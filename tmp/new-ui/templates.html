@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Templates</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .pres { display: flex; align-items: center; gap: 1rem; margin-top: 0.75rem; font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .pres .p { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .pres .p b { color: var(--foreground); font-weight: 400; }
+  .pres .h-dot { width: 6px; height: 6px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-chevron"><path d="m6 9 6 6 6-6"/></g>
+    <g id="i-kebab"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+    <g id="i-download"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats"><span>cpu <b>34%</b></span><span>ram <b>21/64G</b></span><span>load <b>1.84</b></span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab active">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Templates</h1>
+    <span class="count">4 templates</span>
+    <span class="spacer"></span>
+    <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-download"/></svg>Import from Odoo.sh</button>
+  </div>
+
+  <div class="cards">
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">odoo18-base</h2>
+        <span class="badge info">db loaded</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Create environment</button>
+          <button class="btn" disabled title="3 environments use this template">Rename</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="pres">
+        <span class="p"><span class="h-dot"></span>pg <b>loaded</b></span>
+        <span class="p"><span class="h-dot"></span>sql dump <b>412M</b></span>
+        <span class="p"><span class="h-dot"></span>filestore <b>1.8G</b> · overlay</span>
+        <span class="p">envs from it <b>3</b></span>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">git user</span><span class="v">litnimax</span></div>
+        <div class="kv"><span class="k">modules</span><span class="v dim">base_setup, web_responsive</span></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">odoo18-demo</h2>
+        <span class="badge info">db loaded</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Create environment</button>
+          <button class="btn">Rename</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="pres">
+        <span class="p"><span class="h-dot"></span>pg <b>loaded</b></span>
+        <span class="p"><span class="h-dot"></span>sql dump <b>220M</b></span>
+        <span class="p"><span class="h-dot"></span>filestore <b>640M</b> · copy</span>
+        <span class="p">envs from it <b>1</b></span>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">git user</span><span class="v">litnimax</span></div>
+        <div class="kv"><span class="k">modules</span><span class="v dim">demo data</span></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">odoo17-demo</h2>
+        <span class="badge stopped">db not loaded</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Create environment</button>
+          <button class="btn">Rename</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="pres">
+        <span class="p"><span class="h-dot" style="background:var(--muted-foreground)"></span>pg <b>—</b></span>
+        <span class="p"><span class="h-dot"></span>sql dump <b>198M</b></span>
+        <span class="p"><span class="h-dot"></span>filestore <b>410M</b> · copy</span>
+        <span class="p">envs from it <b>1</b></span>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">odoo:17.0</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">git user</span><span class="v">litnimax</span></div>
+        <div class="kv"><span class="k">modules</span><span class="v dim">demo data</span></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">prod-mirror</h2>
+        <span class="badge info">db loaded</span>
+        <span class="badge syncing">odoo.sh import</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Create environment</button>
+          <button class="btn">Rename</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="pres">
+        <span class="p"><span class="h-dot"></span>pg <b>loaded</b></span>
+        <span class="p"><span class="h-dot"></span>sql dump <b>3.1G</b></span>
+        <span class="p"><span class="h-dot"></span>filestore <b>9.4G</b> · overlay</span>
+        <span class="p">imported <b>2026-08-02</b></span>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0-ee</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/prod</span></div>
+        <div class="kv"><span class="k">git user</span><span class="v">litnimax</span></div>
+        <div class="kv"><span class="k">addons</span><span class="v dim">enterprise (local) · themes (local)</span></div>
+      </div>
+    </article>
+  </div>
+</main>
+
+</body>
+</html>

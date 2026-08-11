@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Agent Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1100px; overflow: hidden; }
+  .scrim { align-items: center; padding-top: 0; }
+  .chat { width: 1240px; height: 940px; display: flex; flex-direction: row; overflow: hidden; padding: 0; }
+  .rail { width: 264px; flex: none; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .rail-h { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 0.875rem; border-bottom: 1px solid var(--border); }
+  .rail-h .t { font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted-foreground); }
+  .conv { padding: 0.625rem 0.875rem; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .conv .ct { font-size: var(--text-xs); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv .cm { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); margin-top: 2px; }
+  .conv.on { background: var(--muted); box-shadow: inset 2px 0 0 var(--primary); }
+  .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .chat-h { display: flex; align-items: center; gap: 0.625rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
+  .chat-h .t { font-size: var(--text-lg); font-weight: 600; }
+  .chat-h .spacer { flex: 1; }
+  .msgs { flex: 1; overflow: hidden; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.875rem; }
+  .kick { font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); display: flex; align-items: center; gap: 0.5rem; }
+  .kick .who-user { color: var(--cyan); }
+  .kick .who-agent { color: var(--violet); }
+  .msg { display: flex; flex-direction: column; gap: 0.375rem; }
+  .msg .body { font-size: var(--text-sm); max-width: 760px; }
+  .msg .body code, .codeblock { font-family: var(--font-mono); font-size: var(--text-2xs); }
+  .codeblock { background: var(--terminal-bg); border: 1px solid var(--border); border-radius: var(--r-md); padding: 0.625rem 0.75rem; white-space: pre; color: var(--foreground); }
+  .attach { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.6rem; background: var(--muted); border-radius: var(--r-md); font-family: var(--font-mono); font-size: var(--text-2xs); }
+  .attach svg { width: 12px; height: 12px; stroke: var(--muted-foreground); }
+  .fold { display: flex; align-items: center; gap: 0.5rem; font-size: var(--text-2xs); color: var(--muted-foreground); cursor: pointer; }
+  .fold svg { width: 12px; height: 12px; stroke: var(--muted-foreground); }
+  .plan { border: 1px solid var(--border); border-radius: var(--r-md); padding: 0.625rem 0.75rem; max-width: 560px; display: flex; flex-direction: column; gap: 0.3rem; }
+  .plan .pi { display: flex; align-items: center; gap: 0.5rem; font-size: var(--text-2xs); color: var(--muted-foreground); font-family: var(--font-mono); }
+  .plan .pi.done { color: var(--emerald); }
+  .plan .pi.doing { color: var(--foreground); }
+  .tool { border: 1px solid var(--border); border-radius: var(--r-md); max-width: 760px; overflow: hidden; }
+  .tool-h { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; background: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
+  .tool-h .nm { color: var(--violet); }
+  .tool-h .arg { color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tool-h .st { margin-left: auto; flex: none; }
+  .tool-b { background: var(--terminal-bg); padding: 0.5rem 0.75rem; font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); white-space: pre; }
+  .perm { border: 1px solid rgb(251 191 36 / 0.35); background: rgb(251 191 36 / 0.08); border-radius: var(--r-md); padding: 0.75rem 0.875rem; max-width: 760px; }
+  .perm .pk { font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--amber); margin-bottom: 0.375rem; }
+  .perm .cmd { font-family: var(--font-mono); font-size: var(--text-2xs); background: var(--terminal-bg); border-radius: var(--r-sm); padding: 0.375rem 0.5rem; margin: 0.375rem 0 0.625rem; }
+  .composer { border-top: 1px solid var(--border); padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .comp-attach { display: flex; gap: 0.5rem; }
+  .comp-row { display: flex; align-items: flex-end; gap: 0.5rem; }
+  .comp-row textarea { flex: 1; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-chevron"><path d="m6 9 6 6 6-6"/></g>
+    <g id="i-chevron-r"><path d="m9 6 6 6-6 6"/></g>
+    <g id="i-minimize"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+    <g id="i-clip"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></g>
+    <g id="i-img"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<div class="scrim">
+  <div class="modal chat">
+    <div class="rail">
+      <div class="rail-h">
+        <span class="t">Conversations</span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="conv on">
+        <div class="ct">Fix loyalty points rounding on refund</div>
+        <div class="cm">claude · 11:02 · running</div>
+      </div>
+      <div class="conv">
+        <div class="ct">Add uk_UA translations for POS screens</div>
+        <div class="cm">claude · yesterday</div>
+      </div>
+      <div class="conv">
+        <div class="ct">Why does queue worker exit on staging</div>
+        <div class="cm">codex · 2d ago</div>
+      </div>
+      <div class="conv">
+        <div class="ct">Write tests for pos_discount</div>
+        <div class="cm">claude · 3d ago</div>
+      </div>
+    </div>
+
+    <div class="chat-main">
+      <div class="chat-h">
+        <span class="t">Agent Chat — feature/pos-loyalty</span>
+        <span class="badge syncing">running</span>
+        <span class="spacer"></span>
+        <div class="select" style="width:150px;height:30px"><span style="font-size:var(--text-2xs)">Claude Code</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+        <div class="select" style="width:170px;height:30px"><span style="font-family:var(--font-mono);font-size:var(--text-2xs)">claude-opus-5</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+        <span class="x" style="color:var(--muted-foreground);display:inline-flex"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-minimize"/></svg></span>
+        <span class="x" style="color:var(--muted-foreground);display:inline-flex"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+      </div>
+
+      <div class="msgs">
+        <div class="msg">
+          <div class="kick"><span class="who-user">You</span> · 11:02</div>
+          <div class="body">Refund receipts double the loyalty points. Screenshot attached — fix it and add a regression test.</div>
+          <div><span class="attach"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-img"/></svg>refund-receipt.png · 214 KB</span></div>
+        </div>
+
+        <div class="msg">
+          <div class="kick"><span class="who-agent">Claude</span> · 11:02</div>
+          <div class="fold"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron-r"/></svg>Thinking · 8s</div>
+          <div class="plan">
+            <div class="pi done">[x] locate points computation in pos_loyalty</div>
+            <div class="pi done">[x] reproduce: refund adds instead of subtracting</div>
+            <div class="pi doing">[·] patch _compute_points sign for refund lines</div>
+            <div class="pi">[ ] add regression test, run module tests</div>
+          </div>
+          <div class="body">Found it — <code>loyalty_program.py</code> ignores the sign of <code>qty</code> on refund lines. Patching:</div>
+          <div class="codeblock">- points = line.qty * rule.points_per_unit
++ points = copysign(line.qty, line.move_id.amount_total) * rule.points_per_unit</div>
+        </div>
+
+        <div class="tool">
+          <div class="tool-h">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--muted-foreground)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg>
+            <span class="nm">write_file_in_odoo</span>
+            <span class="arg">{path: "addons/pos_loyalty/models/loyalty_program.py"}</span>
+            <span class="st badge running" style="font-size:11px">ok</span>
+          </div>
+          <div class="tool-b">wrote 1 file · +2 −1</div>
+        </div>
+
+        <div class="tool">
+          <div class="tool-h">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--muted-foreground)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg>
+            <span class="nm">run_odoo_tests</span>
+            <span class="arg">{modules: "pos_loyalty"}</span>
+            <span class="st badge syncing" style="font-size:11px">running</span>
+          </div>
+          <div class="tool-b">test_refund_points_sign ... ok
+test_points_accumulate ... ok
+test_refund_no_double ... <span style="color:var(--amber)">running</span></div>
+        </div>
+
+        <div class="perm">
+          <div class="pk">Permission requested</div>
+          <div style="font-size:var(--text-2xs)">Agent wants to run a command in the environment container:</div>
+          <div class="cmd">odoo-bin -u pos_loyalty -d o_feature_pos_loyalty --stop-after-init</div>
+          <div style="display:flex;gap:0.5rem">
+            <button class="btn hover-emerald">Allow</button>
+            <button class="btn">Allow for session</button>
+            <button class="btn hover-red">Deny</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="comp-attach">
+          <span class="attach"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-img"/></svg>pos-settings.png · uploading 64%<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+        </div>
+        <div class="comp-row">
+          <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-clip"/></svg></button>
+          <textarea class="input" rows="2" placeholder="Instruct the agent… (drop files to attach)"></textarea>
+          <button class="btn hover-red">Stop</button>
+          <button class="btn primary">Send</button>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:var(--text-2xs);color:var(--muted-foreground)">state: waiting for permission · attachments 2/5 · max 10 MB each</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — UI patterns</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+  .spec { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 1rem 1.25rem; }
+  .spec h3 { font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); margin-bottom: 0.75rem; }
+  .row { display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap; margin-bottom: 0.625rem; }
+  .row:last-child { margin-bottom: 0; }
+  .cap { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); width: 110px; flex: none; }
+  .btn.focus { box-shadow: 0 0 0 3px oklch(0.6 0.2 260 / 0.5); border-color: var(--primary); }
+  .btn .spin { width: 12px; height: 12px; border: 2px solid oklch(0.6 0.2 260 / 0.3); border-top-color: var(--primary); border-radius: 50%; }
+  .confirm-inline { width: 480px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-monitor"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></g>
+    <g id="i-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.9 4.9 1.4 1.4"/><path d="m17.7 17.7 1.4 1.4"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.3 17.7-1.4 1.4"/><path d="m19.1 4.9-1.4 1.4"/></g>
+    <g id="i-moon"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+  </defs>
+</svg>
+
+<main style="padding-bottom:1.5rem">
+  <div class="page-head">
+    <h1>UI patterns</h1>
+    <span class="count">The Engineer's Console — states &amp; overlays</span>
+  </div>
+
+  <div class="grid">
+    <div class="spec">
+      <h3>Buttons — neutral at rest, semantic on intent</h3>
+      <div class="row"><span class="cap">rest</span><button class="btn">Start</button><button class="btn">Stop</button><button class="btn">Restart</button><button class="btn">Sync</button><button class="btn">Logs</button></div>
+      <div class="row"><span class="cap">hover</span><button class="btn hover-emerald">Start</button><button class="btn hover-red">Stop</button><button class="btn hover-amber">Restart</button><button class="btn hover-blue">Sync</button><button class="btn hover-blue">Logs</button></div>
+      <div class="row"><span class="cap">focus</span><button class="btn focus">Sync</button></div>
+      <div class="row"><span class="cap">disabled</span><button class="btn" disabled>Stop</button></div>
+      <div class="row"><span class="cap">loading</span><button class="btn" disabled><span class="spin"></span>Creating…</button></div>
+      <div class="row"><span class="cap">primary</span><button class="btn primary">Create environment</button><button class="btn primary hover-blue">Create environment</button></div>
+      <div class="row"><span class="cap">destructive</span><button class="btn danger-solid">Delete environment</button></div>
+    </div>
+
+    <div class="spec">
+      <h3>Badges — text always names the state</h3>
+      <div class="row"><span class="badge running">running</span><span class="badge partial">partial</span><span class="badge exited">exited</span><span class="badge stopped">stopped</span><span class="badge protected">protected</span><span class="badge syncing">syncing</span><span class="badge info">preset</span></div>
+      <div class="row"><span class="cap">pulse</span><span class="badge running" style="box-shadow:0 0 0 4px rgb(52 211 153 / 0.25)">running</span><span style="font-size:var(--text-2xs);color:var(--muted-foreground)">state change pulses twice · off under reduced motion</span></div>
+      <div class="row"><span class="cap">health</span><span class="h-item"><span class="h-dot"></span>ok</span><span class="h-item"><span class="h-dot warn"></span>degraded</span><span class="h-item"><span class="h-dot err"></span>down</span></div>
+    </div>
+
+    <div class="spec">
+      <h3>Toasts</h3>
+      <div class="row"><span class="toast"><span class="h-dot"></span>Environment feature/pos-loyalty started</span></div>
+      <div class="row"><span class="toast error"><span class="h-dot err"></span><span>Sync failed — exit 1: module pos_kiosk not installable</span><button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></button><span class="x" style="display:inline-flex;color:var(--muted-foreground)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span></span></div>
+      <div class="row"><span style="font-size:var(--text-2xs);color:var(--muted-foreground)">success toasts auto-dismiss · error toasts persist until closed, text copyable</span></div>
+    </div>
+
+    <div class="spec">
+      <h3>Theme toggle — system / light / dark</h3>
+      <div class="row">
+        <button class="icon-btn" style="border-color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="stroke:var(--primary)"><use href="#i-monitor"/></svg></button>
+        <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-sun"/></svg></button>
+        <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-moon"/></svg></button>
+        <span style="font-size:var(--text-2xs);color:var(--muted-foreground)">inline SVG, never emoji · persisted to localStorage · applied before first paint</span>
+      </div>
+      <div class="row"><span class="cap">inputs</span><input class="input" style="width:170px" placeholder="Default"><input class="input focus" style="width:170px" value="Focused"></div>
+      <div class="row"><span class="cap">error</span><input class="input" style="width:170px;border-color:var(--destructive-text)" value="odoo 18"><span class="err-text">Image tag not found in registry</span></div>
+    </div>
+
+    <div class="spec confirm-inline" style="width:auto">
+      <h3>Confirm — destructive</h3>
+      <div class="modal" style="width:100%;box-shadow:none">
+        <div class="modal-h"><span class="t">Delete 2 environments</span></div>
+        <div class="modal-b">
+          <div style="font-size:var(--text-sm)">Containers, databases and workdirs of <span class="mono">fix/invoice-rounding</span>, <span class="mono">demo/odoo17</span> will be permanently deleted.</div>
+          <div style="font-size:var(--text-2xs);color:var(--muted-foreground)">Protected environments are excluded from bulk operations automatically.</div>
+        </div>
+        <div class="modal-f">
+          <button class="btn">Cancel</button>
+          <button class="btn danger-solid">Delete 2 environments</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec" style="grid-column: span 1">
+      <h3>Confirm — rebuild from template</h3>
+      <div class="modal" style="width:100%;box-shadow:none">
+        <div class="modal-h"><span class="t">Rebuild staging from template</span></div>
+        <div class="modal-b">
+          <div style="font-size:var(--text-sm)">The current database and filestore of <span class="mono">staging</span> will be <b>replaced</b> with data from template <span class="mono">odoo18-base</span>. Environment parameters stay the same.</div>
+          <div class="field">
+            <span class="lbl">Type the environment name to confirm</span>
+            <input class="input mono" placeholder="staging">
+          </div>
+        </div>
+        <div class="modal-f">
+          <button class="btn">Cancel</button>
+          <button class="btn danger-solid" disabled>Rebuild environment</button>
+        </div>
+      </div>
+      <div style="margin-top:0.875rem"></div>
+      <h3 style="margin-top:0.5rem">MCP — legacy environment, no token</h3>
+      <div class="note" style="margin-top:0">
+        <span class="kicker">NO TOKEN</span>
+        <span style="font-size:var(--text-2xs)">This environment was created before scoped MCP endpoints. Recreate the container to issue a Secret Key.</span>
+      </div>
+    </div>
+
+    <div class="spec">
+      <h3>The Note — the one human voice</h3>
+      <div class="note" style="margin-top:0">
+        <span class="kicker">NOTE</span>
+        <span>QA in progress — keep until 1.4 release sign-off.</span>
+      </div>
+      <div class="note-ghost">Add a note…</div>
+      <div style="margin-top:0.875rem"></div>
+      <h3 style="margin-top:0.5rem">License</h3>
+      <div class="row"><span class="cap">valid</span><span class="h-item"><span class="h-dot"></span>Oduist · until 2027-01-01</span></div>
+      <div class="row"><span class="cap">activation</span><input class="input mono" style="width:280px" placeholder="Paste license key"><button class="btn">Activate</button></div>
+    </div>
+  </div>
+</main>
+
+</body>
+</html>
