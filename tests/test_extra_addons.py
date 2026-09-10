@@ -86,6 +86,8 @@ class TestOdooMajorFromImage:
             ("registry:5000/acme/odoo:19.0", 19),
             ("acme/odoo:19.0-custom", 19),
             ("odoo:latest", None),
+            ("odoo@sha256:98fabc0123", None),
+            ("odoo:19.0@sha256:98fabc0123", 19),
             ("oduist/customer_odoo", None),
             ("registry:5000/odoo", None),
             ("", None),

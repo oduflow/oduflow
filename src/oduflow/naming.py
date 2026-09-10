@@ -250,9 +250,12 @@ def odoo_major_from_image(image: str) -> int | None:
     Handles ``odoo:19.0``, ``odoo:19``, ``registry:5000/acme/odoo:19.0`` and
     version-prefixed custom tags like ``acme/odoo:19.0-custom``. Returns None
     when the tag carries no leading version (e.g. ``:latest`` or no tag) — the
-    port in ``registry:5000/odoo`` is never mistaken for a tag.
+    port in ``registry:5000/odoo`` is never mistaken for a tag, and neither is
+    the hex of a digest-pinned reference (``odoo@sha256:98f...``).
     """
-    _, sep, tag = image.rpartition(":")
+    # name[:tag][@algo:digest] — drop the digest first so its hex is never
+    # parsed as a tag; a digest carries no version information anyway.
+    _, sep, tag = image.split("@", 1)[0].rpartition(":")
     if sep and "/" not in tag:
         match = re.match(r"(\d+)(?:\D|$)", tag)
         if match:
