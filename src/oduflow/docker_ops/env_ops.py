@@ -2224,7 +2224,11 @@ def _create_environment_impl(
         )
         main_addons_path = resolve_main_addons_path(repo_path)
         generate_odoo_conf(
-            base_conf_path, generated_conf, extra_container_paths, main_addons_path
+            base_conf_path,
+            generated_conf,
+            extra_container_paths,
+            main_addons_path,
+            odoo_image=odoo_image,
         )
         odoo_conf_to_copy = generated_conf
 
@@ -3750,7 +3754,11 @@ def _reapply_odoo_conf(
     generated_conf = os.path.join(workspace_path, "odoo.conf")
     main_addons_path = resolve_main_addons_path(repo_path)
     generate_odoo_conf(
-        base_conf_path, generated_conf, extra_container_paths, main_addons_path
+        base_conf_path,
+        generated_conf,
+        extra_container_paths,
+        main_addons_path,
+        odoo_image=labels.get(settings.image_label, ""),
     )
     _copy_file_to_container(container, generated_conf, "/etc/odoo")
     return True

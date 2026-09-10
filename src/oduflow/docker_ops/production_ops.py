@@ -161,6 +161,7 @@ def _build_prod_odoo_conf(
     *,
     plan: ResourcePlan | None = None,
     output_path: str | None = None,
+    odoo_image: str = "",
 ) -> str:
     """Generate the merged production odoo.conf; return the host path."""
     from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
@@ -188,6 +189,7 @@ def _build_prod_odoo_conf(
         extra_container_paths,
         resolve_main_addons_path(repo_path),
         overrides=overrides,
+        odoo_image=odoo_image,
     )
     return generated
 
@@ -227,7 +229,14 @@ def reapply_prod_odoo_conf(
             ]
         except (json.JSONDecodeError, TypeError):
             extra_paths = []
-    generated = _build_prod_odoo_conf(settings, team, name, repo_path, extra_paths)
+    generated = _build_prod_odoo_conf(
+        settings,
+        team,
+        name,
+        repo_path,
+        extra_paths,
+        odoo_image=(container.labels or {}).get(settings.image_label, ""),
+    )
     _copy_file_to_container(container, generated, "/etc/odoo")
     return True
 
@@ -654,6 +663,7 @@ def create_production(
             name,
             repo_path,
             [cp for _, cp in extra_mount_paths],
+            odoo_image=odoo_image,
         )
 
         try:
