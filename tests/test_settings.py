@@ -481,7 +481,7 @@ class TestQuotas:
 class TestAgentSettings:
     def test_global_defaults(self):
         s = Settings()
-        assert s.agent_image == "oduist/oduflow-coder:0.3.0"
+        assert s.agent_image == "oduist/oduflow-coder:0.3.1"
         assert s.agent_claude_model == ""
         assert s.agent_codex_model == ""
         assert s.agent_opencode_model == ""

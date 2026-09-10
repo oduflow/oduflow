@@ -12,8 +12,9 @@
 # alive.
 #
 # LICENSING: the published image contains redistributable open-source software.
-# Codex CLI, codex-acp and agent-browser are Apache-2.0; OpenCode is MIT; ruff is
-# MIT/Apache-2.0; Debian's Chromium package carries its upstream
+# Codex CLI, codex-acp and agent-browser are Apache-2.0; OpenCode and the
+# GitHub CLI (gh) are MIT; ruff is MIT/Apache-2.0; Debian's Chromium package
+# carries its upstream
 # BSD-style/component licenses and preserves the corresponding notices under
 # /usr/share/doc. Claude Code
 # (@anthropic-ai/claude-code) and its ACP adapter are PROPRIETARY-adjacent
@@ -29,7 +30,7 @@
 
 FROM node:24-bookworm-slim
 
-ARG CODER_VERSION=0.3.0
+ARG CODER_VERSION=0.3.1
 LABEL org.opencontainers.image.title="oduflow-coder" \
       org.opencontainers.image.version="${CODER_VERSION}" \
       org.opencontainers.image.source="https://github.com/oduist/oduflow"
@@ -54,6 +55,17 @@ RUN apt-get update \
         chromium \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s "$(command -v fdfind)" /usr/local/bin/fd
+
+# GitHub CLI (gh; MIT): PR/issue/API workflows from the console. Not in
+# Debian bookworm's default repos, so add GitHub's official apt repo first
+# (curl + ca-certificates come from the layer above).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
 # Ruff: fast lint + format for Odoo Python, so the agent can validate a change
 # locally before git push + pull_and_apply. Self-contained binary; Debian marks
