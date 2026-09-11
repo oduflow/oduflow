@@ -4276,7 +4276,7 @@ def cleanup_orphans(
     Template databases (oduflow_template_*) are always excluded.
 
     Returns a dict with keys: orphan_databases, orphan_workspaces, orphan_ports,
-    each a list of removed (or would-be-removed) names.
+    and orphan_roles, each a list of removed (or would-be-removed) names.
     """
     from oduflow.port_registry import _load_registry, _save_registry
 
@@ -4338,20 +4338,25 @@ def cleanup_orphans(
             orphan_ports.append(branch)
 
     # 5. Orphan PG roles
-    from oduflow.env_credentials import generate_pg_username
+    from oduflow.env_credentials import generate_pg_username, load_credentials
 
     role_prefix = f"u_{team.team_id}_"
     roles_raw = _exec_sql(
         client, settings, "SELECT rolname FROM pg_roles WHERE rolcanlogin=true;"
     )
     all_roles = [r for r in roles_raw.splitlines() if r.startswith(role_prefix)]
-    orphan_roles: list[str] = []
-    for role in all_roles:
-        matched = any(
-            role == generate_pg_username(b, team.team_id) for b in live_branches
+    live_roles = {
+        generate_pg_username(branch, team.team_id) for branch in live_branches
+    }
+    for branch in live_branches:
+        credentials = load_credentials(
+            branch,
+            team.workspaces_dir,
+            settings.db_user,
+            settings.db_password,
         )
-        if not matched:
-            orphan_roles.append(role)
+        live_roles.add(credentials["pg_user"])
+    orphan_roles = [role for role in all_roles if role not in live_roles]
 
     if dry_run:
         logger.info(

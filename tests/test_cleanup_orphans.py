@@ -7,8 +7,10 @@ removed nothing.
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from oduflow import server
 from oduflow.docker_ops import system_ops
 from oduflow.settings import Settings, TeamSettings
 
@@ -79,3 +81,52 @@ def test_cleanup_orphans_unmount_receives_teamsettings(tmp_path):
     assert seen["env_name"] == "feature-y"
     assert seen["team"] is team
     assert isinstance(seen["team"], TeamSettings)
+
+
+def test_cleanup_orphans_drops_only_role_unused_by_renamed_environment(tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    workspace = os.path.join(team.workspaces_dir, "new-name")
+    os.makedirs(workspace)
+    with open(os.path.join(workspace, "env_credentials.json"), "w") as f:
+        f.write('{"pg_user": "u_1_old-name", "pg_password": "secret"}')
+
+    container = SimpleNamespace(
+        name="oduflow-1-new-name-odoo",
+        labels={settings.branch_label: "new-name"},
+    )
+    client = _FakeClient()
+    client.containers = SimpleNamespace(list=lambda **_kwargs: [container])
+
+    def sql_result(_client, _settings, statement, **_kwargs):
+        if "FROM pg_roles" in statement:
+            return "u_1_old-name\nu_1_unused"
+        return ""
+
+    with (
+        patch.object(system_ops, "get_client", return_value=client),
+        patch.object(system_ops, "_exec_sql", side_effect=sql_result),
+        patch("oduflow.port_registry._load_registry", return_value={}),
+    ):
+        result = system_ops.cleanup_orphans(settings, team, dry_run=False)
+
+    assert result["orphan_roles"] == ["u_1_unused"]
+
+
+def test_run_cleanup_prints_orphan_roles(tmp_path, capsys):
+    team, settings = _team_and_settings(tmp_path)
+    result = {
+        "dry_run": True,
+        "orphan_databases": [],
+        "orphan_workspaces": [],
+        "orphan_ports": [],
+        "orphan_roles": ["u_1_unused"],
+    }
+
+    with patch.object(system_ops, "cleanup_orphans", return_value=result):
+        server._run_cleanup(settings, team)
+
+    output = capsys.readouterr().out
+    assert "PostgreSQL roles (1):" in output
+    assert "u_1_unused" in output
+    assert "1 resource(s) would be removed" in output
+    assert "No orphaned resources found" not in output

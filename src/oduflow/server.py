@@ -6322,8 +6322,9 @@ def _run_cleanup(settings: Settings, team: TeamSettings, dry_run: bool = True) -
     dbs = result["orphan_databases"]
     workspaces = result["orphan_workspaces"]
     ports = result["orphan_ports"]
+    roles = result["orphan_roles"]
 
-    if not dbs and not workspaces and not ports:
+    if not dbs and not workspaces and not ports and not roles:
         print(f"[{mode}] No orphaned resources found.")
         return
 
@@ -6340,8 +6341,12 @@ def _run_cleanup(settings: Settings, team: TeamSettings, dry_run: bool = True) -
         print(f"  Port registry entries ({len(ports)}):")
         for p in ports:
             print(f"    - {p}")
+    if roles:
+        print(f"  PostgreSQL roles ({len(roles)}):")
+        for role in roles:
+            print(f"    - {role}")
 
-    total = len(dbs) + len(workspaces) + len(ports)
+    total = len(dbs) + len(workspaces) + len(ports) + len(roles)
     if result["dry_run"]:
         print(f"\n  {total} resource(s) would be removed. Run with --force to apply.")
     else:
