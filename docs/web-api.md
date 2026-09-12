@@ -191,6 +191,9 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/credentials/add` | Store credentials embedded in body `repo_url` |
 | `POST` | `/api/credentials/delete` | Delete by body `host` and `username` |
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
+| `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
+| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
+| `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
 

@@ -369,3 +369,41 @@ class TestRecreateChecksFirst:
         assert "Not enough free disk space" in resp.json()["error"]
         mock_delete.assert_not_called()
         mock_create.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.create_environment")
+    @patch("oduflow.docker_ops.env_ops.delete_environment")
+    @patch("oduflow.docker_ops.client.get_client")
+    def test_recreate_refuses_on_dangling_secret_before_delete(
+        self, mock_client, mock_delete, mock_create, tmp_path
+    ):
+        """A dangling secret:<name> reference must refuse the recreate while
+        the working environment is still intact — create_environment would
+        only re-check after delete_environment has destroyed it."""
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        from oduflow.locking import LockManager
+        from oduflow.web_ui import mount_web_ui
+
+        settings, team = _make_env(tmp_path)
+        container = MagicMock()
+        container.labels = {
+            settings.repo_label: "https://github.com/x/y.git",
+            settings.image_label: "odoo:19.0",
+            "oduflow.template": "none",
+            "oduflow.env_vars": json.dumps({"KEY": "secret:gone"}),
+        }
+        mock_client.return_value.containers.get.return_value = container
+
+        app = Starlette()
+        mount_web_ui(app, lambda: settings, LockManager())
+        with (
+            patch.object(system_ops, "estimate_new_db_bytes", return_value=0),
+            patch.object(system_ops, "check_disk_space"),
+        ):
+            resp = TestClient(app).post("/api/environments/main/recreate")
+
+        assert resp.status_code == 400
+        assert "Undefined secret(s): gone" in resp.json()["error"]
+        mock_delete.assert_not_called()
+        mock_create.assert_not_called()

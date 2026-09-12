@@ -1437,8 +1437,14 @@
 <div id="tab-credentials" class="tab-content">
   <div class="tab-toolbar">
     <button class="btn-create" onclick="openAddCredentialModal()">+ Add Credential</button>
+    <button class="btn-create" onclick="openSecretModal()">+ Add Secret</button>
   </div>
   <div id="credentials-list"></div>
+  <div id="secrets-section" style="margin-top:24px;">
+    <h2 class="section-subtitle">Secrets</h2>
+    <div class="hint">Named values for environment variables. Reference one as <code>KEY=secret:&lt;name&gt;</code> in any service or environment. Values are write-only: agents and the API can only see the name, never the value.</div>
+    <div id="secrets-list"></div>
+  </div>
 </div>
 
 <div id="tab-agent-guides" class="tab-content">
@@ -1520,7 +1526,7 @@
       <div class="form-group">
         <label for="cr-env-vars">Environment variables</label>
         <textarea id="cr-env-vars" rows="3" spellcheck="false" placeholder="WORKERS=2&#10;LIMIT_TIME_CPU=600"></textarea>
-        <div class="hint" id="cr-env-vars-hint">One KEY=VALUE per line, injected into the Odoo container. A value may contain commas.</div>
+        <div class="hint" id="cr-env-vars-hint">One KEY=VALUE per line, injected into the Odoo container. A value may contain commas. Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
       </div>
 
       <div class="form-actions">
@@ -1616,6 +1622,7 @@
       <div class="form-group">
         <label for="svc-update-env-vars">Environment variables</label>
         <textarea id="svc-update-env-vars" rows="6" spellcheck="false" placeholder="MEILI_ENV=production&#10;MEILI_MASTER_KEY=..."></textarea>
+        <div class="hint">Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
         <p class="modal-note">One KEY=VALUE per line. Clear the field to remove all variables; leave it untouched to keep them.</p>
       </div>
       <div class="form-actions">
@@ -1761,6 +1768,7 @@
       <div class="form-group">
         <label for="svc-envvars">Environment variables (optional)</label>
         <textarea id="svc-envvars" rows="5" placeholder="KEY1=val1&#10;KEY2=val2"></textarea>
+        <div class="hint">One KEY=VALUE per line. Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
       </div>
       <div class="form-group check-row">
         <input type="checkbox" id="svc-host-mode">
@@ -1838,6 +1846,7 @@
       <div class="form-group">
         <label for="restore-svc-envvars">Environment variables (optional)</label>
         <textarea id="restore-svc-envvars" rows="4" placeholder="KEY1=val1&#10;KEY2=val2"></textarea>
+        <div class="hint">One KEY=VALUE per line. <code>secret:&lt;name&gt;</code> values are resolved from the team secrets at restore time.</div>
       </div>
       <div class="form-group check-row">
         <input type="checkbox" id="restore-svc-host-mode">
@@ -2186,6 +2195,7 @@
       <div class="form-group">
         <label for="update-env-vars">Environment variables</label>
         <textarea id="update-env-vars" rows="5" spellcheck="false" placeholder="WORKERS=2&#10;LIMIT_TIME_CPU=600"></textarea>
+        <div class="hint">Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
         <p class="modal-note">One KEY=VALUE per line, injected into the Odoo container on top of the database connection variables. Clear the field to remove all custom variables; leave it untouched to keep them.</p>
       </div>
       <div class="form-actions">
@@ -2390,6 +2400,31 @@
       <div class="form-actions">
         <button class="btn" onclick="closeAddCredentialModal()">Cancel</button>
         <button class="btn-create" id="credential-submit" onclick="submitAddCredential()">Save &amp; Verify</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="secret-modal" onclick="closeSecretModal(event)">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 id="secret-modal-title">Add Secret</h2>
+      <button class="modal-close" onclick="closeSecretModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="secret-error"></div>
+      <div class="form-group">
+        <label for="secret-name">Name</label>
+        <input type="text" id="secret-name" placeholder="openai-api-key" autocomplete="off">
+        <div class="hint">Lowercase letters, digits, dots, hyphens, underscores. Referenced from env vars as <code>KEY=secret:&lt;name&gt;</code>.</div>
+      </div>
+      <div class="form-group">
+        <label for="secret-value">Value</label>
+        <input type="password" id="secret-value" placeholder="" autocomplete="new-password">
+        <div class="hint">Write-only: the stored value can be replaced here, but never read back.</div>
+      </div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeSecretModal()">Cancel</button>
+        <button class="btn-create" id="secret-submit" onclick="submitSecret()">Save</button>
       </div>
     </div>
   </div>
@@ -4225,7 +4260,7 @@ function switchTab(name) {
   if (name === 'volumes') loadVolumes();
   if (name === 'agent-guides') loadAgentGuides();
   if (name === 'extra-addons') loadExtraRepos();
-  if (name === 'credentials') loadCredentials();
+  if (name === 'credentials') { loadCredentials(); loadSecrets(); }
 }
 
 async function loadTemplates() {
@@ -6819,6 +6854,128 @@ async function doValidateCredential(host, username) {
   }
 }
 
+// --- Secrets (write-only named values for env vars) ---
+const API_SECRETS = '/api/secrets';
+
+async function loadSecrets() {
+  try {
+    var r = await fetch(API_SECRETS);
+    var data = await readResult(r);
+    if (data.ok) {
+      renderSecrets(data.secrets || []);
+    } else {
+      showToast(data.error || 'Failed to load secrets', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+function renderSecrets(secrets) {
+  var el = document.getElementById('secrets-list');
+  if (!secrets || secrets.length === 0) {
+    el.innerHTML = '<div class="empty">No secrets defined.<br>Add one to reference it as <code>KEY=secret:&lt;name&gt;</code>.</div>';
+    return;
+  }
+  el.innerHTML = secrets.map(function(s) {
+    return '<div class="svc-card">' +
+      '<div class="svc-header">' +
+        '<div class="left">' +
+          '<span class="svc-name">' + esc(s.name) + '</span>' +
+          '<span class="badge badge-preset">write-only</span>' +
+        '</div>' +
+        '<div class="svc-actions">' +
+          '<button class="btn btn-sm" onclick="openSecretModal(\'' + escAttr(s.name) + '\')">Replace value</button>' +
+          '<button class="btn btn-delete" onclick="doDeleteSecret(\'' + escAttr(s.name) + '\')">Delete</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="svc-meta">' +
+        '<span>Reference: <strong class="copy-db" role="button" tabindex="0" title="Copy reference" aria-label="Copy reference" ' +
+          'onclick="copyToClipboard(\'secret:' + escAttr(s.name) + '\')">secret:' + esc(s.name) + '</strong></span>' +
+        (s.updated_at ? '<span>Updated: <strong>' + formatDate(s.updated_at) + '</strong></span>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openSecretModal(name) {
+  document.getElementById('secret-modal-title').textContent = name ? 'Replace Secret Value' : 'Add Secret';
+  var nameEl = document.getElementById('secret-name');
+  nameEl.value = name || '';
+  nameEl.readOnly = !!name;
+  document.getElementById('secret-value').value = '';
+  document.getElementById('secret-error').style.display = 'none';
+  document.getElementById('secret-submit').disabled = false;
+  showModal('secret-modal');
+  (name ? document.getElementById('secret-value') : nameEl).focus();
+}
+
+function closeSecretModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('secret-value').value = '';
+  hideModal('secret-modal');
+}
+
+async function submitSecret() {
+  var name = document.getElementById('secret-name').value.trim();
+  var value = document.getElementById('secret-value').value;
+  var errEl = document.getElementById('secret-error');
+  if (!name || !value) {
+    errEl.textContent = 'Name and value are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  errEl.style.display = 'none';
+  var btn = document.getElementById('secret-submit');
+  btn.disabled = true;
+  try {
+    var r = await fetch(API_SECRETS + '/' + encodeURIComponent(name) + '/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: value})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      closeSecretModal();
+      var created = data.result && data.result.created;
+      showToast(created
+        ? 'Secret "' + name + '" saved — reference it as secret:' + name
+        : 'Secret "' + name + '" value replaced. Recreate services/environments that use it.');
+      await loadSecrets();
+    } else {
+      errEl.textContent = data.error || 'Failed to save secret';
+      errEl.style.display = 'block';
+    }
+  } catch (e) {
+    errEl.textContent = 'Connection error: ' + e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doDeleteSecret(name) {
+  if (!(await confirmDialog({
+    title: 'Delete secret',
+    message: 'Delete the secret "' + name + '"? Configurations referencing secret:' + name +
+      ' will fail to resolve on their next create or update. Running containers keep the value until recreated.',
+    confirmLabel: 'Delete secret',
+    danger: true
+  }))) return;
+  try {
+    var r = await fetch(API_SECRETS + '/' + encodeURIComponent(name) + '/delete', { method: 'POST' });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast('Secret "' + name + '" deleted');
+      await loadSecrets();
+    } else {
+      showToast(data.error || 'Delete failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
 // xterm.js is vendored under /static and loaded on first console open,
 // so the dashboard stays self-contained and works air-gapped.
 var _xtermReady = null;
@@ -7140,6 +7297,7 @@ var MODAL_CLOSERS = {
   'license-modal': closeLicenseModal,
   'add-extra-repo-modal': closeAddExtraRepoModal,
   'add-credential-modal': closeAddCredentialModal,
+  'secret-modal': closeSecretModal,
   'import-from-odoo-modal': closeImportFromOdooModal,
   'import-odoo-modal': closeImportOdooModal,
   'template-settings-modal': closeTemplateSettingsModal,

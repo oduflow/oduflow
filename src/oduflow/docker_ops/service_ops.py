@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 import docker
+from oduflow import secret_store
 from oduflow.docker_ops import service_presets, volume_ops
 from oduflow.docker_ops.client import (
     docker_error_detail,
@@ -34,6 +35,10 @@ logger = logging.getLogger("oduflow")
 
 _TRAEFIK_ACME_MOUNT_PATH = "/etc/traefik"
 _HTTP_ROUTES_LABEL = "oduflow.http_routes"
+# KEY -> "secret:<name>" for env vars whose configured value is a secret
+# reference. Lives on the container (not only in the preset) so read surfaces
+# keep showing the reference even if the preset is deleted.
+_SECRET_ENV_LABEL = "oduflow.secret_env"
 
 _SYSTEM_ENV_KEYS = {
     "PATH",
@@ -352,11 +357,24 @@ def create_service(
     command: list[str] | None = None,
     runtime: dict[str, Any] | None = None,
     stack_labels: dict[str, str] | None = None,
+    _resolved_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     runtime = normalize_runtime(runtime)
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
     routes = normalize_http_routes(routes)
     _validate_service_exposure(settings, port, routes)
+    # A dangling secret reference must abort before any Docker resource is
+    # touched. Only the container environment receives the resolved values;
+    # the preset and the label below keep the references. update_service
+    # passes the mapping it already resolved (_resolved_env) so its
+    # validate-then-recreate window cannot see a concurrently deleted secret
+    # after the old container is gone.
+    resolved_env = (
+        _resolved_env
+        if _resolved_env is not None
+        else secret_store.resolve_env_secrets(team, env_vars)
+    )
+    secret_env = secret_store.secret_env_refs(env_vars)
     client = get_client()
 
     # Check for existing container
@@ -394,6 +412,8 @@ def create_service(
         "oduflow.service": name,
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    if secret_env:
+        labels[_SECRET_ENV_LABEL] = json.dumps(secret_env, sort_keys=True)
     if runtime:
         labels[RUNTIME_LABEL] = json.dumps(runtime, sort_keys=True)
     if stack_labels:
@@ -487,8 +507,8 @@ def create_service(
             run_kwargs["ports"] = {f"{port}/tcp": port}
         url = f"{settings.public_scheme}://{team.hostname}:{port}"
 
-    if env_vars:
-        run_kwargs["environment"] = env_vars
+    if resolved_env:
+        run_kwargs["environment"] = resolved_env
 
     if command:
         run_kwargs["command"] = list(command)
@@ -653,14 +673,44 @@ def _traefik_label_by_suffix(labels: dict[str, str], suffix: str) -> str:
     return ""
 
 
-def _container_env_vars(container: Any) -> dict[str, str]:
-    """Env of a service container without the keys every image sets anyway."""
+def _secret_env_refs(container: Any) -> dict[str, str]:
+    """KEY -> "secret:<name>" recorded on the container at creation time."""
+    raw = (container.labels or {}).get(_SECRET_ENV_LABEL, "")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _raw_container_env(container: Any) -> dict[str, str]:
+    """Config.Env of a container as a dict — the values it actually runs with."""
     env_vars: dict[str, str] = {}
     for entry in container.attrs.get("Config", {}).get("Env", []) or []:
         if "=" in entry:
             key, value = entry.split("=", 1)
-            if key not in _SYSTEM_ENV_KEYS:
-                env_vars[key] = value
+            env_vars[key] = value
+    return env_vars
+
+
+def _container_env_vars(container: Any) -> dict[str, str]:
+    """Env of a service container without the keys every image sets anyway.
+
+    Keys configured as secret references come back as the reference, not the
+    resolved value the container actually runs with: every read surface built
+    on container inspection (get_service_info, list_services, the legacy
+    no-preset update path) must never expose a secret value.
+    """
+    env_vars = {
+        key: value
+        for key, value in _raw_container_env(container).items()
+        if key not in _SYSTEM_ENV_KEYS
+    }
+    for key, ref in _secret_env_refs(container).items():
+        if key in env_vars:
+            env_vars[key] = ref
     return env_vars
 
 
@@ -912,7 +962,10 @@ def update_service(
 
     Optional overrides replace the corresponding setting from the saved preset.
     When any override differs from the current config the container is recreated
-    even if the image digest has not changed.
+    even if the image digest has not changed. A rotated team secret also counts
+    as a config change: the resolved value of every ``secret:<name>`` reference
+    is compared against what the container actually runs with, so the
+    documented rotation flow (replace the value, then update) takes effect.
     """
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
@@ -1116,6 +1169,25 @@ def update_service(
     # must not stop and remove the currently running service.
     _resolve_service_volume_binds(settings, team, old_volumes or None, client=client)
 
+    # Resolve secret references once, up front: a dangling reference must fail
+    # before the (possibly large) image pull and before the destructive
+    # stop/remove below, and the same resolved mapping is handed to
+    # create_service so a secret deleted concurrently with this update cannot
+    # fail the re-create after the old container is already gone.
+    resolved_env = secret_store.resolve_env_secrets(team, env_vars)
+
+    # A rotated secret value changes neither the reference-form config nor the
+    # image digest, so the documented rotation flow (replace the value in the
+    # dashboard, then update_service) hinges on this check: compare the values
+    # the container actually runs with against the freshly resolved ones for
+    # every reference-configured key.
+    if not config_changed:
+        live_env = _raw_container_env(container)
+        for key in secret_store.secret_env_refs(env_vars):
+            if live_env.get(key) != (resolved_env or {}).get(key):
+                config_changed = True
+                break
+
     # Capture old image digest
     old_digest = container.image.id  # e.g. sha256:abc...
 
@@ -1192,6 +1264,7 @@ def update_service(
             command=command or None,
             runtime=runtime,
             stack_labels=effective_stack_labels,
+            _resolved_env=resolved_env,
         )
 
     result["image_updated"] = image_updated

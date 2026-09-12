@@ -38,6 +38,7 @@ from oduflow import (
     production_registry,
     quotas,
     reaper,
+    secret_store,
 )
 from oduflow import settings as settings_module
 from oduflow.docker_ops import (
@@ -744,7 +745,7 @@ def create_environment(
         extra_addons: Comma-separated list of extra addon repo names with branches (e.g. "enterprise:19.0,custom-themes:main"). Each entry must include a branch after a colon.
         sanitize: Sanitize the database after provisioning (default: True). Runs Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets database.is_neutralized) and then any custom scripts from the .oduflow/odoo_sanitize/ folder in the repository. Only applies to environments created from a template.
         auto_install_modules: Comma-separated list of Odoo modules to install automatically after the environment is provisioned (e.g. "sale,purchase,stock"). When a template is specified and this is empty, the value is loaded from template metadata.
-        env_vars: Comma- or newline-separated KEY=VALUE pairs injected as environment variables into the Odoo container (e.g. "WORKERS=2,LIMIT_TIME_CPU=600"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. These are added on top of the database connection variables (HOST/USER/PASSWORD). When a template records env_vars, the two sets are merged per key and the values passed here win.
+        env_vars: Comma- or newline-separated KEY=VALUE pairs injected as environment variables into the Odoo container (e.g. "WORKERS=2,LIMIT_TIME_CPU=600"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. These are added on top of the database connection variables (HOST/USER/PASSWORD). When a template records env_vars, the two sets are merged per key and the values passed here win. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         local_path: LOCAL FAST-PATH. Absolute path to a checkout on THIS host. When set, Oduflow skips git clone and bind-mounts the directory live into the container — your file edits are visible instantly, no git push/pull needed. After editing, call pull_and_apply with explicit install/upgrade/restart to apply. repo_url is not required in this mode. Gated by allow_local_path (default: true).
     """
     import json
@@ -1742,7 +1743,7 @@ def update_environment(
 
     Args:
         env_name: The name of the environment to update.
-        env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace the current user-supplied env vars (e.g. "WORKERS=4,LIMIT_TIME_CPU=900"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep the current env vars. The database connection variables (HOST/USER/PASSWORD) are always preserved.
+        env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace the current user-supplied env vars (e.g. "WORKERS=4,LIMIT_TIME_CPU=900"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep the current env vars. The database connection variables (HOST/USER/PASSWORD) are always preserved. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         odoo_image: New Docker image with tag to pull and run (e.g. "odoo:19.0"). Leave empty to keep the current image.
         new_name: Optional new name for the environment. Leave empty to keep the current name.
     """
@@ -4034,7 +4035,7 @@ def create_service(
         image: Docker image with tag (e.g. "redis:7", "getmeili/meilisearch:v1.6").
         port: Catch-all exposure mode: forward every path to this one container port. Required outside Traefik. Mutually exclusive with routes.
         hostname: Custom hostname for traefik routing (optional, traefik mode only).
-        env_vars: Comma- or newline-separated KEY=VALUE pairs (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. So "CONNECT_MCP_TOOL_GROUPS=write,collaboration,documents" is one variable.
+        env_vars: Comma- or newline-separated KEY=VALUE pairs (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. So "CONNECT_MCP_TOOL_GROUPS=write,collaboration,documents" is one variable. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         host_mode: Run the container in host network mode instead of the shared Docker network. Use when the service needs direct host network access. Traefik routing still works.
         volumes: Comma-separated volume mounts (e.g. "mydata:/data,config:/etc/app:ro"). Each entry is volume_name:/container/path[:ro|rw]. Volumes must be created first via create_volume. In Traefik TLS mode the system ACME volume is mounted automatically at /etc/traefik:ro; do not include it here.
         privileged: Run the container in privileged mode (full host access). Use with care — implies all Linux capabilities. Mutually exclusive with net_admin (privileged already grants NET_ADMIN).
@@ -4122,7 +4123,7 @@ def update_service(
 
     Args:
         name: The name of the service to update (e.g. "redis", "meilisearch").
-        env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace existing env vars (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep current env vars.
+        env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace existing env vars (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep current env vars. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         runtime: Replace lifecycle settings; omit to preserve, pass {} to clear.
         image: New Docker image with tag (e.g. "redis:8"). Leave empty to keep current image.
         port: New container port. Pass 0 to keep current port.
@@ -4351,6 +4352,36 @@ def list_service_presets(ctx: Context | None = None) -> str:
             output += f", routes=[{route_str}]"
         output += "\n"
     return output
+
+
+@mcp.tool()
+@handle_errors
+def list_secrets(ctx: Context | None = None) -> str:
+    """
+    List the names of the team's named secrets. Values are write-only: they are
+    set by a human in the Oduflow dashboard and can never be read through MCP.
+
+    Reference a secret in any env_vars argument (create_environment,
+    update_environment, create_service, update_service) as
+    KEY=secret:<name> — the real value is substituted only inside the
+    container, while every stored or displayed configuration keeps the
+    reference.
+    """
+    team = _resolve_team(ctx)
+    records = secret_store.list_secrets(team)
+    if not records:
+        return (
+            "No secrets defined. A human operator can add them in the "
+            "dashboard (Credentials tab, Secrets section)."
+        )
+    lines = ["Team secrets (values are not readable over MCP):"]
+    for record in records:
+        line = f"- {record['name']}"
+        if record.get("updated_at"):
+            line += f" (updated {record['updated_at']})"
+        lines.append(line)
+    lines.append("Use in env_vars as KEY=secret:<name>.")
+    return "\n".join(lines)
 
 
 @mcp.tool()

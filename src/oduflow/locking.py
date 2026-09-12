@@ -76,6 +76,11 @@ def credentials_lock_key(team_id: str, name: str = "") -> str:
     return f"creds:{team_id}"
 
 
+def team_secrets_lock_key(team_id: str, name: str = "") -> str:
+    """The team's named-secrets store (secrets.json read-modify-write)."""
+    return f"secrets:{team_id}"
+
+
 def prod_backups_lock_key(team_id: str, name: str = "") -> str:
     """The team's snapshot/chunk store — prune vs. snapshot vs. restore."""
     return f"prod-backups:{team_id}"

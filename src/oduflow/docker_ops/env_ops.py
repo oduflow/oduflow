@@ -19,7 +19,7 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import activity, env_share, settings
+from oduflow import activity, env_share, secret_store, settings
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -2063,6 +2063,11 @@ def _create_environment_impl(
             repo_url, team.git_credentials_file(), git_user
         )
 
+    # Fail fast on dangling secret references, before any database, checkout
+    # or container work. The oduflow.env_vars label below keeps the references;
+    # only the container environment receives the resolved values.
+    resolved_env_vars = secret_store.resolve_env_secrets(team, env_vars)
+
     labels = {
         settings.managed_label: "true",
         settings.team_label: team.team_id,
@@ -2198,7 +2203,7 @@ def _create_environment_impl(
         "HOST": settings.shared_db_container,
         "USER": env_creds["pg_user"],
         "PASSWORD": env_creds["pg_password"],
-        **(env_vars or {}),
+        **(resolved_env_vars or {}),
     }
     odoo_volumes = {repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}}
 
@@ -4833,6 +4838,11 @@ def update_environment(
     else:
         user_env = json.loads(labels.get("oduflow.env_vars", "{}"))
 
+    # Resolve secret references while the old container is still intact — a
+    # dangling reference must fail the update here, not after the removal. The
+    # label keeps the references; only the container env gets real values.
+    resolved_user_env = secret_store.resolve_env_secrets(team, user_env) or {}
+
     # Volumes / bind mounts – parse "host:container:mode" strings
     raw_binds = container.attrs.get("HostConfig", {}).get("Binds") or []
     volumes: dict[str, dict[str, str]] = {}
@@ -5005,7 +5015,7 @@ def update_environment(
         "HOST": settings.shared_db_container,
         "USER": creds["pg_user"],
         "PASSWORD": creds["pg_password"],
-        **user_env,
+        **resolved_user_env,
     }
     labels[settings.image_label] = odoo_image
     if user_env:

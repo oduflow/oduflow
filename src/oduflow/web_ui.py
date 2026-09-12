@@ -43,9 +43,11 @@ from oduflow import (
     connect_tokens,
     env_share,
     feedback,
+    fsutil,
     git_ops,
     import_tokens,
     production_registry,
+    secret_store,
     ui_scope,
 )
 from oduflow.docker_ops import (
@@ -1584,6 +1586,12 @@ def _build_routes(
                 env_name=branch,
             )
 
+            # Same reasoning as the disk-space check: a dangling secret
+            # reference must refuse the recreate here, while refusing loses
+            # nothing — create_environment would only re-check after
+            # delete_environment has already destroyed the working environment.
+            secret_store.resolve_env_secrets(team, env_vars)
+
             env_ops.delete_environment(settings, team, branch, preserve_share=True)
             result = env_ops.create_environment(
                 settings,
@@ -2404,8 +2412,11 @@ def _build_routes(
         try:
             staging = team.get_import_staging_dir(template_name)
             os.makedirs(staging, exist_ok=True)
-            with open(os.path.join(staging, "metadata.json"), "w") as f:
-                json.dump(metadata, f, indent=2)
+            # 0600 from birth: the staged file is promoted into the live
+            # template dir with its mode, and template metadata is owner-only.
+            fsutil.atomic_write_private_json(
+                os.path.join(staging, "metadata.json"), metadata, sort_keys=False
+            )
         except ValueError as e:  # invalid template name
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True})
@@ -3934,6 +3945,65 @@ def _build_routes(
             return JSONResponse({"ok": True, "status": status})
         except Exception:
             logger.exception("Unexpected error in api_credential_validate")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    def api_secrets(request: Request) -> JSONResponse:
+        """Names and timestamps only — secret values never leave the server."""
+        try:
+            team = _get_ui_team(request)
+            return JSONResponse(
+                {"ok": True, "secrets": secret_store.list_secrets(team)}
+            )
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_secrets")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_secret_set(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            value = body.get("value")
+            if not isinstance(value, str) or not value:
+                return JSONResponse(
+                    {"ok": False, "error": "A non-empty value is required."},
+                    status_code=400,
+                )
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body."}, status_code=400
+            )
+        try:
+            result = secret_store.set_secret(team, name, value)
+            return JSONResponse({"ok": True, "result": result})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_secret_set")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    def api_secret_delete(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            secret_store.delete_secret(team, name)
+            return JSONResponse({"ok": True, "result": {"deleted": name}})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_secret_delete")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -5828,6 +5898,12 @@ def _build_routes(
         Route("/api/credentials/add", api_credential_add, methods=["POST"]),
         Route("/api/credentials/delete", api_credential_delete, methods=["POST"]),
         Route("/api/credentials/validate", api_credential_validate, methods=["POST"]),
+        # Secrets are write-only: the list returns names + timestamps, and no
+        # endpoint anywhere returns a stored value. Deliberately absent from
+        # the ui_scope allowlist, so scoped share sessions cannot touch them.
+        Route("/api/secrets", api_secrets, methods=["GET"]),
+        Route("/api/secrets/{name}/set", api_secret_set, methods=["POST"]),
+        Route("/api/secrets/{name}/delete", api_secret_delete, methods=["POST"]),
         Route("/api/environments/{branch:path}/logs", api_logs, methods=["GET"]),
         WebSocketRoute("/api/environments/{branch:path}/terminal", ws_terminal),
         WebSocketRoute("/api/environments/{branch:path}/sql", ws_sql_terminal),

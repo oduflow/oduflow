@@ -4,6 +4,7 @@ import os
 import secrets
 
 from oduflow.errors import PrerequisiteNotMetError
+from oduflow.fsutil import atomic_write_private_json
 from oduflow.naming import get_workspace_path, slugify_branch
 
 logger = logging.getLogger("oduflow")
@@ -41,16 +42,7 @@ def create_credentials(
     creds_path = os.path.join(workspace_path, _CREDENTIALS_FILE)
     # Atomic write with restrictive permissions: the file holds a plaintext PG
     # password, and a crash mid-write must not leave a half-written file.
-    fd = os.open(creds_path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(creds, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(creds_path + ".tmp", creds_path)
-    finally:
-        if os.path.exists(creds_path + ".tmp"):
-            os.remove(creds_path + ".tmp")
+    atomic_write_private_json(creds_path, creds)
 
     logger.info(
         "Created PG credentials for environment '%s' (user=%s)", env_name, username
