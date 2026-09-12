@@ -1748,6 +1748,14 @@ def _ensure_pg_container(
     restore can read it in place. It carries no new exposure — a dump is a
     subset of the cluster this container already serves.
     """
+    tablespaces_dir = _pg_tablespaces_host_dir(settings)
+    exchange_dir = _pg_exchange_host_dir(settings)
+    for mount_parent in (tablespaces_dir, exchange_dir):
+        os.makedirs(mount_parent, exist_ok=True)
+        # Only shared mount parents are public/searchable. Team directories
+        # retain their own ownership and restrictive data permissions. Repair
+        # parents created under a restrictive umask even for existing servers.
+        os.chmod(mount_parent, 0o755)
     try:
         db_container = client.containers.get(settings.shared_db_container)
         if db_container.status != "running":
@@ -1756,10 +1764,6 @@ def _ensure_pg_container(
     except docker.errors.NotFound:
         pass
 
-    tablespaces_dir = _pg_tablespaces_host_dir(settings)
-    os.makedirs(tablespaces_dir, exist_ok=True)
-    exchange_dir = _pg_exchange_host_dir(settings)
-    os.makedirs(exchange_dir, exist_ok=True)
     client.containers.run(
         settings.postgres_image,
         name=settings.shared_db_container,
