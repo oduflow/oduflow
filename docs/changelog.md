@@ -370,12 +370,11 @@
   and token, so a finished branch can hand its slot to the next one without
   reissuing certificates or reconfiguring an agent. The switch fetches and
   checks out the target branch, then reuses the regular pull pipeline to
-  classify the diff and install, upgrade or restart as needed. It deliberately
-  does not inspect installed module state before switching; real database/code
-  incompatibilities surface from the apply command or Odoo runtime instead.
-  Productions and live-mounted environments are rejected. Available as an MCP
-  tool, a REST endpoint, and the branch chip on each dashboard card. See
-  `specs/0049`. (#198)
+  classify the diff and install, upgrade or restart as needed. A preflight
+  warns when the target branch does not carry a module that is installed in the
+  database (`strict=True` refuses instead), and productions and live-mounted
+  environments are rejected. Available as an MCP tool, a REST endpoint, and the
+  branch chip on each dashboard card. See `specs/0049`. (#198)
 
 - **Rename an environment in place** — `switch_branch` accepts an optional
   `new_name`, so a reused slot whose name still echoes a finished branch can be
