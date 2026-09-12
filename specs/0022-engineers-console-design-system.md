@@ -40,7 +40,7 @@ the automation is what keeps that state worth showing.
   and that creation ergonomics / deep links / keyboard accelerators are
   **explicit non-goals**.
 - `DESIGN.md` is the normative visual system: OKLCH tokens on a blue-black ramp,
-  Outfit + Geist Mono, a categorical **signal palette**, raised-layer elevation,
+  Source Sans 3 + Source Code Pro, a categorical **signal palette**, raised-layer elevation,
   and named components down to "The Embedded Terminal." `AGENTS.md` points every
   agent at both docs before touching dashboard UI.
 - **Hard rules** (binding, not suggestions): **no external CDNs** — every asset
@@ -113,14 +113,14 @@ the automation is what keeps that state worth showing.
   (v1.50.5).
 - `0ee3eef` (2026-06-16, `#66`) — STOPPED status surfacing + service env vars in
   the Info modal.
-- _(pending merge)_ (2026-09-12, `#232`) — **retypeset on Adobe Source**: Outfit →
+- (2026-09-12, `#232`) — **retypeset on Adobe Source**: Outfit →
   **Source Sans 3**, Geist Mono → **Source Code Pro**. The original pairing was
   chosen for identity — a geometric sans carrying every UI role through weight.
   In use that identity cost legibility: Outfit's closed apertures and monotone
   geometry make dense agent-chat prose and long log lines tiring to read, which
   is the dashboard's dominant content. The replacement inverts the priority:
   humanist text proportions first, personality second. Measured, Source Sans 3
-  runs a 2% larger x-height than Outfit in 5.4% less width, so the fix costs no
+  runs a 4% larger x-height than Outfit in 5.4% less width, so the fix costs no
   type-scale change and gains density. The sibling relationship is the second
   reason: Source Sans 3 and Source Code Pro share an x-height exactly, so inline
   `code` now sits flush in prose instead of running chunkier than its

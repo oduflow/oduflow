@@ -245,8 +245,7 @@ images, log output, counts. Source Sans 3 and Source Code Pro are siblings from
 the same Adobe Source family, so the two voices share skeleton and rhythm while
 staying unmistakably apart on the proportional/monospaced axis. Both faces are
 bundled with the package as variable woff2 (SIL Open Font License 1.1 — see
-`src/oduflow/templates/static/FONTS-LICENSE.md`), never loaded from a CDN;
-until bundled, the system stack fallback is acceptable.
+`src/oduflow/templates/static/FONTS-LICENSE.md`), never loaded from a CDN.
 
 ### Hierarchy
 Fixed rem scale via semantic `--text-*` tokens (declared in `:root`) — product
