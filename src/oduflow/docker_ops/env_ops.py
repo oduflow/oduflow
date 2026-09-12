@@ -4174,65 +4174,6 @@ def pull_environment(
     return result
 
 
-# Module directories come from a git tree, so they are already tame — but the
-# preflight interpolates them into a SQL IN(...) list, so only accept names that
-# Odoo itself would accept as a module.
-_MODULE_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
-
-
-def _dropped_module_warnings(
-    settings: Settings,
-    team: TeamSettings,
-    env_name: str,
-    repo_path: str,
-    target_ref: str,
-) -> list[str]:
-    """Warn when a target branch drops a module this database has installed.
-
-    The failure mode reuse introduces and a fresh environment cannot have: the
-    database outlives the code. Switching to a branch that never carried module
-    X leaves X installed with nothing to load it from.
-
-    Advisory on purpose. A module can legitimately come from extra-addons or
-    the image, the query needs a reachable database, and neither is worth
-    turning a routine switch into a hard failure — so this reports and only
-    ``strict`` refuses. An unanswerable question yields no warning.
-    """
-    from oduflow.git_ops import tree_modules
-
-    try:
-        dropped = tree_modules(repo_path, "HEAD") - tree_modules(repo_path, target_ref)
-    except FlowError as exc:
-        logger.info("Skipping dropped-module preflight for '%s': %s", env_name, exc)
-        return []
-
-    candidates = tuple(sorted(name for name in dropped if _MODULE_NAME_RE.match(name)))
-    if not candidates:
-        return []
-
-    from oduflow.docker_ops.odoo_ops import _get_module_states
-
-    try:
-        states = _get_module_states(settings, team, env_name, candidates)
-    except Exception as exc:
-        logger.info(
-            "Could not read module states for '%s' during branch switch: %s",
-            env_name,
-            exc,
-        )
-        return []
-
-    installed = [name for name in candidates if states.get(name) == "installed"]
-    if not installed:
-        return []
-    return [
-        "The target branch does not provide these modules, which are installed "
-        f"in the database: {', '.join(installed)}. Odoo will start without their "
-        "code. Uninstall them first, or create a separate environment for this "
-        "branch."
-    ]
-
-
 def switch_environment_branch(
     settings: Settings,
     team: TeamSettings,
@@ -4259,21 +4200,19 @@ def switch_environment_branch(
 
     1. Fetch the target branch. A branch that was never pushed fails here, with
        nothing mutated.
-    2. Preflight the database against the target tree (see
-       :func:`_dropped_module_warnings`); ``strict`` refuses instead of warning.
-    3. Flip the ``oduflow.git_branch`` label — deliberately *before* the
+    2. Flip the ``oduflow.git_branch`` label — deliberately *before* the
        checkout. Labels are frozen at container creation, so this recreates the
        container; if it fails, the environment is still on the old branch in
        both label and tree. The reverse order would leave a switched tree that
        the next pull silently resets back to the old branch.
-    4. Check out the branch and hand the resulting diff to
+    3. Check out the branch and hand the resulting diff to
        :func:`pull_environment`, so the switch shares one implementation of
        classification, the guardrail, extra-addons mounts and apply.
 
     ``new_name`` optionally renames the environment along the way, so a slot
     whose name still echoes a finished branch can be relabelled instead of
     re-provisioned. It rides on the same container recreate as the label flip
-    (step 3), which keeps the whole switch at one recreate; everything after
+    (step 2), which keeps the whole switch at one recreate; everything after
     that point works under the new name.
     """
     from oduflow.git_ops import checkout_branch, fetch_branch, is_git_repository
@@ -4403,28 +4342,7 @@ def switch_environment_branch(
         )
         return result
 
-    target_sha = fetch_branch(repo_path, branch, cred_file=team.git_credentials_file())
-    warnings = _dropped_module_warnings(settings, team, env_name, repo_path, target_sha)
-    if strict and warnings:
-        blocked_message = (
-            f"Guardrail (strict) blocked the switch to '{branch}': it does not "
-            "carry every module installed in this database. Uninstall them, "
-            "use a separate environment for this branch, or pass "
-            "strict=False to switch anyway."
-        )
-        if rename_to:
-            # "Blocked" has to mean nothing changed — the name included.
-            blocked_message += f" The rename to '{rename_to}' was not applied."
-        return {
-            "action": "blocked",
-            "warnings": warnings,
-            "branch": current_branch,
-            "requested_branch": branch,
-            "branch_switched": False,
-            "env_name": env_name,
-            "changed_files": [],
-            "message": blocked_message,
-        }
+    fetch_branch(repo_path, branch, cred_file=team.git_credentials_file())
 
     label_overrides = {"oduflow.git_branch": branch}
     if extra_override is not None:
@@ -4518,8 +4436,6 @@ def switch_environment_branch(
     result["old_head"] = old_head
     result["new_head"] = new_head
     result["message"] = f"{switched} {tail}".strip()
-    if warnings:
-        result["warnings"] = warnings + list(result.get("warnings") or [])
     return result
 
 

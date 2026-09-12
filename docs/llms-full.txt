@@ -1887,13 +1887,12 @@ to let Oduflow classify the difference:
 oduflow call switch_branch '{"env_name": "dev1", "branch": "feature/next-task", "upgrade": "sale_custom"}'
 ```
 
-Since the database is kept, it can outlive the code that created it. If the
-target branch never carried a module that is installed in this database, the
-response says so, and `strict: true` refuses the switch instead of warning:
-
-```bash
-oduflow call switch_branch '{"env_name": "dev1", "branch": "hotfix/19.0", "strict": true}'
-```
+Since the database is kept, it can outlive the code that created it.
+`switch_branch` deliberately does not inspect installed module state before it
+moves the branch. It applies the requested action and returns any real failure
+from install, upgrade or restart; incompatibilities that only surface at runtime
+remain visible in the normal Odoo logs. `strict: true` still refuses an explicit
+action that looks incomplete for the detected file changes.
 
 Two limits are worth knowing:
 

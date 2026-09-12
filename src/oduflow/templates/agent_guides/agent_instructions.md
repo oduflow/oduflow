@@ -60,8 +60,9 @@ that is when step 2 applies. `switch_branch` keeps the database, filestore, URL
 and scoped MCP endpoint and only changes the code, and it applies the branch
 difference exactly like `pull_and_apply`. The target branch must exist on
 origin; live-mounted environments are rejected (switch the branch in the
-mounted checkout and call `pull_and_apply`). If the target branch does not
-carry a module installed in that database, the response warns.
+mounted checkout and call `pull_and_apply`). The switch does not inspect
+installed module state in the retained database; handle any real incompatibility
+from the apply response or subsequent Odoo runtime errors.
 
 `create_environment` refuses an existing environment only when it tracks a
 different branch: that environment's database and URL are in use, so moving it

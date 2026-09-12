@@ -479,30 +479,6 @@ def checkout_branch(repo_path: str, branch: str) -> tuple[str, str, list[str]]:
     return old_head, new_head, diff_names(repo_path, old_head, new_head)
 
 
-def tree_modules(repo_path: str, ref: str = "HEAD") -> set[str]:
-    """Odoo module names a tree provides — directories with a ``__manifest__.py``.
-
-    Read through git rather than the filesystem so the *target* of a branch
-    switch can be inspected before the checkout moves onto it.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "-C", repo_path, "ls-tree", "-r", "--name-only", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=_GIT_BASE_ENV,
-        ).stdout
-    except subprocess.CalledProcessError as e:
-        raise ExternalCommandError("git ls-tree", e.returncode, e.stderr or "")
-
-    modules = set()
-    for path in out.splitlines():
-        if path.endswith("/__manifest__.py"):
-            modules.add(path.rsplit("/", 2)[-2])
-    return modules
-
-
 def rev_parse(repo_path: str, ref: str = "HEAD") -> str:
     """Commit hash of *ref* in *repo_path*."""
     try:
