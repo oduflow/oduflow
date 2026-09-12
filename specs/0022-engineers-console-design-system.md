@@ -113,7 +113,7 @@ the automation is what keeps that state worth showing.
   (v1.50.5).
 - `0ee3eef` (2026-06-16, `#66`) — STOPPED status surfacing + service env vars in
   the Info modal.
-- _(pending commit)_ (2026-09-12) — **retypeset on Adobe Source**: Outfit →
+- _(pending merge)_ (2026-09-12, `#232`) — **retypeset on Adobe Source**: Outfit →
   **Source Sans 3**, Geist Mono → **Source Code Pro**. The original pairing was
   chosen for identity — a geometric sans carrying every UI role through weight.
   In use that identity cost legibility: Outfit's closed apertures and monotone
