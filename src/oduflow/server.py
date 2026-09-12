@@ -2072,11 +2072,11 @@ def switch_branch(
     MCP endpoint moves from /mcp/<old name> to /mcp/<new name>, so an MCP client
     configured against the old path has to be re-pointed.
 
-    Because the database is kept, it can outlive the code: if the target branch
-    never carried a module that is installed here, the response says so (with
-    strict=True the switch is refused instead). Live-mounted environments are
-    rejected — there the checkout is yours, so switch the branch in it and call
-    pull_and_apply.
+    Switching does not inspect which modules are installed in the retained
+    database. If the target code is incompatible with that database, the apply
+    command returns the real failure or Odoo reports it at runtime. Live-mounted
+    environments are rejected — there the checkout is yours, so switch the
+    branch in it and call pull_and_apply.
 
     Errors and tracebacks are returned directly in this response — do NOT call
     get_environment_logs to check for them.
@@ -2087,7 +2087,7 @@ def switch_branch(
         install: Comma-separated modules to install (-i). Leave empty for automatic classification.
         upgrade: Comma-separated modules to upgrade (-u). Leave empty for automatic classification.
         restart: Restart the Odoo container (for Python-only differences).
-        strict: Refuse instead of warning when the target branch drops an installed module, or when the requested action looks incomplete for the diff.
+        strict: Refuse instead of warning when the requested action looks incomplete for the diff.
         extra_addons: Optional comma-separated extra addon repos with branches (e.g. "enterprise:19.0,custom-themes:main") to switch along with the main repo. Leave empty to keep the current ones.
         new_name: Optional new name for the environment. Leave empty to keep the current name.
     """
