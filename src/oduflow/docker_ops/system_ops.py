@@ -1819,6 +1819,9 @@ def _ensure_prod_pg_conf(settings: Settings) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    # This non-secret bind mount must be readable by the PostgreSQL user,
+    # including when the Oduflow service uses a restrictive umask.
+    os.chmod(path, 0o644)
     logger.info(
         "Config: %s (auto-tuned production profile: %d vCPU, %d MB RAM)",
         path,
