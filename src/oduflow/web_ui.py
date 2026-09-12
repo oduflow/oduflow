@@ -43,6 +43,7 @@ from oduflow import (
     connect_tokens,
     env_share,
     feedback,
+    fsutil,
     git_ops,
     import_tokens,
     production_registry,
@@ -1584,6 +1585,12 @@ def _build_routes(
                 env_name=branch,
             )
 
+            # Same reasoning as the disk-space check: a dangling secret
+            # reference must refuse the recreate here, while refusing loses
+            # nothing — create_environment would only re-check after
+            # delete_environment has already destroyed the working environment.
+            secret_store.resolve_env_secrets(team, env_vars)
+
             env_ops.delete_environment(settings, team, branch, preserve_share=True)
             result = env_ops.create_environment(
                 settings,
@@ -2404,8 +2411,11 @@ def _build_routes(
         try:
             staging = team.get_import_staging_dir(template_name)
             os.makedirs(staging, exist_ok=True)
-            with open(os.path.join(staging, "metadata.json"), "w") as f:
-                json.dump(metadata, f, indent=2)
+            # 0600 from birth: the staged file is promoted into the live
+            # template dir with its mode, and template metadata is owner-only.
+            fsutil.atomic_write_private_json(
+                os.path.join(staging, "metadata.json"), metadata, sort_keys=False
+            )
         except ValueError as e:  # invalid template name
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True})

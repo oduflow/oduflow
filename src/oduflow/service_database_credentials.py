@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from oduflow.errors import ConflictError, NotFoundError, PrerequisiteNotMetError
+from oduflow.fsutil import atomic_write_private_json
 from oduflow.naming import validate_service_database_name
 from oduflow.settings import TeamSettings
 
@@ -47,19 +48,7 @@ def save(
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     os.chmod(os.path.dirname(path), 0o700)
     payload = {"version": _VERSION, **record}
-    tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    atomic_write_private_json(path, payload)
 
 
 def load(team: TeamSettings, name: str) -> dict[str, Any]:

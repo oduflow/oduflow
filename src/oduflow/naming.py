@@ -120,6 +120,20 @@ def validate_service_database_name(name: str) -> str:
     return name
 
 
+_SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def validate_secret_name(name: str) -> str:
+    """Validate a team-secret name (``secret_store``) and return it unchanged."""
+    if not name or not _SECRET_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid secret name '{name}': must start with a lowercase letter "
+            "or digit and contain only lowercase letters, digits, dots, hyphens "
+            "and underscores (max 64 characters)."
+        )
+    return name
+
+
 _PG_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_.-]")
 _PG_IDENTIFIER_MAX_BYTES = 63
 _PG_DIGEST_LEN = 10

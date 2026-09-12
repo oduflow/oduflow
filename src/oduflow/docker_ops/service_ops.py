@@ -350,19 +350,23 @@ def create_service(
     routes: list[dict[str, object]] | None = None,
     command: list[str] | None = None,
     stack_labels: dict[str, str] | None = None,
+    _resolved_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
     routes = normalize_http_routes(routes)
     _validate_service_exposure(settings, port, routes)
     # A dangling secret reference must abort before any Docker resource is
     # touched. Only the container environment receives the resolved values;
-    # the preset and the label below keep the references.
-    resolved_env = secret_store.resolve_env_secrets(team, env_vars)
-    secret_env = {
-        key: value
-        for key, value in (env_vars or {}).items()
-        if secret_store.is_secret_ref(value)
-    }
+    # the preset and the label below keep the references. update_service
+    # passes the mapping it already resolved (_resolved_env) so its
+    # validate-then-recreate window cannot see a concurrently deleted secret
+    # after the old container is gone.
+    resolved_env = (
+        _resolved_env
+        if _resolved_env is not None
+        else secret_store.resolve_env_secrets(team, env_vars)
+    )
+    secret_env = secret_store.secret_env_refs(env_vars)
     client = get_client()
 
     # Check for existing container
@@ -661,11 +665,19 @@ def _secret_env_refs(container: Any) -> dict[str, str]:
         return {}
     try:
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError:
         return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {str(key): str(value) for key, value in parsed.items()}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _raw_container_env(container: Any) -> dict[str, str]:
+    """Config.Env of a container as a dict — the values it actually runs with."""
+    env_vars: dict[str, str] = {}
+    for entry in container.attrs.get("Config", {}).get("Env", []) or []:
+        if "=" in entry:
+            key, value = entry.split("=", 1)
+            env_vars[key] = value
+    return env_vars
 
 
 def _container_env_vars(container: Any) -> dict[str, str]:
@@ -676,12 +688,11 @@ def _container_env_vars(container: Any) -> dict[str, str]:
     on container inspection (get_service_info, list_services, the legacy
     no-preset update path) must never expose a secret value.
     """
-    env_vars: dict[str, str] = {}
-    for entry in container.attrs.get("Config", {}).get("Env", []) or []:
-        if "=" in entry:
-            key, value = entry.split("=", 1)
-            if key not in _SYSTEM_ENV_KEYS:
-                env_vars[key] = value
+    env_vars = {
+        key: value
+        for key, value in _raw_container_env(container).items()
+        if key not in _SYSTEM_ENV_KEYS
+    }
     for key, ref in _secret_env_refs(container).items():
         if key in env_vars:
             env_vars[key] = ref
@@ -934,7 +945,10 @@ def update_service(
 
     Optional overrides replace the corresponding setting from the saved preset.
     When any override differs from the current config the container is recreated
-    even if the image digest has not changed.
+    even if the image digest has not changed. A rotated team secret also counts
+    as a config change: the resolved value of every ``secret:<name>`` reference
+    is compared against what the container actually runs with, so the
+    documented rotation flow (replace the value, then update) takes effect.
     """
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
@@ -1130,6 +1144,25 @@ def update_service(
     # must not stop and remove the currently running service.
     _resolve_service_volume_binds(settings, team, old_volumes or None, client=client)
 
+    # Resolve secret references once, up front: a dangling reference must fail
+    # before the (possibly large) image pull and before the destructive
+    # stop/remove below, and the same resolved mapping is handed to
+    # create_service so a secret deleted concurrently with this update cannot
+    # fail the re-create after the old container is already gone.
+    resolved_env = secret_store.resolve_env_secrets(team, env_vars)
+
+    # A rotated secret value changes neither the reference-form config nor the
+    # image digest, so the documented rotation flow (replace the value in the
+    # dashboard, then update_service) hinges on this check: compare the values
+    # the container actually runs with against the freshly resolved ones for
+    # every reference-configured key.
+    if not config_changed:
+        live_env = _raw_container_env(container)
+        for key in secret_store.secret_env_refs(env_vars):
+            if live_env.get(key) != (resolved_env or {}).get(key):
+                config_changed = True
+                break
+
     # Capture old image digest
     old_digest = container.image.id  # e.g. sha256:abc...
 
@@ -1176,11 +1209,6 @@ def update_service(
         config_changed,
     )
 
-    # Validate secret references before the destructive stop/remove below: a
-    # dangling reference must fail the update, not cost the service its
-    # container (create_service would only re-check after the removal).
-    secret_store.resolve_env_secrets(team, env_vars)
-
     # The service is invisible to the registry between remove and re-create, so
     # both happen under the registry key: a delete_volume that looked in that
     # window would find the volume unused and remove it out from under the
@@ -1210,6 +1238,7 @@ def update_service(
             routes=routes,
             command=command or None,
             stack_labels=effective_stack_labels,
+            _resolved_env=resolved_env,
         )
 
     result["image_updated"] = image_updated

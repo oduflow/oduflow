@@ -21,30 +21,23 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import re
 from typing import Any
 
 from oduflow.errors import NotFoundError, PrerequisiteNotMetError
+from oduflow.fsutil import atomic_write_private_json
 from oduflow.locking import keyed_mutex, team_secrets_lock_key
+
+# Re-exported: name validation lives in naming.py with the other validate_*
+# helpers; existing callers keep using secret_store.validate_secret_name.
+from oduflow.naming import validate_secret_name as validate_secret_name
 from oduflow.settings import TeamSettings
 
 _VERSION = 1
 SECRET_REF_PREFIX = "secret:"
-_SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
 def secrets_path(team: TeamSettings) -> str:
     return os.path.join(team.data_dir, "secrets.json")
-
-
-def validate_secret_name(name: str) -> str:
-    if not name or not _SECRET_NAME_RE.fullmatch(name):
-        raise ValueError(
-            f"Invalid secret name '{name}': must start with a lowercase letter "
-            "or digit and contain only lowercase letters, digits, dots, hyphens "
-            "and underscores (max 64 characters)."
-        )
-    return name
 
 
 def is_secret_ref(value: object) -> bool:
@@ -56,6 +49,18 @@ def secret_ref_name(value: str) -> str:
     """The secret name inside a reference; raises ValueError if malformed."""
     name = value[len(SECRET_REF_PREFIX) :].strip()
     return validate_secret_name(name)
+
+
+def secret_env_refs(env_vars: dict[str, str] | None) -> dict[str, str]:
+    """KEY -> ``secret:<name>`` for every reference-valued env var.
+
+    The single definition of which env vars are secret references: used both
+    by resolution below and by callers that persist the reference map (the
+    ``oduflow.secret_env`` container label), so the two can never diverge.
+    """
+    return {
+        key: value for key, value in (env_vars or {}).items() if is_secret_ref(value)
+    }
 
 
 def _load(team: TeamSettings) -> dict[str, Any]:
@@ -83,19 +88,7 @@ def _load(team: TeamSettings) -> dict[str, Any]:
 def _save(team: TeamSettings, data: dict[str, Any]) -> None:
     path = secrets_path(team)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            json.dump(data, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    atomic_write_private_json(path, data)
 
 
 def list_secrets(team: TeamSettings) -> list[dict[str, str]]:
@@ -151,15 +144,13 @@ def resolve_env_secrets(
     if not env_vars:
         return env_vars
     refs: dict[str, str] = {}
-    for key, value in env_vars.items():
-        if is_secret_ref(value):
-            try:
-                refs[key] = secret_ref_name(value)
-            except ValueError as exc:
-                raise PrerequisiteNotMetError(
-                    f"Environment variable {key} holds a malformed secret "
-                    f"reference: {exc}"
-                ) from exc
+    for key, value in secret_env_refs(env_vars).items():
+        try:
+            refs[key] = secret_ref_name(value)
+        except ValueError as exc:
+            raise PrerequisiteNotMetError(
+                f"Environment variable {key} holds a malformed secret reference: {exc}"
+            ) from exc
     if not refs:
         return dict(env_vars)
     records = _load(team)["secrets"]

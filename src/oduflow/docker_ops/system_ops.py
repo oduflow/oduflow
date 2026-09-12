@@ -31,6 +31,7 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
+from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
 from oduflow.naming import (
     get_db_name,
     get_service_database_name,
@@ -120,8 +121,10 @@ def _update_template_sizes(
     if "use_overlay" not in metadata or metadata["use_overlay"] is None:
         metadata["use_overlay"] = fs_size >= settings.overlay_threshold_mb
 
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+    # Owner-only like the credential stores: metadata records the source
+    # environment's env vars, which may hold plaintext values (migration 0007
+    # brings pre-existing files forward).
+    atomic_write_private_json(metadata_path, metadata, sort_keys=False)
     return metadata
 
 
@@ -4248,8 +4251,7 @@ def finalize_imported_template(
                 md = json.load(f)
             existing = _normalize_extra_addons(md.get("extra_addons", {}))
             md["extra_addons"] = {**existing, **wired}
-            with open(meta_path, "w") as f:
-                json.dump(md, f, indent=2)
+            atomic_write_private_json(meta_path, md, sort_keys=False)
         except (OSError, ValueError) as exc:
             raise PrerequisiteNotMetError(
                 f"Could not record imported addons on the template: {exc}"
@@ -4662,30 +4664,15 @@ def update_template_metadata(
         # cannot export is worth surfacing while the editor is still open.
         metadata["env_vars"] = normalize_env_vars(metadata["env_vars"])
 
-    normalized = (json.dumps(metadata, indent=2, ensure_ascii=False) + "\n").encode(
-        "utf-8"
-    )
-    tmp_path = f"{metadata_path}.tmp-{uuid.uuid4().hex}"
-    try:
-        mode = stat.S_IMODE(os.stat(metadata_path).st_mode)
-    except FileNotFoundError:
-        mode = 0o644
-
-    try:
-        with open(tmp_path, "wb") as f:
-            f.write(normalized)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp_path, mode)
-        os.replace(tmp_path, metadata_path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    normalized = json.dumps(metadata, indent=2, ensure_ascii=False) + "\n"
+    # Always owner-only, even for files that predate migration 0007: the
+    # editor is exactly where env vars (possibly plaintext values) get added.
+    atomic_write_private_text(metadata_path, normalized)
 
     logger.info("Updated metadata for template %s", template_name)
     return {
-        "content": normalized.decode("utf-8"),
-        "revision": hashlib.sha256(normalized).hexdigest(),
+        "content": normalized,
+        "revision": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
     }
 
 

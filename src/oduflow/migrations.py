@@ -334,6 +334,21 @@ def _migrate_traefik_yml_config(settings: Settings) -> None:
         pass
 
 
+def _chmod_private_best_effort(path: str) -> None:
+    """chmod *path* to 0600, logging instead of raising on failure.
+
+    Permission hardening is not worth blocking server startup over (a failing
+    migration step aborts every start until fixed): a file the server user
+    cannot chmod — e.g. root-owned after a backup restore — is reported for
+    the operator to chown, like migration 0004 handles per-container failures.
+    """
+    try:
+        os.chmod(path, 0o600)
+        logger.info("Restricted %s to mode 0600", path)
+    except OSError as exc:
+        logger.warning("Could not restrict %s to mode 0600: %s", path, exc)
+
+
 def _migrate_service_presets_permissions(settings: Settings) -> None:
     """Restrict each team's ``service_presets.json`` to owner-only access.
 
@@ -346,8 +361,25 @@ def _migrate_service_presets_permissions(settings: Settings) -> None:
     for team in settings.teams.values():
         path = os.path.join(team.data_dir, "service_presets.json")
         if os.path.isfile(path):
-            os.chmod(path, 0o600)
-            logger.info("Restricted %s to mode 0600", path)
+            _chmod_private_best_effort(path)
+
+
+def _migrate_template_metadata_permissions(settings: Settings) -> None:
+    """Restrict every template ``metadata.json`` to owner-only access.
+
+    Template metadata records the source environment's env vars — the same
+    data class as service presets (migration 0006) — but was written with the
+    default umask. New writes are 0600; this brings existing files forward.
+    The templates tree is walked directly so nested template names
+    (``customer/prod``) are covered too.
+    """
+    for team in settings.teams.values():
+        templates_dir = os.path.join(team.data_dir, "templates")
+        if not os.path.isdir(templates_dir):
+            continue
+        for root, _dirs, files in os.walk(templates_dir):
+            if "metadata.json" in files:
+                _chmod_private_best_effort(os.path.join(root, "metadata.json"))
 
 
 # Append-only registry, executed in list order. Ids are recorded in
@@ -401,6 +433,14 @@ MIGRATIONS: list[Migration] = [
             "API keys) to owner-only permissions like the credential stores"
         ),
         apply=_migrate_service_presets_permissions,
+    ),
+    Migration(
+        id="0007-template-metadata-0600",
+        description=(
+            "Restrict template metadata.json (records source-environment env "
+            "vars) to owner-only permissions like the credential stores"
+        ),
+        apply=_migrate_template_metadata_permissions,
     ),
 ]
 

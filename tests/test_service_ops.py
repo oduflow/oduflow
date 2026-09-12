@@ -2370,3 +2370,81 @@ class TestServiceSecrets:
 
         container.stop.assert_not_called()
         container.remove.assert_not_called()
+        # The reference is validated before the image pull, so a dangling one
+        # costs neither a registry round-trip nor a download.
+        mock_docker_client.images.pull.assert_not_called()
+
+    def test_update_rotated_secret_value_recreates_container(
+        self, mock_docker_client, tmp_path
+    ):
+        """The documented rotation flow (replace the value, then update_service)
+        must recreate the container even though neither the reference-form
+        config nor the image digest changed."""
+        from oduflow import secret_store
+
+        team = self._team(tmp_path)
+        secret_store.set_secret(team, "master-key", "new-value")
+        container = MagicMock()
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "meili"}
+        container.image.tags = ["getmeili/meilisearch:v1.6"]
+        container.image.id = "sha256:same"
+        container.attrs = {"Config": {"Env": ["KEY=old-value"]}}
+        mock_docker_client.containers.get.side_effect = [
+            container,
+            docker.errors.NotFound("nf"),
+        ]
+        new_image = MagicMock()
+        new_image.id = "sha256:same"
+        mock_docker_client.images.pull.return_value = new_image
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value={
+                "name": "meili",
+                "image": "getmeili/meilisearch:v1.6",
+                "port": 7700,
+                "hostname": "",
+                "env_vars": {"KEY": "secret:master-key"},
+            },
+        ):
+            result = service_ops.update_service(TEST_SETTINGS, team, "meili")
+
+        assert result["config_updated"] is True
+        container.stop.assert_called_once()
+        container.remove.assert_called_once()
+        run_kwargs = mock_docker_client.containers.run.call_args[1]
+        assert run_kwargs["environment"] == {"KEY": "new-value"}
+
+    def test_update_unrotated_secret_stays_a_noop(self, mock_docker_client, tmp_path):
+        """An unchanged secret value must not force a recreation."""
+        from oduflow import secret_store
+
+        team = self._team(tmp_path)
+        secret_store.set_secret(team, "master-key", "same-value")
+        container = MagicMock()
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "meili"}
+        container.image.tags = ["getmeili/meilisearch:v1.6"]
+        container.image.id = "sha256:same"
+        container.attrs = {"Config": {"Env": ["KEY=same-value"]}}
+        mock_docker_client.containers.get.return_value = container
+        new_image = MagicMock()
+        new_image.id = "sha256:same"
+        mock_docker_client.images.pull.return_value = new_image
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value={
+                "name": "meili",
+                "image": "getmeili/meilisearch:v1.6",
+                "port": 7700,
+                "hostname": "",
+                "env_vars": {"KEY": "secret:master-key"},
+            },
+        ):
+            result = service_ops.update_service(TEST_SETTINGS, team, "meili")
+
+        assert result["config_updated"] is False
+        assert result["image_updated"] is False
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
