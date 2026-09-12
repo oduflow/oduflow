@@ -1324,6 +1324,7 @@ class TestUpdateServiceTool:
             privileged_override=None,
             routes_override=None,
             command_override=None,
+            runtime_override=None,
         )
 
     @patch("oduflow.docker_ops.service_ops.update_service")

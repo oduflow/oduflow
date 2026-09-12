@@ -3013,6 +3013,7 @@ def _build_routes(
                 privileged=privileged,
                 routes=routes,
                 command=command,
+                runtime=body.get("runtime"),
             )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:
@@ -3096,6 +3097,7 @@ def _build_routes(
                 privileged_override=privileged_override,
                 routes_override=routes_override,
                 command_override=command_override,
+                runtime_override=body.get("runtime") if body else None,
             )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:
@@ -3225,6 +3227,12 @@ def _build_routes(
             net_admin = bool(body.get("net_admin", False))
             cap_add = ["NET_ADMIN"] if net_admin else None
             command = _command_from_body(body.get("command")) or None
+            runtime = body.get("runtime")
+            if runtime is None:
+                try:
+                    runtime = service_presets.get_preset(team, name).get("runtime")
+                except NotFoundError:
+                    pass
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except FlowError as e:
@@ -3255,6 +3263,7 @@ def _build_routes(
                 privileged=privileged,
                 routes=routes,
                 command=command,
+                runtime=runtime,
             )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:

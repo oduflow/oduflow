@@ -223,3 +223,31 @@ oduflow call restore_service redis
 # Remove a saved preset
 oduflow call delete_service_preset redis
 ```
+
+## Container lifecycle settings
+
+MCP/REST `create_service` and `update_service` accept a `runtime` mapping.
+It is also available on Stack services. Supported keys are `tmpfs` (only `/run`,
+`/run/lock`, `/tmp`), `cgroupns: private`, `stop_signal` (`SIGTERM` or
+`SIGRTMIN+3`) and `stop_timeout` (1–3600 seconds). For example:
+
+```json
+{
+  "tmpfs": {"/run": "rw,nosuid,nodev,mode=755", "/tmp": "rw,nosuid,nodev,mode=1777"},
+  "cgroupns": "private",
+  "stop_signal": "SIGRTMIN+3",
+  "stop_timeout": 240
+}
+```
+
+In Stack manifests the keys follow the manifest-wide camelCase convention
+(`stopSignal`, `stopTimeout`); the snake_case spellings shown above are also
+accepted there.
+
+Updates preserve these settings when omitted; `{}` clears the explicit overrides.
+Presets and stack planning retain them. Stop/restart/replacement honors the old
+container's timeout so changing an image does not truncate its shutdown grace
+period. These settings do not grant privileges or make a systemd image healthy: an
+image must implement its own readiness check, and its cgroup/capability requirements
+must be verified on the deployment host. The `runtime` field does not accept
+arbitrary Docker options or bind mounts from the host.

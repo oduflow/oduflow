@@ -5994,7 +5994,12 @@ async function doDeletePreset(name) {
   }
 }
 
+// Runtime has no form field; remember the selected preset's value so the
+// restore payload carries it even when the user renames the service.
+var _restoreRuntime = null;
+
 function _fillRestoreFields(p) {
+   _restoreRuntime = p.runtime || {};
    document.getElementById('restore-svc-name').value = p.name || '';
    document.getElementById('restore-svc-image').value = p.image || '';
    document.getElementById('restore-svc-port').value = p.routes && p.routes.length ? '' : (p.port || '');
@@ -6022,6 +6027,7 @@ function openRestoreServiceModal(preselect) {
    var sel = document.getElementById('restore-svc-select');
    var errEl = document.getElementById('restore-svc-error');
    errEl.style.display = 'none';
+   _restoreRuntime = null;
    document.getElementById('restore-svc-submit').disabled = false;
    document.getElementById('restore-svc-name').value = '';
    document.getElementById('restore-svc-image').value = '';
@@ -6096,6 +6102,7 @@ async function submitRestoreService() {
     var netAdmin = document.getElementById('restore-svc-net-admin').checked;
     var command = document.getElementById('restore-svc-command').value.trim();
     var payload = { name: name, image: image, host_mode: hostMode, privileged: privileged, net_admin: netAdmin };
+    if (_restoreRuntime !== null) payload.runtime = _restoreRuntime;
     if (command) payload.command = command;
     if (routeMode) payload.routes = collectServiceRoutes('restore-svc');
     else payload.port = parseInt(port, 10);

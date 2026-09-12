@@ -75,6 +75,7 @@ precursors).
 | [0054](0054-agent-container-image-build-and-publish.md) | 2026-09-01 | Agent-driven container image build and publication |
 | [0055](0055-scoped-environment-ui-sharing.md) | 2026-09-02 | Shared single-environment dashboard (`/env/<name>` share links) |
 | [0056](0056-public-url-scheme.md) | 2026-09-04 | Public URL scheme (`[routing] public_scheme`) and conditional forwarded-header trust |
+| [0057](0057-service-container-lifecycle.md) | 2026-09-12 | Explicit service container lifecycle settings |
 
 ## Design docs
 
