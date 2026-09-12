@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 try:
     import tomllib
@@ -227,7 +228,7 @@ class Settings:
     """Global settings + per-team isolation."""
 
     # Server
-    host: str = "0.0.0.0"
+    bind_host: str = "0.0.0.0"
     port: int = 8000
     trace: bool = False
     disable_telemetry: bool = False
@@ -327,16 +328,6 @@ class Settings:
     repo_label: str = "oduflow.repo"
     image_label: str = "oduflow.image"
 
-    # OAuth (self-hosted Authorization Server). Public base URL of this server,
-    # used as the OAuth issuer and to advertise authorize/token endpoints.
-    # When set, Oduflow exposes /.well-known/oauth-authorization-server,
-    # /authorize, and /token. Each team's client_id is public (team_<id>), while
-    # auth_token is the client_secret and also works directly as a Bearer token.
-    # In traefik mode this is optional: the issuer is derived per-request from
-    # the team's own hostname (already TLS-terminated), so OAuth works without a
-    # central host. Set it only to pin a fixed issuer or in port mode.
-    oauth_base_url: str = ""
-
     # Config location
     etc_dir: str = ""
     toml_path: str = ""
@@ -360,9 +351,24 @@ class Settings:
     def get_team_by_hostname(self, hostname: str) -> TeamSettings | None:
         if not hostname:
             return None
-        hostname = hostname.split(":")[0]  # Strip port
+        try:
+            authority = urlsplit(f"//{hostname.strip()}")
+            # Reading .port validates malformed or out-of-range port values.
+            _ = authority.port
+        except ValueError:
+            return None
+        if (
+            authority.username is not None
+            or authority.password is not None
+            or authority.path
+            or authority.query
+            or authority.fragment
+            or authority.hostname is None
+        ):
+            return None
+        hostname = authority.hostname.lower()
         for team in self.teams.values():
-            if team.hostname == hostname:
+            if team.hostname.lower() == hostname:
                 return team
         return None
 
@@ -384,17 +390,9 @@ class Settings:
 
     @property
     def oauth_enabled(self) -> bool:
-        # Self-hosted OAuth is served whenever an explicit issuer is configured
-        # (oauth_base_url) or we run behind Traefik, where each team's own
-        # TLS-terminated hostname is used as a per-request issuer — no central
-        # oauth_base_url needed. Port mode still requires an explicit issuer.
-        # It also requires a team auth_token (which doubles as the OAuth client
-        # credential): without one nothing is actually served, so the flag stays
-        # False rather than reporting "OAuth ON" for a tokenless deployment.
-        has_token = any(t.auth_token for t in self.teams.values())
-        return has_token and (
-            bool(self.oauth_base_url) or self.routing_mode == "traefik"
-        )
+        # Every authenticated HTTP deployment serves OAuth on the hostname of
+        # the team reached by the request.
+        return any(t.auth_token for t in self.teams.values())
 
     def get_team_by_ui_password(self, password: str) -> TeamSettings | None:
         if not password:
@@ -445,13 +443,23 @@ class Settings:
                     "routing tls is enabled"
                 )
 
-        # Validate per-team settings
+        # A hostname is the stable routing and OAuth identity of a team in every
+        # mode. Requiring it explicitly avoids a hidden global fallback and makes
+        # host-relative OAuth safe to enable behind any TLS-terminating proxy.
+        seen_team_hosts: dict[str, str] = {}
         for team in self.teams.values():
-            if self.routing_mode == "traefik" and not team.hostname:
+            if not team.hostname:
                 raise ValueError(
-                    f"Team '{team.team_id}': hostname must be set "
-                    "when routing_mode=traefik"
+                    f"Team '{team.team_id}': hostname must be set explicitly."
                 )
+            normalized_host = team.hostname.lower()
+            if normalized_host in seen_team_hosts:
+                raise ValueError(
+                    f"Teams '{seen_team_hosts[normalized_host]}' and "
+                    f"'{team.team_id}' have duplicate hostname "
+                    f"'{team.hostname}'."
+                )
+            seen_team_hosts[normalized_host] = team.team_id
             if team.port_range_start >= team.port_range_end:
                 raise ValueError(
                     f"Team '{team.team_id}': invalid port range "
@@ -502,7 +510,7 @@ class Settings:
         # across routes and team hostnames so a Host rule never routes two ways.
         if self.extra_routes and self.routing_mode != "traefik":
             raise ValueError("[route.*] sections require routing.mode = 'traefik'.")
-        seen_hosts = {t.hostname for t in self.teams.values() if t.hostname}
+        seen_hosts = {t.hostname.lower() for t in self.teams.values()}
         for route in self.extra_routes:
             if not route.host:
                 raise ValueError(f"Route '{route.name}': host must be set.")
@@ -521,12 +529,13 @@ class Settings:
                     f"Route '{route.name}': url must start with http:// or https:// "
                     f"(got {route.url!r})."
                 )
-            if route.host in seen_hosts:
+            normalized_route_host = route.host.lower()
+            if normalized_route_host in seen_hosts:
                 raise ValueError(
                     f"Route '{route.name}': host '{route.host}' collides with "
                     "another route or team hostname."
                 )
-            seen_hosts.add(route.host)
+            seen_hosts.add(normalized_route_host)
 
         # Validate that team port ranges do not overlap. The default range is
         # identical for every team, so two teams that never set an explicit
@@ -557,15 +566,6 @@ class Settings:
         passwords = [t.ui_password for t in self.teams.values() if t.ui_password]
         if len(passwords) != len(set(passwords)):
             raise ValueError("Duplicate ui_password values across teams.")
-
-        # Validate OAuth: when oauth_base_url is set, at least one team must
-        # have a non-empty auth_token (used as OAuth client_secret/access token).
-        if self.oauth_base_url and not any(t.auth_token for t in self.teams.values()):
-            raise ValueError(
-                "oauth_base_url is set but no team has an auth_token. "
-                "Self-hosted OAuth requires at least one [team.*] section "
-                "with a non-empty auth_token."
-            )
 
         if self.prod_workers_cap < 1:
             raise ValueError("[production] workers_cap must be >= 1")
@@ -604,8 +604,44 @@ class Settings:
         prod_enabled = production.get("enabled", False)
         if not isinstance(prod_enabled, bool):
             raise ValueError("[production] enabled must be true or false")
-        oauth = raw.get("oauth", server)  # [oauth] section or fall back to [server]
+        if "oauth" in raw:
+            raise ValueError(
+                "[oauth] has been removed; OAuth is enabled automatically from "
+                "each [team.*] hostname and auth_token."
+            )
+        if "oauth_base_url" in server:
+            raise ValueError(
+                "[server].oauth_base_url has been removed; OAuth is enabled "
+                "automatically from each [team.*] hostname and auth_token."
+            )
         routing_mode = str(routing.get("mode", "port")).strip().lower()
+        if "hostname" in routing:
+            logger.warning(
+                "[routing].hostname is ignored; set hostname explicitly in "
+                "every [team.*] section."
+            )
+
+        bind_value = server.get("bind")
+        legacy_host = server.get("host")
+        if bind_value is not None and legacy_host is not None:
+            bind_text = str(bind_value).strip()
+            legacy_text = str(legacy_host).strip()
+            if bind_text != legacy_text:
+                raise ValueError(
+                    "[server].bind and legacy [server].host disagree; keep only "
+                    "bind or set both to the same value."
+                )
+        if legacy_host is not None:
+            logger.warning("[server].host is deprecated; use [server].bind instead.")
+        bind_host = str(
+            bind_value
+            if bind_value is not None
+            else legacy_host
+            if legacy_host is not None
+            else "0.0.0.0"
+        ).strip()
+        if not bind_host:
+            raise ValueError("[server].bind must not be empty.")
         backup = _parse_backup_section(raw.get("backup", {}))
 
         etc_dir = _resolve_etc_dir()
@@ -641,15 +677,7 @@ class Settings:
                     f"got {port_range!r}"
                 )
 
-            # [routing].hostname is a fallback only in port mode. In traefik
-            # mode the validator requires every team to set its own hostname;
-            # silently inheriting one shared default would make two such teams
-            # collide in get_team_by_hostname, so leave it empty and let
-            # validate() report the misconfiguration.
-            default_hostname = (
-                routing.get("hostname", "localhost") if routing_mode == "port" else ""
-            )
-            raw_hostname = str(team_cfg.get("hostname", default_hostname))
+            raw_hostname = str(team_cfg.get("hostname", ""))
             hostname = re.sub(r"^https?://", "", raw_hostname).strip()
 
             agent_env_raw = team_cfg.get("agent_env", {})
@@ -725,7 +753,7 @@ class Settings:
         TRACE = trace
 
         return Settings(
-            host=str(server.get("host", "0.0.0.0")),
+            bind_host=bind_host,
             port=int(server.get("port", 8000)),
             trace=trace,
             disable_telemetry=bool(server.get("disable_telemetry", False)),
@@ -748,7 +776,6 @@ class Settings:
             agent_opencode_model=str(agent.get("opencode_model", "")).strip(),
             auto_stop_hours=int(lifecycle.get("auto_stop_hours", 48)),
             auto_delete_hours=int(lifecycle.get("auto_delete_hours", 0)),
-            oauth_base_url=str(oauth.get("oauth_base_url", "")).strip(),
             prod_enabled=prod_enabled,
             prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),

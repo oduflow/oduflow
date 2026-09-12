@@ -168,7 +168,7 @@ hostname = "localhost"
 ```toml
 # ── Server ────────────────────────────────────────────
 [server]
-host = "0.0.0.0"           # HTTP server bind address
+bind = "0.0.0.0"           # HTTP listener address; legacy "host" is accepted
 port = 8000                 # HTTP server port
 allow_local_path = true     # trusted single-user local development; disable on hosted/multi-user servers
 # allow_insecure_http = false  # serve /mcp over HTTP with NO auth (only behind your own proxy)
@@ -182,23 +182,11 @@ mode = "port"               # "port" (direct host port) | "traefik" (reverse pro
 # tls = true                # traefik only. false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)
 # public_scheme = "https"   # scheme of the URLs Oduflow hands out. Default: https (traefik) / http (port).
                             # Set "http" with tls = false when nothing terminates TLS in front
-# hostname = "localhost"    # port mode only: default host for teams without their own
-                            # (traefik requires each team to set its own hostname)
 
 # ── Extra routes (Traefik only) ───────────────────────
 # [route.legacy-api]
 # host = "api.example.com"
 # url = "http://127.0.0.1:3000"
-
-# ── OAuth (optional) ──────────────────────────────────
-# In traefik mode the self-hosted OAuth 2.1 Authorization Server is enabled
-# automatically and runs on each team's own hostname (issuer derived per-request),
-# so oauth_base_url is NOT needed. Set it only to pin a fixed issuer, or in port
-# mode: the public URL of this instance (for Claude.ai and other OAuth MCP
-# clients). OAuth client_id = team_<id> (non-secret); auth_token = client_secret.
-# OAuth mints independent expiring access tokens; auth_token also works as Bearer.
-[oauth]
-# oauth_base_url = "https://oduflow.example.com"
 
 # ── Database ──────────────────────────────────────────
 [database]
@@ -250,7 +238,8 @@ auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 di
 # At least one [team.*] section is required.
 
 [team.1]
-hostname = "localhost"               # port mode: http://{hostname}:{port}, traefik mode: https://{slug}.{hostname}
+hostname = "localhost"               # required and unique; OAuth issuer host for this team
+                                     # port mode: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
 environment_slots = 20               # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                   # maximum managed auxiliary services; 0 = unlimited
@@ -282,7 +271,8 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 
 | Key | Default | Description |
 |---|---|---|
-| `[server].host` | `0.0.0.0` | HTTP server bind address |
+| `[server].bind` | `0.0.0.0` | HTTP server listener address. The legacy key `[server].host` remains accepted with a deprecation warning; if both are present they must have the same value |
+| `[server].host` | *(legacy)* | Deprecated alias for `[server].bind` |
 | `[server].port` | `8000` | HTTP server port |
 | `[server].allow_local_path` | `true` | Allow trusted local-development live-mounts that bind a host checkout read/write. Set `false` on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required |
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
@@ -297,13 +287,6 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[routing].acme_email` | *(empty)* | Let's Encrypt email for TLS certificates. Required when `mode = "traefik"` and `tls = true` |
 | `[routing].tls` | `true` | Traefik only. `true`: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). `false`: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay `https://` either way unless `public_scheme` says otherwise |
 | `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 |
-| `[routing].hostname` | `localhost` | Default hostname for teams that don't set their own `hostname` |
-
-### OAuth settings
-
-| Key | Default | Description |
-|---|---|---|
-| `[oauth].oauth_base_url` | *(empty)* | Public URL of this Oduflow instance used as the OAuth issuer. Oduflow runs a self-hosted OAuth 2.1 Authorization Server (exposes `/.well-known/oauth-authorization-server`, `/authorize`, `/token`) so OAuth-based MCP clients like Claude.ai can connect; the OAuth `client_id` is the non-secret `team_<id>` (e.g. `team_1`) and each team's `auth_token` is the `client_secret`. OAuth mints independent expiring access tokens; `auth_token` also works directly as a Bearer token. **In traefik mode this is enabled automatically and the issuer is derived per-request from each team's own hostname — leave empty.** Set it to pin a fixed issuer, or in port mode. Empty + port mode = plain Bearer-token auth only. See [Authentication & Security](security.md) |
 
 ### Database settings
 
@@ -370,7 +353,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 
 | Key | Default | Description |
 |---|---|---|
-| `hostname` | `localhost` | Team hostname. In port mode: `http://{hostname}:{port}`. In traefik mode: `https://{slug}.{hostname}` |
+| `hostname` | *(required)* | Unique team hostname and host-relative OAuth identity. In port mode environment URLs use `http://{hostname}:{port}`; in traefik mode they use `https://{slug}.{hostname}`. Behind Cloudflare Tunnel, publish this same hostname and use split DNS for direct LAN access when needed |
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |

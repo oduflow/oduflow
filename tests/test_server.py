@@ -2004,6 +2004,26 @@ class TestRestoreServiceTool:
 
 
 class TestHttpFailClosed:
+    def test_build_auth_enables_host_relative_oauth_in_port_mode(self, tmp_path):
+        from oduflow import server
+        from oduflow.oauth_provider import OduflowOAuthProvider
+
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            routing_mode="port",
+            teams={
+                "1": TeamSettings(
+                    team_id="1",
+                    hostname="oduflow.example.com",
+                    auth_token="secret",
+                )
+            },
+        )
+
+        auth = server._build_auth(settings)
+
+        assert isinstance(auth, OduflowOAuthProvider)
+
     def test_live_mount_security_warning_when_enabled(self, caplog):
         from oduflow import server
 
@@ -2032,7 +2052,7 @@ class TestHttpFailClosed:
         from oduflow.errors import PrerequisiteNotMetError
 
         settings = Settings(
-            host="127.0.0.1",
+            bind_host="127.0.0.1",
             teams={"1": TeamSettings(team_id="1")},
             allow_insecure_http=False,
         )
@@ -2047,7 +2067,7 @@ class TestHttpFailClosed:
         from oduflow import server
 
         settings = Settings(
-            host="127.0.0.1",
+            bind_host="127.0.0.1",
             teams={"1": TeamSettings(team_id="1")},
             allow_insecure_http=True,
         )
@@ -2067,7 +2087,7 @@ class TestHttpFailClosed:
         from oduflow.errors import PrerequisiteNotMetError
 
         settings = Settings(
-            host="127.0.0.1",
+            bind_host="127.0.0.1",
             teams={},
             allow_insecure_http=False,
         )
@@ -2085,7 +2105,7 @@ class TestHttpFailClosed:
         from oduflow import server
 
         settings = Settings(
-            host="127.0.0.1",
+            bind_host="127.0.0.1",
             teams={"1": TeamSettings(team_id="1")},
             allow_insecure_http=True,
             routing_mode="port",
@@ -2110,7 +2130,7 @@ class TestHttpFailClosed:
         from oduflow import server
 
         settings = Settings(
-            host="0.0.0.0",
+            bind_host="0.0.0.0",
             teams={"1": TeamSettings(team_id="1", hostname="t1.example.com")},
             allow_insecure_http=True,
             routing_mode="traefik",

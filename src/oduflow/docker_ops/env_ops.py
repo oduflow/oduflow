@@ -2475,15 +2475,12 @@ def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> 
     The scoped ``/mcp/<env>`` endpoint + per-environment token (ADR 0028) is
     the only Oduflow access the agent gets — the team ``auth_token`` never
     enters the agent container. In Traefik mode agents use the team's public
-    TLS endpoint, matching the dashboard's MCP Access URL. Port mode uses an
-    explicitly configured public OAuth base when available, otherwise it falls
-    back to the Docker host gateway for local deployments."""
+    TLS endpoint, matching the dashboard's MCP Access URL. In port mode they use
+    the Docker host gateway and do not hairpin through an external tunnel."""
     from urllib.parse import quote
 
     if settings.routing_mode == "traefik":
         base = f"{settings.public_scheme}://{team.hostname}"
-    elif settings.oauth_base_url:
-        base = settings.oauth_base_url.rstrip("/")
     else:
         base = f"http://host.docker.internal:{settings.port}"
     return f"{base}/mcp/{quote(env_name, safe='/')}"

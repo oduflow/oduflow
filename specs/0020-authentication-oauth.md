@@ -1,9 +1,9 @@
 # 0020 — Authentication for MCP HTTP transport: GitHub OAuth → self-hosted OAuth Authorization Server
 
-**Status:** Adopted (self-hosted AS is current; traefik uses a per-team, host-relative issuer; the OAuth flow mints independent expiring/rotating/revocable tokens with a persistent store; static Bearer tokens retained)
+**Status:** Adopted (self-hosted AS is current; every routing mode always uses a per-team, host-relative issuer; the OAuth flow mints independent expiring/rotating/revocable tokens with a persistent store; static Bearer tokens retained)
 **Type:** Architecture
 **First introduced:** `97c3fc8` "add GitHub OAuth support for MCP HTTP transport" (2026-03-13)
-**Key code today:** `server.py` (`_build_auth`, transport/auth wiring), `oauth_provider.py` (`OduflowOAuthProvider`, host-relative `get_routes`), `oauth_token_store.py` (persistent minted-token store), `settings.py` (`oauth_base_url`, `oauth_enabled`, per-team `auth_token`/`hostname`)
+**Key code today:** `server.py` (`_build_auth`, transport/auth wiring), `oauth_provider.py` (`OduflowOAuthProvider`, host-relative `get_routes`), `oauth_token_store.py` (persistent minted-token store), `settings.py` (`oauth_enabled`, per-team `auth_token`/`hostname`)
 
 ## Context
 
@@ -44,10 +44,10 @@ Bearer tokens retained as the simple fallback.
   built-in OAuth 2.1 AS so MCP clients authenticate **without any external
   identity provider**. Oduflow exposes `/authorize`, `/token`, and
   `/.well-known/oauth-authorization-server`. Each team's existing `auth_token`
-  *doubles as* `client_id`, `client_secret`, and the issued access token — so the
-  plain Bearer-token path is unchanged and there is exactly one secret per team
-  to manage. `oauth_base_url` (the instance's public URL) toggles the mode; the
-  GitHub-specific config and `github_users` are removed.
+  remains its single configured secret and the direct Bearer path stays intact.
+  OAuth is enabled whenever a team has that token, and the team's required
+  hostname is always the issuer identity. There is no separate OAuth
+  configuration. The GitHub-specific config and `github_users` are removed.
 
 The interface invariant from [[0002-remote-multi-user-mcp-access]] is preserved
 throughout: auth never appears in a tool signature; identity is resolved from the
@@ -55,10 +55,10 @@ request context and threaded into per-team scoping.
 
 ## How it works (macro)
 
-- **Auto-detected auth mode.** At startup `_build_auth` inspects settings: if
-  `oauth_base_url` is set, Oduflow serves the self-hosted Authorization Server;
-  otherwise it falls back to validating static Bearer tokens directly from the
-  `Authorization` header. Both reduce to the same per-team `auth_token`.
+- **One provider, two client paths.** Whenever a team has `auth_token`, Oduflow
+  serves the self-hosted Authorization Server and also accepts that same secret
+  directly from the `Authorization` header. Discovery derives the issuer from
+  the request's validated team hostname.
 - **One secret, one public id.** A team is preregistered as an OAuth client whose
   `client_id` is the **non-secret** `team_<id>` (e.g. `team_1`) and whose
   `client_secret` is the team's `auth_token`. The OAuth flow mints an independent,
@@ -77,9 +77,9 @@ request context and threaded into per-team scoping.
   connect to via standard OAuth, with no tokens in tool arguments and no external
   IdP in the trust path — the operator controls token issuance and revocation
   (rotate `auth_token`).
-- Collapsing client credentials and the issued token into the team's single
-  `auth_token` kept the model tiny: no separate client registry, and the static
-  Bearer path (curl/CLI/IDEs) keeps working with zero OAuth machinery.
+- Keeping one configured team secret avoids a separate client registry, while
+  the static Bearer path (curl/CLI/IDEs) continues to work alongside independently
+  minted OAuth access and refresh tokens.
 - Dropping GitHub was a **breaking config change** (`oauth_client_id`,
   `oauth_client_secret`, per-team `github_users` removed; `oauth_base_url`
   added), traded for self-containment and operator control.
@@ -136,6 +136,26 @@ request context and threaded into per-team scoping.
   Breaking: any already-configured claude.ai connector must be re-entered as
   `client_id = team_<id>`, `client_secret = auth_token`.
 
+- **Host-relative issuer in port mode behind an upstream tunnel.** Port mode was
+  originally excluded from automatic OAuth because it was assumed to have no
+  per-team TLS hostname. A TLS-terminating upstream such as Cloudflare Tunnel
+  invalidates that assumption: it exposes the team's configured hostname over
+  HTTPS while forwarding to Oduflow's plain HTTP listener. The existing
+  host-relative provider is therefore enabled whenever a team has `auth_token`,
+  independently of routing mode. The incoming host is still checked against the
+  configured, now-required and unique team hostnames, so arbitrary Host headers
+  cannot become issuers. This also keeps hosted agents local in port mode: with
+  no global issuer setting, their scoped MCP URL remains the Docker host gateway
+  instead of hairpinning through the public tunnel.
+
+- **One issuer source: the team hostname.** Once host-relative OAuth worked in
+  both routing modes, the remaining fixed `oauth_base_url` override only created
+  a second public identity that could disagree with the team selected by the
+  request. The `[oauth]` section and `oauth_base_url` setting are therefore
+  removed. Browser-facing URLs follow the validated request origin, Traefik uses
+  the team's hostname, and local port-mode agent containers keep using the Docker
+  host gateway.
+
 - **Independent, expiring, revocable minted tokens (#83).** The credential split
   (above) kept the *issued* access token equal to the `auth_token`, so the OAuth
   client (claude.ai/IDE) still stored the team's long-lived master secret, the
@@ -186,3 +206,9 @@ request context and threaded into per-team scoping.
   `/revoke`, persisted across restarts (`oauth_token_store.py`); the `auth_token`
   stays a non-expiring direct Bearer credential and per-env tokens stay
   Bearer-only.
+- `2026-08-29` — enable the existing per-team host-relative issuer in port mode
+  for TLS-terminating upstreams such as Cloudflare Tunnel; make every team
+  hostname explicit and unique; retain `oauth_base_url` only as a fixed-issuer
+  override.
+- `2026-09-12` — remove `[oauth]` and `oauth_base_url`; the required team
+  hostname becomes the only OAuth issuer source in every routing mode.

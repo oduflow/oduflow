@@ -80,14 +80,16 @@ class TestSettings:
         assert s.db_user == "odoo"
         assert s.routing_mode == "port"
 
-    def test_routing_hostname_fallback_port_mode(self, tmp_path):
-        # In port mode a team with no hostname inherits [routing].hostname.
+    def test_routing_hostname_is_ignored_in_port_mode(self, tmp_path, caplog):
         toml = tmp_path / "oduflow.toml"
         toml.write_text(
             '[routing]\nmode = "port"\nhostname = "shared.example.com"\n[team.1]\n'
         )
         s = Settings.from_toml(str(toml))
-        assert s.get_team("1").hostname == "shared.example.com"
+        assert s.get_team("1").hostname == ""
+        assert "[routing].hostname is ignored" in caplog.text
+        with pytest.raises(ValueError, match="hostname must be set explicitly"):
+            s.validate()
 
     def test_routing_hostname_ignored_in_traefik_mode(self, tmp_path):
         # In traefik mode the shared default is NOT inherited; a team without
@@ -102,6 +104,56 @@ class TestSettings:
         assert s.get_team("1").hostname == ""
         with pytest.raises(ValueError, match="hostname must be set"):
             s.validate()
+
+    def test_bind_from_toml(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[server]\nbind = "127.0.0.1"\n[team.1]\nhostname = "localhost"\n'
+        )
+
+        assert Settings.from_toml(str(toml)).bind_host == "127.0.0.1"
+
+    def test_legacy_server_host_is_supported(self, tmp_path, caplog):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[server]\nhost = "127.0.0.1"\n[team.1]\nhostname = "localhost"\n'
+        )
+
+        assert Settings.from_toml(str(toml)).bind_host == "127.0.0.1"
+        assert "[server].host is deprecated" in caplog.text
+
+    def test_matching_bind_and_legacy_host_are_supported(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[server]\nbind = "127.0.0.1"\nhost = "127.0.0.1"\n'
+            '[team.1]\nhostname = "localhost"\n'
+        )
+
+        assert Settings.from_toml(str(toml)).bind_host == "127.0.0.1"
+
+    def test_conflicting_bind_and_legacy_host_are_rejected(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[server]\nbind = "127.0.0.1"\nhost = "0.0.0.0"\n'
+            '[team.1]\nhostname = "localhost"\n'
+        )
+
+        with pytest.raises(ValueError, match="disagree"):
+            Settings.from_toml(str(toml))
+
+    def test_empty_bind_is_rejected(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text('[server]\nbind = ""\n[team.1]\nhostname = "localhost"\n')
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            Settings.from_toml(str(toml))
+
+    def test_empty_legacy_host_is_rejected(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text('[server]\nhost = ""\n[team.1]\nhostname = "localhost"\n')
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            Settings.from_toml(str(toml))
 
     def test_validate_no_teams(self):
         s = Settings()
@@ -207,18 +259,75 @@ class TestSettings:
     def test_validate_overlapping_port_ranges(self):
         # Two teams left on the default (identical) range would draw host ports
         # from the same pool — issue #46.
-        t1 = TeamSettings(team_id="1", port_range_start=50000, port_range_end=50100)
-        t2 = TeamSettings(team_id="2", port_range_start=50050, port_range_end=50150)
+        t1 = TeamSettings(
+            team_id="1",
+            hostname="one.example.com",
+            port_range_start=50000,
+            port_range_end=50100,
+        )
+        t2 = TeamSettings(
+            team_id="2",
+            hostname="two.example.com",
+            port_range_start=50050,
+            port_range_end=50150,
+        )
         s = Settings(teams={"1": t1, "2": t2})
         with pytest.raises(ValueError, match="overlapping port ranges"):
             s.validate()
 
     def test_validate_adjacent_port_ranges_ok(self):
         # Half-open ranges that merely touch at the boundary do not overlap.
-        t1 = TeamSettings(team_id="1", port_range_start=50000, port_range_end=50100)
-        t2 = TeamSettings(team_id="2", port_range_start=50100, port_range_end=50200)
+        t1 = TeamSettings(
+            team_id="1",
+            hostname="one.example.com",
+            port_range_start=50000,
+            port_range_end=50100,
+        )
+        t2 = TeamSettings(
+            team_id="2",
+            hostname="two.example.com",
+            port_range_start=50100,
+            port_range_end=50200,
+        )
         s = Settings(teams={"1": t1, "2": t2})
         s.validate()
+
+    def test_validate_duplicate_team_hostnames(self):
+        t1 = TeamSettings(
+            team_id="1",
+            hostname="same.example.com",
+            port_range_start=50000,
+            port_range_end=50100,
+        )
+        t2 = TeamSettings(
+            team_id="2",
+            hostname="SAME.example.com",
+            port_range_start=50100,
+            port_range_end=50200,
+        )
+
+        with pytest.raises(ValueError, match="duplicate hostname"):
+            Settings(teams={"1": t1, "2": t2}).validate()
+
+    def test_get_team_by_hostname_is_case_insensitive_and_strips_port(self):
+        team = TeamSettings(team_id="1", hostname="Oduflow.Example.com")
+        settings = Settings(teams={"1": team})
+
+        assert settings.get_team_by_hostname("oduflow.example.com:8000") is team
+
+    @pytest.mark.parametrize(
+        "authority",
+        [
+            "oduflow.example.com:443@evil.example.com",
+            "oduflow.example.com:not-a-port",
+            "oduflow.example.com/path",
+        ],
+    )
+    def test_get_team_by_hostname_rejects_malformed_authority(self, authority):
+        team = TeamSettings(team_id="1", hostname="oduflow.example.com")
+        settings = Settings(teams={"1": team})
+
+        assert settings.get_team_by_hostname(authority) is None
 
     def test_frozen(self):
         s = Settings()
@@ -243,10 +352,18 @@ class TestSettings:
 
     def test_validate_duplicate_tokens(self):
         t1 = TeamSettings(
-            team_id="1", auth_token="same", port_range_start=50000, port_range_end=50100
+            team_id="1",
+            hostname="one.example.com",
+            auth_token="same",
+            port_range_start=50000,
+            port_range_end=50100,
         )
         t2 = TeamSettings(
-            team_id="2", auth_token="same", port_range_start=50100, port_range_end=50200
+            team_id="2",
+            hostname="two.example.com",
+            auth_token="same",
+            port_range_start=50100,
+            port_range_end=50200,
         )
         s = Settings(teams={"1": t1, "2": t2})
         with pytest.raises(ValueError, match="Duplicate auth_token"):
@@ -363,24 +480,34 @@ class TestOAuthSettings:
 
     def test_oauth_defaults(self):
         s = Settings()
-        assert s.oauth_base_url == ""
         assert not s.oauth_enabled
 
-    def test_oauth_enabled(self):
-        s = Settings(
-            oauth_base_url="https://example.com",
-            teams={"1": self._team(auth_token="tok-a")},
-        )
+    def test_oauth_enabled_by_team_token(self):
+        s = Settings(teams={"1": self._team(auth_token="tok-a")})
+
         s.validate()
+
         assert s.oauth_enabled
 
-    def test_oauth_without_auth_token_raises(self):
-        s = Settings(
-            oauth_base_url="https://example.com",
-            teams={"1": self._team()},
+    def test_removed_oauth_section_is_rejected(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[oauth]\noauth_base_url = "https://example.com"\n'
+            '[team.1]\nhostname = "example.com"\n'
         )
-        with pytest.raises(ValueError, match="auth_token"):
-            s.validate()
+
+        with pytest.raises(ValueError, match=r"\[oauth\] has been removed"):
+            Settings.from_toml(str(toml))
+
+    def test_removed_server_oauth_base_url_is_rejected(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[server]\noauth_base_url = "https://example.com"\n'
+            '[team.1]\nhostname = "example.com"\n'
+        )
+
+        with pytest.raises(ValueError, match="oauth_base_url has been removed"):
+            Settings.from_toml(str(toml))
 
 
 class TestTeamSettings:
@@ -621,6 +748,14 @@ class TestExtraRoutes:
         toml = self._traefik_toml(
             tmp_path,
             '[route.r]\nhost = "dev.example.com"\nurl = "http://127.0.0.1:3000"\n',
+        )
+        with pytest.raises(ValueError, match="collides"):
+            Settings.from_toml(str(toml)).validate()
+
+    def test_route_host_collision_with_team_is_case_insensitive(self, tmp_path):
+        toml = self._traefik_toml(
+            tmp_path,
+            '[route.r]\nhost = "DEV.example.com"\nurl = "http://127.0.0.1:3000"\n',
         )
         with pytest.raises(ValueError, match="collides"):
             Settings.from_toml(str(toml)).validate()

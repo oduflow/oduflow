@@ -271,9 +271,7 @@ def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | N
     """
     if _web_bind is None:
         return None
-    if settings.oauth_base_url:
-        base = settings.oauth_base_url.rstrip("/")
-    elif settings.routing_mode == "traefik":
+    if settings.routing_mode == "traefik":
         base = f"{settings.public_scheme}://{team.hostname}"
     else:
         bind_host, port = _web_bind
@@ -7150,7 +7148,7 @@ def _start_http() -> None:
     # check below only trips if this could not write the config.
     settings = _ensure_web_ui_password(settings)
     _warn_local_path_security(settings)
-    host = "0.0.0.0" if settings.routing_mode == "traefik" else settings.host
+    host = "0.0.0.0" if settings.routing_mode == "traefik" else settings.bind_host
     port = settings.port
 
     auth = _build_auth(settings)
@@ -7162,7 +7160,7 @@ def _start_http() -> None:
     if auth is None and not settings.allow_insecure_http:
         raise PrerequisiteNotMetError(
             "Refusing to start the HTTP transport with no MCP authentication: "
-            "set a [team.*] auth_token (or oauth_base_url) in oduflow.toml. To "
+            "set a [team.*] auth_token in oduflow.toml. To "
             "run unauthenticated on purpose (e.g. behind your own auth proxy), "
             "set [server] allow_insecure_http = true."
         )
@@ -7263,11 +7261,10 @@ def _start_http() -> None:
 
     # Outermost shim so /mcp/<env> routes to the canonical /mcp route.
     served: Any = ScopedEnvASGI(app)
-    # When the OAuth issuer is derived per-request (traefik, no fixed
-    # oauth_base_url), also rewrite the 401 challenge's resource_metadata origin
-    # to the request host — otherwise fastmcp's static URL would send every
-    # team's client to discover OAuth on one team's hostname.
-    if getattr(auth, "_host_relative", False):
+    # FastMCP builds the 401 challenge from one placeholder base URL. Rewrite it
+    # to the validated request hostname so every team discovers OAuth on its own
+    # origin.
+    if auth is not None:
         from oduflow.oauth_provider import HostRelativeAuthChallenge
 
         served = HostRelativeAuthChallenge(served, settings)
@@ -7302,37 +7299,20 @@ def _start_http() -> None:
 def _build_auth(settings: Settings):  # type: ignore[no-untyped-def]
     """Build the auth provider from settings.
 
-    Two modes (auto-detected via ``settings.oauth_enabled``):
-    - Self-hosted OAuth Authorization Server — when ``oauth_base_url`` is set OR
-      routing is traefik. Oduflow exposes /authorize, /token, and
-      /.well-known/oauth-authorization-server. In traefik mode the issuer is
-      derived per-request from the team's own (TLS-terminated) hostname, so no
-      central oauth_base_url is needed; each team's OAuth flow runs on its own
-      host. Each team's client_id is public (team_<id>), while auth_token is the
-      client_secret and also works directly as a Bearer token, so Bearer-token
-      callers keep working unchanged.
-      Suitable for claude.ai and other MCP clients that require an OAuth flow.
-    - Static Bearer tokens — port mode with no oauth_base_url: auth_token is
-      consumed directly from the Authorization header. Suitable for curl, CLI
-      clients, and IDEs that don't need OAuth.
+    Whenever a team token exists, Oduflow serves its self-hosted OAuth
+    Authorization Server and keeps the same token valid as a direct Bearer
+    credential. The issuer is always derived per request from the registered
+    team hostname, whether TLS terminates in Traefik or an upstream such as
+    Cloudflare Tunnel in port mode.
     """
     has_team_token = any(t.auth_token for t in settings.teams.values())
 
-    if settings.oauth_enabled:
-        # oauth_enabled already implies a team auth_token (see Settings), used as
-        # the OAuth client_secret and as a direct Bearer token.
+    if has_team_token:
         from oduflow.oauth_provider import OduflowOAuthProvider
 
         return OduflowOAuthProvider(settings)
 
-    if has_team_token:
-        # Verifies team auth_token (full access) and per-environment tokens
-        # (scoped /mcp/<env> access) — see oduflow.scoped_access.
-        from oduflow.scoped_access import OduflowTokenVerifier
-
-        return OduflowTokenVerifier(settings)
-
-    logger.warning("HTTP auth DISABLED (no auth_token or oauth_base_url set)")
+    logger.warning("HTTP auth DISABLED (no team auth_token set)")
     return None
 
 
