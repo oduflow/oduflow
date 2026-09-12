@@ -1,12 +1,30 @@
 """Explicit Docker lifecycle settings, preserved across service replacement."""
 
+import json
+import logging
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+logger = logging.getLogger("oduflow")
+
+RUNTIME_LABEL = "oduflow.runtime"
+
+
+def to_camel(value: str) -> str:
+    head, *tail = value.split("_")
+    return head + "".join(part.capitalize() for part in tail)
+
 
 class ServiceRuntime(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    # camelCase aliases keep Stack manifests on the manifest-wide convention
+    # (stopSignal/stopTimeout) while MCP/REST keep passing snake_case.
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+        strict=True,
+    )
 
     tmpfs: dict[str, str] = Field(default_factory=dict)
     cgroupns: Literal["private"] | None = None
@@ -34,8 +52,19 @@ def normalize_runtime(value: dict[str, Any] | None) -> dict[str, Any]:
 
 def inspect_runtime(container: Any) -> dict[str, Any]:
     """Read only settings explicitly managed by Oduflow, ignoring image defaults."""
-    import json
-
-    if "oduflow.runtime" not in container.labels:
+    raw = container.labels.get(RUNTIME_LABEL)
+    if not raw:
         return {}
-    return normalize_runtime(json.loads(container.labels.get("oduflow.runtime", "{}")))
+    try:
+        return normalize_runtime(json.loads(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        # A label written by another Oduflow version (or edited by hand) must
+        # not break describe/stop/delete for this container.
+        logger.warning("Ignoring invalid %s label", RUNTIME_LABEL, exc_info=True)
+        return {}
+
+
+def stop_kwargs(container: Any) -> dict[str, Any]:
+    """Stop/restart arguments honoring the container's configured stop timeout."""
+    timeout = inspect_runtime(container).get("stop_timeout")
+    return {"timeout": timeout} if timeout else {}

@@ -21,7 +21,7 @@ from oduflow.naming import (
     validate_env_name,
     validate_template_name,
 )
-from oduflow.service_runtime import ServiceRuntime
+from oduflow.service_runtime import ServiceRuntime, to_camel
 
 STACK_API_VERSION = "oduflow.dev/v1alpha1"
 STACK_KIND = "Stack"
@@ -53,16 +53,11 @@ CommandArgument = Annotated[
 ]
 
 
-def _to_camel(value: str) -> str:
-    head, *tail = value.split("_")
-    return head + "".join(part.capitalize() for part in tail)
-
-
 class StackModel(BaseModel):
     """Strict base model with a YAML-friendly camelCase public shape."""
 
     model_config = ConfigDict(
-        alias_generator=_to_camel,
+        alias_generator=to_camel,
         populate_by_name=True,
         extra="forbid",
         str_strip_whitespace=True,

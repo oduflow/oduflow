@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1146,7 +1147,7 @@ class TestUpdateService:
             labels={
                 "oduflow.managed": "true",
                 "oduflow.service": "minio",
-                "oduflow.runtime": __import__("json").dumps(runtime),
+                "oduflow.runtime": json.dumps(runtime),
             },
             attrs={"Config": {"Env": []}},
         )
@@ -1174,8 +1175,12 @@ class TestUpdateService:
 
         run_kwargs = mock_docker_client.containers.run.call_args
         container.stop.assert_called_once_with(timeout=180)
-        for key, value in runtime.items():
-            assert run_kwargs[1][key] == value
+        assert run_kwargs[1]["stop_signal"] == "SIGRTMIN+3"
+        assert run_kwargs[1]["cgroupns"] == "private"
+        # docker-py's containers.run() rejects stop_timeout; it is preserved
+        # in the label and applied when the container is stopped/restarted.
+        assert "stop_timeout" not in run_kwargs[1]
+        assert json.loads(run_kwargs[1]["labels"]["oduflow.runtime"]) == runtime
 
     def test_update_command_override_recreates_container(self, mock_docker_client):
         """A changed command recreates the container even on an unchanged digest."""

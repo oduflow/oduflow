@@ -2831,6 +2831,10 @@ It is also available on Stack services. Supported keys are `tmpfs` (only `/run`,
 }
 ```
 
+In Stack manifests the keys follow the manifest-wide camelCase convention
+(`stopSignal`, `stopTimeout`); the snake_case spellings shown above are also
+accepted there.
+
 Updates preserve these settings when omitted; `{}` clears the explicit overrides.
 Presets and stack planning retain them. Stop/restart/replacement honors the old
 container's timeout so changing an image does not truncate its shutdown grace

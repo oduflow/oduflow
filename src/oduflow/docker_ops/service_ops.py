@@ -22,7 +22,12 @@ from oduflow.errors import (
 )
 from oduflow.locking import keyed_mutex, service_registry_key
 from oduflow.naming import get_service_container_name
-from oduflow.service_runtime import inspect_runtime, normalize_runtime
+from oduflow.service_runtime import (
+    RUNTIME_LABEL,
+    inspect_runtime,
+    normalize_runtime,
+    stop_kwargs,
+)
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -390,7 +395,7 @@ def create_service(
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     if runtime:
-        labels["oduflow.runtime"] = json.dumps(runtime, sort_keys=True)
+        labels[RUNTIME_LABEL] = json.dumps(runtime, sort_keys=True)
     if stack_labels:
         labels.update(stack_labels)
 
@@ -402,7 +407,9 @@ def create_service(
         "restart_policy": {"Name": "unless-stopped"},
     }
 
-    run_kwargs.update(runtime)
+    # stop_timeout is not a containers.run() argument in docker-py; it is
+    # honored at stop/restart/replacement time via stop_kwargs().
+    run_kwargs.update({k: v for k, v in runtime.items() if k != "stop_timeout"})
 
     if host_mode:
         run_kwargs["network_mode"] = "host"
@@ -600,13 +607,7 @@ def restart_service(
     except Exception:
         pass
     try:
-        container.restart(
-            **(
-                {"timeout": inspect_runtime(container)["stop_timeout"]}
-                if inspect_runtime(container).get("stop_timeout")
-                else {}
-            )
-        )
+        container.restart(**stop_kwargs(container))
     except docker.errors.DockerException as exc:
         _raise_service_start_error(
             name, port, exc, retry_with="update_service with a new port"
@@ -628,13 +629,7 @@ def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[st
     except docker.errors.NotFound:
         raise NotFoundError(f"Service '{name}' not found")
 
-    container.stop(
-        **(
-            {"timeout": inspect_runtime(container)["stop_timeout"]}
-            if inspect_runtime(container).get("stop_timeout")
-            else {}
-        )
-    )
+    container.stop(**stop_kwargs(container))
     container.remove(v=True)
     logger.info("Deleted service container %s", container_name)
 
@@ -1176,13 +1171,7 @@ def update_service(
     # reopen the very race it exists to close.
     with keyed_mutex(service_registry_key(team.team_id)):
         # Stop and remove the old container
-        container.stop(
-            **(
-                {"timeout": inspect_runtime(container)["stop_timeout"]}
-                if inspect_runtime(container).get("stop_timeout")
-                else {}
-            )
-        )
+        container.stop(**stop_kwargs(container))
         container.remove(v=True)
         logger.info("Removed old container %s for update", container_name)
 

@@ -327,7 +327,7 @@
           "default": null,
           "title": "Cgroupns"
         },
-        "stop_signal": {
+        "stopSignal": {
           "anyOf": [
             {
               "enum": [
@@ -341,9 +341,9 @@
             }
           ],
           "default": null,
-          "title": "Stop Signal"
+          "title": "Stopsignal"
         },
-        "stop_timeout": {
+        "stopTimeout": {
           "anyOf": [
             {
               "maximum": 3600,
@@ -355,7 +355,7 @@
             }
           ],
           "default": null,
-          "title": "Stop Timeout"
+          "title": "Stoptimeout"
         }
       },
       "title": "ServiceRuntime",

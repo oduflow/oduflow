@@ -1,8 +1,9 @@
-# Explicit service container lifecycle settings
+# 0057 — Explicit service container lifecycle settings
 
-Status: Implemented · Type: Runtime capability · First introduced: 2026-09-12
-
-Key code: `service_runtime.py`, `docker_ops/service_ops.py`, `stack_ops.py`.
+**Status:** Adopted
+**Type:** Architecture / Service lifecycle
+**First introduced:** `litnimax/platform-systemd-services` branch (2026-09-12)
+**Key code today:** `service_runtime.py`, `docker_ops/service_ops.py`, `stack_models.py`, `stack_ops.py`, MCP tools in `server.py`, REST/dashboard in `web_ui.py`
 
 ## Context
 
@@ -19,12 +20,16 @@ Stack manifests. Supported fields are `tmpfs` (only `/run`, `/run/lock`, `/tmp`)
 arguments or host bind mounts are accepted. Existing privilege settings remain
 explicit; this mapping never grants capabilities or privileged mode implicitly.
 
-## How it works
+## How it works (macro)
 
 The mapping is recorded with the container and preset, compared by stack planning,
 and reused during replacement. Updates omit the mapping to preserve it or pass
 an empty mapping to clear it. Stop/restart operations respect the old container's
-configured timeout before replacing it with the new configuration.
+configured timeout before replacing it with the new configuration. The stop
+timeout lives in the `oduflow.runtime` label (docker-py's high-level create does
+not carry it into container config) and is applied whenever Oduflow stops or
+restarts the container; an unreadable label degrades to defaults instead of
+blocking lifecycle operations.
 
 ## Consequences
 
@@ -38,4 +43,5 @@ Related: [[0053-explicit-start-commands-for-auxiliary-services]],
 
 ## History
 
-Initial implementation accompanies the platform native-services change.
+- 2026-09-12 — introduced on the `litnimax/platform-systemd-services` branch
+  (PR #229), accompanying the platform native-services change.
