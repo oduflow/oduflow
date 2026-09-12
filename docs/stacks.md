@@ -214,3 +214,6 @@ descriptions are also immutable in V1. There is no automatic deletion or
 V1 supports one development environment per manifest. Production stacks,
 portable database artifacts, binary volume files, lockfiles, lifecycle shell
 hooks, dashboard controls, and OCI distribution are intentionally deferred.
+
+Service definitions also accept the explicit [`runtime` lifecycle mapping](services.md#container-lifecycle-settings).
+Stack planning detects changes to it and replacement preserves the declared settings.

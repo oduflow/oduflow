@@ -139,6 +139,9 @@
     "Service": {
       "additionalProperties": false,
       "properties": {
+        "runtime": {
+          "$ref": "#/$defs/ServiceRuntime"
+        },
         "image": {
           "minLength": 1,
           "title": "Image",
@@ -299,6 +302,63 @@
         "port"
       ],
       "title": "ServiceRoute",
+      "type": "object"
+    },
+    "ServiceRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "tmpfs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Tmpfs",
+          "type": "object"
+        },
+        "cgroupns": {
+          "anyOf": [
+            {
+              "const": "private",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cgroupns"
+        },
+        "stop_signal": {
+          "anyOf": [
+            {
+              "enum": [
+                "SIGTERM",
+                "SIGRTMIN+3"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Signal"
+        },
+        "stop_timeout": {
+          "anyOf": [
+            {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Timeout"
+        }
+      },
+      "title": "ServiceRuntime",
       "type": "object"
     },
     "StackSpec": {

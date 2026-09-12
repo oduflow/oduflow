@@ -24,6 +24,7 @@ from oduflow.docker_ops import (
 )
 from oduflow.errors import ConflictError, NotFoundError
 from oduflow.naming import sanitize_repo_url, validate_env_name
+from oduflow.service_runtime import normalize_runtime
 from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import (
     manifest_hash,
@@ -504,6 +505,13 @@ def build_plan(
         ):
             drift.append("env")
         comparisons = (
+            (
+                "runtime",
+                actual.get("runtime") or {},
+                normalize_runtime(
+                    desired_service.runtime.model_dump(exclude_none=True)
+                ),
+            ),
             ("image", actual.get("image"), desired_service.image),
             ("port", actual.get("port"), desired_service.port),
             (
@@ -604,6 +612,7 @@ def _service_kwargs(
         environ=environ,
     )
     return {
+        "runtime": normalize_runtime(desired.runtime.model_dump(exclude_none=True)),
         "image": desired.image,
         "port": desired.port,
         "hostname": desired.hostname,
@@ -753,6 +762,7 @@ def apply_stack(
                     privileged_override=kwargs["privileged"],
                     routes_override=kwargs["routes"] or [],
                     command_override=kwargs["command"] or [],
+                    runtime_override=kwargs["runtime"],
                     stack_labels=kwargs["stack_labels"],
                 )
 

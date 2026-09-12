@@ -21,6 +21,7 @@ from oduflow.naming import (
     validate_env_name,
     validate_template_name,
 )
+from oduflow.service_runtime import ServiceRuntime
 
 STACK_API_VERSION = "oduflow.dev/v1alpha1"
 STACK_KIND = "Stack"
@@ -230,6 +231,7 @@ class ServiceRoute(StackModel):
 
 
 class Service(StackModel):
+    runtime: ServiceRuntime = Field(default_factory=ServiceRuntime)
     image: NonEmptyString
     port: int | None = Field(default=None, ge=1, le=65535)
     hostname: NonEmptyString | None = None

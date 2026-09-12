@@ -1134,6 +1134,49 @@ class TestUpdateService:
         run_kwargs = mock_docker_client.containers.run.call_args
         assert run_kwargs[1]["command"] == ["server", "/data"]
 
+    def test_update_preserves_runtime_and_shutdown_timeout(self, mock_docker_client):
+        """Replacement must retain runtime settings and drain the old service."""
+        runtime = {
+            "stop_timeout": 180,
+            "stop_signal": "SIGRTMIN+3",
+            "cgroupns": "private",
+        }
+        container = self._make_container(
+            image_tags=["minio/minio:latest"],
+            labels={
+                "oduflow.managed": "true",
+                "oduflow.service": "minio",
+                "oduflow.runtime": __import__("json").dumps(runtime),
+            },
+            attrs={"Config": {"Env": []}},
+        )
+        mock_docker_client.containers.get.side_effect = [
+            container,
+            docker.errors.NotFound("nf"),
+        ]
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        preset = {
+            "name": "minio",
+            "image": "minio/minio:latest",
+            "port": 9000,
+            "hostname": "",
+            "env_vars": {},
+            "command": ["server", "/data"],
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            service_ops.update_service(TEST_SETTINGS, TEST_TEAM, "minio")
+
+        run_kwargs = mock_docker_client.containers.run.call_args
+        container.stop.assert_called_once_with(timeout=180)
+        for key, value in runtime.items():
+            assert run_kwargs[1][key] == value
+
     def test_update_command_override_recreates_container(self, mock_docker_client):
         """A changed command recreates the container even on an unchanged digest."""
         container = self._make_container(
