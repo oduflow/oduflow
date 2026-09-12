@@ -1073,6 +1073,7 @@ def _build_routes(
         ".js": "application/javascript",
         ".woff2": "font/woff2",
         ".png": "image/png",
+        ".md": "text/markdown; charset=utf-8",
     }
 
     def static_file(request: Request) -> Response:
