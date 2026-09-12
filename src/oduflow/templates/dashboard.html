@@ -1606,7 +1606,10 @@
   <div class="modal modal-md">
     <div class="modal-header">
       <h2 id="svc-info-title">Environment</h2>
-      <button class="modal-close" onclick="closeServiceInfo()" aria-label="Close">&times;</button>
+      <div class="modal-header-actions">
+        <button class="btn" id="svc-info-copy" disabled onclick="copyToClipboard(document.getElementById('svc-info-content').textContent, 'Environment variables copied')" title="Copy environment variables to clipboard">Copy</button>
+        <button class="modal-close" onclick="closeServiceInfo()" aria-label="Close">&times;</button>
+      </div>
     </div>
     <div class="modal-body"><pre id="svc-info-content"></pre></div>
   </div>
@@ -5693,6 +5696,7 @@ function showServiceInfo(name) {
   document.getElementById('svc-info-content').textContent = keys.length
     ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
     : 'No environment variables.';
+  document.getElementById('svc-info-copy').disabled = keys.length === 0;
   showModal('svc-info-modal');
 }
 
@@ -5710,6 +5714,7 @@ async function showEnvInfo(branch) {
     document.getElementById('svc-info-content').textContent = keys.length
       ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
       : 'No environment variables.';
+    document.getElementById('svc-info-copy').disabled = keys.length === 0;
     showModal('svc-info-modal');
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
