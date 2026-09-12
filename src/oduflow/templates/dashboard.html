@@ -2969,6 +2969,7 @@ function renderEnvironments(envs, force) {
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
+              '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
               (showAgent
                 ? '<button role="menuitem" title="Structured chat with the coding agent for this environment" onclick="openChat(\'' + escAttr(env.branch) + '\')">Agent Chat</button>'
                 : '') +
@@ -5658,6 +5659,26 @@ function showServiceInfo(name) {
     ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
     : 'No environment variables.';
   showModal('svc-info-modal');
+}
+
+async function showEnvInfo(branch) {
+  try {
+    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/env-vars');
+    const data = await readResult(r);
+    if (!data.ok) {
+      showToast(data.error || 'Could not load the environment variables', true);
+      return;
+    }
+    var vars = data.env_vars || {};
+    var keys = Object.keys(vars);
+    document.getElementById('svc-info-title').textContent = 'Environment — ' + branch;
+    document.getElementById('svc-info-content').textContent = keys.length
+      ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
+      : 'No environment variables.';
+    showModal('svc-info-modal');
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
 }
 
 function closeServiceInfo(event) {
