@@ -1279,6 +1279,9 @@
     color: var(--text-dim);
   }
   .scoped-chip strong { font-family: var(--font-mono); color: var(--text); font-weight: 500; }
+  /* The display rule above would otherwise beat the UA stylesheet's
+     [hidden] { display: none }, leaving an empty chip in the header. */
+  .scoped-chip[hidden] { display: none; }
 
   @media (max-width: 880px) {
     body { padding: 16px; padding-bottom: 96px; }
