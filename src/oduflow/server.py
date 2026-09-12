@@ -4023,6 +4023,7 @@ def create_service(
     net_admin: bool = False,
     routes: list[dict[str, object]] | None = None,
     command: str = "",
+    runtime: dict[str, object] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -4030,6 +4031,7 @@ def create_service(
 
     Args:
         name: Short name for the service (e.g. "redis", "meilisearch").
+        runtime: Explicit Docker tmpfs, private cgroupns, stop_signal and stop_timeout settings.
         image: Docker image with tag (e.g. "redis:7", "getmeili/meilisearch:v1.6").
         port: Catch-all exposure mode: forward every path to this one container port. Required outside Traefik. Mutually exclusive with routes.
         hostname: Custom hostname for traefik routing (optional, traefik mode only).
@@ -4062,6 +4064,7 @@ def create_service(
         cap_add=cap_add,
         privileged=privileged,
         routes=routes,
+        runtime=runtime,
         command=parsed_command or None,
     )
     vol_info = ""
@@ -4107,6 +4110,7 @@ def update_service(
     net_admin: bool | None = None,
     routes: list[dict[str, object]] | None = None,
     command: str | None = None,
+    runtime: dict[str, object] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -4120,6 +4124,7 @@ def update_service(
     Args:
         name: The name of the service to update (e.g. "redis", "meilisearch").
         env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace existing env vars (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep current env vars. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
+        runtime: Replace lifecycle settings; omit to preserve, pass {} to clear.
         image: New Docker image with tag (e.g. "redis:8"). Leave empty to keep current image.
         port: New container port. Pass 0 to keep current port.
         hostname: New hostname for traefik routing. Leave empty to keep current hostname.
@@ -4162,6 +4167,7 @@ def update_service(
         privileged_override=privileged,
         routes_override=routes,
         command_override=command_override,
+        runtime_override=runtime,
     )
 
     if result.get("image_updated"):
@@ -4409,6 +4415,7 @@ def restore_service(name: str, ctx: Context | None = None) -> str:
         privileged=preset_privileged,
         routes=preset.get("routes") or None,
         command=preset_command,
+        runtime=preset.get("runtime"),
     )
     extra = ""
     if preset_volumes:

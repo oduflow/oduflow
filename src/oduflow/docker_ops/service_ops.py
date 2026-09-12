@@ -23,6 +23,12 @@ from oduflow.errors import (
 )
 from oduflow.locking import keyed_mutex, service_registry_key
 from oduflow.naming import get_service_container_name
+from oduflow.service_runtime import (
+    RUNTIME_LABEL,
+    inspect_runtime,
+    normalize_runtime,
+    stop_kwargs,
+)
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -349,9 +355,11 @@ def create_service(
     privileged: bool = False,
     routes: list[dict[str, object]] | None = None,
     command: list[str] | None = None,
+    runtime: dict[str, Any] | None = None,
     stack_labels: dict[str, str] | None = None,
     _resolved_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    runtime = normalize_runtime(runtime)
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
     routes = normalize_http_routes(routes)
     _validate_service_exposure(settings, port, routes)
@@ -406,6 +414,8 @@ def create_service(
     }
     if secret_env:
         labels[_SECRET_ENV_LABEL] = json.dumps(secret_env, sort_keys=True)
+    if runtime:
+        labels[RUNTIME_LABEL] = json.dumps(runtime, sort_keys=True)
     if stack_labels:
         labels.update(stack_labels)
 
@@ -416,6 +426,10 @@ def create_service(
         "labels": labels,
         "restart_policy": {"Name": "unless-stopped"},
     }
+
+    # stop_timeout is not a containers.run() argument in docker-py; it is
+    # honored at stop/restart/replacement time via stop_kwargs().
+    run_kwargs.update({k: v for k, v in runtime.items() if k != "stop_timeout"})
 
     if host_mode:
         run_kwargs["network_mode"] = "host"
@@ -554,6 +568,7 @@ def create_service(
             privileged=privileged,
             routes=routes,
             command=command,
+            runtime=runtime,
         )
     except Exception:
         logger.warning("Failed to save service preset for %s", name, exc_info=True)
@@ -612,7 +627,7 @@ def restart_service(
     except Exception:
         pass
     try:
-        container.restart()
+        container.restart(**stop_kwargs(container))
     except docker.errors.DockerException as exc:
         _raise_service_start_error(
             name, port, exc, retry_with="update_service with a new port"
@@ -634,7 +649,7 @@ def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[st
     except docker.errors.NotFound:
         raise NotFoundError(f"Service '{name}' not found")
 
-    container.stop()
+    container.stop(**stop_kwargs(container))
     container.remove(v=True)
     logger.info("Deleted service container %s", container_name)
 
@@ -819,6 +834,7 @@ def _describe_service_container(
         "volumes": svc_volumes,
         "cap_add": svc_cap_add,
         "privileged": svc_privileged,
+        "runtime": inspect_runtime(container),
         "command": svc_command,
         "image_command": svc_image_command,
         "created_at": container.labels.get("oduflow.created_at", "")
@@ -939,6 +955,7 @@ def update_service(
     privileged_override: bool | None = None,
     routes_override: list[dict[str, object]] | None = None,
     command_override: list[str] | None = None,
+    runtime_override: dict[str, Any] | None = None,
     stack_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Pull the latest image for a service and re-create it with the same settings.
@@ -968,6 +985,11 @@ def update_service(
             f"Cannot determine image for service '{name}'. "
             "The container has no image tag or Config.Image."
         )
+
+    runtime = inspect_runtime(container)
+    candidate_runtime = (
+        normalize_runtime(runtime_override) if runtime_override is not None else runtime
+    )
 
     # Read service options from saved preset (authoritative source).
     # Fall back to container inspection for legacy services without a preset.
@@ -1072,7 +1094,10 @@ def update_service(
     # Services created before the implicit ACME mount was introduced are
     # brought forward by an ordinary update, even when the image digest and
     # user-controlled settings are otherwise unchanged.
-    config_changed = _needs_traefik_acme_mount(settings, container)
+    config_changed = (
+        _needs_traefik_acme_mount(settings, container) or candidate_runtime != runtime
+    )
+    runtime = candidate_runtime
     persisted_stack_labels = {
         key: value
         for key, value in container.labels.items()
@@ -1218,7 +1243,7 @@ def update_service(
     # reopen the very race it exists to close.
     with keyed_mutex(service_registry_key(team.team_id)):
         # Stop and remove the old container
-        container.stop()
+        container.stop(**stop_kwargs(container))
         container.remove(v=True)
         logger.info("Removed old container %s for update", container_name)
 
@@ -1237,6 +1262,7 @@ def update_service(
             privileged=privileged,
             routes=routes,
             command=command or None,
+            runtime=runtime,
             stack_labels=effective_stack_labels,
             _resolved_env=resolved_env,
         )

@@ -1,4 +1,4 @@
-# 0057 — Team secrets for environment variables (`secret:<name>` references)
+# 0058 — Team secrets for environment variables (`secret:<name>` references)
 
 **Status:** Adopted (still in force)
 **Type:** Architecture / Security

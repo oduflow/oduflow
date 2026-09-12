@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="preload" href="/static/outfit-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/static/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/source-sans-3-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/source-code-pro-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="/favicon.ico" sizes="16x16 32x32">
 <link rel="icon" href="/static/icon.png" type="image/png" sizes="32x32">
 <link rel="apple-touch-icon" href="/static/apple-icon.png">
@@ -26,19 +26,19 @@
 </script>
 <style>
   @font-face {
-    font-family: "Outfit";
+    font-family: "Source Sans 3";
     font-style: normal;
     font-weight: 400 700;
     font-display: swap;
-    src: url("/static/outfit-latin.woff2") format("woff2");
+    src: url("/static/source-sans-3-latin.woff2") format("woff2");
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
   }
   @font-face {
-    font-family: "Geist Mono";
+    font-family: "Source Code Pro";
     font-style: normal;
-    font-weight: 400 600;
+    font-weight: 400 700;
     font-display: swap;
-    src: url("/static/geist-mono-latin.woff2") format("woff2");
+    src: url("/static/source-code-pro-latin.woff2") format("woff2");
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
   }
   :root {
@@ -68,8 +68,8 @@
     --shadow-bar: 0 8px 24px rgba(0,0,0,0.4);
     --shadow-menu: 0 16px 48px rgba(0,0,0,0.5);
     --shadow-modal: 0 24px 64px rgba(0,0,0,0.65);
-    --font-sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-    --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+    --font-sans: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "Source Code Pro", ui-monospace, SFMono-Regular, Consolas, monospace;
     /* Type scale — semantic rem tokens (see DESIGN.md §3) */
     --text-2xs: 0.8125rem;  /* 13px — micro labels: byline, badges, ports */
     --text-xs:  0.875rem;   /* 14px — secondary UI: meta, labels, buttons, inputs, hints, mono meta */
@@ -3004,6 +3004,7 @@ function renderEnvironments(envs, force) {
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
+              '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
               (showAgent
                 ? '<button role="menuitem" title="Structured chat with the coding agent for this environment" onclick="openChat(\'' + escAttr(env.branch) + '\')">Agent Chat</button>'
                 : '') +
@@ -5695,6 +5696,26 @@ function showServiceInfo(name) {
   showModal('svc-info-modal');
 }
 
+async function showEnvInfo(branch) {
+  try {
+    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/env-vars');
+    const data = await readResult(r);
+    if (!data.ok) {
+      showToast(data.error || 'Could not load the environment variables', true);
+      return;
+    }
+    var vars = data.env_vars || {};
+    var keys = Object.keys(vars);
+    document.getElementById('svc-info-title').textContent = 'Environment — ' + branch;
+    document.getElementById('svc-info-content').textContent = keys.length
+      ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
+      : 'No environment variables.';
+    showModal('svc-info-modal');
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
 function closeServiceInfo(event) {
   if (event && event.target !== event.currentTarget) return;
   hideModal('svc-info-modal');
@@ -6008,7 +6029,12 @@ async function doDeletePreset(name) {
   }
 }
 
+// Runtime has no form field; remember the selected preset's value so the
+// restore payload carries it even when the user renames the service.
+var _restoreRuntime = null;
+
 function _fillRestoreFields(p) {
+   _restoreRuntime = p.runtime || {};
    document.getElementById('restore-svc-name').value = p.name || '';
    document.getElementById('restore-svc-image').value = p.image || '';
    document.getElementById('restore-svc-port').value = p.routes && p.routes.length ? '' : (p.port || '');
@@ -6036,6 +6062,7 @@ function openRestoreServiceModal(preselect) {
    var sel = document.getElementById('restore-svc-select');
    var errEl = document.getElementById('restore-svc-error');
    errEl.style.display = 'none';
+   _restoreRuntime = null;
    document.getElementById('restore-svc-submit').disabled = false;
    document.getElementById('restore-svc-name').value = '';
    document.getElementById('restore-svc-image').value = '';
@@ -6110,6 +6137,7 @@ async function submitRestoreService() {
     var netAdmin = document.getElementById('restore-svc-net-admin').checked;
     var command = document.getElementById('restore-svc-command').value.trim();
     var payload = { name: name, image: image, host_mode: hostMode, privileged: privileged, net_admin: netAdmin };
+    if (_restoreRuntime !== null) payload.runtime = _restoreRuntime;
     if (command) payload.command = command;
     if (routeMode) payload.routes = collectServiceRoutes('restore-svc');
     else payload.port = parseInt(port, 10);
@@ -7011,7 +7039,7 @@ function openChat(branch, type) {
 }
 
 var _XTERM_THEME = { background: '#060a12', foreground: '#e6e8eb', cursor: '#2e79f5' };
-var _XTERM_FONT = '"Geist Mono", Menlo, ui-monospace, monospace';
+var _XTERM_FONT = getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim();
 
 var _consoleState = { ws: null, term: null, fitAddon: null };
 
