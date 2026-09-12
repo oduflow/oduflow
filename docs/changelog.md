@@ -1,5 +1,69 @@
 # Changelog
 
+## v1.76.0
+
+### Features
+
+- **Write-only team secrets** — store passwords and API keys in the dashboard's
+  Credentials tab and reference them in environment variables as `secret:<name>`.
+  Presets, templates and MCP/REST/dashboard configuration reads retain the
+  reference; Oduflow resolves the value when creating the container. Agents can
+  list secret names without retrieving stored values. Missing references fail
+  before replacing a running container. To rotate a secret, replace its value
+  and recreate its consumers. Resolved values remain accessible inside the
+  consuming container. (#231)
+
+- **Service lifecycle controls survive replacement** — auxiliary services accept
+  a validated `runtime` mapping for tmpfs mounts, private cgroup namespaces,
+  stop signals and shutdown timeouts through MCP, REST and Stack manifests.
+  Updates, presets and restores preserve these settings, and stop, restart and
+  replacement honor the existing container's shutdown timeout. (#229)
+
+- **One team hostname for LAN and tunneled OAuth access** — self-hosted OAuth
+  derives its issuer from the team's hostname in both port and Traefik modes.
+  Port-mode deployments can expose MCP through Cloudflare Tunnel while hosted
+  agents continue using the local Docker host gateway. Configuration now uses
+  `[server].bind`; legacy `[server].host` is accepted with a deprecation warning.
+  Upgrade configuration: every team must declare a unique `hostname`; the old
+  `[routing].hostname` fallback is ignored, and `[oauth]` / `oauth_base_url` are
+  removed. Host-header parsing also rejects malformed authorities and origin
+  injection. (#234)
+
+### Bug Fixes
+
+- **Branch switching no longer blocks on installed-module preflight** —
+  `switch_branch` proceeds without the database module-state check, allowing
+  branch changes that the preflight previously refused. Normal apply checks
+  and actual Odoo failures still report problems; `strict` remains scoped to
+  incomplete install, upgrade or restart actions. (#233)
+
+- **Cleanup preserves renamed environments' database roles** — orphan detection
+  checks persisted PostgreSQL credentials as well as roles derived from current
+  environment names, so a role still used after a rename is not treated as
+  orphaned. (4c72e68b)
+
+- **Saving a template preserves environment metadata** — source-container lookup
+  uses the current team-scoped name, restoring capture of environment variables,
+  repository URL, Odoo image, Git user and extra addons. (#231)
+
+### Security
+
+- **Service presets use owner-only file permissions** — new writes use mode
+  0600, and a startup migration applies the same permissions to existing
+  service preset files, which may contain credentials. (#231)
+
+### Dashboard
+
+- **More readable dashboard typography** — Source Sans 3 and Source Code Pro
+  replace Outfit and Geist Mono across the dashboard and login page, including
+  code, logs and the terminal. Fonts and their licenses ship with the package
+  and require no external CDN. (#232)
+
+- **Inspect environment variables from the environment card** — the More menu
+  gains an Info action that displays configured variables, including secret
+  references. The header also stops rendering an empty shared-environment
+  badge in regular team sessions. (#230, #228)
+
 ## v1.75.0
 
 ### Features
@@ -168,18 +232,6 @@
   `/mcp/<env>` endpoints, emits machine-readable JSON for automation, and
   preserves server-side tool errors and output-cache summaries. The existing
   `oduflow call <tool>` remains the local in-process path. (#214)
-
-- **One team hostname now serves LAN and tunneled OAuth access** — every team
-  must declare a unique `hostname`, and the self-hosted OAuth server derives its
-  issuer from that validated host in both port and Traefik modes. A port-mode
-  server behind Cloudflare Tunnel can therefore expose
-  `https://<team-host>/mcp`, while its hosted agents keep using the local Docker
-  host gateway. The obsolete `[oauth]` section and fixed `oauth_base_url` issuer
-  are removed, leaving the team hostname as the single public identity. The new
-  `[server].bind` name makes the listener address explicit; legacy
-  `[server].host` remains accepted with a deprecation warning. The old shared
-  `[routing].hostname` fallback is ignored because team hostnames are now
-  explicit routing and OAuth identities.
 
 - **Token-safe summaries for apply and test calls** — `pull_and_apply` and
   `run_odoo_tests` now accept `summary_only=True`, keeping verbose Odoo command
