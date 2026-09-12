@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2271,3 +2272,101 @@ class TestDestroyBlockedByServices:
 
         with pytest.raises(ConflictError, match="Active environments/services exist"):
             system_ops.destroy_system(TEST_SETTINGS)
+
+
+class TestServiceSecrets:
+    """secret:<name> references resolve only into the container environment;
+    every persisted or displayed shape keeps the reference."""
+
+    def _team(self, tmp_path):
+        return TeamSettings(team_id="1", data_dir=str(tmp_path))
+
+    def test_create_resolves_refs_but_persists_references(
+        self, mock_docker_client, tmp_path
+    ):
+        from oduflow import secret_store
+        from oduflow.docker_ops import service_presets
+
+        team = self._team(tmp_path)
+        secret_store.set_secret(team, "master-key", "hunter2")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(
+            TEST_SETTINGS,
+            team,
+            "meili",
+            "getmeili/meilisearch:v1.6",
+            7700,
+            env_vars={"MEILI_MASTER_KEY": "secret:master-key", "MEILI_ENV": "dev"},
+        )
+
+        run_kwargs = mock_docker_client.containers.run.call_args[1]
+        assert run_kwargs["environment"] == {
+            "MEILI_MASTER_KEY": "hunter2",
+            "MEILI_ENV": "dev",
+        }
+        assert json.loads(run_kwargs["labels"]["oduflow.secret_env"]) == {
+            "MEILI_MASTER_KEY": "secret:master-key"
+        }
+        preset = service_presets.get_preset(team, "meili")
+        assert preset["env_vars"] == {
+            "MEILI_MASTER_KEY": "secret:master-key",
+            "MEILI_ENV": "dev",
+        }
+
+    def test_create_with_dangling_ref_touches_nothing(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+
+        with pytest.raises(PrerequisiteNotMetError, match="gone"):
+            service_ops.create_service(
+                TEST_SETTINGS,
+                team,
+                "meili",
+                "getmeili/meilisearch:v1.6",
+                7700,
+                env_vars={"KEY": "secret:gone"},
+            )
+
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_container_env_shows_reference_not_value(self):
+        container = MagicMock()
+        container.labels = {
+            "oduflow.secret_env": json.dumps({"KEY": "secret:master-key"})
+        }
+        container.attrs = {"Config": {"Env": ["KEY=hunter2", "OTHER=x"]}}
+
+        assert service_ops._container_env_vars(container) == {
+            "KEY": "secret:master-key",
+            "OTHER": "x",
+        }
+
+    def test_update_with_dangling_ref_keeps_the_container(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        container = MagicMock()
+        container.labels = {"oduflow.service": "meili"}
+        container.image.tags = ["getmeili/meilisearch:v1.6"]
+        mock_docker_client.containers.get.return_value = container
+
+        with (
+            patch(
+                "oduflow.docker_ops.service_ops.service_presets.get_preset",
+                return_value={
+                    "name": "meili",
+                    "image": "getmeili/meilisearch:v1.6",
+                    "port": 7700,
+                    "env_vars": {"KEY": "secret:gone"},
+                },
+            ),
+            pytest.raises(PrerequisiteNotMetError, match="gone"),
+        ):
+            service_ops.update_service(TEST_SETTINGS, team, "meili")
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()

@@ -269,6 +269,29 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 
 Validation checks the credential against the provider's API (GitHub, GitLab, Bitbucket). For other hosts, it reports `"valid"` if the credential exists. Tokens are always masked in API responses (e.g. `ghp_****`).
 
+## Secrets for Environment Variables
+
+Environment variables on services and environments are visible to coding agents through `get_service_info`, `list_services`, `get_environment_info` and the dashboard — so putting a password or API key directly into `env_vars` leaks it into every agent conversation that inspects the resource.
+
+**Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
+
+To use one, set the env-var value to a reference:
+
+```bash
+oduflow call create_service '{
+  "name": "meili",
+  "image": "getmeili/meilisearch:v1.6",
+  "port": 7700,
+  "env_vars": "MEILI_MASTER_KEY=secret:meili-master-key,MEILI_ENV=production"
+}'
+```
+
+The real value is substituted only into the container's environment at creation time. Everything that stores or displays the configuration — the service preset, the environment's Docker label, template metadata, `get_service_info`/`get_environment_info` output — keeps the `secret:<name>` reference. Because only the reference travels, secrets migrate automatically when a service is restored from a preset, an environment is renamed, or an environment is saved as a template and new environments are created from it.
+
+A dangling reference (secret deleted or never created) fails the create/update with a clear error before anything is touched; running containers keep their resolved value until recreated. After replacing a secret's value, recreate the services/environments that use it (`update_service` / `update_environment`).
+
+The store lives at `{team_data_dir}/secrets.json` with owner-only (0600) file permissions, like the other credential stores. Note the boundary: code running *inside* a container can always read its own environment — secrets protect the MCP/REST/dashboard read surfaces, not the container itself.
+
 ## iptables rule
 
 On startup, an `iptables ACCEPT` rule is automatically added for the `oduflow-net` Docker bridge interface. This ensures that containers on the shared network can communicate with the host (required for Traefik `host.docker.internal` routing and PostgreSQL access). If `iptables` is not available, the rule is skipped with a warning.

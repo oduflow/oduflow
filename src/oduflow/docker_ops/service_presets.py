@@ -47,7 +47,12 @@ def _save_presets(team: TeamSettings, data: dict[str, Any]) -> None:
     path = _presets_path(team)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # Presets carry service env vars, which historically include API keys, so
+    # they get the same owner-only mode as the credential stores (migration
+    # 0006 brings pre-existing files forward).
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        os.fchmod(fh.fileno(), 0o600)
         json.dump(data, fh, indent=2)
         fh.flush()
         os.fsync(fh.fileno())

@@ -2601,8 +2601,9 @@ Oduflow can manage sidecar containers for auxiliary services your Odoo instance 
 # Redis
 oduflow call create_service redis redis:7 6379
 
-# Meilisearch with environment variables
-oduflow call create_service meilisearch getmeili/meilisearch:v1.6 7700 "" "MEILI_MASTER_KEY=abc123,MEILI_ENV=production"
+# Meilisearch with environment variables. A value "secret:<name>" references a
+# write-only team secret set in the dashboard — see Security → Secrets.
+oduflow call create_service meilisearch getmeili/meilisearch:v1.6 7700 "" "MEILI_MASTER_KEY=secret:meili-master-key,MEILI_ENV=production"
 
 # Elasticsearch
 oduflow call create_service elasticsearch docker.elastic.co/elasticsearch/elasticsearch:8.11.0 9200 "" "discovery.type=single-node,ES_JAVA_OPTS=-Xms512m -Xmx512m"
@@ -3361,6 +3362,9 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/credentials/add` | Store credentials embedded in body `repo_url` |
 | `POST` | `/api/credentials/delete` | Delete by body `host` and `username` |
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
+| `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
+| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
+| `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
 
@@ -3512,6 +3516,8 @@ also available via the [REST API](web-api.md).
 | `list_service_presets` | | List saved service presets (configurations that can be restored) |
 | `restore_service` | ✓ | Restore a service from a saved preset |
 | `delete_service_preset` | ✓ | Remove a saved service preset |
+| **Secrets** | | |
+| `list_secrets` | | List the names of the team's named secrets; values are write-only (set in the dashboard) and are never readable over MCP. Reference one in any `env_vars` argument as `KEY=secret:<name>` |
 | **Container Image Builds** | | Requires a `[team.X.image_registry]` section |
 | `start_image_build` | ✓ | Build a container image from the environment checkout's current commit (asynchronous; returns a `build_id`); the source is sealed with `git archive` under the environment lock, with hard timeout, log-size, and per-team concurrency limits |
 | `get_image_build` | | Status, source commit, publication history, and a build log tail for one build |
@@ -4548,6 +4554,29 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 | **Validate** a credential against the provider | `POST /api/credentials/validate` (body: `host`, `username`) |
 
 Validation checks the credential against the provider's API (GitHub, GitLab, Bitbucket). For other hosts, it reports `"valid"` if the credential exists. Tokens are always masked in API responses (e.g. `ghp_****`).
+
+## Secrets for Environment Variables
+
+Environment variables on services and environments are visible to coding agents through `get_service_info`, `list_services`, `get_environment_info` and the dashboard — so putting a password or API key directly into `env_vars` leaks it into every agent conversation that inspects the resource.
+
+**Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
+
+To use one, set the env-var value to a reference:
+
+```bash
+oduflow call create_service '{
+  "name": "meili",
+  "image": "getmeili/meilisearch:v1.6",
+  "port": 7700,
+  "env_vars": "MEILI_MASTER_KEY=secret:meili-master-key,MEILI_ENV=production"
+}'
+```
+
+The real value is substituted only into the container's environment at creation time. Everything that stores or displays the configuration — the service preset, the environment's Docker label, template metadata, `get_service_info`/`get_environment_info` output — keeps the `secret:<name>` reference. Because only the reference travels, secrets migrate automatically when a service is restored from a preset, an environment is renamed, or an environment is saved as a template and new environments are created from it.
+
+A dangling reference (secret deleted or never created) fails the create/update with a clear error before anything is touched; running containers keep their resolved value until recreated. After replacing a secret's value, recreate the services/environments that use it (`update_service` / `update_environment`).
+
+The store lives at `{team_data_dir}/secrets.json` with owner-only (0600) file permissions, like the other credential stores. Note the boundary: code running *inside* a container can always read its own environment — secrets protect the MCP/REST/dashboard read surfaces, not the container itself.
 
 ## iptables rule
 

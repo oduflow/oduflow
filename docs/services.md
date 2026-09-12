@@ -10,8 +10,9 @@ Oduflow can manage sidecar containers for auxiliary services your Odoo instance 
 # Redis
 oduflow call create_service redis redis:7 6379
 
-# Meilisearch with environment variables
-oduflow call create_service meilisearch getmeili/meilisearch:v1.6 7700 "" "MEILI_MASTER_KEY=abc123,MEILI_ENV=production"
+# Meilisearch with environment variables. A value "secret:<name>" references a
+# write-only team secret set in the dashboard — see Security → Secrets.
+oduflow call create_service meilisearch getmeili/meilisearch:v1.6 7700 "" "MEILI_MASTER_KEY=secret:meili-master-key,MEILI_ENV=production"
 
 # Elasticsearch
 oduflow call create_service elasticsearch docker.elastic.co/elasticsearch/elasticsearch:8.11.0 9200 "" "discovery.type=single-node,ES_JAVA_OPTS=-Xms512m -Xmx512m"

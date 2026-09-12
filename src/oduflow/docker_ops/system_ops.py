@@ -3311,11 +3311,13 @@ def publish_env_as_template(
     affected_envs = remount.affected
     remount_failures = remount.failures
 
-    # Save template metadata from source environment
-    promoted_container_name = f"{settings.prefix}{env_name.replace('/', '-')}-odoo"
+    # Save template metadata from source environment. `source_container` is the
+    # team-scoped container name computed above — a hand-built pre-migration
+    # name here used to miss the container and silently drop the metadata
+    # (env_vars, repo_url, odoo_image, ...) from every published template.
     metadata: dict[str, Any] = {}
     try:
-        pc = client.containers.get(promoted_container_name)
+        pc = client.containers.get(source_container)
         metadata = _source_env_metadata(settings, pc.labels)
         metadata.update(_code_provenance(team, env_name, pc.labels))
     except docker.errors.NotFound:

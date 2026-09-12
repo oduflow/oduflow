@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 import docker
+from oduflow import secret_store
 from oduflow.docker_ops import service_presets, volume_ops
 from oduflow.docker_ops.client import (
     docker_error_detail,
@@ -28,6 +29,10 @@ logger = logging.getLogger("oduflow")
 
 _TRAEFIK_ACME_MOUNT_PATH = "/etc/traefik"
 _HTTP_ROUTES_LABEL = "oduflow.http_routes"
+# KEY -> "secret:<name>" for env vars whose configured value is a secret
+# reference. Lives on the container (not only in the preset) so read surfaces
+# keep showing the reference even if the preset is deleted.
+_SECRET_ENV_LABEL = "oduflow.secret_env"
 
 _SYSTEM_ENV_KEYS = {
     "PATH",
@@ -349,6 +354,15 @@ def create_service(
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
     routes = normalize_http_routes(routes)
     _validate_service_exposure(settings, port, routes)
+    # A dangling secret reference must abort before any Docker resource is
+    # touched. Only the container environment receives the resolved values;
+    # the preset and the label below keep the references.
+    resolved_env = secret_store.resolve_env_secrets(team, env_vars)
+    secret_env = {
+        key: value
+        for key, value in (env_vars or {}).items()
+        if secret_store.is_secret_ref(value)
+    }
     client = get_client()
 
     # Check for existing container
@@ -386,6 +400,8 @@ def create_service(
         "oduflow.service": name,
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    if secret_env:
+        labels[_SECRET_ENV_LABEL] = json.dumps(secret_env, sort_keys=True)
     if stack_labels:
         labels.update(stack_labels)
 
@@ -473,8 +489,8 @@ def create_service(
             run_kwargs["ports"] = {f"{port}/tcp": port}
         url = f"{settings.public_scheme}://{team.hostname}:{port}"
 
-    if env_vars:
-        run_kwargs["environment"] = env_vars
+    if resolved_env:
+        run_kwargs["environment"] = resolved_env
 
     if command:
         run_kwargs["command"] = list(command)
@@ -638,14 +654,37 @@ def _traefik_label_by_suffix(labels: dict[str, str], suffix: str) -> str:
     return ""
 
 
+def _secret_env_refs(container: Any) -> dict[str, str]:
+    """KEY -> "secret:<name>" recorded on the container at creation time."""
+    raw = (container.labels or {}).get(_SECRET_ENV_LABEL, "")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
 def _container_env_vars(container: Any) -> dict[str, str]:
-    """Env of a service container without the keys every image sets anyway."""
+    """Env of a service container without the keys every image sets anyway.
+
+    Keys configured as secret references come back as the reference, not the
+    resolved value the container actually runs with: every read surface built
+    on container inspection (get_service_info, list_services, the legacy
+    no-preset update path) must never expose a secret value.
+    """
     env_vars: dict[str, str] = {}
     for entry in container.attrs.get("Config", {}).get("Env", []) or []:
         if "=" in entry:
             key, value = entry.split("=", 1)
             if key not in _SYSTEM_ENV_KEYS:
                 env_vars[key] = value
+    for key, ref in _secret_env_refs(container).items():
+        if key in env_vars:
+            env_vars[key] = ref
     return env_vars
 
 
@@ -1136,6 +1175,11 @@ def update_service(
         image_updated,
         config_changed,
     )
+
+    # Validate secret references before the destructive stop/remove below: a
+    # dangling reference must fail the update, not cost the service its
+    # container (create_service would only re-check after the removal).
+    secret_store.resolve_env_secrets(team, env_vars)
 
     # The service is invisible to the registry between remove and re-create, so
     # both happen under the registry key: a delete_volume that looked in that

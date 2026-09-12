@@ -335,3 +335,29 @@ class TestTraefikYmlConfigMigration:
 
     def test_absent_traefik_is_not_an_error(self, monkeypatch):
         self._run(monkeypatch, None)  # must not raise
+
+
+class TestServicePresetsPermissions:
+    def _settings(self, tmp_path):
+        from oduflow.settings import TeamSettings
+
+        team_dir = tmp_path / "team_1"
+        os.makedirs(team_dir, exist_ok=True)
+        team = TeamSettings(team_id="1", data_dir=str(team_dir))
+        return Settings(base_data_dir=str(tmp_path), teams={"1": team}), team_dir
+
+    def test_restricts_existing_presets_file(self, tmp_path):
+        from oduflow.migrations import _migrate_service_presets_permissions
+
+        settings, team_dir = self._settings(tmp_path)
+        presets = team_dir / "service_presets.json"
+        presets.write_text("{}")
+        os.chmod(presets, 0o644)
+
+        _migrate_service_presets_permissions(settings)
+        assert oct(os.stat(presets).st_mode & 0o777) == "0o600"
+
+        # Idempotent on rerun and with no file at all.
+        _migrate_service_presets_permissions(settings)
+        os.remove(presets)
+        _migrate_service_presets_permissions(settings)

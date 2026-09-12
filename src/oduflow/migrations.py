@@ -334,6 +334,22 @@ def _migrate_traefik_yml_config(settings: Settings) -> None:
         pass
 
 
+def _migrate_service_presets_permissions(settings: Settings) -> None:
+    """Restrict each team's ``service_presets.json`` to owner-only access.
+
+    Presets carry service env vars (historically including API keys) but were
+    written with the default umask; the credential stores are all 0600. New
+    writes already use 0600 (service_presets._save_presets); this brings the
+    files that predate that change forward. Idempotent: chmod to the same mode
+    is a no-op, and a missing file is skipped.
+    """
+    for team in settings.teams.values():
+        path = os.path.join(team.data_dir, "service_presets.json")
+        if os.path.isfile(path):
+            os.chmod(path, 0o600)
+            logger.info("Restricted %s to mode 0600", path)
+
+
 # Append-only registry, executed in list order. Ids are recorded in
 # migrations.json once applied; reordering or renaming entries would re-run
 # or skip steps on existing installs.
@@ -377,6 +393,14 @@ MIGRATIONS: list[Migration] = [
             "(file provider rejects .json); init recreates it with oduflow.yml"
         ),
         apply=_migrate_traefik_yml_config,
+    ),
+    Migration(
+        id="0006-service-presets-0600",
+        description=(
+            "Restrict service_presets.json (holds service env vars, often "
+            "API keys) to owner-only permissions like the credential stores"
+        ),
+        apply=_migrate_service_presets_permissions,
     ),
 ]
 
