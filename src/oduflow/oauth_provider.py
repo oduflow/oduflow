@@ -165,7 +165,10 @@ class HostRelativeAuthChallenge:
         )
         # Only rewrite for a host that belongs to a registered team; a forged or
         # unexpected host is left with fastmcp's own (placeholder team) URL.
-        if self._settings.get_team_by_hostname(host) is None:
+        if (
+            scheme not in {"http", "https"}
+            or self._settings.get_team_by_hostname(host) is None
+        ):
             await self.app(scope, receive, send)
             return
         origin = f"{scheme}://{host}"
@@ -221,24 +224,16 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
     """OAuth Authorization Server backed by ``team.auth_token`` values."""
 
     def __init__(self, settings: Settings) -> None:
-        # Host-relative issuer: with no explicit oauth_base_url (the norm in
-        # traefik mode) the issuer is derived per-request from the incoming Host,
-        # so OAuth runs on each team's own TLS-terminated hostname. The
-        # placeholder base_url below is a real team hostname that satisfies the
-        # SDK's issuer validation for the path-only /authorize + /token routes;
-        # it is kept out of every client-facing output by two overrides —
-        # get_routes() rebuilds the discovery metadata per-request, and
-        # HostRelativeAuthChallenge rewrites the 401 WWW-Authenticate
-        # resource_metadata origin to the request host.
-        self._host_relative = not settings.oauth_base_url
-        if settings.oauth_base_url:
-            base_url = settings.oauth_base_url
-        else:
-            placeholder_host = next(
-                (t.hostname for t in settings.teams.values() if t.hostname),
-                "localhost",
-            )
-            base_url = f"https://{placeholder_host}"
+        # The SDK requires one static base URL even though Oduflow's issuer is
+        # always the hostname of the team reached by the request. Use a real team
+        # hostname only as an internal placeholder: get_routes() rebuilds
+        # discovery per request, and HostRelativeAuthChallenge rewrites the 401
+        # challenge to the validated request origin.
+        placeholder_host = next(
+            (t.hostname for t in settings.teams.values() if t.hostname),
+            "localhost",
+        )
+        base_url = f"https://{placeholder_host}"
         # Enable the /revoke endpoint so a client can really invalidate a minted
         # token (revoke_token deletes it from the persistent store).
         super().__init__(
@@ -287,20 +282,15 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
             )
 
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
-        """OAuth routes, with discovery metadata made per-request when there is
-        no fixed issuer.
+        """OAuth routes with discovery metadata built from the request origin.
 
-        With no explicit ``oauth_base_url`` the SDK would bake the placeholder
-        issuer into static ``/.well-known/...`` documents. We instead swap those
-        two discovery endpoints for handlers that advertise the issuer at the
-        host the client actually reached us on, so each team's OAuth flow runs on
-        its own hostname. ``/authorize`` and ``/token`` are path-only and need no
-        change.
+        The SDK would otherwise bake the internal placeholder issuer into static
+        ``/.well-known/...`` documents. Each team's OAuth flow instead runs on
+        its own hostname behind Traefik or another TLS-terminating upstream such
+        as Cloudflare Tunnel. ``/authorize`` and ``/token`` are path-only and
+        need no change.
         """
         routes = super().get_routes(mcp_path)
-        if not self._host_relative:
-            return routes
-
         patched: list[Route] = []
         for route in routes:
             if not isinstance(route, Route):
@@ -338,7 +328,10 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
         scheme, host = _forwarded_scheme_host(
             request.scope["headers"], request.scope.get("scheme")
         )
-        if self._settings.get_team_by_hostname(host) is None:
+        if (
+            scheme not in {"http", "https"}
+            or self._settings.get_team_by_hostname(host) is None
+        ):
             return None
         return f"{scheme}://{host}"
 

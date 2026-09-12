@@ -4059,8 +4059,8 @@ def _build_routes(
             team = _get_ui_team(request)
             token = env_ops.get_env_token(settings, team, branch)
             # The MCP endpoint is advertised on the same public origin as share
-            # links: the team's own hostname in traefik mode (also the
-            # per-request OAuth issuer), the explicit issuer/base in port mode.
+            # links: the team's own hostname in traefik mode, and the actual
+            # request origin (including an upstream tunnel) in port mode.
             base = _public_base_url(request, settings, team)
             url = f"{base}/mcp/{quote(branch, safe='/')}"
             return JSONResponse(
@@ -4083,7 +4083,7 @@ def _build_routes(
         port mode keeps the configured base or the request's own."""
         if settings.routing_mode == "traefik":
             return f"{settings.public_scheme}://{team.hostname}"
-        return (settings.oauth_base_url or str(request.base_url)).rstrip("/")
+        return str(request.base_url).rstrip("/")
 
     def _share_payload(
         request: Request,

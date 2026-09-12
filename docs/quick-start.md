@@ -111,14 +111,15 @@ and different mechanisms (Bearer vs form/Basic auth).
 
 ### Self-hosted OAuth (Claude.ai)
 
-Some MCP clients (e.g. Claude.ai Remote MCP) require an OAuth flow instead of a static Bearer token. Oduflow can act as its own OAuth 2.1 Authorization Server — no external identity provider needed. In [traefik mode](traefik.md) it's enabled automatically and runs on each team's own hostname, so no extra config is required. In port mode, set the public URL of this instance in `oduflow.toml`:
+Some MCP clients (e.g. Claude.ai Remote MCP) require an OAuth flow instead of a static Bearer token. Oduflow can act as its own OAuth 2.1 Authorization Server — no external identity provider needed. It is enabled automatically whenever a team has an `auth_token` and runs on that team's own hostname in both port and [traefik mode](traefik.md), so no separate OAuth URL is normally required:
 
 ```toml
-[oauth]
-oauth_base_url = "https://oduflow.example.com"
+[team.1]
+hostname = "oduflow.example.com"
+auth_token = "..."
 ```
 
-The OAuth `client_id` is the non-secret `team_<id>` (e.g. `team_1`); each team's `auth_token` is the `client_secret`, and OAuth mints an independent expiring access token. See [Authentication & Security](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) for the full setup and how to connect from Claude.ai.
+Behind Cloudflare Tunnel, publish that same hostname and forward it to port 8000; use split DNS if LAN clients should reach it directly. The OAuth `client_id` is the non-secret `team_<id>` (e.g. `team_1`); each team's `auth_token` is the `client_secret`, and OAuth mints an independent expiring access token. See [Authentication & Security](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) for the full setup and how to connect from Claude.ai.
 
 ### MCP client configuration
 

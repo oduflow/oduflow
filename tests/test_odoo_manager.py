@@ -3516,18 +3516,6 @@ class TestAgentContainer:
             == "https://mirageflow.ca/mcp/feature/x"
         )
 
-    def test_agent_mcp_url_uses_oauth_base_url_in_port_mode(self):
-        team = self._team()
-        settings = self._settings(
-            team=team,
-            oauth_base_url="https://oduflow.example.com/",
-        )
-
-        assert (
-            env_ops.get_agent_mcp_url(settings, team, "feature/x")
-            == "https://oduflow.example.com/mcp/feature/x"
-        )
-
     def test_agent_mcp_url_falls_back_to_host_gateway_in_local_port_mode(self):
         team = self._team()
         settings = self._settings(team=team)

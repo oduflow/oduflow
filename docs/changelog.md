@@ -169,6 +169,18 @@
   preserves server-side tool errors and output-cache summaries. The existing
   `oduflow call <tool>` remains the local in-process path. (#214)
 
+- **One team hostname now serves LAN and tunneled OAuth access** — every team
+  must declare a unique `hostname`, and the self-hosted OAuth server derives its
+  issuer from that validated host in both port and Traefik modes. A port-mode
+  server behind Cloudflare Tunnel can therefore expose
+  `https://<team-host>/mcp`, while its hosted agents keep using the local Docker
+  host gateway. The obsolete `[oauth]` section and fixed `oauth_base_url` issuer
+  are removed, leaving the team hostname as the single public identity. The new
+  `[server].bind` name makes the listener address explicit; legacy
+  `[server].host` remains accepted with a deprecation warning. The old shared
+  `[routing].hostname` fallback is ignored because team hostnames are now
+  explicit routing and OAuth identities.
+
 - **Token-safe summaries for apply and test calls** — `pull_and_apply` and
   `run_odoo_tests` now accept `summary_only=True`, keeping verbose Odoo command
   logs server-side instead of injecting them into the calling agent's context.

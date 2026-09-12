@@ -12,13 +12,16 @@ Each team can have its own auth token:
 
 ```toml
 [team.1]
+hostname = "team-a.example.com"
 auth_token = "secret-token-team-1"
 
 [team.2]
+hostname = "team-b.example.com"
 auth_token = "secret-token-team-2"
 ```
 
-The token is used to both authenticate and identify the team. This is implemented via FastMCP's `StaticTokenVerifier`.
+The token is used to both authenticate and identify the team. The self-hosted
+OAuth provider also accepts it directly as a non-expiring Bearer credential.
 
 Fresh configs get a generated `auth_token` for `[team.1]` on first startup. The
 value is printed in the startup log and stored in `oduflow.toml`; use it as
@@ -32,7 +35,11 @@ The team's OAuth **`client_id`** is a non-secret identifier, `team_<id>` (e.g. `
 
 ### Setup
 
-**In [traefik mode](traefik.md) it's automatic.** The Authorization Server is enabled out of the box and runs on **each team's own hostname** — the OAuth issuer is derived per request from the incoming host (which already has a Let's Encrypt certificate). Just give each team an `auth_token`; no `oauth_base_url` is needed:
+The Authorization Server is enabled automatically whenever a team has an
+`auth_token`. It runs on **each team's own hostname** in both port and
+[traefik mode](traefik.md): the OAuth issuer is derived per request from the
+incoming host after validating it against configured team hostnames. No
+separate OAuth configuration is needed:
 
 ```toml
 [routing]
@@ -44,15 +51,19 @@ hostname = "team-a.example.com"
 auth_token = "secret-token-team-1"
 ```
 
-**In port mode** (no per-team TLS host), set `oauth_base_url` to the public https URL where this instance is reachable, so the issuer is a fixed, reachable endpoint:
+In port mode behind Cloudflare Tunnel or another TLS proxy, publish the same
+hostname configured for the team and forward it to the HTTP listener:
 
 ```toml
-[oauth]
-oauth_base_url = "https://your-server.com"
-
 [team.1]
+hostname = "oduflow.example.com"
 auth_token = "secret-token-team-1"
 ```
+
+For direct LAN access while retaining that public hostname, use split DNS so
+`oduflow.example.com` resolves to the server's LAN address internally. Local
+Bearer clients may also connect by IP; OAuth discovery is intentionally served
+only for a recognized team hostname.
 
 Either way, Oduflow exposes:
 
@@ -86,7 +97,7 @@ For curl, IDE clients, or anything that doesn't need OAuth, simply send the `aut
 Authorization: Bearer secret-token-team-1
 ```
 
-This works whether or not `oauth_base_url` is configured.
+This uses the same team identity as the OAuth flow.
 
 The built-in remote CLI uses the same Bearer authentication and live MCP tool
 schemas:
@@ -236,10 +247,8 @@ deployments, `auth_token` and `ui_password` are generated automatically and
 startup logs show auth as enabled:
 
 ```
-INFO  [team.1] http://localhost:8000/ (MCP token ON, OAuth OFF, UI auth ON)
+INFO  [team.1] http://localhost:8000/ (MCP token ON, OAuth ON (self-hosted), UI auth ON)
 ```
-
-When OAuth is enabled the status reads `OAuth ON (self-hosted)`.
 
 ## Git Credentials
 

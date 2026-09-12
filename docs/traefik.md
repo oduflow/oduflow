@@ -65,7 +65,7 @@ The configured team hostname must include a distinct prefix
 
 ## OAuth on each team's hostname
 
-In traefik mode the self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled **automatically** and runs on **each team's own hostname** — the OAuth issuer is derived per request from the incoming host, which already has a Let's Encrypt certificate. You do **not** need to set `oauth_base_url`: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
+The self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled automatically whenever a team has an `auth_token` and runs on **each team's own hostname** in every routing mode. With Traefik, the incoming host already has a Let's Encrypt certificate; with `tls = false`, the upstream tunnel provides it. There is no separate OAuth section: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
 
 ## Service routing with Traefik
 

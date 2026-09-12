@@ -1,6 +1,6 @@
 # ── Server ────────────────────────────────────────────
 [server]
-host = "0.0.0.0"
+bind = "0.0.0.0"                 # listener address; legacy key "host" is still accepted
 port = 8000
 allow_local_path = true        # trusted single-user local development; disable on hosted/multi-user servers
 # allow_insecure_http = false  # serve HTTP /mcp with NO auth (only behind your own proxy)
@@ -10,8 +10,6 @@ allow_local_path = true        # trusted single-user local development; disable 
 [routing]
 mode = "port"                   # "port" | "traefik"
 # acme_email = "admin@example.com"  # required for traefik (when tls = true)
-# hostname = "localhost"           # port mode only: default host for teams without their own
-                                   # (traefik requires each team to set its own hostname)
 # tls = true                       # traefik only. true: Traefik terminates TLS
 #                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt).
 #                                  # false: plain HTTP on :80 only, no redirect/ACME —
@@ -71,22 +69,6 @@ auto_delete_hours = 0             # delete stopped environments after N hours (D
 # codex_model = ""                 # optional model override; empty = CLI default
 # opencode_model = ""              # optional provider/model; empty = OpenCode default
 
-# ── OAuth (optional) ──────────────────────────────────
-# In traefik mode the self-hosted OAuth Authorization Server is enabled
-# automatically and each team's OAuth flow runs on its OWN hostname (the issuer
-# is derived per-request), so you do NOT need oauth_base_url. Endpoints:
-#   /.well-known/oauth-authorization-server   /authorize   /token
-# For each team, claude.ai (and any OAuth-based MCP client) is configured with:
-#   client_id = team_<id>  (for [team.1], use team_1)
-#   client_secret = team.<id>.auth_token
-# After the OAuth flow the issued access_token is also auth_token, so plain
-# Bearer-token clients keep working.
-#
-# oauth_base_url is only needed to pin a fixed central issuer, or in PORT mode
-# (no per-team TLS host): set it to this instance's public https URL.
-# [oauth]
-# oauth_base_url = "https://oduflow.example.com"
-
 # ── Production hosting ────────────────────────────────
 # Productions (long-lived customer environments with their own domain and a
 # dedicated production PostgreSQL cluster) are created at runtime via the
@@ -118,11 +100,12 @@ auto_delete_hours = 0             # delete stopped environments after N hours (D
 # At least one [team.*] section is required.
 
 [team.1]
-hostname = "localhost"            # port: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
+hostname = "localhost"            # required and unique; OAuth issuer host for this team
+                                   # port: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
 environment_slots = 20            # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                # maximum managed auxiliary services; 0 = unlimited
-auth_token = ""                   # MCP bearer token / OAuth client_id+secret (auto-generated on first run; HTTP refuses to start if empty)
+auth_token = ""                   # MCP bearer token / OAuth client_secret (auto-generated on first run; HTTP refuses to start if empty)
 ui_password = ""                  # Web UI password (auto-generated on first run; HTTP refuses to start if empty unless allow_insecure_http)
 port_range = [50000, 50100]       # port range for Odoo containers
 # db_quota_gb = 50                # combined size cap for the team's PostgreSQL DBs (environments + templates); 0 = off
