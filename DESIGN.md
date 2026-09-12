@@ -21,31 +21,31 @@ colors:
   signal-rose: "#fb7185"
 typography:
   headline:
-    fontFamily: "Outfit, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Source Sans 3, ui-sans-serif, system-ui, sans-serif"
     fontSize: "1.4375rem"
     fontWeight: 600
     lineHeight: 1.3
     letterSpacing: "normal"
   title:
-    fontFamily: "Outfit, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Source Sans 3, ui-sans-serif, system-ui, sans-serif"
     fontSize: "1.0625rem"
     fontWeight: 600
     lineHeight: 1.4
     letterSpacing: "normal"
   body:
-    fontFamily: "Outfit, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Source Sans 3, ui-sans-serif, system-ui, sans-serif"
     fontSize: "0.9375rem"
     fontWeight: 400
     lineHeight: 1.5
     letterSpacing: "normal"
   label:
-    fontFamily: "Outfit, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Source Sans 3, ui-sans-serif, system-ui, sans-serif"
     fontSize: "0.875rem"
     fontWeight: 600
     lineHeight: 1.4
     letterSpacing: "0.02em"
   mono:
-    fontFamily: "Geist Mono, ui-monospace, SFMono-Regular, Consolas, monospace"
+    fontFamily: "Source Code Pro, ui-monospace, SFMono-Regular, Consolas, monospace"
     fontSize: "0.875rem"
     fontWeight: 400
     lineHeight: 1.5
@@ -128,7 +128,7 @@ as a borrowed GitHub theme.
 **Key Characteristics:**
 - Blue-black console field with one confident Console Blue accent (≤15% of any screen)
 - Signal colors used categorically for state and channels, never decoratively
-- One geometric sans (Outfit) + one precise mono (Geist Mono), both self-hosted
+- One humanist sans (Source Sans 3) + its companion mono (Source Code Pro), both self-hosted
 - Earned density: compact rows, full data, text contrast ≥4.5:1
 - Flat at rest; depth via tonal surface steps, shadows only as state response
 - Every asset ships with the package — no CDNs, ever
@@ -232,14 +232,20 @@ and `--accent-fg` carries button text in both themes.
 
 ## 3. Typography
 
-**Display Font:** Outfit (with ui-sans-serif, system-ui fallback)
-**Body Font:** Outfit (same family; weight contrast carries hierarchy)
-**Label/Mono Font:** Geist Mono (with ui-monospace, SFMono-Regular fallback)
+**Display Font:** Source Sans 3 (with ui-sans-serif, system-ui fallback)
+**Body Font:** Source Sans 3 (same family; weight contrast carries hierarchy)
+**Label/Mono Font:** Source Code Pro (with ui-monospace, SFMono-Regular fallback)
 
-**Character:** One geometric sans doing every UI role through weight, paired
-on a true contrast axis with a precise monospace. The mono is the console's
-native voice: container names, DB names, paths, images, log output, counts.
-Both faces are bundled with the package (woff2), never loaded from a CDN;
+**Character:** One humanist sans doing every UI role through weight, paired on
+a true contrast axis with its own companion monospace. Open apertures and true
+text proportions are the point: this is a console people read dense output and
+long agent replies in, so legibility at 14-15px outranks geometric personality.
+The mono is the console's native voice: container names, DB names, paths,
+images, log output, counts. Source Sans 3 and Source Code Pro are siblings from
+the same Adobe Source family, so the two voices share skeleton and rhythm while
+staying unmistakably apart on the proportional/monospaced axis. Both faces are
+bundled with the package as variable woff2 (SIL Open Font License 1.1 — see
+`src/oduflow/templates/static/FONTS-LICENSE.md`), never loaded from a CDN;
 until bundled, the system stack fallback is acceptable.
 
 ### Hierarchy
@@ -386,7 +392,7 @@ be traced against a dimmed page, it is missing one of the two.
 
 ### Signature Component — The Embedded Terminal
 The web console and SQL console: a Terminal Black (`#060a12`) panel inside the
-modal, Geist Mono, cursor in Console Blue, ANSI palette mapped to the signal
+modal, Source Code Pro, cursor in Console Blue, ANSI palette mapped to the signal
 colors. It is the dashboard's proof-of-machine — keep it darker than the page
 so it reads as a device, and never decorate it.
 
@@ -398,7 +404,7 @@ so it reads as a device, and never decorate it.
 - **Do** give every interactive component all five states (default, hover,
   focus-visible, disabled, loading); the focus ring is never removed.
 - **Do** set machine artifacts (DB names, images, paths, logs, counts) in
-  Geist Mono per The Console Voice Rule.
+  Source Code Pro per The Console Voice Rule.
 - **Do** keep status badges textual; color reinforces, text informs.
 - **Do** ship every asset (fonts, xterm.js, css) inside the package —
   the dashboard must work air-gapped. A CDN `<script>` is a bug.
