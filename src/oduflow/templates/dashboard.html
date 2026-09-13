@@ -2196,6 +2196,11 @@
         <div class="hint">Change it to rename this environment. The database and filestore move with it; a pooled or explicit hostname is kept, a hostname derived from the environment name follows the new one. Its MCP endpoint becomes /mcp/&lt;new name&gt; — re-point any MCP client configured against the old path</div>
       </div>
       <div class="form-group">
+        <label for="update-env-hostname">Hostname (Traefik mode)</label>
+        <input type="text" id="update-env-hostname" spellcheck="false" placeholder="qa">
+        <div class="hint">Short hostname, as when creating an environment. Changing it changes the public URL. Leave unchanged or empty to keep the current hostname policy.</div>
+      </div>
+      <div class="form-group">
         <label for="update-env-vars">Environment variables</label>
         <textarea id="update-env-vars" rows="5" spellcheck="false" placeholder="WORKERS=2&#10;LIMIT_TIME_CPU=600"></textarea>
         <div class="hint">Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
@@ -3770,6 +3775,7 @@ async function confirmSwitchBranch() {
 
 var _updateEnv = '';
 var _updateEnvInitial = '';
+var _updateEnvHostnameInitial = '';
 // Bumped on every open and every close, so a prefill response can be matched
 // against the dialog that started it — the Docker-backed lookup is slow enough
 // to outlive a cancel-and-reopen, and answering into the wrong environment
@@ -3972,6 +3978,9 @@ async function doUpdate(branch) {
   document.getElementById('update-env-title').textContent = 'Update environment — ' + branch;
   document.getElementById('update-env-name').textContent = branch;
   document.getElementById('update-env-newname').value = branch;
+  var env = cachedEnvs.find(function(e) { return e.branch === branch; });
+  _updateEnvHostnameInitial = (env && env.hostname) || '';
+  document.getElementById('update-env-hostname').value = _updateEnvHostnameInitial;
   var ta = document.getElementById('update-env-vars');
   ta.value = '';
   ta.disabled = true;
@@ -4018,6 +4027,8 @@ async function confirmUpdateEnv() {
   // Send a mapping, not the raw blob: the server must not re-split values.
   if (raw.trim() !== _updateEnvInitial.trim()) payload.env_vars = parseEnvLines(raw);
   if (newName && newName !== branch) payload.new_name = newName;
+  var hostname = document.getElementById('update-env-hostname').value.trim();
+  if (hostname && hostname !== _updateEnvHostnameInitial) payload.hostname = hostname;
   _updateEnvSeq++;
   hideModal('update-env-modal');
   setBusy(branch, payload.new_name ? 'Renaming' : 'Updating');
