@@ -3173,14 +3173,19 @@ def _check_template_publish_allowed(
 
 
 @contextlib.contextmanager
-def _publishing_template_dir(template_dir: str) -> Iterator[str]:
-    """Create *template_dir* for a publish and take it back if the publish fails.
+def _publishing_template(team: TeamSettings, template_name: str) -> Iterator[str]:
+    """Create the template dir for a publish and leave nothing ready if it fails.
 
     The directory is the first thing a publish leaves behind and the first thing
     anyone checks for, so a dump or restore that failed halfway must not leave
-    an empty one: readers would take it for a template. Only a directory this
-    publish created is removed — re-baselining an existing template keeps it.
+    an empty one: readers would take it for a template. A directory this publish
+    created is removed. Re-baselining an existing template keeps its files, but
+    its metadata is dropped: the database was replaced before the filestore and
+    metadata were, so what is left is a mix of two snapshots (or a partial
+    restore) that ``template_is_ready`` must not report as usable until the
+    publish is repeated.
     """
+    template_dir = team.get_template_dir(template_name)
     created = not os.path.isdir(template_dir)
     os.makedirs(template_dir, exist_ok=True)
     try:
@@ -3188,6 +3193,14 @@ def _publishing_template_dir(template_dir: str) -> Iterator[str]:
     except BaseException:
         if created:
             shutil.rmtree(template_dir, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                os.remove(team.get_template_metadata_path(template_name))
+            logger.warning(
+                "Publish into template %s failed after its database was "
+                "replaced; the template is marked not ready until republished",
+                template_name,
+            )
         raise
 
 
@@ -3323,9 +3336,8 @@ def publish_env_as_template(
     )
     _wait_pg_ready(client, settings)
 
-    template_dir = team.get_template_dir(template_name)
-    dump_path = os.path.join(template_dir, "dump.pgdump")
-    with _publishing_template_dir(template_dir):
+    dump_path = os.path.join(team.get_template_dir(template_name), "dump.pgdump")
+    with _publishing_template(team, template_name) as template_dir:
         # 1-2. pg_dump the branch DB, then rebuild the template DB from it, and
         # only then move the dump into the template dir — a failed restore
         # leaves no half-published template behind. Ownership is stripped at
@@ -3543,15 +3555,23 @@ def publish_production_as_template(
             f"Database '{prod_db}' for production '{prod_name}' not found in "
             f"the production cluster."
         )
+    # create_production always makes this directory; its absence means the
+    # production is broken, not that it has no attachments — a template without
+    # (or with a stale) filestore must not be reported as a successful copy.
+    prod_filestore = production_ops.prod_filestore_dir(team, prod_name)
+    if not os.path.isdir(prod_filestore):
+        raise PrerequisiteNotMetError(
+            f"Filestore directory of production '{prod_name}' not found at "
+            f"{prod_filestore}."
+        )
     _check_template_publish_allowed(
         client, settings, team, template_name, tpl_db, overwrite=overwrite
     )
     _wait_pg_ready(client, settings)
     _wait_pg_ready(client, settings, container_name=settings.prod_db_container)
 
-    template_dir = team.get_template_dir(template_name)
-    dump_path = os.path.join(template_dir, "dump.pgdump")
-    with _publishing_template_dir(template_dir):
+    dump_path = os.path.join(team.get_template_dir(template_name), "dump.pgdump")
+    with _publishing_template(team, template_name) as template_dir:
         # The dump is streamed out of the production cluster straight to its
         # staging file (nothing lands in the production container's writable
         # layer) and restored into the dev cluster; only once that succeeded
@@ -3580,21 +3600,12 @@ def publish_production_as_template(
         # there is no source overlay to unmount and remount here — only the
         # template's own consumers need the swap protection.
         template_filestore_path = team.get_template_filestore_path(template_name)
-        prod_filestore = production_ops.prod_filestore_dir(team, prod_name)
         link_dests = [template_filestore_path]
-        snapshot_dir: str | None = None
-        transferred: list[str] | None = None
-        if os.path.isdir(prod_filestore):
-            snapshot_dir = prod_filestore.rstrip("/") + "_snapshot"
-            transferred = _snapshot_filestore(
-                prod_filestore, snapshot_dir, link_dests=link_dests
-            )
-            logger.info("Snapshot of filestore created for production %s", prod_name)
-        else:
-            logger.warning(
-                "Production filestore %s not found, skipping filestore update",
-                prod_filestore,
-            )
+        snapshot_dir = prod_filestore.rstrip("/") + "_snapshot"
+        transferred = _snapshot_filestore(
+            prod_filestore, snapshot_dir, link_dests=link_dests
+        )
+        logger.info("Snapshot of filestore created for production %s", prod_name)
 
         odoo_image = record.get("odoo_image", "")
         source_image = odoo_image or "odoo:19.0"

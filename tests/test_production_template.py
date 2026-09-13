@@ -70,6 +70,9 @@ def _record(team, **overrides):
         "created_at": "2026-09-01T00:00:00+00:00",
     }
     values.update(overrides)
+    # create_production always makes the filestore directory; the publish
+    # treats its absence as a broken production.
+    os.makedirs(production_ops.prod_filestore_dir(team, PROD), exist_ok=True)
     return production_registry.create_production(team, PROD, values)
 
 
@@ -400,6 +403,8 @@ class TestPublishProductionAsTemplate:
         os.makedirs(template_dir, exist_ok=True)
         with open(os.path.join(template_dir, "dump.pgdump"), "wb") as f:
             f.write(b"previous")
+        with open(team.get_template_metadata_path(TPL), "w") as f:
+            json.dump({"odoo_image": "odoo:18.0", "source_production": PROD}, f)
         client = MagicMock()
         client.containers.get.return_value = _prod_container()
 
@@ -415,9 +420,63 @@ class TestPublishProductionAsTemplate:
                     settings, team, PROD, TPL, overwrite=True
                 )
 
-        # A re-baseline that failed leaves the previous template in place.
+        # A re-baseline that failed keeps the previous files, but the template
+        # database was already replaced (here: left partial), so the template
+        # is marked not ready — its metadata is gone — until republished.
         with open(os.path.join(template_dir, "dump.pgdump"), "rb") as f:
             assert f.read() == b"previous"
+        assert not os.path.exists(team.get_template_metadata_path(TPL))
+
+    def test_failure_after_the_restore_marks_a_rebaselined_template_unready(
+        self, settings, team
+    ):
+        from contextlib import ExitStack
+
+        _record(team)
+        prod_db = production_ops.prod_db_name(team, PROD)
+        tpl_db = get_template_db_name(TPL, team.team_id)
+        os.makedirs(team.get_template_dir(TPL), exist_ok=True)
+        with open(team.get_template_metadata_path(TPL), "w") as f:
+            json.dump({"odoo_image": "odoo:18.0", "source_production": PROD}, f)
+        client = MagicMock()
+        client.containers.get.return_value = _prod_container()
+
+        with ExitStack() as stack:
+            mocks = _publish_patches(stack, client, {prod_db, tpl_db})
+            stack.enter_context(
+                patch.object(
+                    system_ops, "_snapshot_filestore", side_effect=OSError("disk")
+                )
+            )
+            with pytest.raises(OSError, match="disk"):
+                system_ops.publish_production_as_template(
+                    settings, team, PROD, TPL, overwrite=True
+                )
+
+        # The database was restored, the filestore was not: a mix of two
+        # snapshots must not pass for a ready template.
+        mocks["reload_template"].assert_called_once()
+        assert not os.path.exists(team.get_template_metadata_path(TPL))
+
+    def test_missing_production_filestore_refuses_to_publish(self, settings, team):
+        from contextlib import ExitStack
+
+        from oduflow.errors import PrerequisiteNotMetError
+
+        _record(team)
+        os.rmdir(production_ops.prod_filestore_dir(team, PROD))
+        prod_db = production_ops.prod_db_name(team, PROD)
+        client = MagicMock()
+        client.containers.get.return_value = _prod_container()
+
+        with ExitStack() as stack:
+            mocks = _publish_patches(stack, client, {prod_db})
+            with pytest.raises(PrerequisiteNotMetError, match="Filestore directory"):
+                system_ops.publish_production_as_template(settings, team, PROD, TPL)
+
+        # Refused before anything was dumped or created.
+        mocks["_stream_exec_to_file"].assert_not_called()
+        assert not os.path.exists(team.get_template_dir(TPL))
 
     def test_missing_production_cluster_is_a_prerequisite_error(self, settings, team):
         from oduflow.errors import PrerequisiteNotMetError
@@ -730,6 +789,7 @@ class TestCreateEnvironmentFromProduction:
                     "repo_url": "https://github.com/acme/erp.git",
                     "odoo_image": "odoo:18.0",
                     "snapshot_at": "2026-09-10T10:00:00+00:00",
+                    "source_production": PROD,
                 },
                 f,
             )
@@ -775,6 +835,61 @@ class TestCreateEnvironmentFromProduction:
         publish.assert_called_once()
         assert publish.call_args.kwargs["overwrite"] is True
         assert f"Published production '{PROD}' as template '{TPL}'" in result
+
+    def test_readiness_is_rechecked_under_the_production_lock(self, mcp, team):
+        from contextlib import ExitStack
+
+        _record(team)
+        with ExitStack() as stack:
+            self._env_patches(stack)
+            # Unready when first looked at, ready by the time the lock is held:
+            # another caller published it meanwhile.
+            ready = stack.enter_context(
+                patch.object(system_ops, "template_is_ready", side_effect=[False, True])
+            )
+            publish = stack.enter_context(
+                patch.object(system_ops, "publish_production_as_template")
+            )
+            result = mcp(
+                "create_environment",
+                branch="dev",
+                from_production=PROD,
+                repo_url="https://github.com/acme/erp.git",
+                odoo_image="odoo:18.0",
+            )
+
+        assert ready.call_count == 2
+        publish.assert_not_called()
+        assert f"Reused the existing template '{TPL}'" in result
+
+    @pytest.mark.parametrize(
+        ("metadata", "origin"),
+        [
+            ({"source_production": "other"}, "production 'other'"),
+            ({"source_branch": "main"}, "other than a production"),
+        ],
+    )
+    def test_a_foreign_template_under_the_managed_name_is_refused(
+        self, mcp, team, metadata, origin
+    ):
+        from contextlib import ExitStack
+
+        _record(team)
+        os.makedirs(team.get_template_dir(TPL), exist_ok=True)
+        with open(team.get_template_metadata_path(TPL), "w") as f:
+            json.dump({"odoo_image": "odoo:18.0", **metadata}, f)
+
+        with ExitStack() as stack:
+            create = self._env_patches(stack, template_ready=True)
+            publish = stack.enter_context(
+                patch.object(system_ops, "publish_production_as_template")
+            )
+            with pytest.raises(ToolError, match=origin):
+                mcp("create_environment", branch="dev", from_production=PROD)
+
+        # Neither cloned nor silently replaced.
+        publish.assert_not_called()
+        create.assert_not_called()
 
     def test_existing_environment_reports_the_production_template_mismatch(
         self, mcp, team

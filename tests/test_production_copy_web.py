@@ -310,7 +310,10 @@ def test_create_from_production_publishes_the_managed_template(tmp_path):
         path = tm.get_template_metadata_path(template_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            f.write('{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git"}')
+            f.write(
+                '{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git", '
+                '"source_production": "erp"}'
+            )
         return _publish_result()
 
     with (
@@ -345,7 +348,10 @@ def test_create_from_production_reuses_an_existing_managed_template(tmp_path):
     metadata = team.get_template_metadata_path(f"prod-{PROD}")
     os.makedirs(os.path.dirname(metadata), exist_ok=True)
     with open(metadata, "w") as f:
-        f.write('{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git"}')
+        f.write(
+            '{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git", '
+            '"source_production": "erp"}'
+        )
 
     with (
         _template_ready(True),
@@ -372,7 +378,10 @@ def test_create_from_production_republishes_a_half_published_template(tmp_path):
     metadata = team.get_template_metadata_path(f"prod-{PROD}")
     os.makedirs(os.path.dirname(metadata), exist_ok=True)
     with open(metadata, "w") as f:
-        f.write('{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git"}')
+        f.write(
+            '{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git", '
+            '"source_production": "erp"}'
+        )
 
     with (
         _template_ready(False),
@@ -454,7 +463,10 @@ def test_dashboard_copies_work_when_mcp_copies_are_disabled(tmp_path):
     metadata = team.get_template_metadata_path(f"prod-{PROD}")
     os.makedirs(os.path.dirname(metadata), exist_ok=True)
     with open(metadata, "w") as f:
-        f.write('{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git"}')
+        f.write(
+            '{"odoo_image": "odoo:18.0", "repo_url": "https://x/y.git", '
+            '"source_production": "erp"}'
+        )
 
     with (
         _template_ready(True),

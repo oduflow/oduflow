@@ -54,6 +54,7 @@ from oduflow.docker_ops import (
     volume_ops,
 )
 from oduflow.errors import (
+    ConflictError,
     FlowError,
     NotFoundError,
     PrerequisiteNotMetError,
@@ -813,6 +814,7 @@ def ensure_production_template(
     directory. Either way the template is (re)published here.
     """
     managed = production_template_name(prod_name)
+    _check_managed_template_provenance(team, managed, prod_name)
     if system_ops.template_is_ready(settings, team, managed):
         return managed, False
 
@@ -825,6 +827,10 @@ def ensure_production_template(
     key = prod_lock_key(team.team_id, prod_name)
     locks.acquire_env(key, operation=operation)
     try:
+        # A second caller that saw the template unready and then waited for
+        # this key must not repeat a publish that has just completed.
+        if system_ops.template_is_ready(settings, team, managed):
+            return managed, False
         # overwrite=True: prod-<name> is a namespace Oduflow owns; whatever an
         # earlier attempt left behind is replaced, never a reason to refuse.
         system_ops.publish_production_as_template(
@@ -833,6 +839,31 @@ def ensure_production_template(
     finally:
         locks.release_env(key)
     return managed, True
+
+
+def _check_managed_template_provenance(
+    team: TeamSettings, managed: str, prod_name: str
+) -> None:
+    """Refuse to treat a template as the production's managed copy unless its
+    metadata says it was published from that production.
+
+    The ``prod-`` prefix is not reserved for templates: a template of that name
+    may have been published from an environment, or from another production
+    under a chosen name. Cloning it — or silently replacing it — would hand out
+    the wrong data.
+    """
+    metadata = env_ops._read_template_metadata(team, managed)
+    if not metadata:
+        return
+    source = metadata.get("source_production", "")
+    if source != prod_name:
+        origin = (
+            f"production '{source}'" if source else "something other than a production"
+        )
+        raise ConflictError(
+            f"Template '{managed}' exists but was published from {origin}, not "
+            f"from production '{prod_name}'. Rename or delete it first."
+        )
 
 
 def _template_from_production(
