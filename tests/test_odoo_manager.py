@@ -212,6 +212,9 @@ class TestAdoptExistingEnvironment:
             TEST_SETTINGS.team_label: "1",
         }
         container.ports = {"8069/tcp": [{"HostPort": "50000"}]}
+        container.attrs = {
+            "NetworkSettings": {"Ports": {"8069/tcp": [{"HostPort": "50000"}]}}
+        }
         return container
 
     def test_missing_environment_returns_none(self, mock_docker_client):

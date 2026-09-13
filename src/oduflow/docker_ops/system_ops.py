@@ -459,8 +459,21 @@ def _trusts_upstream_headers(settings: Settings) -> bool:
     that must be able to tell us the browser spoke HTTPS. When the deployment is
     plain HTTP end to end (``public_scheme = "http"``) there is no trusted hop,
     so the headers stay untrusted and any client-supplied ones are overwritten.
+
+    The check is per deployment, not per team: Traefik's forwardedHeaders
+    setting is entrypoint-scoped and the ``web`` entrypoint is shared, so if
+    *any* team resolves to https (per-team ``public_scheme`` override) the
+    headers must be trusted or the terminator's ``X-Forwarded-Proto: https``
+    would be overwritten. The trust is then entrypoint-wide: every client that
+    can reach :80 directly becomes a "trusted hop" for **every** router on the
+    entrypoint, across teams — including production Odoo, which runs with
+    proxy_mode and rebuilds absolute URLs (web.base.url, password-reset links)
+    from ``X-Forwarded-Host`` and reads client IPs for logging and login
+    throttling from ``X-Forwarded-For``. In a mixed http/https deployment :80
+    must therefore stay reachable only from networks trusted for *all* teams
+    (see docs/traefik.md).
     """
-    return not settings.routing_tls and settings.public_scheme == "https"
+    return not settings.routing_tls and settings.any_public_scheme_https
 
 
 def _route_entrypoint(settings: Settings) -> dict[str, Any]:

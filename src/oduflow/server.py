@@ -279,7 +279,7 @@ def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | N
     if _web_bind is None:
         return None
     if settings.routing_mode == "traefik":
-        base = f"{settings.public_scheme}://{team.hostname}"
+        base = f"{settings.public_scheme_for(team)}://{team.hostname}"
     else:
         bind_host, port = _web_bind
         # The bind address controls where the listener accepts connections; it
@@ -288,7 +288,7 @@ def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | N
         host = team.hostname or (
             "localhost" if bind_host in ("0.0.0.0", "::") else bind_host
         )
-        base = f"{settings.public_scheme}://{host}:{port}"
+        base = f"{settings.public_scheme_for(team)}://{host}:{port}"
     return f"{base}/oduflow-artifact?token={token}"
 
 
@@ -7566,9 +7566,9 @@ def _start_http() -> None:
 
     for tid, team in settings.teams.items():
         if settings.routing_mode == "traefik":
-            url = f"{settings.public_scheme}://{team.hostname}/"
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}/"
         else:
-            url = f"{settings.public_scheme}://{host}:{port}/"
+            url = f"{settings.public_scheme_for(team)}://{host}:{port}/"
         mcp_status = "MCP token ON" if team.auth_token else "MCP token OFF"
         oauth_status = (
             "OAuth ON (self-hosted)" if settings.oauth_enabled else "OAuth OFF"

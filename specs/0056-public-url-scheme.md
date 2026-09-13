@@ -3,7 +3,7 @@
 **Status:** Adopted (still in force)
 **Type:** Architecture / Routing / Security
 **First introduced:** `litnimax/lethal-bullfrog` branch (2026-09-04)
-**Key code today:** `settings.py` (`public_scheme_setting` field, `public_scheme` property, `validate()` cross-checks), `docker_ops/system_ops.py` (`_trusts_upstream_headers`, `_ensure_traefik` drift control), URL construction sites in `docker_ops/env_ops.py`, `docker_ops/service_ops.py`, `docker_ops/production_ops.py` (`prod_url`), `server.py`, `web_ui.py`
+**Key code today:** `settings.py` (`public_scheme_setting` field on `Settings` and `TeamSettings`, `public_scheme` / `public_scheme_for(team)` / `any_public_scheme_https`, `_validate_public_scheme`), `docker_ops/system_ops.py` (`_trusts_upstream_headers`, `_ensure_traefik` drift control), URL construction sites in `docker_ops/env_ops.py`, `docker_ops/service_ops.py`, `docker_ops/production_ops.py` (`prod_url(settings, team, record)`), `server.py`, `web_ui.py`
 
 ## Context
 
@@ -74,6 +74,37 @@ recreation: their routing labels do not encode the scheme.
   tunnels); an exposed-:80-without-terminator misconfiguration only becomes
   safe once the operator declares `public_scheme = "http"`.
 
+## Evolution
+
+**Per-team override (2026-09-13).** `public_scheme` became overridable per
+team (`[team.X] public_scheme`), resolved through
+`Settings.public_scheme_for(team)`; every team-scoped URL site interpolates
+the resolved value instead of the global one. The motivating shape: one
+deployment where a LAN team hands out `http://` links while another team is
+published through a Cloudflare tunnel with `https://` links — same Traefik on
+plain `:80`.
+
+This **changes the trust rule stated in the Decision above**: Traefik's
+forwarded-header setting is entrypoint-scoped, so the `web` entrypoint now
+gets `forwardedHeaders.insecure=true` whenever `tls = false` and *any* team
+resolves to https (`Settings.any_public_scheme_https`, resolved per-team
+values only). Consequently `[routing] public_scheme = "http"` alone no longer
+guarantees the header-forgery hole is closed — a single team's `https`
+override re-opens entrypoint-wide trust, for every router on `:80` including
+proxy-mode production Odoo. "Plain HTTP end to end" and "no trusted
+terminator" are still the same statement, but now only when it holds for
+**all** teams. The blast radius and the resulting operational rule (port 80
+must be reachable only from networks trusted for all teams; otherwise split
+deployments) are documented in `docs/traefik.md` and in the
+`_trusts_upstream_headers` docstring. A meaningful override is now also
+per-team `https` on an otherwise-http deployment, not just the global
+traefik + `tls = false` + `http`.
+
+Production URLs (`prod_url`, now `(settings, team, record)`) use the owning
+team's scheme; a production domain is free-form, so it is assumed to be
+fronted the same way as its team's other hosts.
+
 ## History
 
 - Introduced on the `litnimax/lethal-bullfrog` branch (2026-09-04).
+- Per-team override, `per-team-acme-public-scheme` branch (2026-09-13).
