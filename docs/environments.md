@@ -59,13 +59,17 @@ When creating an environment, Oduflow:
 
 ### Private repository authentication
 
-For private repos, configure credentials first:
+For private repos, store an access token first:
 
 ```bash
-oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git
+oduflow call setup_repo_auth '{"repo_url": "https://github.com/owner/private-repo.git", "token": "ghp_..."}'
 ```
 
-Credentials are stored in the git credential store. Subsequent `create_environment` calls can use the clean URL without credentials.
+The token is stored in the team's git credential store, keyed by host, so one
+token covers every repository on that host. `create_environment` then uses the
+plain URL without credentials. The legacy inline form
+`oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git`
+still works.
 
 ### Auto-dependency installation
 

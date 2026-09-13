@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Paste the token, not a `user:PAT@repo` URL** — the dashboard's *Add Git
+  Credential* dialog now takes the access token, the git host (default
+  `github.com`), an optional username and an optional repository URL to verify
+  against. Git matches stored credentials by host, not by repository, so a
+  single token covers every repository on that host; the repository path in
+  the old URL form was only ever used for the `git ls-remote` check. Without a
+  repository URL the token is verified against the provider API (GitHub,
+  GitLab, Bitbucket). `setup_repo_auth` gained matching `token`, `username`
+  and `host` arguments and `POST /api/credentials/add` accepts the same body;
+  the legacy `https://user:PAT@host/owner/repo.git` form still works.
+
 ## v1.76.0
 
 ### Features
