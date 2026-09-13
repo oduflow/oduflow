@@ -2397,8 +2397,23 @@
     <div class="modal-body">
       <div class="form-error" id="add-credential-error"></div>
       <div class="form-group">
-        <label for="credential-url">Repository URL with credentials</label>
-        <input type="text" id="credential-url" placeholder="https://user:PAT@github.com/owner/repo.git">
+        <label for="credential-token">Access token</label>
+        <input type="password" id="credential-token" autocomplete="off" spellcheck="false" placeholder="ghp_… / glpat-… / app password">
+        <div class="hint">Personal access token with read access to the repositories. One token covers every repository on the host.</div>
+      </div>
+      <div class="form-group">
+        <label for="credential-host">Git host</label>
+        <input type="text" id="credential-host" value="github.com" spellcheck="false" placeholder="github.com">
+      </div>
+      <div class="form-group">
+        <label for="credential-username">Username <span class="label-hint">(optional)</span></label>
+        <input type="text" id="credential-username" spellcheck="false" placeholder="x-access-token">
+        <div class="hint">GitHub, GitLab and Azure DevOps accept any name with a token. Bitbucket app passwords need the real account name. Use different names to keep several tokens for one host; the same name replaces the stored token.</div>
+      </div>
+      <div class="form-group">
+        <label for="credential-url">Repository URL to verify <span class="label-hint">(optional)</span></label>
+        <input type="text" id="credential-url" spellcheck="false" placeholder="https://github.com/owner/repo.git">
+        <div class="hint">Runs git ls-remote with the token. Without it, the token is checked against the provider API (GitHub, GitLab, Bitbucket); other hosts are saved unverified.</div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeAddCredentialModal()">Cancel</button>
@@ -6754,12 +6769,15 @@ function renderCredentials(creds) {
 }
 
 function openAddCredentialModal() {
+  document.getElementById('credential-token').value = '';
+  document.getElementById('credential-host').value = 'github.com';
+  document.getElementById('credential-username').value = '';
   document.getElementById('credential-url').value = '';
   document.getElementById('add-credential-error').style.display = 'none';
   document.getElementById('credential-submit').disabled = false;
   document.getElementById('credential-submit').innerHTML = 'Save &amp; Verify';
   showModal('add-credential-modal');
-  document.getElementById('credential-url').focus();
+  document.getElementById('credential-token').focus();
 }
 
 function closeAddCredentialModal(event) {
@@ -6768,10 +6786,18 @@ function closeAddCredentialModal(event) {
 }
 
 async function submitAddCredential() {
+  var token = document.getElementById('credential-token').value.trim();
+  var host = document.getElementById('credential-host').value.trim();
+  var username = document.getElementById('credential-username').value.trim();
   var url = document.getElementById('credential-url').value.trim();
   var errEl = document.getElementById('add-credential-error');
-  if (!url) {
-    errEl.textContent = 'Repository URL with credentials is required.';
+  if (!token) {
+    errEl.textContent = 'Access token is required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!host) {
+    errEl.textContent = 'Git host is required.';
     errEl.style.display = 'block';
     return;
   }
@@ -6783,12 +6809,15 @@ async function submitAddCredential() {
     var r = await fetch(API_CREDENTIALS + '/add', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo_url: url})
+      body: JSON.stringify({token: token, host: host, username: username, repo_url: url})
     });
     var data = await readResult(r);
     if (data.ok) {
       closeAddCredentialModal();
-      showToast('Credential saved and verified');
+      var status = data.result && data.result.status;
+      showToast(status === 'unverified'
+        ? 'Credential saved (no verification available for this host)'
+        : 'Credential saved and verified');
       await loadCredentials();
     } else {
       errEl.textContent = data.error || 'Failed to save credential';

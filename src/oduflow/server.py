@@ -495,18 +495,61 @@ def with_prod_lock(fn: Callable[P, R]) -> Callable[P, R]:
 @mcp.tool()
 @handle_errors
 @with_key_lock(credentials_lock_key, require_name=False)
-def setup_repo_auth(repo_url: str, ctx: Context | None = None) -> str:
+def setup_repo_auth(
+    repo_url: str = "",
+    token: str = "",
+    username: str = "",
+    host: str = "",
+    ctx: Context | None = None,
+) -> str:
     """
-    Cache git credentials for a private repository.
+    Cache git credentials for a private git host.
 
-    Accepts a URL with embedded credentials, stores them in git credential store,
-    and verifies access with a test clone. After this, create_environment can clone
-    the repo without authentication prompts.
+    Stores a personal access token in the team's git credential store and
+    verifies it. Git matches credentials by host (and username), so one entry
+    covers every repository on that host; after this, create_environment and
+    add_extra_repo can clone with a plain https:// URL.
+
+    Preferred form: pass the token itself, e.g.
+    setup_repo_auth(repo_url="https://github.com/owner/repo.git", token="ghp_...").
+    The host is taken from repo_url (or from `host`), and access is verified with
+    `git ls-remote` against repo_url when one is given, otherwise against the
+    provider's API (GitHub, GitLab, Bitbucket).
+
+    Legacy form: a repo_url with inline credentials
+    (https://user:PAT@github.com/owner/repo.git) and no `token`.
 
     Args:
-        repo_url: Repository URL with credentials, e.g. https://user:PAT@github.com/owner/repo.git
+        repo_url: Repository HTTPS URL (used to derive the host and to verify access).
+        token: Personal access token / app password.
+        username: Account name to store with the token. Optional for GitHub,
+            GitLab and Azure DevOps (defaults to "x-access-token"); required for
+            Bitbucket app passwords. Use distinct usernames to keep several
+            tokens for the same host.
+        host: Git host such as github.com or git.example.com:8443. Only needed
+            when repo_url is omitted.
     """
     team = _resolve_team(ctx)
+    if token:
+        result = git_ops.store_credential(
+            host=host or repo_url,
+            token=token,
+            username=username,
+            verify_repo_url=repo_url,
+            cred_file=team.git_credentials_file(),
+        )
+        return (
+            f"Repository authentication configured.\n"
+            f"Host: {result['host']}\n"
+            f"Username: {result['username']}\n"
+            f"Status: {result['status']}\n\n"
+            f"You can now use create_environment with a plain https:// URL "
+            f"on this host."
+        )
+    if not repo_url:
+        raise ValueError(
+            "Pass token (and repo_url or host), or a repo_url with inline credentials."
+        )
     result = git_ops.setup_repo_auth(repo_url, cred_file=team.git_credentials_file())
     return (
         f"Repository authentication configured.\n"

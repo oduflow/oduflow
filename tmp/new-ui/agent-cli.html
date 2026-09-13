@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Agent CLI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1100px; overflow: hidden; }
+  .scrim { align-items: center; padding-top: 0; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-minimize"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="cards">
+    <article class="card"><div class="row1"><span class="cbx"></span><h2 class="title">feature/pos-loyalty</h2><span class="badge running">running</span><span class="spacer"></span><div class="actions"><button class="btn">Stop</button><button class="btn">Sync</button><button class="btn">Logs</button></div></div></article>
+  </div>
+</main>
+
+<div class="scrim">
+  <div class="modal wide" style="width:1100px">
+    <div class="modal-h">
+      <span class="t">Agent CLI — feature/pos-loyalty</span>
+      <span class="ver" style="font-family:var(--font-mono)">claude code · opus-5</span>
+      <span class="spacer"></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-minimize"/></svg></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+    </div>
+    <div class="termbox" style="height:640px"><span class="vio">▐▛███▜▌   Claude Code v2.1.33</span>
+<span class="dim">▝▜█████▛▘  /workspace/odoo-addons · branch feature/pos-loyalty</span>
+
+<span class="dim">›</span> <span class="blue">/test pos_loyalty</span>
+
+<span class="vio">●</span> Running module tests for <span class="blue">pos_loyalty</span>…
+
+  <span class="dim">$ oduflow call run_odoo_tests '{"modules": "pos_loyalty"}'</span>
+
+  test_points_accumulate ......................... <span class="ok">ok</span> <span class="dim">0.41s</span>
+  test_refund_points_sign ........................ <span class="ok">ok</span> <span class="dim">0.38s</span>
+  test_refund_no_double .......................... <span class="ok">ok</span> <span class="dim">0.52s</span>
+  test_program_expiry ............................ <span class="ok">ok</span> <span class="dim">0.19s</span>
+
+  <span class="ok">4 passed</span><span class="dim">, 0 failed · 1.50s · o_feature_pos_loyalty</span>
+
+<span class="vio">●</span> All green. The refund sign fix holds — points now subtract on
+  refund lines and the regression test covers the double-count case.
+
+<span class="dim">──────────────────────────────────────────────────────────────────────</span>
+<span class="dim">›</span> <span class="cursor"></span>
+
+<span class="dim">  ? for shortcuts · session persists while minimized · 132×38</span></div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Usage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); margin-bottom: var(--gap); }
+  .tile { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 1rem 1.25rem; }
+  .tile .tk { font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .tile .tv { font-family: var(--font-mono); font-size: var(--text-xl); margin-top: 0.25rem; }
+  .tile .ts { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); margin-top: 0.125rem; }
+  .quota-row { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.625rem; }
+  .quota-row .bar { flex: 1; }
+  .quota-row .num { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); flex: none; }
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats"><span>cpu <b>34%</b></span><span>ram <b>21/64G</b></span><span>load <b>1.84</b></span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab active">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Usage</h1>
+    <span class="count">team velesagro · XFS project quota</span>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="tk">Disk quota</div>
+      <div class="tv">142 / 200G</div>
+      <div class="quota-row"><span class="bar"><i class="warn" style="width:71%"></i></span><span class="num">71%</span></div>
+    </div>
+    <div class="tile">
+      <div class="tk">Environments</div>
+      <div class="tv">23.1G</div>
+      <div class="ts">5 environments · db 9.5G · filestore 13.6G</div>
+    </div>
+    <div class="tile">
+      <div class="tk">Templates</div>
+      <div class="tv">16.2G</div>
+      <div class="ts">4 templates · dumps 3.9G · filestores 12.3G</div>
+    </div>
+    <div class="tile">
+      <div class="tk">Production + backups</div>
+      <div class="tv">102.4G</div>
+      <div class="ts">erp 34.8G · S3 snapshots 67.6G</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row1" style="margin-bottom:0.5rem">
+      <h2 class="title">Per environment</h2>
+      <span class="spacer"></span>
+      <button class="btn">Recalculate</button>
+    </div>
+    <table class="table">
+      <tr><th>environment</th><th>db</th><th>filestore</th><th>workdir</th><th>total</th><th>share</th></tr>
+      <tr><td>staging</td><td>4.8G</td><td>5.1G</td><td>1.3G</td><td>11.2G</td><td><span class="bar" style="display:inline-block;width:120px;vertical-align:middle"><i style="width:48%"></i></span></td></tr>
+      <tr><td>feature/pos-loyalty</td><td>1.2G</td><td>1.4G</td><td>0.8G</td><td>3.4G</td><td><span class="bar" style="display:inline-block;width:120px;vertical-align:middle"><i style="width:15%"></i></span></td></tr>
+      <tr><td>demo/odoo17</td><td>2.2G</td><td>2.0G</td><td>0.8G</td><td>5.0G</td><td><span class="bar" style="display:inline-block;width:120px;vertical-align:middle"><i style="width:22%"></i></span></td></tr>
+      <tr><td>fix/invoice-rounding</td><td>0.9G</td><td>0.7G</td><td>0.5G</td><td>2.1G</td><td><span class="bar" style="display:inline-block;width:120px;vertical-align:middle"><i style="width:9%"></i></span></td></tr>
+      <tr><td>test/mrp-batch</td><td>0.4G</td><td>0.3G</td><td>0.4G</td><td>1.1G</td><td><span class="bar" style="display:inline-block;width:120px;vertical-align:middle"><i style="width:5%"></i></span></td></tr>
+    </table>
+  </div>
+</main>
+
+</body>
+</html>
