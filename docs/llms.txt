@@ -163,7 +163,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `delete_environment` — tear down an environment
 - `start_environment` / `stop_environment` / `restart_environment` — lifecycle control
 - Idle environments auto-stop after 48h without work (`[lifecycle].auto_stop_hours`). Auto-delete of long-stopped environments is opt-in and off by default (`auto_delete_hours = 0`; set a positive value to enable — destructive; protected environments are exempt). Container-level tools (pull_and_apply, shell/tests/installs/file ops) wake a stopped environment automatically and note it in the response
-- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `env_vars` replaces container environment variables)
+- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `hostname` changes the public Traefik hostname, `env_vars` replaces container environment variables)
 - `install_odoo_modules` — install Odoo modules
 - `upgrade_odoo_modules` — upgrade Odoo modules
 - `export_module_translations` — export a module's .pot/.po translation catalogue

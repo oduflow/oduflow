@@ -4656,6 +4656,7 @@ def update_environment(
     *,
     env_override: dict[str, str] | None = None,
     image_override: str | None = None,
+    hostname_override: str | None = None,
     extra_checkout_overrides: dict[str, str] | None = None,
     extra_revision_overrides: dict[str, str] | None = None,
     pull_image: bool = True,
@@ -4676,6 +4677,10 @@ def update_environment(
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
     and image-baked env comes from the image itself.
 
+    ``hostname_override`` changes the short public hostname in Traefik mode.
+    Empty or omitted values keep the current hostname policy. Conflicts are
+    rejected before stopping the current container.
+
     ``rename_to`` additionally moves the environment onto another name. The
     container has to be re-created for that anyway — it carries the name in its
     own name, its labels and its bind mounts — so the rename rides on the same
@@ -4687,6 +4692,14 @@ def update_environment(
     switch_branch refreshes that checkout itself once it is on the target
     branch, and clone-env.sh is too expensive to run twice.
     """
+    requested_hostname = (hostname_override or "").strip()
+    if requested_hostname:
+        requested_hostname = validate_env_hostname(requested_hostname)
+        if settings.routing_mode != "traefik":
+            raise ValueError(
+                "hostname is supported only when routing.mode = 'traefik'."
+            )
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -4813,9 +4826,28 @@ def update_environment(
                     "locally; leaving the existing environment untouched."
                 ) from exc
 
-    clear_hostname_after_update = _reconcile_environment_hostname_for_update(
-        client, settings, team, env_name, labels
-    )
+    if requested_hostname:
+        hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
+        active_envs, used_hostnames = _environment_hostname_usage(
+            client, settings, team, exclude_env=env_name
+        )
+        # Reserve before stopping: conflicts leave the current container intact.
+        # A simultaneous rename moves this reservation with the environment.
+        labels[ENV_HOSTNAME_LABEL] = allocate_hostname(
+            _hostname_registry_path(team),
+            env_name,
+            0,  # An update does not consume a new environment slot.
+            requested_hostname=requested_hostname,
+            hostname_prefix=hostname_prefix,
+            active_envs=active_envs,
+            used_hostnames=used_hostnames,
+        )
+        labels[ENV_HOSTNAME_SOURCE_LABEL] = HOSTNAME_SOURCE_CUSTOM
+        clear_hostname_after_update = False
+    else:
+        clear_hostname_after_update = _reconcile_environment_hostname_for_update(
+            client, settings, team, env_name, labels
+        )
 
     logger.info(
         "Updating environment – stopping old container",
