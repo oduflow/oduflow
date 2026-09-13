@@ -87,6 +87,9 @@ pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 
 
 def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
+    # The domain is free-form (not necessarily under team.hostname); the owning
+    # team's scheme assumes it is fronted the same way as the team's other
+    # hosts (documented in docs/traefik.md). There is no per-production scheme.
     return f"{settings.public_scheme_for(team)}://{record['domain']}"
 
 

@@ -4154,16 +4154,29 @@ URLs — uses each team's resolved scheme. No `acme_email` is involved: with
 `tls = false` Traefik never talks to Let's Encrypt, and the tunnel's
 certificate comes from Cloudflare.
 
-Because at least one team resolves to `https`, the `web` entrypoint trusts
-inbound `X-Forwarded-*` headers (as in the tunnel setup above) — so the tunnel's
-`X-Forwarded-Proto: https` survives. That trust is entrypoint-wide: a LAN
-client could forge `X-Forwarded-Proto` on its own requests, which only makes
-its own session cookie `Secure` (unsendable over its http:// origin) — but
-keep port 80 unreachable from untrusted networks regardless.
+!!! warning "Forwarded-header trust is deployment-wide"
+    Because at least one team resolves to `https`, the `web` entrypoint trusts
+    inbound `X-Forwarded-*` headers (as in the tunnel setup above) — so the
+    tunnel's `X-Forwarded-Proto: https` survives. That trust is
+    **entrypoint-wide**, not per team: any client that can reach port 80
+    directly can forge `X-Forwarded-Host`, `X-Forwarded-Proto` and
+    `X-Forwarded-For` on requests to *any* hostname this Traefik serves —
+    including the other team's environments and productions. Production Odoo
+    runs in proxy mode and uses those headers to rebuild absolute URLs
+    (`web.base.url`, password-reset links) and for IP logging and login
+    throttling. Only mix schemes when every network that can reach port 80 is
+    trusted for **all** teams on the deployment; otherwise split the teams
+    onto separate deployments.
 
 The per-team value obeys the same rules as the global one: `https` is invalid
 in port mode, and `http` is invalid while `tls = true` (the :80→:443 redirect
 would break the links).
+
+Production URLs are reported with the **owning team's** scheme. A production's
+domain is free-form (it need not live under the team's hostname), so make sure
+each production domain is fronted the same way as the rest of its team — a
+plain-HTTP team's production published through the other team's tunnel would be
+reported as `http://` even though only `https://` answers.
 
 ---
 

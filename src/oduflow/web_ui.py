@@ -4331,13 +4331,12 @@ def _build_routes(
                 status_code=400,
                 media_type="text/plain",
             )
-        # Same-host redirect: keep whatever scheme the browser reached us on
-        # (the env host belongs to one team, whose per-team scheme the incoming
-        # request already reflects via the terminator's X-Forwarded-Proto).
-        scheme = "https" if _is_secure_request(request) else "http"
-        response: Response = RedirectResponse(
-            f"{scheme}://{env_host}/web", status_code=303
-        )
+        # Same-host redirect: a relative Location keeps whatever scheme and
+        # host the browser really reached us on, with no header interpretation
+        # — the one-time token is already consumed, so a wrong absolute scheme
+        # (e.g. a terminator that doesn't send X-Forwarded-Proto) would leave
+        # the user with a dead link.
+        response: Response = RedirectResponse("/web", status_code=303)
         response.set_cookie(
             "session_id",
             sid,

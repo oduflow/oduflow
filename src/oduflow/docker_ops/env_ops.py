@@ -1764,15 +1764,11 @@ def adopt_existing_environment(
         start_environment(settings, env_name, team)
         container.reload()
 
-    if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}"
-    else:
-        ports = container.ports.get("8069/tcp")
-        url = (
-            f"{settings.public_scheme_for(team)}://{team.hostname}:{ports[0]['HostPort']}"
-            if ports
-            else ""
-        )
+    try:
+        url = get_env_base_url(settings, team, env_name, container)[0]
+    except NotFoundError:
+        # Port mode with no published port (container stopped mid-start).
+        url = ""
 
     return {
         "env_name": env_name,
@@ -1983,14 +1979,13 @@ def _create_environment_impl(
         existing = client.containers.get(odoo_container_name)
         if existing.status == "running":
             existing.reload()
-            if settings.routing_mode == "traefik":
-                url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, existing.labels.get(ENV_HOSTNAME_LABEL, ''))}"
-            else:
-                ports = existing.ports.get("8069/tcp")
-                existing_port = ports[0]["HostPort"] if ports else "?"
-                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{existing_port}"
+            try:
+                url = get_env_base_url(settings, team, env_name, existing)[0]
+            except NotFoundError:
+                url = ""
             raise ConflictError(
-                f"Environment '{env_name}' already exists and is running at {url}."
+                f"Environment '{env_name}' already exists and is running"
+                + (f" at {url}." if url else ".")
             )
         raise ConflictError(
             f"Environment '{env_name}' already exists (status: {existing.status})."
@@ -3250,21 +3245,14 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
         }
 
         if "-odoo" in container.name:
-            if settings.routing_mode == "traefik":
+            try:
                 envs[env_name]["url"] = (
-                    f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                    get_env_base_url(settings, team, env_name, container)[0]
+                    + "/web?debug=1"
                 )
-            else:
-                ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-                if ports:
-                    mappings = ports.get("8069/tcp")
-                    if mappings:
-                        host_port = mappings[0].get("HostPort")
-                        if host_port:
-                            envs[env_name]["url"] = (
-                                f"{settings.public_scheme_for(team)}://{team.hostname}"
-                                f":{host_port}/web?debug=1"
-                            )
+            except NotFoundError:
+                # Port mode with no published port: leave the URL unset.
+                pass
 
         envs[env_name]["containers"].append(container_info)
 
@@ -3450,11 +3438,14 @@ def get_env_base_url(
     """Return ``(base_url, cookie_domain)`` for an environment's Odoo web UI.
 
     ``base_url`` is scheme + host (+ published port) with no path; ``cookie_domain``
-    is the bare host an Odoo ``session_id`` cookie must be scoped to. Mirrors the
-    URL logic in :func:`get_environment_info` (traefik subdomain vs. published
-    host port) so a single source computes both the browsable URL and the cookie
-    domain — used by ``connect_as_user`` to hand back a cookie a browser will
-    actually send.
+    is the bare host an Odoo ``session_id`` cookie must be scoped to. This is
+    the single source of the URL rule (traefik subdomain vs. published host
+    port): ``adopt_existing_environment``, ``create_environment``,
+    ``list_environments``, ``get_environment_info`` and ``connect_as_user`` all
+    build their URLs from it. Pass ``container`` when it is already in hand to
+    skip the Docker lookup. ``update_environment`` is the one deliberate
+    exception: right after recreating the container it builds the URL from its
+    own authoritative locals instead of re-reading fresh container attrs.
     """
     if settings.routing_mode == "traefik":
         if container is None:
@@ -3553,21 +3544,14 @@ def get_environment_info(
             env_name, labels.get(ENV_HOSTNAME_LABEL, "")
         )
 
-        if settings.routing_mode == "traefik":
+        try:
             result["url"] = (
-                f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                get_env_base_url(settings, team, env_name, odoo_container)[0]
+                + "/web?debug=1"
             )
-        else:
-            ports = odoo_container.attrs.get("NetworkSettings", {}).get("Ports", {})
-            if ports:
-                mappings = ports.get("8069/tcp")
-                if mappings:
-                    host_port = mappings[0].get("HostPort")
-                    if host_port:
-                        result["url"] = (
-                            f"{settings.public_scheme_for(team)}://{team.hostname}"
-                            f":{host_port}/web?debug=1"
-                        )
+        except NotFoundError:
+            # Port mode with no published port: leave the URL unset.
+            pass
 
         stats = _get_one_container_stats(odoo_container)
         if stats:

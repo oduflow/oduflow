@@ -408,10 +408,15 @@ class Settings:
 
     @property
     def any_public_scheme_https(self) -> bool:
-        """Whether any team (or the global default) resolves to https."""
-        return self.public_scheme == "https" or any(
-            self.public_scheme_for(t) == "https" for t in self.teams.values()
-        )
+        """Whether any team's resolved public scheme is https.
+
+        Derived from the resolved per-team values only (``validate`` guarantees
+        at least one team, and a team without an override already resolves to
+        the global value). The raw global default must not vote on its own:
+        when every team overrides to http, no URL Oduflow hands out is https
+        and forwarded-header trust must stay off.
+        """
+        return any(self.public_scheme_for(t) == "https" for t in self.teams.values())
 
     @property
     def oauth_enabled(self) -> bool:
@@ -427,6 +432,30 @@ class Settings:
                 return team
         return None
 
+    def _validate_public_scheme(self, value: str, prefix: str = "") -> None:
+        """The wire-reality rules for a public_scheme value (global or team).
+
+        The scheme must match what actually answers on the wire: with Traefik
+        terminating TLS, :80 redirects to :443, so http:// links would bounce
+        (POSTs drop body/Authorization) and leak tokens on the first plaintext
+        hop; in port mode nothing can terminate TLS on the published
+        per-environment ports, so https:// links (and the internal probes built
+        from them) would fail the handshake outright.
+        """
+        if value not in ("", "http", "https"):
+            raise ValueError(f"{prefix}public_scheme must be 'http' or 'https'")
+        if value == "http" and self.routing_mode == "traefik" and self.routing_tls:
+            raise ValueError(
+                f"{prefix}public_scheme = 'http' requires tls = false: with "
+                "tls = true Traefik redirects :80 to :443, so http:// links "
+                "would not work"
+            )
+        if value == "https" and self.routing_mode == "port":
+            raise ValueError(
+                f"{prefix}public_scheme = 'https' is not supported in port "
+                "mode: published environment ports serve plain HTTP"
+            )
+
     def validate(self) -> None:
         if not self.teams:
             raise ValueError(
@@ -437,29 +466,7 @@ class Settings:
         if self.routing_mode not in ("port", "traefik"):
             raise ValueError("routing_mode must be 'port' or 'traefik'")
 
-        if self.public_scheme_setting not in ("", "http", "https"):
-            raise ValueError("public_scheme must be 'http' or 'https'")
-
-        # public_scheme must match what actually answers on the wire: with
-        # Traefik terminating TLS, :80 redirects to :443, so http:// links would
-        # bounce (POSTs drop body/Authorization) and leak tokens on the first
-        # plaintext hop; in port mode nothing can terminate TLS on the published
-        # per-environment ports, so https:// links (and the internal probes
-        # built from them) would fail the handshake outright.
-        if (
-            self.public_scheme_setting == "http"
-            and self.routing_mode == "traefik"
-            and self.routing_tls
-        ):
-            raise ValueError(
-                "public_scheme = 'http' requires tls = false: with tls = true "
-                "Traefik redirects :80 to :443, so http:// links would not work"
-            )
-        if self.public_scheme_setting == "https" and self.routing_mode == "port":
-            raise ValueError(
-                "public_scheme = 'https' is not supported in port mode: "
-                "published environment ports serve plain HTTP"
-            )
+        self._validate_public_scheme(self.public_scheme_setting)
 
         if self.routing_mode == "traefik" and self.routing_tls:
             if not self.acme_email:
@@ -486,29 +493,12 @@ class Settings:
                 )
             seen_team_hosts[normalized_host] = team.team_id
             # Per-team public_scheme obeys the same wire-reality rules as the
-            # global one (see the checks above): it changes only the URLs handed
-            # out, not what Traefik serves, so it must still match what actually
-            # answers on that hostname.
-            if team.public_scheme_setting not in ("", "http", "https"):
-                raise ValueError(
-                    f"Team '{team.team_id}': public_scheme must be 'http' or 'https'"
-                )
-            if (
-                team.public_scheme_setting == "http"
-                and self.routing_mode == "traefik"
-                and self.routing_tls
-            ):
-                raise ValueError(
-                    f"Team '{team.team_id}': public_scheme = 'http' requires "
-                    "tls = false: with tls = true Traefik redirects :80 to "
-                    ":443, so http:// links would not work"
-                )
-            if team.public_scheme_setting == "https" and self.routing_mode == "port":
-                raise ValueError(
-                    f"Team '{team.team_id}': public_scheme = 'https' is not "
-                    "supported in port mode: published environment ports serve "
-                    "plain HTTP"
-                )
+            # global one: it changes only the URLs handed out, not what Traefik
+            # serves, so it must still match what actually answers on that
+            # hostname.
+            self._validate_public_scheme(
+                team.public_scheme_setting, prefix=f"Team '{team.team_id}': "
+            )
             if team.port_range_start >= team.port_range_end:
                 raise ValueError(
                     f"Team '{team.team_id}': invalid port range "

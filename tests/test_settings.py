@@ -514,8 +514,15 @@ class TestTeamPublicScheme:
         assert self._settings(
             scheme="http", team_schemes=("", "https")
         ).any_public_scheme_https
-        # Global default (traefik → https) counts even with no overrides.
+        # A team without an override resolves to the global default
+        # (traefik → https), so it counts.
         assert self._settings(team_schemes=("",)).any_public_scheme_https
+
+    def test_all_teams_http_disables_forwarded_header_trust(self):
+        # The global default derives to https, but every team overrides to
+        # http: no URL Oduflow hands out is https, so the unused global value
+        # must not keep Traefik trusting client-supplied X-Forwarded-*.
+        assert not self._settings(team_schemes=("http", "http")).any_public_scheme_https
 
     def test_from_toml_parses_team_public_scheme(self, tmp_path):
         toml = tmp_path / "oduflow.toml"
