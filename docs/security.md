@@ -259,11 +259,22 @@ Private repository credentials are stored in the git credential store at `{team_
 ### Managing credentials via MCP
 
 ```bash
-# Store credentials for a private repository
+# Store a personal access token for a git host (verified with git ls-remote against repo_url)
+oduflow call setup_repo_auth '{"repo_url": "https://github.com/owner/private-repo.git", "token": "ghp_..."}'
+
+# Host only — verified against the provider API (GitHub, GitLab, Bitbucket)
+oduflow call setup_repo_auth '{"host": "github.com", "token": "ghp_..."}'
+
+# Legacy inline form
 oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git
 ```
 
-The tool parses the URL, stores the credentials, and verifies access by running `git ls-remote`.
+Git matches stored credentials by host and username, not by repository, so a
+single token covers every repository on that host. `username` is optional (it
+defaults to `x-access-token`; GitHub, GitLab and Azure DevOps accept any name
+with a token) and only has to be the real account name for Bitbucket app
+passwords. Use different usernames to keep several tokens for one host; storing
+again with the same username replaces the token.
 
 ### Managing credentials via REST API and Web Dashboard
 
@@ -272,7 +283,7 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 | Action | REST API |
 |---|---|
 | **List** all stored credentials | `GET /api/credentials` |
-| **Add** credentials for a repository | `POST /api/credentials/add` (body: `repo_url`) |
+| **Add** a credential for a git host | `POST /api/credentials/add` (body: `token`, `host` = `github.com`, optional `username`, optional `repo_url` to verify against; legacy: `repo_url` with inline `user:PAT@`) |
 | **Delete** a stored credential | `POST /api/credentials/delete` (body: `host`, `username`) |
 | **Validate** a credential against the provider | `POST /api/credentials/validate` (body: `host`, `username`) |
 

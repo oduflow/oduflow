@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Create environment</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1100px; overflow: hidden; }
+  .addon-row { display: grid; grid-template-columns: 1fr 180px 32px; gap: 0.5rem; align-items: center; }
+  .addon-row .rm { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 34px; border: 1px solid var(--border); border-radius: var(--r-md); color: var(--muted-foreground); cursor: pointer; }
+  .addon-row .rm svg { width: 14px; height: 14px; stroke: currentColor; }
+  .tpl-hint { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; background: oklch(0.6 0.2 260 / 0.08); border: 1px solid oklch(0.6 0.2 260 / 0.25); border-radius: var(--r-md); font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .tpl-hint b { color: var(--primary); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-external"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></g>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-refresh"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>
+    <g id="i-chevron"><path d="m6 9 6 6 6-6"/></g>
+    <g id="i-kebab"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></g>
+    <g id="i-monitor"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></g>
+    <g id="i-book"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></g>
+    <g id="i-logout"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats"><span>cpu <b>34%</b></span><span>ram <b>21/64G</b></span><span>load <b>1.84</b></span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Environments</h1>
+    <span class="count">5 environments · 3 running</span>
+    <span class="spacer"></span>
+    <button class="btn primary">Create environment</button>
+  </div>
+  <div class="cards">
+    <article class="card"><div class="row1"><span class="cbx"></span><h2 class="title">feature/pos-loyalty</h2><span class="badge running">running</span><span class="spacer"></span><div class="actions"><button class="btn">Stop</button><button class="btn">Sync</button><button class="btn">Logs</button></div></div></article>
+    <article class="card"><div class="row1"><span class="cbx"></span><h2 class="title">staging</h2><span class="badge partial">partial</span><span class="spacer"></span><div class="actions"><button class="btn">Sync</button><button class="btn">Logs</button></div></div></article>
+  </div>
+</main>
+
+<div class="scrim">
+  <div class="modal">
+    <div class="modal-h">
+      <span class="t">Create environment</span>
+      <span class="spacer"></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+    </div>
+    <div class="modal-b">
+      <div class="field">
+        <span class="lbl">Name</span>
+        <input class="input mono focus" value="feature/stock-alerts">
+        <span class="hint">Matches the git branch. DB: <span style="font-family:var(--font-mono)">o_feature_stock_alerts</span></span>
+      </div>
+      <div class="field">
+        <span class="lbl">Template</span>
+        <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-xs)">odoo18-base</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+        <div class="tpl-hint"><b>Autofilled from template:</b> repo, image, git user, auto-install modules. Pick “— from scratch” to start empty.</div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <span class="lbl">Git repository</span>
+          <input class="input mono" value="github.com/velesagro/odoo-addons">
+        </div>
+        <div class="field">
+          <span class="lbl">Git credential</span>
+          <div class="select"><span>litnimax @ github.com</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <span class="lbl">Odoo image</span>
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-xs)">odoo:18.0</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+        </div>
+        <div class="field">
+          <span class="lbl">Auto-install modules</span>
+          <input class="input mono" value="stock_alerts, mail_bot">
+        </div>
+      </div>
+      <div class="field">
+        <span class="lbl">Extra addons</span>
+        <div class="addon-row">
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-xs)">velesagro-extra</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-xs)">main</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <span class="rm"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+        </div>
+        <div class="addon-row" style="margin-top:0.5rem">
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-xs)">oca-web</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-xs)">18.0</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <span class="rm"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+        </div>
+        <button class="btn" style="align-self:flex-start;margin-top:0.5rem"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>Add repo</button>
+      </div>
+      <div class="field">
+        <span class="lbl">Container env vars</span>
+        <textarea class="input mono" rows="3">ODOO_LOG_LEVEL=info
+SMTP_HOST=mail.velesagro.pl</textarea>
+        <span class="hint">One KEY=VALUE per line.</span>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">Cancel</button>
+      <button class="btn primary">Create environment</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Productions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .sect { margin-top: 1.125rem; }
+  .sect .sh {
+    display: flex; align-items: center; gap: 0.625rem; margin-bottom: 0.625rem;
+    font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  .sect .sh::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .sect .sh .act { text-transform: none; letter-spacing: 0; font-family: var(--font-mono); font-weight: 400; }
+  .toggle { display: inline-flex; align-items: center; gap: 0.4rem; font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .toggle .tr { width: 26px; height: 15px; border-radius: 999px; background: var(--primary); position: relative; }
+  .toggle .tr::after { content: ""; position: absolute; right: 2px; top: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--primary-foreground); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-external"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></g>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+    <g id="i-refresh"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>
+    <g id="i-camera"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats"><span>cpu <b>34%</b></span><span>ram <b>21/64G</b></span><span>load <b>1.84</b></span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab active">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Productions</h1>
+    <span class="count">1 production</span>
+    <span class="spacer"></span>
+    <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>Create production</button>
+  </div>
+
+  <div class="cards">
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">erp</h2>
+        <span class="badge running">running</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Deploy</button>
+          <button class="btn">Rollback</button>
+          <button class="btn">Restart</button>
+          <button class="btn">Logs</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">domain</span><span class="v">erp.velesagro.pl</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">branch</span><span class="v">production @ 8c41f2a</span></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0-ee</span></div>
+        <div class="kv"><span class="k">db</span><span class="v">p_erp</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">tls</span><span class="v dim">Let’s Encrypt · renews 2026-10-02</span></div>
+        <div class="kv"><span class="k">last deploy</span><span class="v dim">update · success · 1h ago</span></div>
+        <div class="kv"><span class="k">last snapshot</span><span class="v dim">snap-0142 · 04:00 · 3.4G</span></div>
+        <div class="kv"><span class="k">auto-deploy</span><span class="v"><span class="toggle">on push<span class="tr"></span></span></span></div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Webhook</div>
+        <div class="meta" style="margin-top:0">
+          <div class="kv" style="grid-column: span 2"><span class="k">url</span><span class="v">https://velesagro.oduflow.dev/hooks/github/erp</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+          <div class="kv"><span class="k">secret</span><span class="v">whs_••••••••••7bc1</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+          <div class="kv"><span class="k">events</span><span class="v dim">push → production</span></div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Deploy history</div>
+        <div class="panel">
+          <table class="table">
+            <tr><th>time</th><th>action</th><th>commits</th><th>result</th><th>trigger</th></tr>
+            <tr><td class="dim">today 10:12</td><td>update</td><td>4b90c11 → 8c41f2a</td><td><span class="badge running" style="font-size:11px">success</span></td><td class="dim">webhook</td></tr>
+            <tr><td class="dim">yesterday 18:40</td><td>update</td><td>77aa310 → 4b90c11</td><td><span class="badge running" style="font-size:11px">success</span></td><td class="dim">manual</td></tr>
+            <tr><td class="dim">2026-08-08 16:05</td><td>update + rollback</td><td>52e0d9f → 77aa310</td><td><span class="badge exited" style="font-size:11px">failed · code rolled back</span></td><td class="dim">webhook</td></tr>
+            <tr><td class="dim">2026-08-05 09:30</td><td>create</td><td>— → 52e0d9f</td><td><span class="badge running" style="font-size:11px">success</span></td><td class="dim">manual</td></tr>
+          </table>
+        </div>
+        <div class="scope-note" style="margin-top:0.5rem;font-size:var(--text-2xs);color:var(--muted-foreground)">Failed deploys roll back code automatically. The database is never rolled back automatically.</div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Snapshots <span class="act">· S3 · retention 14d</span></div>
+        <div class="panel">
+          <div class="panel-toolbar">
+            <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-camera"/></svg>Snapshot now</button>
+            <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg>Reload from S3</button>
+            <span class="spacer"></span>
+            <span style="font-family:var(--font-mono);font-size:var(--text-2xs);color:var(--muted-foreground)">last base backup 04:00 · WAL archiving on</span>
+          </div>
+          <table class="table">
+            <tr><th>snapshot</th><th>date</th><th>db size</th><th>commit</th><th>trigger</th><th></th></tr>
+            <tr><td>snap-0142</td><td class="dim">today 04:00</td><td>3.4G</td><td>8c41f2a</td><td class="dim">schedule</td><td><button class="btn">Restore</button></td></tr>
+            <tr><td>snap-0141</td><td class="dim">yesterday 04:00</td><td>3.4G</td><td>4b90c11</td><td class="dim">schedule</td><td><button class="btn">Restore</button></td></tr>
+            <tr><td>snap-0140</td><td class="dim">2026-08-09 16:22</td><td>3.3G</td><td>4b90c11</td><td class="dim">manual</td><td><button class="btn">Restore</button></td></tr>
+          </table>
+        </div>
+      </div>
+    </article>
+  </div>
+</main>
+
+<div class="scrim">
+  <div class="modal" style="width:560px">
+    <div class="modal-h">
+      <span class="t">Restore snapshot snap-0140</span>
+      <span class="spacer"></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+    </div>
+    <div class="modal-b">
+      <div style="font-size:var(--text-sm)">Database and filestore of <b>erp</b> will be replaced with snapshot <span class="mono">snap-0140</span> (2026-08-09 16:22, 3.3G, commit <span class="mono">4b90c11</span>).</div>
+      <div style="font-size:var(--text-2xs);color:var(--muted-foreground)">Swap-based restore: the snapshot is loaded next to the live database and swapped in only after it succeeds. A failed restore never replaces the current state.</div>
+      <div class="field">
+        <span class="lbl">Type the production name to confirm</span>
+        <input class="input mono focus" placeholder="erp">
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">Cancel</button>
+      <button class="btn danger-solid" disabled>Restore snapshot</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

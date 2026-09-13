@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Environments</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-external"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></g>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-refresh"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>
+    <g id="i-chevron"><path d="m6 9 6 6 6-6"/></g>
+    <g id="i-kebab"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></g>
+    <g id="i-terminal"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></g>
+    <g id="i-chat"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></g>
+    <g id="i-logs"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></g>
+    <g id="i-book"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></g>
+    <g id="i-logout"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></g>
+    <g id="i-monitor"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats">
+      <span>cpu <b>34%</b></span>
+      <span>ram <b>21/64G</b></span>
+      <span>load <b>1.84</b></span>
+    </div>
+    <div class="hdr-sep"></div>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+    <button class="icon-btn"><span class="mono-sm">auto 30s</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-monitor"/></svg></button>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-book"/></svg></button>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-logout"/></svg></button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Environments</h1>
+    <span class="count">5 environments · 3 running</span>
+    <span class="spacer"></span>
+    <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>Create environment</button>
+  </div>
+
+  <div class="cards">
+
+    <!-- 1: running -->
+    <article class="card">
+      <div class="row1">
+        <span class="cbx"></span>
+        <h2 class="title">feature/pos-loyalty</h2>
+        <span class="badge running">running</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Stop</button>
+          <button class="btn">Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_feature_pos_loyalty</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">template</span><span class="v">odoo18-base</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">2d ago</span></div>
+        <div class="kv"><span class="k">active</span><span class="v dim">5m ago</span></div>
+        <div class="kv"><span class="k">size</span><span class="v dim">db 1.2G · disk 3.4G</span></div>
+        <div class="kv"><span class="k">addons</span><span class="v dim">velesagro-extra : main</span></div>
+      </div>
+      <div class="chips">
+        <span class="chip"><span class="h-dot"></span>odoo-feature-pos-loyalty<span class="dim">cpu 4.2% · 812M</span><svg class="copy" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="oklch(0.7 0.01 260)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></span>
+      </div>
+      <div class="note-ghost">Add a note…</div>
+    </article>
+
+    <!-- 2: running + sync op, selected -->
+    <article class="card selected">
+      <div class="row1">
+        <span class="cbx checked"></span>
+        <h2 class="title">fix/invoice-rounding</h2>
+        <span class="badge running">running</span>
+        <span class="badge syncing">syncing</span>
+        <span class="op"><span class="spin"></span>sync · 00:42</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn" disabled>Stop</button>
+          <button class="btn" disabled>Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_fix_invoice_rounding</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">template</span><span class="v">odoo18-base</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">6h ago</span></div>
+        <div class="kv"><span class="k">active</span><span class="v dim">just now</span></div>
+        <div class="kv"><span class="k">size</span><span class="v dim">db 0.9G · disk 2.1G</span></div>
+        <div class="kv"></div>
+      </div>
+      <div class="chips">
+        <span class="chip"><span class="h-dot"></span>odoo-fix-invoice-rounding<span class="dim">cpu 61% · 1.4G</span></span>
+      </div>
+    </article>
+
+    <!-- 3: partial + protected + note -->
+    <article class="card">
+      <div class="row1">
+        <span class="cbx" style="opacity:.35"></span>
+        <h2 class="title">staging</h2>
+        <span class="badge partial">partial</span>
+        <span class="badge protected">protected</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn" disabled>Stop</button>
+          <button class="btn">Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+        </div>
+      </div>
+      <div class="note">
+        <span class="kicker">NOTE</span>
+        <span>QA in progress — keep until 1.4 release sign-off.</span>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_staging</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">branch</span><span class="v">release/1.4</span></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">21d ago</span></div>
+        <div class="kv"><span class="k">active</span><span class="v dim">1h ago</span></div>
+        <div class="kv"><span class="k">size</span><span class="v dim">db 4.8G · disk 11.2G</span></div>
+        <div class="kv"><span class="k">addons</span><span class="v dim">velesagro-extra : release/1.4</span></div>
+      </div>
+      <div class="chips">
+        <span class="chip"><span class="h-dot"></span>odoo-staging<span class="dim">cpu 2.1% · 968M</span></span>
+        <span class="chip"><span class="h-dot err"></span>odoo-staging-queue<span class="dim">exited</span></span>
+      </div>
+    </article>
+
+    <!-- 4: exited, selected -->
+    <article class="card selected">
+      <div class="row1">
+        <span class="cbx checked"></span>
+        <h2 class="title">demo/odoo17</h2>
+        <span class="badge exited">exited</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Start</button>
+          <button class="btn">Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_demo_odoo17</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:17.0</span></div>
+        <div class="kv"><span class="k">template</span><span class="v">odoo17-demo</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">14d ago</span></div>
+        <div class="kv"><span class="k">exited</span><span class="v dim">3h ago · exit 137</span></div>
+        <div class="kv"><span class="k">size</span><span class="v dim">db 2.2G · disk 5.0G</span></div>
+        <div class="kv"></div>
+      </div>
+    </article>
+
+    <!-- 5: stopped (auto) -->
+    <article class="card">
+      <div class="row1">
+        <span class="cbx"></span>
+        <h2 class="title">test/mrp-batch</h2>
+        <span class="badge stopped">stopped</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Start</button>
+          <button class="btn">Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_test_mrp_batch</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">template</span><span class="v">— from scratch</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">local live-mount · ~/dev/mrp</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">9d ago</span></div>
+        <div class="kv"><span class="k">stopped</span><span class="v dim">auto · 2d ago</span></div>
+        <div class="kv"><span class="k">size</span><span class="v dim">db 0.4G · disk 1.1G</span></div>
+        <div class="kv"></div>
+      </div>
+    </article>
+
+  </div>
+</main>
+
+<div class="bulkbar">
+  <span class="count"><b>2</b> environments selected</span>
+  <button class="btn">Stop selected</button>
+  <button class="btn">Delete selected</button>
+  <button class="clear">Clear</button>
+</div>
+
+<div class="dock">
+  <span class="dock-chip"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-logs"/></svg>logs · feature/pos-loyalty</span>
+  <span class="dock-chip"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-terminal"/></svg>shell · staging</span>
+  <span class="dock-chip"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chat"/></svg>agent · fix/invoice-rounding<span class="unread"></span></span>
+</div>
+
+</body>
+</html>

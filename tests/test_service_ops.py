@@ -859,22 +859,24 @@ class TestListServices:
         for sys_key in ("PATH", "HOME", "HOSTNAME", "TERM", "LANG", "LC_ALL"):
             assert sys_key not in env
 
-    def test_list_image_fallback(self, mock_docker_client):
-        """When image.tags is empty, fall back to Config.Image."""
+    @pytest.mark.parametrize("tags", [[], ["redis:latest", "redis:7-alpine"]])
+    def test_list_preserves_config_image_digest(self, mock_docker_client, tags):
+        """Tags on the resolved image cannot replace the requested digest."""
+        reference = "redis@sha256:" + "a" * 64
         container = MagicMock()
         container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
         container.name = "oduflow-1-svc-redis"
         container.status = "running"
-        container.image.tags = []
+        container.image.tags = tags
         container.attrs = {
             "NetworkSettings": {"Ports": {}},
-            "Config": {"Image": "redis:7-alpine", "Env": []},
+            "Config": {"Image": reference, "Env": []},
         }
         mock_docker_client.containers.list.return_value = [container]
 
         result = service_ops.list_services(TEST_SETTINGS, TEST_TEAM)
 
-        assert result[0]["image"] == "unknown"
+        assert result[0]["image"] == reference
 
     def test_list_port_no_mappings(self, mock_docker_client):
         """Port key exists but no host mappings."""

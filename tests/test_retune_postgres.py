@@ -1,8 +1,12 @@
 import configparser
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from oduflow import pg_tune, production_registry, server
+from oduflow.docker_ops import system_ops
 from oduflow.naming import get_repo_path, prod_env_name
 from oduflow.settings import Settings, TeamSettings
 
@@ -29,6 +33,34 @@ def _fixed_resources(monkeypatch):
         },
     )
     monkeypatch.setattr(server, "_get_version", lambda: "test")
+
+
+@pytest.mark.parametrize("writer", ["development", "production", "bundled", "retune"])
+def test_generated_pg_config_is_readable_with_restrictive_umask(
+    tmp_path, monkeypatch, writer
+):
+    settings = _settings(tmp_path)
+    _fixed_resources(monkeypatch)
+    config_dir = Path(settings.etc_dir)
+    config_dir.mkdir()
+    path = config_dir / "postgresql.conf"
+    previous_umask = os.umask(0o077)
+    try:
+        secret = config_dir / "credentials"
+        secret.write_text("private test fixture")
+        if writer == "development":
+            assert server._write_tuned_pg_conf(path, settings=settings)
+        elif writer == "production":
+            path = Path(system_ops._ensure_prod_pg_conf(settings))
+        elif writer == "bundled":
+            server._copy_bundled_pg_conf(path)
+        else:
+            assert server._run_retune_postgres(settings, apply=True, force=False)
+            assert (config_dir / "postgresql-prod.conf").stat().st_mode & 0o777 == 0o644
+    finally:
+        os.umask(previous_umask)
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert secret.stat().st_mode & 0o777 == 0o600
 
 
 def test_preview_does_not_write_files(tmp_path, monkeypatch, capsys):

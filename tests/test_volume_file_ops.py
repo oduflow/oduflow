@@ -1,3 +1,4 @@
+import tarfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -171,6 +172,34 @@ class TestReadFileInVolume:
 
 
 class TestWriteFileInVolume:
+    def test_replacement_advances_filesystem_mtime_within_one_second(
+        self, mock_docker_client, tmp_path
+    ):
+        container = MagicMock()
+        mock_docker_client.containers.run.return_value = container
+
+        def extract_archive(_parent, stream):
+            with tarfile.open(fileobj=stream, mode="r") as archive:
+                member = archive.getmember("app.conf")
+                assert member.isfile()
+                archive.extract(member, tmp_path)
+
+        container.put_archive.side_effect = extract_archive
+        timestamps = [1_789_253_700.125, 1_789_253_700.875]
+        observed = []
+        with patch.object(volume_file_ops.time, "time", side_effect=timestamps):
+            for content in ("version=1", "version=2"):
+                volume_file_ops.write_file_in_volume(
+                    TEST_SETTINGS, TEST_TEAM, "mydata", "app.conf", content
+                )
+                target = tmp_path / "app.conf"
+                assert target.read_text() == content
+                observed.append(target.stat().st_mtime)
+
+        assert observed == timestamps
+        assert int(observed[0]) == int(observed[1])
+        assert observed[0] != observed[1]
+
     def test_write_file(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
         mock_container = MagicMock()

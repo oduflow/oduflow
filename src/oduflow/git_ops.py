@@ -147,20 +147,46 @@ def extract_and_store_inline_credentials(
     return sanitize_repo_url(repo_url), label_user or ""
 
 
-def setup_repo_auth(repo_url: str, cred_file: str) -> dict[str, str]:
-    clean_url, host, username, password = _parse_authenticated_url(repo_url)
+# Username stored alongside a bare token when the caller does not supply one.
+# GitHub, GitLab and Azure DevOps accept any non-empty username with a PAT;
+# this is GitHub's documented placeholder for token auth.
+DEFAULT_TOKEN_USERNAME = "x-access-token"
 
-    # SSRF guard (parity with validate_repo_url): refuse to store credentials for
-    # — or run `git ls-remote` against — loopback / link-local (cloud metadata) /
-    # unspecified hosts. Otherwise a caller could point this at an internal host
-    # and exfiltrate the presented PAT (git sends the stored credential to that
-    # host). Internal RFC1918 git servers stay allowed (allow_private=True).
-    from oduflow.url_safety import assert_allowed_host
 
-    assert_allowed_host(host, allow_private=True)
+def normalize_credential_host(raw_host: str) -> str:
+    """Turn user input into a git credential-store host key.
 
-    _store_git_credentials(host, username, password, cred_file)
+    Accepts a bare hostname (``github.com``), a host with an explicit port
+    (``git.example.com:8443``) or a full HTTPS URL, from which only the host
+    (and port) is kept. Raises :class:`InvalidRepoURLError` for anything else.
+    """
+    raw = (raw_host or "").strip()
+    if not raw:
+        raise InvalidRepoURLError("Git host is required, e.g. github.com")
+    candidate = raw if "://" in raw else f"https://{raw}"
+    try:
+        parsed = urlparse(candidate)
+        hostname = parsed.hostname
+        host_key = _credential_host(parsed)  # ValueError for a non-numeric port
+    except ValueError as e:
+        raise InvalidRepoURLError(f"Invalid git host {raw!r}: {e}")
+    if parsed.scheme not in ("https", "http") or not hostname:
+        raise InvalidRepoURLError(
+            f"Invalid git host {raw!r}: use a hostname such as github.com"
+        )
+    if parsed.username or parsed.password:
+        raise InvalidRepoURLError(
+            "Do not embed credentials in the host field; pass the token separately."
+        )
+    if "://" not in raw and parsed.path not in ("", "/"):
+        raise InvalidRepoURLError(
+            f"Invalid git host {raw!r}: give only the hostname, not a path"
+        )
+    return host_key
 
+
+def _verify_repo_access(clean_url: str, cred_file: str) -> None:
+    """Run ``git ls-remote`` with the team credential store; raise on failure."""
     env = git_env_for_team(cred_file)
     try:
         subprocess.run(
@@ -185,6 +211,97 @@ def setup_repo_auth(repo_url: str, cred_file: str) -> dict[str, str]:
             -1,
             "Access check timed out (30s).",
         )
+
+
+def store_credential(
+    host: str,
+    token: str,
+    cred_file: str,
+    username: str = "",
+    verify_repo_url: str = "",
+) -> dict[str, str]:
+    """Store a bare access token for *host* and verify it.
+
+    This is the token-first counterpart of :func:`setup_repo_auth`: the caller
+    pastes the PAT itself instead of composing a ``user:PAT@host`` URL. Git
+    matches stored credentials by host and username only, so one entry covers
+    every repository on that host; *username* defaults to
+    :data:`DEFAULT_TOKEN_USERNAME` and only has to be a real account name for
+    providers that require it (Bitbucket app passwords).
+
+    Verification: when *verify_repo_url* is given, ``git ls-remote`` must
+    succeed against it with the stored credential (the URL must live on
+    *host*). Otherwise the token is checked against the provider's API for the
+    hosts :func:`validate_credential` knows about; unknown hosts are stored
+    as ``"unverified"``.
+
+    Returns ``{"host", "username", "status"}`` where *status* is
+    ``"authenticated"`` or ``"unverified"``.
+    """
+    host_key = normalize_credential_host(host)
+    token = (token or "").strip()
+    if not token:
+        raise InvalidRepoURLError("Access token is required.")
+    if "\n" in token or "\r" in token:
+        raise InvalidRepoURLError("Access token must be a single line.")
+    username = (username or "").strip() or DEFAULT_TOKEN_USERNAME
+    if "\n" in username or "\r" in username or "@" in username or ":" in username:
+        raise InvalidRepoURLError("Username must not contain ':', '@' or line breaks.")
+
+    clean_verify_url = ""
+    if verify_repo_url:
+        validate_repo_url(verify_repo_url)
+        clean_verify_url = sanitize_repo_url(verify_repo_url.strip())
+        verify_host = _credential_host(urlparse(clean_verify_url))
+        if verify_host != host_key:
+            raise InvalidRepoURLError(
+                f"Repository URL host {verify_host!r} does not match "
+                f"credential host {host_key!r}."
+            )
+
+    # SSRF guard: same rationale as setup_repo_auth — never store (and later
+    # send) a PAT for loopback / link-local / unspecified hosts.
+    from oduflow.url_safety import assert_allowed_host
+
+    assert_allowed_host(urlparse(f"https://{host_key}").hostname, allow_private=True)
+
+    _store_git_credentials(host_key, username, token, cred_file)
+
+    if clean_verify_url:
+        _verify_repo_access(clean_verify_url, cred_file)
+        status = "authenticated"
+    else:
+        api_status = _check_token_with_provider(host_key, username, token)
+        if api_status == "invalid":
+            # A definite 401/403 from the provider: the token itself is bad, so
+            # do not leave it in the store (unlike a failed ls-remote, where the
+            # repository URL rather than the token may be at fault).
+            delete_credential(host_key, username, cred_file)
+            raise ExternalCommandError(
+                f"{host_key} API (auth test)",
+                1,
+                f"{host_key} rejected the token; nothing was saved.",
+            )
+        status = "authenticated" if api_status == "valid" else "unverified"
+
+    logger.info("Credential stored for host=%s status=%s", host_key, status)
+    return {"host": host_key, "username": username, "status": status}
+
+
+def setup_repo_auth(repo_url: str, cred_file: str) -> dict[str, str]:
+    clean_url, host, username, password = _parse_authenticated_url(repo_url)
+
+    # SSRF guard (parity with validate_repo_url): refuse to store credentials for
+    # — or run `git ls-remote` against — loopback / link-local (cloud metadata) /
+    # unspecified hosts. Otherwise a caller could point this at an internal host
+    # and exfiltrate the presented PAT (git sends the stored credential to that
+    # host). Internal RFC1918 git servers stay allowed (allow_private=True).
+    from oduflow.url_safety import assert_allowed_host
+
+    assert_allowed_host(host, allow_private=True)
+
+    _store_git_credentials(host, username, password, cred_file)
+    _verify_repo_access(clean_url, cred_file)
 
     logger.info("Repo auth verified for %s", clean_url)
     return {"repo_url": clean_url, "host": host, "status": "authenticated"}
@@ -233,10 +350,48 @@ def list_credentials(cred_file: str) -> list[dict[str, Any]]:
     return results
 
 
-def validate_credential(host: str, username: str, cred_file: str) -> str:
+# Providers whose API can confirm a token without a repository URL.
+_PROVIDER_API_URLS = {
+    "github.com": "https://api.github.com/user",
+    "gitlab.com": "https://gitlab.com/api/v4/user",
+    "bitbucket.org": "https://api.bitbucket.org/2.0/user",
+}
+
+
+def _check_token_with_provider(host: str, username: str, token: str) -> str:
+    """Check *token* against the provider API; ``valid``/``invalid``/``unknown``.
+
+    Hosts without a known API (see ``_PROVIDER_API_URLS``) return ``"unknown"``
+    without any network call.
+    """
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
+    api_url = _PROVIDER_API_URLS.get(host)
+    if not api_url:
+        return "unknown"
+
+    try:
+        req = Request(api_url)
+        if host == "github.com":
+            req.add_header("Authorization", f"token {token}")
+        elif host == "gitlab.com":
+            req.add_header("PRIVATE-TOKEN", token)
+        elif host == "bitbucket.org":
+            import base64
+
+            b64 = base64.b64encode(f"{username}:{token}".encode()).decode()
+            req.add_header("Authorization", f"Basic {b64}")
+        req.add_header("User-Agent", "oduflow")
+        resp = urlopen(req, timeout=10)
+        return "valid" if resp.status == 200 else "invalid"
+    except HTTPError as e:
+        return "invalid" if e.code in (401, 403) else "unknown"
+    except (URLError, OSError):
+        return "unknown"
+
+
+def validate_credential(host: str, username: str, cred_file: str) -> str:
     if not os.path.exists(cred_file):
         return "invalid"
 
@@ -257,34 +412,10 @@ def validate_credential(host: str, username: str, cred_file: str) -> str:
     if not token:
         return "invalid"
 
-    api_urls = {
-        "github.com": "https://api.github.com/user",
-        "gitlab.com": "https://gitlab.com/api/v4/user",
-        "bitbucket.org": "https://api.bitbucket.org/2.0/user",
-    }
-
-    api_url = api_urls.get(host)
-    if not api_url:
+    if host not in _PROVIDER_API_URLS:
+        # No API to ask: the credential exists, report it as valid.
         return "valid"
-
-    try:
-        req = Request(api_url)
-        if host == "github.com":
-            req.add_header("Authorization", f"token {token}")
-        elif host == "gitlab.com":
-            req.add_header("PRIVATE-TOKEN", token)
-        elif host == "bitbucket.org":
-            import base64
-
-            b64 = base64.b64encode(f"{username}:{token}".encode()).decode()
-            req.add_header("Authorization", f"Basic {b64}")
-        req.add_header("User-Agent", "oduflow")
-        resp = urlopen(req, timeout=10)
-        return "valid" if resp.status == 200 else "invalid"
-    except HTTPError as e:
-        return "invalid" if e.code in (401, 403) else "unknown"
-    except (URLError, OSError):
-        return "unknown"
+    return _check_token_with_provider(host, username, token)
 
 
 def delete_credential(host: str, username: str, cred_file: str) -> bool:

@@ -714,6 +714,14 @@ def _container_env_vars(container: Any) -> dict[str, str]:
     return env_vars
 
 
+def _container_image_reference(container: Any) -> str | None:
+    """Keep the image reference used at creation, including immutable digests."""
+    reference = container.attrs.get("Config", {}).get("Image")
+    if isinstance(reference, str) and reference:
+        return reference
+    return container.image.tags[0] if container.image.tags else None
+
+
 def _describe_service_container(
     settings: Settings, team: TeamSettings, container: Any
 ) -> dict[str, Any]:
@@ -723,7 +731,7 @@ def _describe_service_container(
     """
     svc_name = container.labels.get("oduflow.service")
     container_name = container.name
-    image = container.image.tags[0] if container.image.tags else "unknown"
+    image = _container_image_reference(container) or "unknown"
     status = container.status
 
     env_vars = _container_env_vars(container)
@@ -976,10 +984,7 @@ def update_service(
         raise NotFoundError(f"Service '{name}' not found")
 
     # Capture current image name
-    old_image = container.image.tags[0] if container.image.tags else None
-    if not old_image:
-        # Fall back to Config.Image (may be a digest reference)
-        old_image = container.attrs.get("Config", {}).get("Image")
+    old_image = _container_image_reference(container)
     if not old_image:
         raise NotFoundError(
             f"Cannot determine image for service '{name}'. "

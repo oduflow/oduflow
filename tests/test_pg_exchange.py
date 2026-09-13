@@ -97,6 +97,38 @@ def test_pg_container_gets_the_exchange_mount(tmp_path):
     assert (tmp_path / "pg_exchange").is_dir()
 
 
+@pytest.mark.parametrize("existing_container", [False, True])
+def test_pg_mount_parents_are_searchable_without_opening_team_data(
+    tmp_path, existing_container
+):
+    client = MagicMock()
+    if existing_container:
+        client.containers.get.return_value.status = "running"
+    else:
+        client.containers.get.side_effect = docker.errors.NotFound("absent")
+    previous_umask = os.umask(0o077)
+    try:
+        children = []
+        for name in ("pg_tablespaces", "pg_exchange"):
+            child = tmp_path / name / "team_7"
+            child.mkdir(parents=True)
+            (child / "private").write_text("private test fixture")
+            children.append(child)
+        with patch.object(
+            system_ops, "_resolve_conf", return_value=tmp_path / "pg.conf"
+        ):
+            system_ops._ensure_pg_container(client, _settings(tmp_path), {})
+    finally:
+        os.umask(previous_umask)
+
+    for child in children:
+        assert child.parent.stat().st_mode & 0o777 == 0o755
+        assert child.stat().st_mode & 0o777 == 0o700
+        assert (child / "private").stat().st_mode & 0o777 == 0o600
+    if existing_container:
+        client.containers.run.assert_not_called()
+
+
 # --------------------------------------------------------------------------
 # _staged_db_dump
 # --------------------------------------------------------------------------

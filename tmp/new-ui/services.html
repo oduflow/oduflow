@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Services</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .routes { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.5rem; }
+  .route { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--foreground); display: flex; align-items: center; gap: 0.5rem; }
+  .route .arrow { color: var(--cyan); }
+  .route .flag { color: var(--muted-foreground); }
+  .flagchip { display: inline-flex; padding: 0.05rem 0.45rem; border: 1px solid rgb(251 113 133 / 0.4); color: var(--rose); border-radius: var(--r-pill); font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
+  .sect-title { display: flex; align-items: center; gap: 0.75rem; margin: 1.75rem 0 0.875rem; }
+  .sect-title h2 { font-size: var(--text-lg); font-weight: 600; }
+  .sect-title .count { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--muted-foreground); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-external"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></g>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats"><span>cpu <b>34%</b></span><span>ram <b>21/64G</b></span><span>load <b>1.84</b></span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab active">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Services</h1>
+    <span class="count">3 services · 3 running</span>
+    <span class="spacer"></span>
+    <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>Create service</button>
+  </div>
+
+  <div class="cards">
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">fs</h2>
+        <span class="badge running">running</span>
+        <span class="flagchip">privileged</span>
+        <span class="flagchip">net_admin</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Update</button>
+          <button class="btn">Restart</button>
+          <button class="btn">Logs</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">oduist/freeswitch:latest</span></div>
+        <div class="kv"><span class="k">container</span><span class="v">oduflow-svc-fs</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">network</span><span class="v dim">host mode · hostname fs</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">12d ago · cpu 3.1% · 486M</span></div>
+        <div class="kv"><span class="k">volumes</span><span class="v dim">fs-sounds:/usr/share/freeswitch/sounds rw · acme:/etc/traefik ro</span></div>
+        <div class="kv"><span class="k">update</span><span class="v dim">digest unchanged · checked 2h ago</span></div>
+        <div class="kv"><span class="k">env</span><span class="v dim">ODOO_URL, FS_DOMAIN, FS_ESL_PASSWORD ••••, FS_WEBHOOK_TOKEN ••••, +6</span></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">meilisearch</h2>
+        <span class="badge running">running</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Update</button>
+          <button class="btn">Restart</button>
+          <button class="btn">Logs</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">getmeili/meilisearch:v1.9</span></div>
+        <div class="kv"><span class="k">container</span><span class="v">oduflow-svc-meilisearch</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">30d ago · cpu 0.8% · 212M</span></div>
+        <div class="kv"><span class="k">env</span><span class="v dim">MEILI_MASTER_KEY ••••</span></div>
+      </div>
+      <div class="routes">
+        <span class="route">/meili <span class="arrow">→</span> :7700 <span class="flag">· strip prefix</span></span>
+        <span class="route">/meili-admin <span class="arrow">→</span> :7701</span>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">redis</h2>
+        <span class="badge running">running</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Update</button>
+          <button class="btn">Restart</button>
+          <button class="btn">Logs</button>
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">redis:7-alpine</span></div>
+        <div class="kv"><span class="k">container</span><span class="v">oduflow-svc-redis</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">network</span><span class="v dim">internal · hostname redis</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">45d ago · cpu 0.2% · 38M</span></div>
+      </div>
+    </article>
+  </div>
+
+  <div class="sect-title">
+    <h2>Presets</h2>
+    <span class="count">3 saved configs · restore even after the container is gone</span>
+  </div>
+  <div class="cards">
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">fs</h2>
+        <span class="badge info">preset</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Restore service</button>
+          <button class="btn">Delete preset</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">oduist/freeswitch:latest</span></div>
+        <div class="kv"><span class="k">network</span><span class="v dim">host mode · hostname fs</span></div>
+        <div class="kv"><span class="k">volumes</span><span class="v dim">fs-sounds rw</span></div>
+        <div class="kv"><span class="k">env</span><span class="v dim">FS_ESL_PASSWORD ••••, FS_WEBHOOK_TOKEN ••••, +8</span></div>
+      </div>
+    </article>
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">pgadmin</h2>
+        <span class="badge info">preset</span>
+        <span class="badge stopped">no container</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Restore service</button>
+          <button class="btn">Delete preset</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">image</span><span class="v">dpage/pgadmin4:8</span></div>
+        <div class="kv"><span class="k">port</span><span class="v">5050</span></div>
+        <div class="kv"><span class="k">env</span><span class="v dim">PGADMIN_DEFAULT_PASSWORD ••••</span></div>
+        <div class="kv"></div>
+      </div>
+    </article>
+  </div>
+</main>
+
+</body>
+</html>
