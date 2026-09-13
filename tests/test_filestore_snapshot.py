@@ -335,3 +335,29 @@ def test_publish_installs_one_canonical_dump_after_restore(tmp_path):
     assert not os.path.exists(os.path.join(template_dir, "dump.sql.gz"))
     assert reload_db.call_args.kwargs["persist_dump"] is False
     assert reload_db.call_args.kwargs["dump_path"].endswith("dump.pgdump.staged")
+
+
+def test_snapshot_tolerates_files_vanishing_from_a_live_source(tmp_path, caplog):
+    # rsync exit 24: some source files disappeared mid-transfer. Routine on a
+    # running production's filestore, and everything else was copied — so this
+    # must not trigger the full-copy fallback (which would fail the same way).
+    baseline, merged = _fixture(tmp_path)
+    dest = str(tmp_path / "snapshot")
+    vanished = subprocess.CompletedProcess(
+        [], 24, b"bb/edited\n", b"rsync warning: some files vanished"
+    )
+
+    with (
+        patch.object(system_ops.shutil, "which", return_value="/usr/bin/rsync"),
+        patch.object(system_ops.subprocess, "run", return_value=vanished) as run,
+        patch.object(system_ops.shutil, "copytree") as copytree,
+    ):
+        transferred = system_ops._snapshot_filestore(
+            merged, dest, link_dests=[baseline]
+        )
+
+    run.assert_called_once()
+    copytree.assert_not_called()
+    assert transferred == ["bb/edited"]
+    assert "vanished" in caplog.text
+    assert "full copy" not in caplog.text

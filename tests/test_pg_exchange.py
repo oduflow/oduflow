@@ -329,3 +329,50 @@ def test_reload_does_not_persist_a_dump_owned_by_the_staging_context(tmp_path):
 
     copy_dump.assert_not_called()
     assert not os.path.exists(team.get_template_sql_path("prod"))
+
+
+def test_staged_dump_from_another_cluster_streams_into_the_exchange_dir(tmp_path):
+    # The production cluster has no exchange mount, so its dump is streamed out
+    # through the exec API — but still lands in the dev cluster's exchange dir,
+    # where the restore reads it in place. One full-size write, nothing in
+    # either container's writable layer.
+    settings, team = _settings(tmp_path), _team(tmp_path)
+    host_dir = tmp_path / "pg_exchange" / "team_7"
+    host_dir.mkdir(parents=True)
+    dev_container = MagicMock()
+    dev_container.attrs = {"Mounts": [{"Destination": "/exchange"}]}
+    prod_container = MagicMock()
+    client = MagicMock()
+    client.containers.get.side_effect = lambda name: (
+        prod_container if name == settings.prod_db_container else dev_container
+    )
+    dest = tmp_path / "templates" / "prod" / "dump.pgdump"
+    dest.parent.mkdir(parents=True)
+    streamed = []
+
+    def _stream(client_, container_, cmd, path, *, tool):
+        streamed.append((container_, cmd))
+        with open(path, "w") as fh:
+            fh.write("PGDMP streamed from prod")
+
+    with patch.object(system_ops, "_stream_exec_to_file", side_effect=_stream):
+        with system_ops._staged_db_dump(
+            client,
+            settings,
+            team,
+            "oduflow_7_prod-erp",
+            str(dest),
+            container_name=settings.prod_db_container,
+        ) as (host_path, container_path):
+            assert container_path.startswith("/exchange/team_7/")
+            assert os.path.dirname(host_path) == str(host_dir)
+
+    assert dest.read_text() == "PGDMP streamed from prod"
+    assert list(host_dir.iterdir()) == []
+    assert streamed == [
+        (
+            prod_container,
+            ["pg_dump", "-U", settings.db_user, "-Fc", "oduflow_7_prod-erp"],
+        )
+    ]
+    prod_container.exec_run.assert_not_called()

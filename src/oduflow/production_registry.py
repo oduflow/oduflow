@@ -23,6 +23,7 @@ Top-level schema::
           "name": ..., "domain": ..., "repo_url": ..., "branch": ...,
           "odoo_image": ..., "git_user": ..., "extra_addons": {...},
           "auto_update": false, "created_at": "...",
+          "allow_copy_to_dev_mcp": true,
           "unhealthy": false, "deploy_in_progress": false,
           "meta": {},        # free-form attach point (reserved)
           "backup": {}       # backup subsystem state (schedule, last run)
@@ -162,6 +163,11 @@ def create_production(
             "git_user": "",
             "extra_addons": {},
             "auto_update": False,
+            # Gates MCP/agent-initiated copies of this production's data into
+            # dev (template publish, create-from-production). Read as True when
+            # the key is missing so pre-existing records keep working; only the
+            # dashboard can turn it off.
+            "allow_copy_to_dev_mcp": True,
             "created_at": "",
             "unhealthy": False,
             "deploy_in_progress": False,
