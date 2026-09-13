@@ -1993,6 +1993,7 @@ def update_environment(
     env_vars: str = "",
     odoo_image: str = "",
     new_name: str = "",
+    hostname: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -2024,6 +2025,7 @@ def update_environment(
         env_name: The name of the environment to update.
         env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace the current user-supplied env vars (e.g. "WORKERS=4,LIMIT_TIME_CPU=900"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep the current env vars. The database connection variables (HOST/USER/PASSWORD) are always preserved. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         odoo_image: New Docker image with tag to pull and run (e.g. "odoo:19.0"). Leave empty to keep the current image.
+        hostname: New short Traefik hostname (e.g. "qa" produces qa.example.com for team dev.example.com). Leave empty to keep the current hostname policy. Changes the public URL.
         new_name: Optional new name for the environment. Leave empty to keep the current name.
     """
     settings = _get_settings()
@@ -2044,6 +2046,7 @@ def update_environment(
             env_override=parsed_env,
             image_override=odoo_image or None,
             rename_to=rename_to or None,
+            hostname_override=hostname or None,
         )
     finally:
         if rename_to:

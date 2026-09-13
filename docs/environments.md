@@ -223,9 +223,20 @@ oduflow call update_environment feature-login "WORKERS=4,LIMIT_TIME_CPU=900" odo
 # Rename it (keeps database, filestore and a pooled or explicit hostname)
 oduflow call update_environment '{"env_name": "feature-login", "new_name": "login"}'
 
+# Change the public Traefik hostname
+oduflow call update_environment '{"env_name": "feature-login", "hostname": "qa"}'
+
 # Tear down everything (container, database, filestore, workspace)
 oduflow call delete_environment feature-login
 ```
+
+The `hostname` parameter of `update_environment` accepts the same short hostname
+as `create_environment`: for team `dev.example.com`, `qa` routes to
+`qa.example.com`. It requires Traefik mode. Empty or omitted values keep the
+current hostname policy. Conflicting addresses are rejected before stopping the
+container. The database and filestore are preserved. You can also edit Hostname
+in the dashboard's **Update environment** dialog; leaving the field unchanged
+preserves the current policy, including name-derived routing during a rename.
 
 ### Reusing an Environment for the Next Branch
 

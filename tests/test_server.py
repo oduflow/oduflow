@@ -486,6 +486,7 @@ class TestUpdateEnvironmentTool:
             "env_override": None,
             "image_override": None,
             "rename_to": None,
+            "hostname_override": None,
         }
         assert "Environment updated successfully!" in result
         assert "Image: odoo:17.0" in result
@@ -512,9 +513,17 @@ class TestUpdateEnvironmentTool:
             "env_override": {"FOO": "new"},
             "image_override": "odoo:17.0",
             "rename_to": None,
+            "hostname_override": None,
         }
         assert "Image: odoo:17.0 (updated)" in result
         assert "Env vars: FOO=new" in result
+
+    @patch("oduflow.docker_ops.env_ops.update_environment")
+    def test_update_hostname(self, mock_update):
+        mock_update.return_value = dict(self._renamed_result(), hostname="qa")
+        result = _call_tool("update_environment", env_name="main", hostname="qa")
+        assert mock_update.call_args.kwargs["hostname_override"] == "qa"
+        assert "Hostname: qa" in result
 
     @staticmethod
     def _renamed_result():

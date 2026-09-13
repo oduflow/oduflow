@@ -1474,6 +1474,9 @@ def _build_routes(
                 env_override=env_override,
                 image_override=odoo_image or None,
                 rename_to=new_name or None,
+                hostname_override=(body.get("hostname") or "").strip() or None
+                if body
+                else None,
             )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:

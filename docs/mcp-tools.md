@@ -16,7 +16,7 @@ also available via the [REST API](web-api.md).
 | `start_environment` | | Start a stopped environment |
 | `stop_environment` | | Stop a running environment |
 | `restart_environment` | | Restart the Odoo container |
-| `update_environment` | ✓ | Re-create the container, preserving DB and filestore; optional `odoo_image` switches the image, `env_vars` replaces the container environment variables and `new_name` renames the environment |
+| `update_environment` | ✓ | Re-create the container, preserving DB and filestore; optional `odoo_image` switches the image, `hostname` changes the public Traefik hostname, `env_vars` replaces the container environment variables and `new_name` renames the environment |
 | `switch_branch` | ✓ | Point an existing environment at another branch and apply the difference, keeping its database, filestore, hostname and URL — the way to work when the team is out of environment slots; optional `new_name` renames the environment in the same operation (its scoped MCP endpoint moves with the name) |
 | **Odoo Operations** | | |
 | `pull_and_apply` | ✓ | Git pull + smart analysis → auto install/upgrade/restart; `summary_only=True` returns one action/status line and caches command logs for `read_output` |
