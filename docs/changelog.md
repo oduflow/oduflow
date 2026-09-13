@@ -4,6 +4,16 @@
 
 ### Features
 
+- **Per-team `public_scheme`** — `[team.X] public_scheme` overrides the global
+  `[routing]` value, so one `tls = false` deployment can serve a plain-HTTP
+  LAN team and a team behind a TLS-terminating upstream (e.g. a Cloudflare
+  tunnel) with `https://` links at the same time. Every URL Oduflow hands out
+  (dashboard links, MCP endpoints, environment/service/production URLs) uses
+  the owning team's resolved scheme, and Traefik trusts inbound
+  `X-Forwarded-*` on `:80` whenever any team resolves to `https`. The same
+  wire-reality validation applies per team: `https` is rejected in port mode
+  and `http` is rejected while `tls = true`.
+
 - **Paste the token, not a `user:PAT@repo` URL** — the dashboard's *Add Git
   Credential* dialog now takes the access token, the git host (default
   `github.com`), an optional username and an optional repository URL to verify

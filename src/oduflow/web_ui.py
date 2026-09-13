@@ -4104,7 +4104,7 @@ def _build_routes(
         mode that is the team's own hostname (the env pages are served there);
         port mode keeps the configured base or the request's own."""
         if settings.routing_mode == "traefik":
-            return f"{settings.public_scheme}://{team.hostname}"
+            return f"{settings.public_scheme_for(team)}://{team.hostname}"
         return str(request.base_url).rstrip("/")
 
     def _share_payload(
@@ -4280,7 +4280,7 @@ def _build_routes(
                 env_host = result["cookie_domain"]
                 token = connect_tokens.issue(env_host, result["sid"])
                 landing = (
-                    f"{settings.public_scheme}://{env_host}"
+                    f"{settings.public_scheme_for(team)}://{env_host}"
                     f"/oduflow-connect?token={token}"
                 )
                 return RedirectResponse(landing, status_code=303)
@@ -4331,8 +4331,12 @@ def _build_routes(
                 status_code=400,
                 media_type="text/plain",
             )
+        # Same-host redirect: keep whatever scheme the browser reached us on
+        # (the env host belongs to one team, whose per-team scheme the incoming
+        # request already reflects via the terminator's X-Forwarded-Proto).
+        scheme = "https" if _is_secure_request(request) else "http"
         response: Response = RedirectResponse(
-            f"{get_settings().public_scheme}://{env_host}/web", status_code=303
+            f"{scheme}://{env_host}/web", status_code=303
         )
         response.set_cookie(
             "session_id",

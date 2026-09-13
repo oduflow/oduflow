@@ -310,11 +310,13 @@ def test_connect_land_sets_host_only_cookie_and_redirects(tmp_path):
         )
     token = parse_qs(urlparse(r1.headers["location"]).query)["token"][0]
 
-    # Land on the env host (Traefik would route /oduflow-connect here).
+    # Land on the env host (Traefik would route /oduflow-connect here). The
+    # redirect keeps the scheme the browser arrived on, which Traefik reports
+    # via X-Forwarded-Proto — https for this team's TLS-terminated host.
     r2 = client.get(
         "/oduflow-connect",
         params={"token": token},
-        headers={"host": "180.dev.example.com"},
+        headers={"host": "180.dev.example.com", "x-forwarded-proto": "https"},
         follow_redirects=False,
     )
     assert r2.status_code == 303

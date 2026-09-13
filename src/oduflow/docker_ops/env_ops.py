@@ -1707,9 +1707,9 @@ def build_env_traefik_labels(
         labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
     else:
         # Upstream (e.g. Cloudflare tunnel) terminates TLS; Traefik routes plain
-        # HTTP on the web entrypoint. Public URLs use settings.public_scheme
-        # (the upstream's scheme, https unless overridden), not this
-        # entrypoint's.
+        # HTTP on the web entrypoint. Public URLs use the team's resolved
+        # public scheme (the upstream's scheme, https unless overridden), not
+        # this entrypoint's.
         labels[f"traefik.http.routers.{router}.entrypoints"] = "web"
     return labels
 
@@ -1765,11 +1765,11 @@ def adopt_existing_environment(
         container.reload()
 
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}"
+        url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}"
     else:
         ports = container.ports.get("8069/tcp")
         url = (
-            f"{settings.public_scheme}://{team.hostname}:{ports[0]['HostPort']}"
+            f"{settings.public_scheme_for(team)}://{team.hostname}:{ports[0]['HostPort']}"
             if ports
             else ""
         )
@@ -1984,11 +1984,11 @@ def _create_environment_impl(
         if existing.status == "running":
             existing.reload()
             if settings.routing_mode == "traefik":
-                url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, existing.labels.get(ENV_HOSTNAME_LABEL, ''))}"
+                url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, existing.labels.get(ENV_HOSTNAME_LABEL, ''))}"
             else:
                 ports = existing.ports.get("8069/tcp")
                 existing_port = ports[0]["HostPort"] if ports else "?"
-                url = f"{settings.public_scheme}://{team.hostname}:{existing_port}"
+                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{existing_port}"
             raise ConflictError(
                 f"Environment '{env_name}' already exists and is running at {url}."
             )
@@ -2364,9 +2364,9 @@ def _create_environment_impl(
         raise
 
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, hostname)}"
     else:
-        url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
     logger.info(
         "Environment created",
         extra={"env_name": env_name, "url": url, "container": odoo_container_name},
@@ -2480,7 +2480,7 @@ def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> 
     from urllib.parse import quote
 
     if settings.routing_mode == "traefik":
-        base = f"{settings.public_scheme}://{team.hostname}"
+        base = f"{settings.public_scheme_for(team)}://{team.hostname}"
     else:
         base = f"http://host.docker.internal:{settings.port}"
     return f"{base}/mcp/{quote(env_name, safe='/')}"
@@ -3252,7 +3252,7 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
         if "-odoo" in container.name:
             if settings.routing_mode == "traefik":
                 envs[env_name]["url"] = (
-                    f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                    f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
                 )
             else:
                 ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
@@ -3262,7 +3262,7 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
                         host_port = mappings[0].get("HostPort")
                         if host_port:
                             envs[env_name]["url"] = (
-                                f"{settings.public_scheme}://{team.hostname}"
+                                f"{settings.public_scheme_for(team)}://{team.hostname}"
                                 f":{host_port}/web?debug=1"
                             )
 
@@ -3470,7 +3470,7 @@ def get_env_base_url(
         host = get_env_hostname(
             env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, "")
         )
-        return f"{settings.public_scheme}://{host}", host
+        return f"{settings.public_scheme_for(team)}://{host}", host
 
     # Port routing: read the container's published 8069 port. Cookies are not
     # port-scoped, so the domain is just the host.
@@ -3492,7 +3492,10 @@ def get_env_base_url(
             f"Environment '{env_name}' has no published HTTP port; "
             "is the environment running?"
         )
-    return f"{settings.public_scheme}://{team.hostname}:{host_port}", team.hostname
+    return (
+        f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}",
+        team.hostname,
+    )
 
 
 def get_environment_info(
@@ -3552,7 +3555,7 @@ def get_environment_info(
 
         if settings.routing_mode == "traefik":
             result["url"] = (
-                f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
             )
         else:
             ports = odoo_container.attrs.get("NetworkSettings", {}).get("Ports", {})
@@ -3562,7 +3565,7 @@ def get_environment_info(
                     host_port = mappings[0].get("HostPort")
                     if host_port:
                         result["url"] = (
-                            f"{settings.public_scheme}://{team.hostname}"
+                            f"{settings.public_scheme_for(team)}://{team.hostname}"
                             f":{host_port}/web?debug=1"
                         )
 
@@ -5072,9 +5075,9 @@ def update_environment(
     # 6. Build URL and return result
     # ------------------------------------------------------------------
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, route_hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, route_hostname)}"
     else:
-        url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
 
     env_db = get_db_name(env_name, team.team_id)
     workspace = get_workspace_path(env_name, team.workspaces_dir)

@@ -7,8 +7,14 @@ from oduflow.docker_ops.env_ops import build_env_traefik_labels
 from oduflow.settings import ExtraRoute, Settings, TeamSettings
 
 
-def _traefik_settings(tmp_path, tls, extra_routes=(), public_scheme=""):
-    team = TeamSettings(team_id="1", hostname="dev.example.com")
+def _traefik_settings(
+    tmp_path, tls, extra_routes=(), public_scheme="", team_public_scheme=""
+):
+    team = TeamSettings(
+        team_id="1",
+        hostname="dev.example.com",
+        public_scheme_setting=team_public_scheme,
+    )
     return Settings(
         routing_mode="traefik",
         routing_tls=tls,
@@ -239,6 +245,21 @@ class TestEnsureTraefik:
         cmd = client.containers.run.call_args[1]["command"]
         assert client.containers.run.call_args[1]["ports"] == {"80/tcp": 80}
         assert not any("forwardedHeaders" in a for a in cmd)
+
+    def test_team_https_override_trusts_forwarded_headers(self, tmp_path):
+        # Mixed deployment: global public_scheme = "http" (LAN team) but one
+        # team sits behind a TLS-terminating upstream (Cloudflare tunnel). The
+        # shared web entrypoint must trust X-Forwarded-* so the tunnel's
+        # X-Forwarded-Proto: https survives for that team.
+        client = self._client_no_container()
+        system_ops._ensure_traefik(
+            client,
+            _traefik_settings(
+                tmp_path, False, public_scheme="http", team_public_scheme="https"
+            ),
+        )
+        cmd = client.containers.run.call_args[1]["command"]
+        assert "--entrypoints.web.forwardedHeaders.insecure=true" in cmd
 
     def test_drift_recreates_when_public_scheme_drops_tls(self, tmp_path):
         # Container was built for an upstream terminator (forwarded headers

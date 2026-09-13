@@ -213,3 +213,43 @@ no environment or service needs recreating.
     Odoo logins, session cookies, the dashboard password and MCP bearer tokens
     all travel in cleartext. Use this only on a trusted network, never on a
     public-facing server.
+
+## Mixing HTTP and HTTPS teams in one deployment
+
+`public_scheme` can be overridden per team. The typical shape: one team is
+reached directly over the LAN in plain HTTP, another is published through a
+**Cloudflare tunnel** that terminates TLS — same server, same Traefik on plain
+`:80`:
+
+```toml
+[routing]
+mode = "traefik"
+tls = false              # Traefik listens on plain HTTP :80 only
+public_scheme = "http"   # default for teams without an override (the LAN team)
+
+[team.1]
+hostname = "dev.internal.example.com"   # LAN, http:// links
+
+[team.2]
+hostname = "dev.example.com"            # via Cloudflare tunnel
+public_scheme = "https"                 # its links are https://
+```
+
+Point the tunnel at the server's port 80 for the second team's hostnames
+(e.g. `dev.example.com` and `*.dev.example.com → http://localhost:80`); the
+first team's clients resolve its hostname to the server directly. Every URL
+Oduflow hands out — dashboard links, MCP endpoints, environment and service
+URLs — uses each team's resolved scheme. No `acme_email` is involved: with
+`tls = false` Traefik never talks to Let's Encrypt, and the tunnel's
+certificate comes from Cloudflare.
+
+Because at least one team resolves to `https`, the `web` entrypoint trusts
+inbound `X-Forwarded-*` headers (as in the tunnel setup above) — so the tunnel's
+`X-Forwarded-Proto: https` survives. That trust is entrypoint-wide: a LAN
+client could forge `X-Forwarded-Proto` on its own requests, which only makes
+its own session cookie `Secure` (unsendable over its http:// origin) — but
+keep port 80 unreachable from untrusted networks regardless.
+
+The per-team value obeys the same rules as the global one: `https` is invalid
+in port mode, and `http` is invalid while `tls = true` (the :80→:443 redirect
+would break the links).

@@ -86,8 +86,8 @@ _DEPLOYS_CAP = 100
 pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 
 
-def prod_url(settings: Settings, record: dict[str, Any]) -> str:
-    return f"{settings.public_scheme}://{record['domain']}"
+def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
+    return f"{settings.public_scheme_for(team)}://{record['domain']}"
 
 
 def _odoo_container_name(settings: Settings, team: TeamSettings, name: str) -> str:
@@ -740,7 +740,7 @@ def create_production(
     )
     return {
         "name": name,
-        "url": prod_url(settings, record),
+        "url": prod_url(settings, team, record),
         "domain": domain,
         "odoo_container": container_name,
         "database": env_db,
@@ -1267,7 +1267,7 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
             {
                 "name": name,
                 "domain": record.get("domain", ""),
-                "url": prod_url(settings, record),
+                "url": prod_url(settings, team, record),
                 "status": _runtime_status(container, record),
                 "repo_url": record.get("repo_url", ""),
                 "branch": record.get("branch", ""),
@@ -1315,7 +1315,7 @@ def get_production_info(
     return {
         "name": name,
         "domain": record.get("domain", ""),
-        "url": prod_url(settings, record),
+        "url": prod_url(settings, team, record),
         "status": _runtime_status(container, record),
         "healthy": healthy,
         "repo_url": record.get("repo_url", ""),

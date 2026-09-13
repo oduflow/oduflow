@@ -115,6 +115,12 @@ class TeamSettings:
     # Container image building ([team.X.image_registry]); None = the image
     # build/publish MCP tools are unavailable for this team.
     image_registry: ImageRegistrySettings | None = None
+    # Raw per-team ``public_scheme`` override; empty falls back to the global
+    # [routing] value. Read the resolved scheme via
+    # :meth:`Settings.public_scheme_for`, not this field. Lets one deployment
+    # mix teams reached over plain HTTP (e.g. LAN) with teams fronted by an
+    # upstream TLS terminator such as a Cloudflare tunnel (https).
+    public_scheme_setting: str = ""
 
     @property
     def workspaces_dir(self) -> str:
@@ -382,11 +388,30 @@ class Settings:
         and a ``tls = false`` deployment is normally fronted by an upstream
         terminator (e.g. a Cloudflare tunnel) that still serves https. An
         operator who runs plain HTTP end to end sets ``[routing]
-        public_scheme = "http"`` to override the derived default.
+        public_scheme = "http"`` to override the derived default. Team-scoped
+        URLs go through :meth:`public_scheme_for`, which lets a ``[team.X]
+        public_scheme`` override this deployment-wide value.
         """
         if self.public_scheme_setting:
             return self.public_scheme_setting
         return "https" if self.routing_mode == "traefik" else "http"
+
+    def public_scheme_for(self, team: TeamSettings) -> str:
+        """Resolved URL scheme for one team's public URLs.
+
+        A ``[team.X] public_scheme`` overrides the global ``[routing]`` value,
+        so one deployment can hand out http:// links for a LAN-only team and
+        https:// links for a team fronted by an upstream TLS terminator (e.g. a
+        Cloudflare tunnel) at the same time.
+        """
+        return team.public_scheme_setting or self.public_scheme
+
+    @property
+    def any_public_scheme_https(self) -> bool:
+        """Whether any team (or the global default) resolves to https."""
+        return self.public_scheme == "https" or any(
+            self.public_scheme_for(t) == "https" for t in self.teams.values()
+        )
 
     @property
     def oauth_enabled(self) -> bool:
@@ -460,6 +485,30 @@ class Settings:
                     f"'{team.hostname}'."
                 )
             seen_team_hosts[normalized_host] = team.team_id
+            # Per-team public_scheme obeys the same wire-reality rules as the
+            # global one (see the checks above): it changes only the URLs handed
+            # out, not what Traefik serves, so it must still match what actually
+            # answers on that hostname.
+            if team.public_scheme_setting not in ("", "http", "https"):
+                raise ValueError(
+                    f"Team '{team.team_id}': public_scheme must be 'http' or 'https'"
+                )
+            if (
+                team.public_scheme_setting == "http"
+                and self.routing_mode == "traefik"
+                and self.routing_tls
+            ):
+                raise ValueError(
+                    f"Team '{team.team_id}': public_scheme = 'http' requires "
+                    "tls = false: with tls = true Traefik redirects :80 to "
+                    ":443, so http:// links would not work"
+                )
+            if team.public_scheme_setting == "https" and self.routing_mode == "port":
+                raise ValueError(
+                    f"Team '{team.team_id}': public_scheme = 'https' is not "
+                    "supported in port mode: published environment ports serve "
+                    "plain HTTP"
+                )
             if team.port_range_start >= team.port_range_end:
                 raise ValueError(
                     f"Team '{team.team_id}': invalid port range "
@@ -722,6 +771,9 @@ class Settings:
                 or "claude",
                 agent_env={str(k): str(v) for k, v in agent_env_raw.items()},
                 image_registry=image_registry,
+                public_scheme_setting=str(team_cfg.get("public_scheme", ""))
+                .strip()
+                .lower(),
             )
 
         # Parse static extra routes ([route.<name>] → host + upstream url).

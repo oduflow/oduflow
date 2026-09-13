@@ -458,8 +458,15 @@ def _trusts_upstream_headers(settings: Settings) -> bool:
     that must be able to tell us the browser spoke HTTPS. When the deployment is
     plain HTTP end to end (``public_scheme = "http"``) there is no trusted hop,
     so the headers stay untrusted and any client-supplied ones are overwritten.
+
+    The check is per deployment, not per team: the ``web`` entrypoint is shared,
+    so if *any* team resolves to https (per-team ``public_scheme`` override) the
+    headers must be trusted or the terminator's ``X-Forwarded-Proto: https``
+    would be overwritten. A plain-HTTP team on the same entrypoint could then
+    forge ``X-Forwarded-Proto``, but the only effect is on its own session
+    (Secure-flagged cookies its http:// origin cannot send back).
     """
-    return not settings.routing_tls and settings.public_scheme == "https"
+    return not settings.routing_tls and settings.any_public_scheme_https
 
 
 def _route_entrypoint(settings: Settings) -> dict[str, Any]:
