@@ -17,6 +17,7 @@ import sys
 import tarfile
 import time
 import uuid
+from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -1672,6 +1673,8 @@ def _staged_db_dump(
     team: TeamSettings,
     db_name: str,
     dest_path: str,
+    *,
+    container_name: str | None = None,
 ) -> Any:
     """Dump *db_name* for *dest_path*, as cheaply as this installation allows.
 
@@ -1682,10 +1685,18 @@ def _staged_db_dump(
     which a parallel ``pg_restore`` uses; a dump streamed from stdout cannot
     carry them.
 
+    ``container_name`` selects the PostgreSQL instance to dump from: the shared
+    dev cluster by default, or ``settings.prod_db_container``. Only the shared
+    container has the exchange dir mounted, so a dump from any other cluster is
+    streamed out through the exec API — still straight into the exchange dir
+    when there is one, so the dev-side restore can read it in place.
+
     On a clean exit the staged dump is moved to *dest_path*; on failure nothing
     is left behind, and *dest_path* is never half-written.
     """
-    db_container = client.containers.get(settings.shared_db_container)
+    source_name = container_name or settings.shared_db_container
+    db_container = client.containers.get(source_name)
+    dump_in_place = source_name == settings.shared_db_container
     exchange = _pg_exchange_dirs(client, settings, team)
     dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fc"]
     container_path: str | None = None
@@ -1700,7 +1711,7 @@ def _staged_db_dump(
         container_path = f"{container_dir}/{name}"
 
     try:
-        if container_path is None:
+        if container_path is None or not dump_in_place:
             _stream_exec_to_file(
                 client, db_container, [*dump_cmd, db_name], host_path, tool="pg_dump"
             )
@@ -2928,26 +2939,19 @@ def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def _code_provenance(
-    team: TeamSettings, env_name: str, labels: dict[str, Any]
-) -> dict[str, str]:
-    """Which code the template's database was snapshotted from.
+def _commit_provenance(branch: str, repo_path: str) -> dict[str, str]:
+    """Which code a template's database was snapshotted from.
 
-    A template DB is a snapshot of a branch at a moment in time; without that
+    A template DB is a snapshot of *branch* at a moment in time; without that
     anchor nothing can tell a later environment whether its checkout predates
     the data it was handed. Recorded best-effort — a missing checkout only means
     the lineage check is skipped later (see git_analysis.template_lineage).
     """
     from oduflow.git_ops import is_git_repository, rev_parse
-    from oduflow.naming import get_repo_path
 
     provenance: dict[str, str] = {"snapshot_at": _utc_now_iso()}
-    branch = labels.get("oduflow.git_branch", "")
     if branch:
         provenance["source_branch"] = branch
-    repo_path = labels.get("oduflow.local_path", "") or get_repo_path(
-        env_name, team.workspaces_dir
-    )
     if is_git_repository(repo_path):
         try:
             provenance["source_commit"] = rev_parse(repo_path)
@@ -2956,6 +2960,18 @@ def _code_provenance(
                 "No snapshot commit for template source %s: %s", repo_path, exc
             )
     return provenance
+
+
+def _code_provenance(
+    team: TeamSettings, env_name: str, labels: dict[str, Any]
+) -> dict[str, str]:
+    """Provenance of an environment's checkout, read from its container labels."""
+    from oduflow.naming import get_repo_path
+
+    repo_path = labels.get("oduflow.local_path", "") or get_repo_path(
+        env_name, team.workspaces_dir
+    )
+    return _commit_provenance(labels.get("oduflow.git_branch", ""), repo_path)
 
 
 def _source_env_metadata(settings: Settings, labels: dict[str, Any]) -> dict[str, Any]:
@@ -3038,7 +3054,16 @@ def _snapshot_filestore(
 
     os.makedirs(dest, exist_ok=True)
     result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
+    if result.returncode == 24:
+        # "Some files vanished before they could be transferred": routine on a
+        # live source (a running production unlinks attachments), and rsync has
+        # still copied everything else. Falling back to a full copy of a tree
+        # that is changing underneath would only fail the same way, later.
+        logger.warning(
+            "Filestore snapshot: some source files vanished during rsync; "
+            "continuing without them"
+        )
+    elif result.returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)
         _full_copy(
             f"rsync exited {result.returncode}: "
@@ -3112,6 +3137,160 @@ def _chown_filestore(
         chown_recursive(root, uid, gid, client, image)
 
 
+def _check_template_publish_allowed(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    template_name: str,
+    tpl_db: str,
+    *,
+    overwrite: bool,
+) -> None:
+    """Gate a publish into *template_name*.
+
+    Never silently clobber an existing template: publishing over one is a
+    deliberate re-baseline, so it must be requested explicitly (overwrite=True).
+    Republishing replaces the template (no net growth), so only a brand-new
+    template database is charged against the team's quota.
+    """
+    tpl_db_exists = _db_exists(client, settings, tpl_db)
+    if not overwrite and (
+        os.path.exists(team.get_template_dir(template_name)) or tpl_db_exists
+    ):
+        raise ConflictError(
+            f"Template '{template_name}' already exists. Choose a new name "
+            f"(or pass overwrite=True to re-baseline it)."
+        )
+    if not tpl_db_exists:
+        check_db_quota(client, settings, team)
+
+
+@contextlib.contextmanager
+def _publishing_template_dir(template_dir: str) -> Iterator[str]:
+    """Create *template_dir* for a publish and take it back if the publish fails.
+
+    The directory is the first thing a publish leaves behind and the first thing
+    anyone checks for, so a dump or restore that failed halfway must not leave
+    an empty one: readers would take it for a template. Only a directory this
+    publish created is removed — re-baselining an existing template keeps it.
+    """
+    created = not os.path.isdir(template_dir)
+    os.makedirs(template_dir, exist_ok=True)
+    try:
+        yield template_dir
+    except BaseException:
+        if created:
+            shutil.rmtree(template_dir, ignore_errors=True)
+        raise
+
+
+def _remove_legacy_dumps(template_dir: str) -> None:
+    """Drop the dump formats an older template may carry next to ``dump.pgdump``.
+
+    A publish always produces an uncompressed custom-format archive; the
+    previous dump is only removed once the new one has been installed.
+    """
+    for old_name in ("dump.sql", "dump.sql.gz", "dump.pgdump.gz"):
+        old_path = os.path.join(template_dir, old_name)
+        if os.path.isfile(old_path):
+            os.remove(old_path)
+            logger.info("Removed old dump %s", old_path)
+
+
+def _odoo_uid_gid(client: DockerClient, image: str) -> tuple[int, int]:
+    uid_str, gid_str = get_odoo_uid_gid(client, image).split(":")
+    return int(uid_str), int(gid_str)
+
+
+def _install_filestore_snapshot(
+    client: DockerClient,
+    snapshot_dir: str,
+    template_filestore_path: str,
+    *,
+    transferred: list[str] | None,
+    link_dests: list[str],
+    uid: int,
+    gid: int,
+    image: str,
+    source_label: str,
+) -> None:
+    """Make *snapshot_dir* the template's filestore baseline, owned by Odoo.
+
+    Runs while the template's overlay consumers are unmounted (inside
+    ``env_ops.remount_template_overlays``): this is where the lower layer is
+    swapped.
+    """
+    if os.path.exists(template_filestore_path):
+        shutil.rmtree(template_filestore_path)
+    os.makedirs(os.path.dirname(template_filestore_path), exist_ok=True)
+    try:
+        os.rename(snapshot_dir, template_filestore_path)
+    except OSError as exc:
+        # Both paths live under the team data dir, so this should be a free
+        # rename. Anything else (separate mounts, mismatched XFS project IDs)
+        # degrades to a full-size copy — say so loudly instead of quietly
+        # paying for it.
+        logger.warning(
+            "Could not move the filestore snapshot into place (%s); copying %s instead",
+            exc,
+            snapshot_dir,
+        )
+        shutil.copytree(snapshot_dir, template_filestore_path)
+        shutil.rmtree(snapshot_dir)
+    logger.info("Template filestore replaced from %s", source_label)
+
+    _chown_filestore(
+        template_filestore_path,
+        transferred if _baselines_owned_by(link_dests, uid, gid) else None,
+        uid,
+        gid,
+        client,
+        image,
+    )
+    logger.info("Template filestore chowned to %d:%d", uid, gid)
+
+
+def _finalize_template_metadata(
+    settings: Settings,
+    team: TeamSettings,
+    template_name: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Decide the overlay mode from the new baseline's size and persist metadata."""
+    from oduflow.docker_ops import env_ops
+
+    template_filestore_path = team.get_template_filestore_path(template_name)
+    fs_size = (
+        env_ops._dir_size_mb(template_filestore_path)
+        if os.path.isdir(template_filestore_path)
+        else 0.0
+    )
+    metadata["use_overlay"] = fs_size >= settings.overlay_threshold_mb
+    metadata = _update_template_sizes(team, settings, template_name, metadata)
+    logger.info(
+        "Template metadata saved (use_overlay=%s, filestore=%.0f MB)",
+        metadata["use_overlay"],
+        fs_size,
+    )
+    return metadata
+
+
+def template_is_ready(
+    settings: Settings, team: TeamSettings, template_name: str
+) -> bool:
+    """Whether *template_name* is a complete, usable template.
+
+    Metadata is the last artefact a publish writes and the template database is
+    what environments are cloned from, so both must exist. A bare template
+    directory is not enough: a publish that failed halfway can leave one behind,
+    and a stale database can outlive its directory.
+    """
+    if not os.path.isfile(team.get_template_metadata_path(template_name)):
+        return False
+    tpl_db = get_template_db_name(template_name, team.team_id)
+    return _db_exists(get_client(), settings, tpl_db)
+
+
 def publish_env_as_template(
     settings: Settings,
     team: TeamSettings,
@@ -3132,211 +3311,169 @@ def publish_env_as_template(
         raise NotFoundError(
             f"Database '{env_db}' for environment '{env_name}' not found."
         )
-
-    # Never silently clobber an existing template: publishing over one is a
-    # deliberate re-baseline, so it must be requested explicitly (overwrite=True).
-    if not overwrite and (
-        os.path.exists(team.get_template_dir(template_name))
-        or _db_exists(client, settings, tpl_db)
-    ):
-        raise ConflictError(
-            f"Template '{template_name}' already exists. Choose a new name "
-            f"(or pass overwrite=True to re-baseline it)."
-        )
-
-    # Republishing an existing template replaces it (no net growth); only a
-    # brand-new template is gated by the quota.
-    if not _db_exists(client, settings, tpl_db):
-        check_db_quota(client, settings, team)
-
+    _check_template_publish_allowed(
+        client, settings, team, template_name, tpl_db, overwrite=overwrite
+    )
     _wait_pg_ready(client, settings)
 
-    # 1-2. pg_dump the branch DB, then rebuild the template DB from it, and only
-    # then move the dump into the template dir — a failed restore leaves no
-    # half-published template behind. Ownership is stripped at restore time
-    # (pg_restore --no-owner in reload_template), NOT here: --no-owner is ignored
-    # by pg_dump for the -Fc archive format.
     template_dir = team.get_template_dir(template_name)
     dump_path = os.path.join(template_dir, "dump.pgdump")
-    os.makedirs(template_dir, exist_ok=True)
-
-    logger.info("Dumping branch database %s", env_db)
-    with _staged_db_dump(client, settings, team, env_db, dump_path) as (
-        staged_dump,
-        container_dump,
-    ):
-        logger.info("Branch dump saved to %s", staged_dump)
-        reload_template(
-            settings,
-            team,
-            template_name=template_name,
-            dump_path=staged_dump,
-            container_dump_path=container_dump,
-            persist_dump=False,
-        )
-
-    # A publish always produces an uncompressed custom-format archive. Keep the
-    # previous dump until the restore and atomic install above have both
-    # succeeded, then remove any obsolete format left by an older template.
-    for old_name in ("dump.sql", "dump.sql.gz", "dump.pgdump.gz"):
-        old_path = os.path.join(template_dir, old_name)
-        if os.path.isfile(old_path):
-            os.remove(old_path)
-            logger.info("Removed old dump %s", old_path)
-
-    # ------------------------------------------------------------------
-    # 3-7. Swap the template's lower filestore non-destructively (issue #2).
-    # ------------------------------------------------------------------
-    # The SOURCE env's deltas become the new lower layer, so it is always reset.
-    # OTHER overlay envs on this template keep their upper deltas by default;
-    # reset_env_changes=True resets them to the new baseline instead.
-    env_paths = get_filestore_paths(env_name, team.workspaces_dir)
-    branch_merged = env_paths["merged"]
-    template_filestore_path = team.get_template_filestore_path(template_name)
-    source_container = get_resource_name(
-        env_name, "odoo", settings.prefix, team.team_id
-    )
-    source_is_overlay = os.path.isdir(branch_merged) and os.path.ismount(branch_merged)
-
-    source_template = ""
-    try:
-        sc = client.containers.get(source_container)
-        source_was_running = sc.status == "running"
-        source_image = sc.image.tags[0] if sc.image.tags else "odoo:19.0"
-        source_template = sc.labels.get("oduflow.template", "") or ""
-    except (docker.errors.NotFound, IndexError):
-        source_was_running = False
-        source_image = "odoo:19.0"
-
-    # Snapshot the source env's merged filestore while it is still mounted.
-    # Link against the baseline the env is currently mounted on (where nearly
-    # every file matches) and against the template being published into, which
-    # differ when an env from one template is published under a new name.
-    # An env created without a template carries the literal "none" label
-    # (env_ops._env_labels), which is a sentinel, not a template to link against.
-    candidates = (
-        source_template if source_template != "none" else "",
-        template_name,
-    )
-    link_dests = [
-        team.get_template_filestore_path(name)
-        for name in dict.fromkeys(filter(None, candidates))
-    ]
-    snapshot_dir: str | None = None
-    transferred: list[str] | None = None
-    if os.path.isdir(branch_merged):
-        snapshot_dir = branch_merged + "_snapshot"
-        transferred = _snapshot_filestore(
-            branch_merged, snapshot_dir, link_dests=link_dests
-        )
-        logger.info("Snapshot of filestore created for env %s", env_name)
-    else:
-        logger.warning(
-            "Branch filestore %s not found, skipping filestore update", branch_merged
-        )
-
-    with env_ops.remount_template_overlays(
-        client,
-        settings,
-        team,
-        template_name,
-        reset_upper=reset_env_changes,
-        exclude_envs=(env_name,),
-    ) as remount:
-        # Unmount the source overlay (after snapshot) so its lower can change.
-        if source_is_overlay:
-            try:
-                client.containers.get(source_container).stop(timeout=10)
-            except docker.errors.NotFound:
-                pass
-            env_ops._unmount_filestore(env_name, team)
-            env_ops._wait_unmounted(branch_merged)
-
-        # Replace template filestore with the snapshot.
-        if snapshot_dir and os.path.isdir(snapshot_dir):
-            if os.path.exists(template_filestore_path):
-                shutil.rmtree(template_filestore_path)
-            os.makedirs(os.path.dirname(template_filestore_path), exist_ok=True)
-            try:
-                os.rename(snapshot_dir, template_filestore_path)
-            except OSError as exc:
-                # Both paths live under the team data dir, so this should be a
-                # free rename. Anything else (separate mounts, mismatched XFS
-                # project IDs) degrades to a full-size copy — say so loudly
-                # instead of quietly paying for it.
-                logger.warning(
-                    "Could not move the filestore snapshot into place (%s); "
-                    "copying %s instead",
-                    exc,
-                    snapshot_dir,
-                )
-                shutil.copytree(snapshot_dir, template_filestore_path)
-                shutil.rmtree(snapshot_dir)
-            logger.info("Template filestore replaced from env %s", env_name)
-
-            odoo_uid_gid = get_odoo_uid_gid(client, source_image)
-            uid_str, gid_str = odoo_uid_gid.split(":")
-            uid, gid = int(uid_str), int(gid_str)
-            _chown_filestore(
-                template_filestore_path,
-                transferred if _baselines_owned_by(link_dests, uid, gid) else None,
-                uid,
-                gid,
-                client,
-                source_image,
+    with _publishing_template_dir(template_dir):
+        # 1-2. pg_dump the branch DB, then rebuild the template DB from it, and
+        # only then move the dump into the template dir — a failed restore
+        # leaves no half-published template behind. Ownership is stripped at
+        # restore time (pg_restore --no-owner in reload_template), NOT here:
+        # --no-owner is ignored by pg_dump for the -Fc archive format.
+        logger.info("Dumping branch database %s", env_db)
+        with _staged_db_dump(client, settings, team, env_db, dump_path) as (
+            staged_dump,
+            container_dump,
+        ):
+            logger.info("Branch dump saved to %s", staged_dump)
+            reload_template(
+                settings,
+                team,
+                template_name=template_name,
+                dump_path=staged_dump,
+                container_dump_path=container_dump,
+                persist_dump=False,
             )
-            logger.info("Template filestore chowned to %s", odoo_uid_gid)
+        _remove_legacy_dumps(template_dir)
 
-        # Remount the source overlay against the new lower (always reset) + restart.
-        if source_is_overlay:
-            for key in ("upper", "work"):
-                d = env_paths[key]
-                if os.path.isdir(d):
-                    shutil.rmtree(d)
-                    os.makedirs(d, mode=0o777, exist_ok=True)
-            env_ops._mount_filestore(
+        # ------------------------------------------------------------------
+        # 3-7. Swap the template's lower filestore non-destructively (issue #2).
+        # ------------------------------------------------------------------
+        # The SOURCE env's deltas become the new lower layer, so it is always
+        # reset. OTHER overlay envs on this template keep their upper deltas by
+        # default; reset_env_changes=True resets them to the new baseline.
+        env_paths = get_filestore_paths(env_name, team.workspaces_dir)
+        branch_merged = env_paths["merged"]
+        template_filestore_path = team.get_template_filestore_path(template_name)
+        source_container = get_resource_name(
+            env_name, "odoo", settings.prefix, team.team_id
+        )
+        source_is_overlay = os.path.isdir(branch_merged) and os.path.ismount(
+            branch_merged
+        )
+
+        source_template = ""
+        try:
+            sc = client.containers.get(source_container)
+            source_was_running = sc.status == "running"
+            source_image = sc.image.tags[0] if sc.image.tags else "odoo:19.0"
+            source_template = sc.labels.get("oduflow.template", "") or ""
+        except (docker.errors.NotFound, IndexError):
+            source_was_running = False
+            source_image = "odoo:19.0"
+
+        # Snapshot the source env's merged filestore while it is still mounted.
+        # Link against the baseline the env is currently mounted on (where
+        # nearly every file matches) and against the template being published
+        # into, which differ when an env from one template is published under a
+        # new name. An env created without a template carries the literal
+        # "none" label (env_ops._env_labels), which is a sentinel, not a
+        # template to link against.
+        candidates = (
+            source_template if source_template != "none" else "",
+            template_name,
+        )
+        link_dests = [
+            team.get_template_filestore_path(name)
+            for name in dict.fromkeys(filter(None, candidates))
+        ]
+        snapshot_dir: str | None = None
+        transferred: list[str] | None = None
+        if os.path.isdir(branch_merged):
+            snapshot_dir = branch_merged + "_snapshot"
+            transferred = _snapshot_filestore(
+                branch_merged, snapshot_dir, link_dests=link_dests
+            )
+            logger.info("Snapshot of filestore created for env %s", env_name)
+        else:
+            logger.warning(
+                "Branch filestore %s not found, skipping filestore update",
+                branch_merged,
+            )
+
+        # Resolved before the remount block: a cache miss runs (and may pull) the
+        # image, which must not extend the time dependent envs are unmounted.
+        uid, gid = _odoo_uid_gid(client, source_image)
+
+        try:
+            with env_ops.remount_template_overlays(
                 client,
                 settings,
                 team,
-                env_name,
-                get_db_name(env_name, team.team_id),
-                source_image,
-                {},
-                template_name=template_name,
-                force_overlay=True,
-            )
-            if source_was_running:
-                try:
-                    client.containers.get(source_container).start()
-                except (docker.errors.NotFound, docker.errors.APIError):
-                    pass
+                template_name,
+                reset_upper=reset_env_changes,
+                exclude_envs=(env_name,),
+            ) as remount:
+                # Unmount the source overlay (after snapshot) so its lower can
+                # change.
+                if source_is_overlay:
+                    try:
+                        client.containers.get(source_container).stop(timeout=10)
+                    except docker.errors.NotFound:
+                        pass
+                    env_ops._unmount_filestore(env_name, team)
+                    env_ops._wait_unmounted(branch_merged)
 
-    affected_envs = remount.affected
-    remount_failures = remount.failures
+                if snapshot_dir and os.path.isdir(snapshot_dir):
+                    _install_filestore_snapshot(
+                        client,
+                        snapshot_dir,
+                        template_filestore_path,
+                        transferred=transferred,
+                        link_dests=link_dests,
+                        uid=uid,
+                        gid=gid,
+                        image=source_image,
+                        source_label=f"env {env_name}",
+                    )
 
-    # Save template metadata from source environment. `source_container` is the
-    # team-scoped container name computed above — a hand-built pre-migration
-    # name here used to miss the container and silently drop the metadata
-    # (env_vars, repo_url, odoo_image, ...) from every published template.
-    metadata: dict[str, Any] = {}
-    try:
-        pc = client.containers.get(source_container)
-        metadata = _source_env_metadata(settings, pc.labels)
-        metadata.update(_code_provenance(team, env_name, pc.labels))
-    except docker.errors.NotFound:
-        metadata = {"snapshot_at": _utc_now_iso()}
-    fs_size = (
-        env_ops._dir_size_mb(template_filestore_path)
-        if os.path.isdir(template_filestore_path)
-        else 0.0
-    )
-    metadata["use_overlay"] = fs_size >= settings.overlay_threshold_mb
-    metadata = _update_template_sizes(team, settings, template_name, metadata)
-    logger.info(
-        "Template metadata saved (use_overlay=%s, filestore=%.0f MB)",
-        metadata["use_overlay"],
-        fs_size,
-    )
+                # Remount the source overlay against the new lower (always
+                # reset) + restart.
+                if source_is_overlay:
+                    for key in ("upper", "work"):
+                        d = env_paths[key]
+                        if os.path.isdir(d):
+                            shutil.rmtree(d)
+                            os.makedirs(d, mode=0o777, exist_ok=True)
+                    env_ops._mount_filestore(
+                        client,
+                        settings,
+                        team,
+                        env_name,
+                        get_db_name(env_name, team.team_id),
+                        source_image,
+                        {},
+                        template_name=template_name,
+                        force_overlay=True,
+                    )
+                    if source_was_running:
+                        try:
+                            client.containers.get(source_container).start()
+                        except (docker.errors.NotFound, docker.errors.APIError):
+                            pass
+        finally:
+            # A snapshot that never made it into place is a full-size orphan
+            # next to the environment's filestore.
+            if snapshot_dir and os.path.isdir(snapshot_dir):
+                shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+        # Save template metadata from source environment. `source_container` is
+        # the team-scoped container name computed above — a hand-built
+        # pre-migration name here used to miss the container and silently drop
+        # the metadata (env_vars, repo_url, odoo_image, ...) from every
+        # published template.
+        metadata: dict[str, Any] = {}
+        try:
+            pc = client.containers.get(source_container)
+            metadata = _source_env_metadata(settings, pc.labels)
+            metadata.update(_code_provenance(team, env_name, pc.labels))
+        except docker.errors.NotFound:
+            metadata = {"snapshot_at": _utc_now_iso()}
+        _finalize_template_metadata(settings, team, template_name, metadata)
 
     return {
         "status": "promoted",
@@ -3344,8 +3481,171 @@ def publish_env_as_template(
         "dump": dump_path,
         "filestore": template_filestore_path,
         "template_db": tpl_db,
-        "affected_envs": affected_envs,
-        "remount_failures": remount_failures,
+        "affected_envs": remount.affected,
+        "remount_failures": remount.failures,
+        "reset_env_changes": reset_env_changes,
+    }
+
+
+def publish_production_as_template(
+    settings: Settings,
+    team: TeamSettings,
+    prod_name: str,
+    template_name: str,
+    *,
+    reset_env_changes: bool = False,
+    overwrite: bool = False,
+) -> dict[str, object]:
+    """Publish a production's database and filestore as a dev template.
+
+    The reverse of seeding a production from a template: the production DB is
+    dumped out of the dedicated production cluster and restored into the dev
+    cluster as the template database, and the production's plain filestore
+    directory becomes the template's lower layer.
+
+    The production keeps running throughout — ``pg_dump`` takes a consistent
+    snapshot without stopping it, the same tradeoff ``backup_ops`` already makes
+    for scheduled production snapshots.
+
+    This layer deliberately does NOT consult the production's
+    ``allow_copy_to_dev_mcp`` flag: that flag gates agent-initiated copies at
+    the MCP tool layer only, and the dashboard calls straight in here.
+    """
+    # production_ops imports this module at import time, so importing it (and
+    # the registry, which it owns) back at module level would be a cycle.
+    from oduflow import production_registry
+    from oduflow.docker_ops import env_ops, production_ops
+    from oduflow.naming import get_repo_path, prod_env_name
+
+    client = get_client()
+    record = production_registry.get_production(team, prod_name)
+    tpl_db = get_template_db_name(template_name, team.team_id)
+    prod_db = production_ops.prod_db_name(team, prod_name)
+
+    try:
+        client.containers.get(settings.prod_db_container)
+    except docker.errors.NotFound:
+        raise PrerequisiteNotMetError(
+            f"Production PostgreSQL container '{settings.prod_db_container}' "
+            "not found. Production hosting is not initialized on this host."
+        ) from None
+    if not _db_exists(
+        client, settings, prod_db, container_name=settings.prod_db_container
+    ):
+        raise NotFoundError(
+            f"Database '{prod_db}' for production '{prod_name}' not found in "
+            f"the production cluster."
+        )
+    _check_template_publish_allowed(
+        client, settings, team, template_name, tpl_db, overwrite=overwrite
+    )
+    _wait_pg_ready(client, settings)
+    _wait_pg_ready(client, settings, container_name=settings.prod_db_container)
+
+    template_dir = team.get_template_dir(template_name)
+    dump_path = os.path.join(template_dir, "dump.pgdump")
+    with _publishing_template_dir(template_dir):
+        # The dump is streamed out of the production cluster straight to its
+        # staging file (nothing lands in the production container's writable
+        # layer) and restored into the dev cluster; only once that succeeded
+        # does it become the template's dump.
+        logger.info("Dumping production database %s", prod_db)
+        with _staged_db_dump(
+            client,
+            settings,
+            team,
+            prod_db,
+            dump_path,
+            container_name=settings.prod_db_container,
+        ) as (staged_dump, container_dump):
+            logger.info("Production dump staged at %s", staged_dump)
+            reload_template(
+                settings,
+                team,
+                template_name=template_name,
+                dump_path=staged_dump,
+                container_dump_path=container_dump,
+                persist_dump=False,
+            )
+        _remove_legacy_dumps(template_dir)
+
+        # A production filestore is a plain directory (never an overlay), so
+        # there is no source overlay to unmount and remount here — only the
+        # template's own consumers need the swap protection.
+        template_filestore_path = team.get_template_filestore_path(template_name)
+        prod_filestore = production_ops.prod_filestore_dir(team, prod_name)
+        link_dests = [template_filestore_path]
+        snapshot_dir: str | None = None
+        transferred: list[str] | None = None
+        if os.path.isdir(prod_filestore):
+            snapshot_dir = prod_filestore.rstrip("/") + "_snapshot"
+            transferred = _snapshot_filestore(
+                prod_filestore, snapshot_dir, link_dests=link_dests
+            )
+            logger.info("Snapshot of filestore created for production %s", prod_name)
+        else:
+            logger.warning(
+                "Production filestore %s not found, skipping filestore update",
+                prod_filestore,
+            )
+
+        odoo_image = record.get("odoo_image", "")
+        source_image = odoo_image or "odoo:19.0"
+        uid, gid = _odoo_uid_gid(client, source_image)
+
+        try:
+            with env_ops.remount_template_overlays(
+                client,
+                settings,
+                team,
+                template_name,
+                reset_upper=reset_env_changes,
+            ) as remount:
+                if snapshot_dir and os.path.isdir(snapshot_dir):
+                    _install_filestore_snapshot(
+                        client,
+                        snapshot_dir,
+                        template_filestore_path,
+                        transferred=transferred,
+                        link_dests=link_dests,
+                        uid=uid,
+                        gid=gid,
+                        image=source_image,
+                        source_label=f"production {prod_name}",
+                    )
+        finally:
+            if snapshot_dir and os.path.isdir(snapshot_dir):
+                shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+        # A production carries no oduflow.* code labels: repo, image, git user
+        # and extra addons come from the registry record, the commit from the
+        # production checkout. source_production marks the template as
+        # production-derived for everything downstream.
+        metadata: dict[str, Any] = {
+            "odoo_image": odoo_image,
+            "repo_url": record.get("repo_url", ""),
+            "git_user": record.get("git_user", ""),
+            "source_production": prod_name,
+        }
+        extras = _normalize_extra_addons(record.get("extra_addons") or {})
+        if extras:
+            metadata["extra_addons"] = extras
+        metadata.update(
+            _commit_provenance(
+                record.get("branch", ""),
+                get_repo_path(prod_env_name(prod_name), team.workspaces_dir),
+            )
+        )
+        _finalize_template_metadata(settings, team, template_name, metadata)
+
+    return {
+        "status": "promoted",
+        "prod_name": prod_name,
+        "dump": dump_path,
+        "filestore": template_filestore_path,
+        "template_db": tpl_db,
+        "affected_envs": remount.affected,
+        "remount_failures": remount.failures,
         "reset_env_changes": reset_env_changes,
     }
 

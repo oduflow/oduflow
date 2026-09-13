@@ -457,6 +457,7 @@ def create_production(
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
     auto_update: bool = False,
+    allow_copy_to_dev_mcp: bool = True,
     template_name: str | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
@@ -519,6 +520,7 @@ def create_production(
             "git_user": git_user,
             "extra_addons": extra_addons or {},
             "auto_update": bool(auto_update),
+            "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
@@ -1273,6 +1275,9 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
                 "branch": record.get("branch", ""),
                 "odoo_image": record.get("odoo_image", ""),
                 "auto_update": bool(record.get("auto_update")),
+                "allow_copy_to_dev_mcp": bool(
+                    record.get("allow_copy_to_dev_mcp", True)
+                ),
                 "commit": head,
                 "commit_short": head[:10],
                 "created_at": record.get("created_at", ""),
@@ -1323,6 +1328,7 @@ def get_production_info(
         "odoo_image": record.get("odoo_image", ""),
         "extra_addons": record.get("extra_addons", {}),
         "auto_update": bool(record.get("auto_update")),
+        "allow_copy_to_dev_mcp": bool(record.get("allow_copy_to_dev_mcp", True)),
         "unhealthy_flag": bool(record.get("unhealthy")),
         "deploy_in_progress": bool(record.get("deploy_in_progress")),
         "created_at": record.get("created_at", ""),

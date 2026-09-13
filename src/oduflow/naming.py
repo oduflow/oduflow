@@ -225,6 +225,17 @@ def validate_prod_name(name: str) -> str:
     return name
 
 
+# One managed dev template per production, published on first use and reused
+# after that. The prefix keeps the namespace recognisable and owned by Oduflow.
+PRODUCTION_TEMPLATE_PREFIX = "prod-"
+
+
+def production_template_name(name: str) -> str:
+    """Name of the managed dev template holding a copy of production *name*."""
+    validate_prod_name(name)
+    return f"{PRODUCTION_TEMPLATE_PREFIX}{name}"
+
+
 def prod_env_name(name: str) -> str:
     """Internal environment name for a production ("prod-{name}").
 

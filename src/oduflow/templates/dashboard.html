@@ -1480,6 +1480,11 @@
     </div>
     <div class="modal-body">
       <div class="form-error" id="create-error"></div>
+      <div class="form-group" id="cr-from-prod-group" style="display:none">
+        <label>Source production</label>
+        <div class="prod-mono" id="cr-from-prod-name"></div>
+        <div class="hint">A copy of this production's database and filestore, through the managed template <code id="cr-from-prod-template"></code> (published on first use, reused afterwards). Repository, image and extra addons come from the production. The database is sanitized on creation. Refresh the copy with the production's <em>Save as template</em> action.</div>
+      </div>
       <div class="form-group">
         <label for="cr-branch">Branch name</label>
         <input type="text" id="cr-branch" placeholder="e.g. feature/my-branch">
@@ -1508,7 +1513,7 @@
         <label for="cr-image">Odoo image</label>
         <input type="text" id="cr-image" placeholder="e.g. odoo:19.0">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="cr-template-group">
         <label for="cr-template">Template</label>
         <select id="cr-template">
         </select>
@@ -5103,6 +5108,7 @@ function populateTemplateSelect() {
 
 function openCreateFromTemplate(templateName) {
   var tpl = cachedTemplates.find(function(t) { return t.template_name === templateName; });
+  setCreateSourceProduction('');  // a template source clears any production source
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
@@ -5150,7 +5156,23 @@ function openCreateFromTemplate(templateName) {
   document.getElementById('cr-branch').focus();
 }
 
-function openCreateModal() {
+// Set when the create modal was opened from a production card: the environment
+// is then built from a dev copy of that production instead of a template.
+var _createFromProduction = '';
+
+function setCreateSourceProduction(name) {
+  _createFromProduction = name || '';
+  // The source is either a production or a template, never both.
+  document.getElementById('cr-from-prod-group').style.display = _createFromProduction ? '' : 'none';
+  document.getElementById('cr-template-group').style.display = _createFromProduction ? 'none' : '';
+  if (_createFromProduction) {
+    document.getElementById('cr-from-prod-name').textContent = _createFromProduction;
+    document.getElementById('cr-from-prod-template').textContent = 'prod-' + _createFromProduction;
+  }
+}
+
+function openCreateModal(fromProduction) {
+  setCreateSourceProduction(fromProduction);
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
@@ -5305,7 +5327,10 @@ async function submitCreate() {
       hostname: hostname,
       repo_url: repo,
       odoo_image: image,
-      template_name: template,
+      // A production source replaces the template: the server resolves (and
+      // publishes on first use) the managed prod-<name> template itself.
+      template_name: _createFromProduction ? '' : template,
+      from_production: _createFromProduction,
       git_user: gitUser,
       extra_addons: extraAddonsObj,
       auto_install_modules: autoInstall,
@@ -5319,8 +5344,14 @@ async function submitCreate() {
     var data = await readResult(r);
     if (r.ok && data.ok) {
       closeCreateModal();
-      showToast('Environment "' + (envName || branch) + '" created');
-      await loadEnvironments(true);
+      showToast('Environment "' + (envName || branch) + '" created' +
+        (data.from_production
+          ? ' from production "' + data.from_production + '" (template "' + data.template_name + '")'
+          : ''));
+      await Promise.all([
+        data.from_production ? loadTemplates() : Promise.resolve(),
+        loadEnvironments(true)
+      ]);
     } else {
       errEl.textContent = data.error || ('Creation failed (HTTP ' + r.status + ')');
       errEl.style.display = 'block';
@@ -7497,6 +7528,8 @@ function renderProductions() {
       ? '<span>Snapshot: <strong class="prod-mono">' + esc(backup.last_snapshot_id) + '</strong></span>'
       : '<span>Snapshot: <strong>—</strong></span>';
     var open = _prodOpen[p.name];
+    // Missing key = allowed (pre-existing records, and older cached payloads).
+    var allowCopy = p.allow_copy_to_dev_mcp !== false;
     return '<div class="env-card" data-prod="' + esc(p.name) + '">' +
       '<div class="env-header">' +
         '<div class="left">' +
@@ -7504,6 +7537,7 @@ function renderProductions() {
           '<a class="repo-link prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
           '<span class="badge ' + prodBadgeClass(p.status) + '">' + esc(p.status) + '</span>' +
           (p.auto_update ? '<span class="badge badge-neutral" title="Deploys automatically on GitHub push">auto</span>' : '') +
+          (allowCopy ? '' : '<span class="badge badge-neutral" title="Agents cannot publish new copies of this production into dev over MCP; the dashboard still can">copy off</span>') +
         '</div>' +
         '<div class="env-actions">' +
           '<button class="btn btn-sync" title="Pull the branch and deploy (failed deploys roll the code back)" onclick="prodUpdate(\'' + escAttr(p.name) + '\')">Update</button>' +
@@ -7521,6 +7555,11 @@ function renderProductions() {
                 : '') +
               '<button role="menuitem" onclick="prodAutoUpdate(\'' + escAttr(p.name) + '\',' + (p.auto_update ? 'false' : 'true') + ')">' +
                 (p.auto_update ? 'Disable auto-deploy' : 'Enable auto-deploy') + '</button>' +
+              '<button role="menuitem" onclick="prodSaveAsTemplate(\'' + escAttr(p.name) + '\')">Save as template</button>' +
+              '<button role="menuitem" onclick="prodCreateEnvironment(\'' + escAttr(p.name) + '\')">Create environment</button>' +
+              '<button role="menuitem" title="Whether coding agents may publish new copies of this production into dev over MCP (an already published template stays usable, sanitized). The dashboard is never gated." ' +
+                'onclick="prodCopyToDevMcp(\'' + escAttr(p.name) + '\',' + (allowCopy ? 'false' : 'true') + ')">' +
+                (allowCopy ? 'Disable agent copy to dev' : 'Enable agent copy to dev') + '</button>' +
               (p.status === 'stopped'
                 ? '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'start\')">Start</button>'
                 : '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'stop\')">Stop</button>') +
@@ -7653,6 +7692,84 @@ function prodAutoUpdate(name, enabled) {
   _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/auto-update',
     { enabled: enabled },
     'Auto-deploy ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"');
+}
+
+function prodCopyToDevMcp(name, enabled) {
+  _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/copy-to-dev-mcp',
+    { enabled: enabled },
+    'Agent copy to dev ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"');
+}
+
+// Publish a production's database + filestore as a dev template. The dashboard
+// is deliberately not gated by the production's "agent copy to dev" flag.
+async function prodSaveAsTemplate(name) {
+  var template = await promptDialog({
+    title: 'Save production as template',
+    message: 'Copy the database and filestore of "' + name + '" into a dev template. ' +
+      'The production keeps serving; the template holds UNSANITIZED production data ' +
+      '(environments created from it are sanitized). Template name:',
+    placeholder: 'prod-' + name,
+    confirmLabel: 'Save as template'
+  });
+  if (template === null) return;
+  if (!template) { showToast('Template name is required', true); return; }
+  await _prodPublishTemplate(name, template, false);
+}
+
+async function _prodPublishTemplate(name, template, overwrite) {
+  showToast('Saving production "' + name + '" as template "' + template + '"… this can take a while');
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/save-as-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_name: template, overwrite: !!overwrite })
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      var res = data.result || {};
+      var msg = 'Production "' + name + '" saved as template "' + template + '"';
+      var affected = res.affected_envs || [];
+      msg += affected.length
+        ? '. Remounted (changes preserved): ' + affected.join(', ')
+        : '. No other environments were affected.';
+      var failures = res.remount_failures || [];
+      if (failures.length) {
+        msg += ' Remount issues: ' + failures.map(function(f) {
+          return (f[0] || '') + ' — ' + (f[1] || '');
+        }).join('; ');
+      }
+      showToast(msg, failures.length > 0);
+      await loadTemplates();
+      return;
+    }
+    if (data.conflict && !overwrite) {
+      // Refreshing an existing template from the live production is the normal
+      // case for the managed prod-<name> template, so offer it instead of a
+      // dead end — but only as an explicit second choice.
+      if (await confirmDialog({
+        title: 'Template already exists',
+        message: 'Template "' + template + '" already exists. Re-baseline it from the live ' +
+          'production "' + name + '"? Environments using it are remounted onto the new ' +
+          'baseline; their own filestore changes are preserved.',
+        confirmLabel: 'Re-baseline',
+        danger: true
+      })) {
+        await _prodPublishTemplate(name, template, true);
+      }
+      return;
+    }
+    showToast(data.error || 'Save as template failed', true);
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+// Build a dev environment from a copy of this production's data. Opens the
+// normal create dialog (branch / environment name / addons) pre-wired to the
+// production; the server resolves the managed prod-<name> template.
+function prodCreateEnvironment(name) {
+  switchTab('environments');
+  openCreateModal(name);
 }
 
 async function prodDelete(name) {

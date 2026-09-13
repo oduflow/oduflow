@@ -74,12 +74,14 @@ from oduflow.errors import (
     ExternalCommandError,
     FlowError,
     NotFoundError,
+    PrerequisiteNotMetError,
 )
 from oduflow.licensing import get_license_info, install_license_from_text
 from oduflow.locking import (
     LockManager,
     credentials_lock_key,
     prod_backups_lock_key,
+    prod_lock_key,
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
@@ -1679,6 +1681,34 @@ def _build_routes(
         finally:
             locks.release_team(team.team_id)
 
+    async def _template_from_production(team: TeamSettings, prod_name: str) -> str:
+        """Resolve ``from_production`` to its managed ``prod-<name>`` template.
+
+        The dashboard counterpart of the MCP resolver, minus its
+        ``allow_copy_to_dev_mcp`` gate: that flag only governs agent-initiated
+        copies, and the dashboard administrator can always copy a production
+        into dev.
+        """
+        from oduflow.server import (
+            _PRODUCTION_DISABLED_MESSAGE,
+            ensure_production_template,
+        )
+
+        settings = get_settings()
+        if not settings.prod_enabled:
+            raise PrerequisiteNotMetError(_PRODUCTION_DISABLED_MESSAGE)
+        # Raises NotFoundError for an unknown production.
+        production_registry.get_production(team, prod_name)
+        managed, _published = await _offload(
+            ensure_production_template,
+            settings,
+            team,
+            prod_name,
+            locks=locks,
+            operation="create_environment",
+        )
+        return str(managed)
+
     async def api_create(request: Request) -> JSONResponse:
         import json as _json
 
@@ -1702,7 +1732,19 @@ def _build_routes(
         extra_addons_raw = body.get("extra_addons")
         auto_install_raw = (body.get("auto_install_modules") or "").strip()
         hostname = (body.get("hostname") or "").strip()
+        from_production = (body.get("from_production") or "").strip()
         env_vars = _env_vars_from_body(body.get("env_vars"))
+        if from_production and template_name_raw:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": (
+                        "from_production cannot be combined with a template: it "
+                        "supplies the database, filestore and code origin itself."
+                    ),
+                },
+                status_code=400,
+            )
         if not env_name:
             return JSONResponse(
                 {"ok": False, "error": "branch is required."},
@@ -1727,6 +1769,13 @@ def _build_routes(
         except BusyError as e:
             return _error_response(e)
         try:
+            # Publishing dumps a live production database, so it happens only
+            # once the request is past validation and holds the env lock.
+            if from_production:
+                template_name_raw = await _template_from_production(
+                    team, from_production
+                )
+
             resolved_template: str | None
             if not template_name_raw or template_name_raw.lower() == "none":
                 resolved_template = None
@@ -1819,7 +1868,13 @@ def _build_routes(
                 local_path=local_path_from_meta,
                 hostname=hostname,
             )
-            return JSONResponse({"ok": True, "result": result})
+            payload: dict[str, Any] = {"ok": True, "result": result}
+            if from_production:
+                # Which managed template the copy went through, so the dashboard
+                # can name it (and the refresh path) in its confirmation.
+                payload["from_production"] = from_production
+                payload["template_name"] = resolved_template
+            return JSONResponse(payload)
         except FlowError as e:
             # FlowError is an "expected" business error, but for create it is the
             # only record of WHY the environment failed to build (overlay mount,
@@ -5179,8 +5234,6 @@ def _build_routes(
     # ------------------------------------------------------------------
 
     def _prod_lock_key(team: TeamSettings, name: str) -> str:
-        from oduflow.server import prod_lock_key
-
         return prod_lock_key(team.team_id, name)
 
     def api_productions(request: Request) -> JSONResponse:
@@ -5387,6 +5440,125 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
+
+    async def api_production_copy_to_dev_mcp(request: Request) -> JSONResponse:
+        """Flip ``allow_copy_to_dev_mcp`` — the MCP-only gate on prod→dev copies.
+
+        Deliberately dashboard-only: no MCP tool can change this flag, so an
+        agent cannot lift its own restriction.
+        """
+        try:
+            team = _get_ui_team(request)
+            name = request.path_params["name"]
+            try:
+                data = await request.json()
+            except ValueError:
+                data = None
+            enabled = data.get("enabled") if isinstance(data, dict) else None
+            if not isinstance(enabled, bool):
+                return JSONResponse(
+                    {"ok": False, "error": 'Body must be {"enabled": true|false}.'},
+                    status_code=400,
+                )
+            production_registry.update_production(
+                team, name, {"allow_copy_to_dev_mcp": enabled}
+            )
+            return JSONResponse({"ok": True})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("api_production_copy_to_dev_mcp failed")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_production_save_as_template(request: Request) -> JSONResponse:
+        """Publish a production's database and filestore as a dev template.
+
+        Never consults ``allow_copy_to_dev_mcp``: that flag gates agents, and
+        the dashboard is the administrator's own console.
+        """
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body"}, status_code=400
+            )
+        template_name = str((body or {}).get("template_name") or "").strip()
+        # Unlike the environment publish, overwrite is offered here: refreshing
+        # the managed prod-<name> template from the live production is the
+        # normal case, and it stays an explicit choice.
+        overwrite = bool((body or {}).get("overwrite"))
+        if not template_name:
+            return JSONResponse(
+                {"ok": False, "error": "template_name is required"}, status_code=400
+            )
+        try:
+            validate_template_name(template_name)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        # Fail fast on an unknown production before taking a team-wide lock.
+        try:
+            production_registry.get_production(team, name)
+        except FlowError as e:
+            return _error_response(e)
+        # Team lock: publishing can remount other envs' overlay filestores, so it
+        # serializes against the whole team like the save_production_as_template
+        # MCP tool. The production's own key on top keeps deploys, restores and
+        # deletes of this production out of the dump.
+        try:
+            locks.acquire_team(team.team_id)
+        except BusyError as e:
+            return _error_response(e)
+        prod_key = _prod_lock_key(team, name)
+        try:
+            locks.acquire_env(prod_key, operation="save_production_as_template")
+        except BusyError as e:
+            locks.release_team(team.team_id)
+            return _error_response(e)
+        try:
+            result = await _offload(
+                system_ops.publish_production_as_template,
+                get_settings(),
+                team,
+                name,
+                template_name=template_name,
+                overwrite=overwrite,
+            )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "result": {
+                        "status": result.get("status"),
+                        "prod_name": result.get("prod_name"),
+                        "template_name": template_name,
+                        "template_db": result.get("template_db"),
+                        "affected_envs": result.get("affected_envs", []),
+                        "remount_failures": result.get("remount_failures", []),
+                    },
+                }
+            )
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except ConflictError as e:
+            # The dashboard offers a re-baseline instead of a dead end, so it
+            # has to tell "that name is taken" apart from every other 400.
+            return JSONResponse(
+                {"ok": False, "error": _public_flow_error(e), "conflict": True},
+                status_code=_flow_error_status(e),
+            )
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("api_production_save_as_template failed")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+        finally:
+            locks.release_env(prod_key)
+            locks.release_team(team.team_id)
 
     def api_production_logs(request: Request) -> JSONResponse:
         try:
@@ -5641,6 +5813,16 @@ def _build_routes(
             Route(
                 "/api/productions/{name}/auto-update",
                 api_production_auto_update,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/productions/{name}/copy-to-dev-mcp",
+                api_production_copy_to_dev_mcp,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/productions/{name}/save-as-template",
+                api_production_save_as_template,
                 methods=["POST"],
             ),
             Route(

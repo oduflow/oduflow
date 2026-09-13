@@ -53,12 +53,17 @@ from oduflow.docker_ops import (
     volume_file_ops,
     volume_ops,
 )
-from oduflow.errors import FlowError, NotFoundError, PrerequisiteNotMetError
+from oduflow.errors import (
+    FlowError,
+    NotFoundError,
+    PrerequisiteNotMetError,
+    ProtectedError,
+)
 from oduflow.locking import (
-    PROD_KEY_PREFIX,
     LockManager,
     credentials_lock_key,
     prod_backups_lock_key,
+    prod_lock_key,
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
@@ -68,6 +73,7 @@ from oduflow.naming import (
     normalize_env_vars,
     parse_env_vars,
     parse_service_command,
+    production_template_name,
     redact_url_credentials,
 )
 from oduflow.output_cache import CachedOutput, OutputCache
@@ -442,12 +448,6 @@ def with_key_lock(
     return decorator
 
 
-def prod_lock_key(team_id: str, name: str) -> str:
-    """Lock key for a production — team-scoped so two teams' same-named
-    productions never contend (unlike raw env keys)."""
-    return f"{PROD_KEY_PREFIX}{team_id}:{name}"
-
-
 _PRODUCTION_DISABLED_MESSAGE = (
     "Production hosting is disabled. Set enabled = true in the [production] "
     "section of oduflow.toml and restart Oduflow."
@@ -702,6 +702,128 @@ def _existing_environment_message(
 
 
 # =============================================================================
+# Production → dev copies (MCP gate)
+# =============================================================================
+
+
+def _production_record_for_dev_copy(
+    team: TeamSettings, prod_name: str
+) -> dict[str, Any]:
+    """Registry record of a production an MCP caller wants to copy into dev.
+
+    The single place ``allow_copy_to_dev_mcp`` is enforced for *new* copies. It
+    is an MCP-layer gate only: the dashboard calls docker_ops directly, so an
+    administrator can always copy production data to dev from the UI. A
+    template already published from the production stays usable like any other
+    template; see _check_unsanitized_production_copy for the one exception.
+    """
+    record = production_registry.get_production(team, prod_name)
+    if not record.get("allow_copy_to_dev_mcp", True):
+        raise ProtectedError(
+            f"Copying production '{prod_name}' into dev over MCP is disabled "
+            "for this production. An administrator can re-enable it in the "
+            "Oduflow dashboard."
+        )
+    return record
+
+
+def _check_unsanitized_production_copy(
+    team: TeamSettings, prod_name: str, template_name: str
+) -> None:
+    """Refuse ``sanitize=False`` on a production-derived template when its
+    production has MCP copies disabled.
+
+    Using such a template is allowed — its data is neutralized on the way into
+    the environment. Skipping that step hands an agent the raw production data,
+    which is exactly what the flag exists to refuse. A production that no longer
+    exists in the registry has no owner left to ask, so it is allowed.
+    """
+    try:
+        record = production_registry.get_production(team, prod_name)
+    except NotFoundError:
+        return
+    if not record.get("allow_copy_to_dev_mcp", True):
+        raise ProtectedError(
+            f"Template '{template_name}' holds a copy of production "
+            f"'{prod_name}', whose administrator disabled MCP copies to dev. "
+            "Environments from it can only be created with sanitize=True."
+        )
+
+
+def ensure_production_template(
+    settings: Settings,
+    team: TeamSettings,
+    prod_name: str,
+    *,
+    locks: LockManager,
+    operation: str,
+) -> tuple[str, bool]:
+    """Resolve a production to its managed dev template, publishing on demand.
+
+    Shared by the MCP resolver below and the dashboard (which passes its own
+    LockManager). Neither gate lives here: the MCP ``allow_copy_to_dev_mcp``
+    check is the caller's. Returns ``(template_name, published)``.
+
+    Readiness is judged by ``system_ops.template_is_ready`` — metadata plus the
+    template database — never by the directory alone: a publish that failed
+    halfway can leave a directory behind, and a stale database can outlive its
+    directory. Either way the template is (re)published here.
+    """
+    managed = production_template_name(prod_name)
+    if system_ops.template_is_ready(settings, team, managed):
+        return managed, False
+
+    # Publishing mutates team-wide template state, but the team lock is not an
+    # option here: the caller already holds a team-scoped environment lock and
+    # the two are mutually exclusive by design. The production's own key is the
+    # meaningful one anyway — it serialises against deploys and against a
+    # second create from the same production — and an unready template has no
+    # healthy consumers to protect.
+    key = prod_lock_key(team.team_id, prod_name)
+    locks.acquire_env(key, operation=operation)
+    try:
+        # overwrite=True: prod-<name> is a namespace Oduflow owns; whatever an
+        # earlier attempt left behind is replaced, never a reason to refuse.
+        system_ops.publish_production_as_template(
+            settings, team, prod_name, managed, overwrite=True
+        )
+    finally:
+        locks.release_env(key)
+    return managed, True
+
+
+def _template_from_production(
+    settings: Settings, team: TeamSettings, prod_name: str
+) -> tuple[str, list[str]]:
+    """Resolve ``from_production`` to its managed template, publishing on demand.
+
+    Returns the template name and the note lines to append to the tool output.
+    """
+    # create_environment cannot carry @production_enabled (the parameter is
+    # optional), so the disabled-hosting message is raised here instead of
+    # surfacing as a confusing registry NotFoundError.
+    if not settings.prod_enabled:
+        raise PrerequisiteNotMetError(_PRODUCTION_DISABLED_MESSAGE)
+    _production_record_for_dev_copy(team, prod_name)
+    managed, published = ensure_production_template(
+        settings, team, prod_name, locks=_locks, operation="create_environment"
+    )
+    if published:
+        return managed, [
+            f"Published production '{prod_name}' as template '{managed}' "
+            "(unsanitized production data; this environment is sanitized on "
+            "creation unless sanitize=False)."
+        ]
+    snapshot_at = env_ops._read_template_metadata(team, managed).get("snapshot_at", "")
+    taken = f" (snapshot taken {snapshot_at})" if snapshot_at else ""
+    return managed, [
+        f"Reused the existing template '{managed}'{taken}. Call "
+        f"save_production_as_template('{prod_name}', '{managed}', "
+        "overwrite=True) to refresh it from the live production."
+    ]
+
+
+# =============================================================================
 # MCP Tools — Environments
 # =============================================================================
 
@@ -720,6 +842,7 @@ def create_environment(
     env_vars: str = "",
     local_path: str = "",
     hostname: str = "",
+    from_production: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -744,6 +867,7 @@ def create_environment(
         sanitize: Sanitize the database after provisioning (default: True). Runs Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets database.is_neutralized) and then any custom scripts from the .oduflow/odoo_sanitize/ folder in the repository. Only applies to environments created from a template.
         auto_install_modules: Comma-separated list of Odoo modules to install automatically after the environment is provisioned (e.g. "sale,purchase,stock"). When a template is specified and this is empty, the value is loaded from template metadata.
         env_vars: Comma- or newline-separated KEY=VALUE pairs injected as environment variables into the Odoo container (e.g. "WORKERS=2,LIMIT_TIME_CPU=600"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. These are added on top of the database connection variables (HOST/USER/PASSWORD). When a template records env_vars, the two sets are merged per key and the values passed here win. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
+        from_production: Name of a production to build this environment from — a dev copy of real production data (database + filestore + repo/image/extra addons). Mutually exclusive with template_name and local_path. The copy goes through one managed template per production, "prod-<name>", which is published on first use and reused afterwards; refresh it with save_production_as_template(name, "prod-<name>", overwrite=True). The environment is sanitized by default (see sanitize). A production whose administrator disabled MCP copies to dev refuses to be published (an already published "prod-<name>" template stays usable, with sanitize=True only).
         local_path: LOCAL FAST-PATH. Absolute path to a checkout on THIS host. When set, Oduflow skips git clone and bind-mounts the directory live into the container — your file edits are visible instantly, no git push/pull needed. After editing, call pull_and_apply with explicit install/upgrade/restart to apply. repo_url is not required in this mode. Gated by allow_local_path (default: true).
     """
     import json
@@ -753,6 +877,13 @@ def create_environment(
     resolved_env_name = validate_env_name(env_name or branch)
     settings = _get_settings()
     team = _resolve_team(ctx)
+    if from_production and (template_name or local_path):
+        raise ValueError(
+            "from_production cannot be combined with template_name or "
+            "local_path: it supplies the database, filestore and code origin "
+            "itself."
+        )
+    production_notes: list[str] = []
     _locks.acquire_env(resolved_env_name, team.team_id, operation="create_environment")
     try:
         # Creating an environment that already exists is not a mistake worth an
@@ -765,7 +896,21 @@ def create_environment(
         )
         if existing is not None:
             return _existing_environment_message(
-                existing, requested_image=odoo_image, requested_template=template_name
+                existing,
+                requested_image=odoo_image,
+                requested_template=(
+                    production_template_name(from_production)
+                    if from_production
+                    else template_name
+                ),
+            )
+
+        # Only now, past the adopt-existing fast path: publishing a production
+        # template dumps a live production database, far too expensive to do
+        # for a call that turns out to be a no-op.
+        if from_production:
+            template_name, production_notes = _template_from_production(
+                settings, team, from_production
             )
 
         resolved_template: str | None
@@ -786,6 +931,10 @@ def create_environment(
             if os.path.isfile(metadata_path):
                 with open(metadata_path) as f:
                     metadata = json.load(f)
+                if not sanitize and metadata.get("source_production"):
+                    _check_unsanitized_production_copy(
+                        team, metadata["source_production"], resolved_template
+                    )
                 if not effective_repo_url:
                     effective_repo_url = metadata.get("repo_url", "")
                 if not effective_odoo_image:
@@ -906,6 +1055,9 @@ def create_environment(
         ]
         if resolved_env_name != branch:
             lines.insert(2, f"Git Branch: {branch}")
+        if from_production:
+            lines.append(f"Source production: {from_production}")
+            lines.extend(production_notes)
         if result.get("local_path"):
             lines.append(
                 f"Live-mount: {result['local_path']} "
@@ -995,6 +1147,92 @@ def save_as_template(
         f"Template DB: {result['template_db']}",
         f"Dump: {result['dump']}",
         f"Filestore: {result['filestore']}",
+    ]
+    if affected:
+        verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
+        lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    else:
+        lines.append("No other environments were affected.")
+    if failures:
+        lines.append(
+            "⚠️ Remount issues:\n"
+            + "\n".join(f"- {env}: {msg}" for env, msg in failures)
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_team_lock
+def save_production_as_template(
+    prod_name: str,
+    template_name: str,
+    reset_env_changes: bool = False,
+    overwrite: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """
+    Save a PRODUCTION's database and filestore as a dev template.
+
+    The production keeps serving throughout — the dump is a consistent snapshot,
+    nothing is stopped or modified on the production side.
+
+    The resulting template holds UNSANITIZED production data: real customer
+    records, real email addresses, real API credentials. Sanitization happens
+    later, when an environment is created from it (create_environment runs
+    Odoo's neutralization plus the repository's custom sanitize scripts by
+    default). Treat the template itself as production-confidential.
+
+    By default this creates a NEW template and REFUSES to overwrite an existing
+    one (raises an error) — pick a fresh template_name. Set overwrite=True to
+    deliberately re-baseline an existing template: its database and filestore
+    are replaced with the production's data, and environments using this
+    template with overlay-mounted filestores are remounted against the new
+    baseline. Their filestore changes (the overlay upper layer) are PRESERVED by
+    default — non-destructive; set reset_env_changes=True to discard those
+    changes and reset every affected environment to the new baseline.
+
+    Requires EXPLICIT user permission and confirmation before execution. If the
+    user has not clearly and unambiguously asked you to copy this production
+    into a template, DO NOT call this tool. Both overwrite=True (re-baselines an
+    existing template) and reset_env_changes=True (destructive for other
+    environments) require an explicit user request.
+
+    Args:
+        prod_name: The production whose database and filestore are copied.
+        template_name: Name of the template profile to publish into.
+        reset_env_changes: If True, discard other environments' filestore deltas (destructive). Default False (preserve).
+        overwrite: If True, allow re-baselining an existing template. Default False (refuse if the template already exists).
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    _production_record_for_dev_copy(team, prod_name)
+    # The team lock keeps the template's consumers still; the production's own
+    # key keeps deploys, restores and deletes of this production out of the
+    # dump (they hold only that key, which the team lock does not cover).
+    key = prod_lock_key(team.team_id, prod_name)
+    _locks.acquire_env(key, operation="save_production_as_template")
+    try:
+        result = system_ops.publish_production_as_template(
+            settings,
+            team,
+            prod_name,
+            template_name=template_name,
+            reset_env_changes=reset_env_changes,
+            overwrite=overwrite,
+        )
+    finally:
+        _locks.release_env(key)
+    affected = cast("list[str]", result.get("affected_envs", []))
+    failures = cast("list[tuple[str, str]]", result.get("remount_failures", []))
+    lines = [
+        f"Production '{result['prod_name']}' saved as template '{template_name}'.",
+        f"Template DB: {result['template_db']}",
+        f"Dump: {result['dump']}",
+        f"Filestore: {result['filestore']}",
+        "The template contains UNSANITIZED production data; environments "
+        "created from it are sanitized on creation (sanitize=True).",
     ]
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
@@ -4775,6 +5013,7 @@ def create_production(
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
     auto_update: bool = False,
+    allow_copy_to_dev_mcp: bool = True,
     template_name: str = "",
     ctx: Context | None = None,
 ) -> str:
@@ -4795,6 +5034,14 @@ def create_production(
         git_user: Optional git username for credential matching.
         extra_addons: Optional {repo_name: branch} extra addon repos.
         auto_update: Deploy automatically on GitHub push webhooks.
+        allow_copy_to_dev_mcp: Allow MCP/agent-initiated copies of this
+                production's data into dev — save_production_as_template and
+                the first create_environment(from_production=...). Default
+                True. When False those tools refuse to publish a new copy; a
+                template already published from this production stays usable
+                like any other, but only with sanitize=True. The dashboard UI
+                is never gated, and no MCP tool can change this flag afterwards
+                (an administrator toggles it in the dashboard).
         template_name: Optional template to seed the database and filestore
                 from (e.g. an import of the customer's existing production).
                 Empty = fresh database (odoo -i base).
@@ -4813,6 +5060,7 @@ def create_production(
         git_user=git_user,
         extra_addons=env_ops._normalize_extra_addons(extra_addons),
         auto_update=auto_update,
+        allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
         template_name=template_name or None,
     )
     lines = [

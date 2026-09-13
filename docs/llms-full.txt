@@ -1436,6 +1436,32 @@ oduflow template-from-env my-branch --template-name default --reset-env-changes
 !!! info "Copy-mode templates"
     Environments created from a small (copy-mode, `use_overlay=false`) template have an independent filestore copy, not an overlay. They are not affected by template filestore updates and are left untouched.
 
+## Create a Template from Production
+
+A [production](production.md) can be published as a dev template — the reverse of seeding a production from a template. The production database is dumped out of the production cluster and restored into the dev cluster as the template database, and the production filestore becomes the template's baseline:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09"}'
+```
+
+The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`).
+
+The template records the production's `repo_url`, `odoo_image`, `git_user` and extra addons, plus [provenance](#template-metadata) — the production's branch, the commit its checkout is on, and the snapshot time — so environments created from it report code/database drift like any other template.
+
+!!! danger "The template holds unsanitized production data"
+    Real customer records, real email addresses, real API credentials. Sanitization happens **later**, when an environment is created from the template: `create_environment` runs Odoo's neutralization plus the repository's [sanitize scripts](environments.md#database-sanitization) by default. Treat the template itself — and its dump on disk — as production-confidential.
+
+Like `template-from-env`, this refuses to overwrite an existing template. Pass `overwrite=true` to deliberately re-baseline one from the current production data:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09","overwrite":true}'
+```
+
+Environments on that template keep their filestore changes (the overlay `upper` layer) unless you pass `reset_env_changes=true`, which is destructive.
+
+!!! info "MCP copies can be switched off per production"
+    A production whose administrator disabled copies to dev refuses this tool (and the first `create_environment(from_production=...)`, which would publish). A template that was already published stays usable — sanitized only — and the metadata records its `source_production`. The flag gates MCP/CLI agents only; the dashboard is never gated. See [Copying production data to dev](production.md#copying-production-data-to-dev).
+
 ## Refreshing Template Overlays
 
 Re-apply a template's current on-disk filestore to all live overlay environments without re-importing or re-saving — non-destructive by default (each environment keeps its `upper` deltas):
@@ -1653,6 +1679,28 @@ When creating an environment, Oduflow:
 6. **Configures Odoo** — uses repo's `.oduflow/odoo.conf` if available, otherwise the default template; if the repo keeps its modules in a top-level `addons/` directory, `addons_path` points there automatically
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
 8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
+
+### Creating an Environment from Production
+
+`from_production` builds a development environment out of a [production](production.md)'s real data — database, filestore, and the production's code origin (repo, image, extra addons):
+
+```bash
+oduflow call create_environment '{"branch":"bugfix-invoice","from_production":"erp"}'
+```
+
+It is mutually exclusive with `template_name` and `local_path`: the production supplies all of them.
+
+The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
+
+Refresh the copy when it gets stale — the next `from_production` call then reuses the fresh snapshot:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"prod-erp","overwrite":true}'
+```
+
+The environment is [sanitized](#database-sanitization) on creation like any other template-based environment (`sanitize=false` to skip it — with real production data, do so deliberately). The `prod-<name>` template itself holds **unsanitized** production data; see [Create a Template from Production](templates.md#create-a-template-from-production).
+
+An administrator can disable production→dev copies over MCP per production; publishing a new copy then refuses, while an already published `prod-<name>` template stays usable with `sanitize=true` only. See [Copying production data to dev](production.md#copying-production-data-to-dev).
 
 ### Private repository authentication
 
@@ -2286,6 +2334,7 @@ create_production(
     odoo_image="odoo:18.0",
     template_name="acme-prod",   # optional: seed DB+filestore from a template
     auto_update=False,
+    allow_copy_to_dev_mcp=True,  # may agents copy this production into dev?
 )
 ```
 
@@ -2374,6 +2423,46 @@ the cluster the same way.
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
 
+## Copying production data to dev
+
+Productions are seeded from templates; the same road runs backwards, so a
+developer can reproduce a bug on real data:
+
+```text
+save_production_as_template(prod_name="erp", template_name="erp-2026-09")
+create_environment(branch="bugfix-invoice", from_production="erp")
+```
+
+Both dump the production database out of the production cluster with a
+consistent `pg_dump` and restore it into the **dev** cluster, and snapshot the
+production filestore as the template's baseline. **The production keeps
+serving** — nothing is stopped or modified on its side.
+
+`create_environment(from_production=…)` routes through one managed template per
+production, `prod-<name>`, published on first use and reused afterwards; refresh
+it with `save_production_as_template(name, "prod-<name>", overwrite=True)`. See
+[Create a Template from Production](templates.md#create-a-template-from-production)
+and [Creating an Environment from Production](environments.md#creating-an-environment-from-production).
+
+!!! danger "The copy is unsanitized until an environment is created"
+    The template carries real customer data and credentials. Environments made
+    from it are neutralized and run the repository's sanitize scripts by
+    default; the template itself is production-confidential.
+
+**`allow_copy_to_dev_mcp`** (default `true`, set at `create_production`) gates
+**new copies**: when it is `false`, an MCP/CLI agent asking for either tool gets
+a refusal — and no MCP tool can turn the flag back on. It is a gate on *agents*,
+not on people: the dashboard's Production tab is never gated and is the only
+place the flag can be toggled, so an agent cannot re-enable its own access.
+Productions created before the flag existed behave as `true`.
+
+The flag does **not** revoke a copy that already exists. A `prod-<name>` (or
+any) template published from the production stays usable through
+`create_environment(template_name=...)` like every other template — its data is
+neutralized on the way into each environment. The one thing agents lose is the
+raw form: `sanitize=false` on a template whose `source_production` has the flag
+off is refused. To withdraw the data itself, `delete_template` the copy.
+
 ## Health
 
 `GET /healthz` (public, no auth, no secrets) returns 200 when healthy and
@@ -2398,6 +2487,7 @@ status bar shows the same checks as chips.
 | `restore_production` | Restore DB + filestore from a snapshot |
 | `set_production_backup_schedule` | Per-production snapshot time / off |
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
+| `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |
 | `prune_production_backups` | Apply retention now |
 | `restore_cluster_pitr` | Cluster-wide disaster recovery / PITR |
 | `delete_production` | Remove (database/files kept unless `drop_database`) |
@@ -3224,7 +3314,7 @@ than a JSON API. Production routes are registered only when
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
-| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user` |
+| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
@@ -3422,6 +3512,8 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/update` | Start an asynchronous deploy; returns `202` |
 | `POST` | `/api/productions/{name}/rollback?to_commit=` | Roll code back to a commit |
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
+| `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
+| `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
 | `POST` | `/api/productions/{name}/delete` | Delete; body `confirm` must equal name, optional `drop_database` |
@@ -3457,7 +3549,7 @@ also available via the [REST API](web-api.md).
 | Tool | Lock | Description |
 |---|:---:|---|
 | **Environment Management** | | |
-| `create_environment` | ✓ | Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional `hostname` selects a short Traefik hostname and `env_vars` injects container environment variables, merged per key over any recorded on the template |
+| `create_environment` | ✓ | Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional `hostname` selects a short Traefik hostname and `env_vars` injects container environment variables, merged per key over any recorded on the template; `from_production` builds the environment from a production's real data through the managed `prod-<name>` template |
 | `delete_environment` | ✓ | Tear down all resources for a branch |
 | `list_environments` | | List all managed environments with status, URL, current git branch, creation/last-activity/stopped timestamps, stop source, protection, Stack ownership and operator note |
 | `get_environment_info` | | Full environment details: lifecycle/reuse metadata, DB name, URL, repo, image, template, extra addons, workspace, container status, CPU/RAM stats |
@@ -3493,6 +3585,7 @@ also available via the [REST API](web-api.md).
 | `read_output` | | Read from a cached tool output by ID (paginate, grep, errors, tail) |
 | **Template Management** | | |
 | `save_as_template` | ✓ | ⚠️ Save a branch DB + filestore as a new template |
+| `save_production_as_template` | ✓ | ⚠️ Save a production's DB + filestore as a template (unsanitized production data; refused when the production has MCP copy-to-dev disabled) |
 | `list_templates` | | List available template profiles, including the branch/commit each database snapshot was taken from |
 | `delete_template` | ✓ | ⚠️ Delete a template profile (DB + files) |
 | `rename_template` | ✓ | Rename a template (directory + PostgreSQL template DB); refused if any environment uses it |
@@ -3542,7 +3635,7 @@ also available via the [REST API](web-api.md).
 | `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
-| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template |
+| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template; `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
 | `list_productions` | | List productions with status, domain, deployed commit, and auto-update state |
 | `get_production_info` | | Detailed status, configuration, deployed commit, deploy history, and backup information |
 | `start_production` | ✓ | Start a stopped production |

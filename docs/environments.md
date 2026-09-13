@@ -57,6 +57,28 @@ When creating an environment, Oduflow:
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
 8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
 
+### Creating an Environment from Production
+
+`from_production` builds a development environment out of a [production](production.md)'s real data — database, filestore, and the production's code origin (repo, image, extra addons):
+
+```bash
+oduflow call create_environment '{"branch":"bugfix-invoice","from_production":"erp"}'
+```
+
+It is mutually exclusive with `template_name` and `local_path`: the production supplies all of them.
+
+The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
+
+Refresh the copy when it gets stale — the next `from_production` call then reuses the fresh snapshot:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"prod-erp","overwrite":true}'
+```
+
+The environment is [sanitized](#database-sanitization) on creation like any other template-based environment (`sanitize=false` to skip it — with real production data, do so deliberately). The `prod-<name>` template itself holds **unsanitized** production data; see [Create a Template from Production](templates.md#create-a-template-from-production).
+
+An administrator can disable production→dev copies over MCP per production; publishing a new copy then refuses, while an already published `prod-<name>` template stays usable with `sanitize=true` only. See [Copying production data to dev](production.md#copying-production-data-to-dev).
+
 ### Private repository authentication
 
 For private repos, configure credentials first:

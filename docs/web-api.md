@@ -42,7 +42,7 @@ than a JSON API. Production routes are registered only when
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
-| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user` |
+| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
@@ -240,6 +240,8 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/update` | Start an asynchronous deploy; returns `202` |
 | `POST` | `/api/productions/{name}/rollback?to_commit=` | Roll code back to a commit |
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
+| `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
+| `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
 | `POST` | `/api/productions/{name}/delete` | Delete; body `confirm` must equal name, optional `drop_database` |
