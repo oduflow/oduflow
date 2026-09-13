@@ -5201,7 +5201,7 @@ def _build_routes(
     # ------------------------------------------------------------------
 
     def _prod_lock_key(team: TeamSettings, name: str) -> str:
-        from oduflow.server import prod_lock_key
+        from oduflow.locking import prod_lock_key
 
         return prod_lock_key(team.team_id, name)
 

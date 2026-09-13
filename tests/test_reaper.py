@@ -452,3 +452,54 @@ class TestThresholdIsStrict:
         reaper.sweep(settings, LockManager())
 
         ops.delete.assert_called_once()
+
+
+class TestProdPurge:
+    def test_disabled_by_default(self, settings, ops):
+        ops.list.return_value = []
+        with patch(
+            "oduflow.docker_ops.production_ops.purge_deleted_productions"
+        ) as purge:
+            reaper.sweep(settings, LockManager())
+        purge.assert_not_called()
+
+    def test_enabled_purges_with_cutoff_and_locks(self, team, tmp_path, ops):
+        ops.list.return_value = []
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            teams={"1": team},
+            prod_purge_hours=72,
+        )
+        locks = LockManager()
+        with patch(
+            "oduflow.docker_ops.production_ops.purge_deleted_productions",
+            return_value={"purged": [], "pending": [], "warnings": []},
+        ) as purge:
+            reaper.sweep(settings, locks)
+        purge.assert_called_once_with(settings, team, older_than_hours=72, locks=locks)
+
+    def test_purge_failure_does_not_break_the_sweep(self, team, tmp_path, ops):
+        ops.list.return_value = [_env()]
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            teams={"1": team},
+            prod_purge_hours=72,
+        )
+        with patch(
+            "oduflow.docker_ops.production_ops.purge_deleted_productions",
+            side_effect=RuntimeError("boom"),
+        ):
+            reaper.sweep(settings, LockManager())  # must not raise
+
+    def test_prod_purge_alone_starts_the_thread(self, team, tmp_path):
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            teams={"1": team},
+            auto_stop_hours=0,
+            auto_delete_hours=0,
+            prod_purge_hours=72,
+        )
+        with patch("threading.Thread") as thread:
+            result = reaper.start_reaper(lambda: settings, LockManager())
+        assert result is not None
+        thread.assert_called_once()

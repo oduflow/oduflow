@@ -203,6 +203,7 @@ overlay_threshold_mb = 50            # template filestore size threshold (MB) �
 [lifecycle]
 auto_stop_hours = 48        # auto-stop environments idle for N hours (no MCP/dashboard work); 0 disables
 auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 disables (opt-in; DESTRUCTIVE, protected envs exempt)
+prod_purge_hours = 0        # purge DB/files kept by a production deletion after N hours; 0 disables (opt-in; DESTRUCTIVE)
 
 # ── Coding agent (optional) ───────────────────────────
 # One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven
@@ -304,6 +305,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
+| `[lifecycle].prod_purge_hours` | `0` | Purge the database and workspace kept by `delete_production` N hours after the deletion (tombstoned leftovers only; a re-created production is never purged). Default `0` = **disabled** — leftovers are kept forever; `oduflow cleanup --purge-deleted-productions --force` purges them immediately |
 
 ### Agent settings
 

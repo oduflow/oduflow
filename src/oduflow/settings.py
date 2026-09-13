@@ -296,6 +296,12 @@ class Settings:
     # non-destructive and enabled by default.
     auto_stop_hours: int = 48
     auto_delete_hours: int = 0
+    # Purge the kept leftovers (database, workspace) of a soft-deleted
+    # production N hours after its deletion, unless it was re-created in the
+    # meantime. DESTRUCTIVE and opt-in (defaults to 0 = keep forever); an
+    # immediate purge is always available via
+    # `oduflow cleanup --purge-deleted-productions --force`.
+    prod_purge_hours: int = 0
 
     # Shared Docker resource names
     shared_network: str = "oduflow-net"
@@ -776,6 +782,7 @@ class Settings:
             agent_opencode_model=str(agent.get("opencode_model", "")).strip(),
             auto_stop_hours=int(lifecycle.get("auto_stop_hours", 48)),
             auto_delete_hours=int(lifecycle.get("auto_delete_hours", 0)),
+            prod_purge_hours=int(lifecycle.get("prod_purge_hours", 0)),
             prod_enabled=prod_enabled,
             prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),

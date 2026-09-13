@@ -53,6 +53,7 @@ overlay_threshold_mb = 50         # filestore size limit for overlay vs copy
 [lifecycle]
 auto_stop_hours = 48              # stop idle environments after N hours (non-destructive)
 auto_delete_hours = 0             # delete stopped environments after N hours (DESTRUCTIVE; opt-in)
+prod_purge_hours = 0              # purge DB/files kept by a production deletion after N hours (DESTRUCTIVE; opt-in)
 
 # ── Coding agent ──────────────────────────────────────
 # One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven

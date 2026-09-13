@@ -169,7 +169,7 @@ def _run_snapshot_job(
     fire: datetime.datetime,
 ) -> None:
     from oduflow import backup_ops
-    from oduflow.server import prod_lock_key
+    from oduflow.locking import prod_lock_key
 
     key = prod_lock_key(team.team_id, name)
     backups_key = prod_backups_lock_key(team.team_id)

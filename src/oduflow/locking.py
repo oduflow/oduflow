@@ -37,6 +37,12 @@ def _is_prod_key(key: str) -> bool:
 # so every builder shares one signature and can be handed to `with_key_lock`.
 
 
+def prod_lock_key(team_id: str, name: str) -> str:
+    """Lock key for a production — team-scoped so two teams' same-named
+    productions never contend (unlike raw env keys)."""
+    return f"{PROD_KEY_PREFIX}{team_id}:{name}"
+
+
 def service_lock_key(team_id: str, name: str) -> str:
     """One auxiliary service — create/update/delete/restart/exec/restore."""
     return f"svc:{team_id}:{name}"

@@ -56,8 +56,10 @@ class TestSettings:
     def test_lifecycle_defaults(self):
         s = Settings(teams={"1": TeamSettings(team_id="1")})
         assert s.auto_stop_hours == 48
-        # auto-delete is destructive, so it is opt-in (disabled by default).
+        # auto-delete and prod purge are destructive, so they are opt-in
+        # (disabled by default).
         assert s.auto_delete_hours == 0
+        assert s.prod_purge_hours == 0
 
     def test_malformed_port_range_raises(self, tmp_path):
         toml = tmp_path / "oduflow.toml"
@@ -69,11 +71,13 @@ class TestSettings:
         toml = tmp_path / "oduflow.toml"
         toml.write_text(
             "[lifecycle]\nauto_stop_hours = 12\nauto_delete_hours = 0\n"
+            "prod_purge_hours = 168\n"
             '[team.1]\nhostname = "localhost"\n'
         )
         s = Settings.from_toml(str(toml))
         assert s.auto_stop_hours == 12
         assert s.auto_delete_hours == 0
+        assert s.prod_purge_hours == 168
 
     def test_defaults(self):
         s = Settings()
