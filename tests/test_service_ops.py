@@ -393,6 +393,46 @@ class TestCreateService:
             "oduflow-traefik-acme": {"bind": "/etc/traefik", "mode": "ro"}
         }
 
+    def test_traefik_hostname_injection_is_rejected(self, mock_docker_client):
+        # P-H10: a tenant hostname lands in a Traefik `Host(...)` rule; a value
+        # that closes the backtick and opens a second Host() would hijack another
+        # team's hostname. It must be rejected before the container is created.
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        with pytest.raises(ValueError):
+            service_ops.create_service(
+                TRAEFIK_SETTINGS,
+                TRAEFIK_TEAM,
+                "evil",
+                "redis:7",
+                6379,
+                hostname="foo`) || Host(`victim.example.com",
+            )
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_traefik_short_hostname_becomes_team_fqdn(self, mock_docker_client):
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        result = service_ops.create_service(
+            TRAEFIK_SETTINGS,
+            TRAEFIK_TEAM,
+            "kibana",
+            "kibana:8",
+            5601,
+            hostname="qa",
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        assert (
+            labels["traefik.http.routers.oduflow-1-svc-kibana.rule"]
+            == "Host(`qa.example.com`)"
+        )
+        assert result["url"] == "https://qa.example.com"
+
     def test_create_traefik_bridge_with_restricted_routes(self, mock_docker_client):
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 

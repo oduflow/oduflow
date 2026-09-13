@@ -39,47 +39,43 @@
     return e;
   }
 
-  // -- markdown (agent output) with a minimal sanitize pass -------------------
-  var _BLOCK_TAGS = { SCRIPT: 1, STYLE: 1, IFRAME: 1, OBJECT: 1, EMBED: 1, LINK: 1, META: 1, BASE: 1, FORM: 1 };
+  // -- markdown (agent output) sanitized with DOMPurify -----------------------
+  // marked emits raw HTML (agent output can echo prompt-injected content), so
+  // its output MUST be sanitized before it reaches innerHTML. DOMPurify (vendored
+  // under /static/purify.min.js, loaded before this file) is a vetted sanitizer:
+  // a hand-rolled pass here was bypassable via entity-encoded scheme whitespace
+  // (java&Tab;script:) and SVG xlink:href.
+  var _purifyHookAdded = false;
+  function _ensurePurifyHook() {
+    if (_purifyHookAdded || !window.DOMPurify) return;
+    // Force external-safe link attributes on every anchor DOMPurify keeps.
+    window.DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+      if (node.tagName === 'A') {
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    });
+    _purifyHookAdded = true;
+  }
+
   function renderMarkdown(text) {
     var html;
     try {
       html = window.marked ? window.marked.parse(text, { breaks: true }) : null;
     } catch (e) { html = null; }
-    if (html == null) {
+    // Never inject unsanitized HTML: if marked failed or DOMPurify is unavailable,
+    // fall back to plain escaped text.
+    if (html == null || !window.DOMPurify) {
       var d = el('div');
       d.textContent = text;
       return d.innerHTML;
     }
-    var tpl = document.createElement('template');
-    tpl.innerHTML = html;
-    var walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_ELEMENT, null);
-    var toRemove = [];
-    var node = walker.nextNode();
-    while (node) {
-      if (_BLOCK_TAGS[node.tagName]) {
-        toRemove.push(node);
-      } else {
-        for (var i = node.attributes.length - 1; i >= 0; i--) {
-          var attr = node.attributes[i];
-          var name = attr.name.toLowerCase();
-          if (name.indexOf('on') === 0) {
-            node.removeAttribute(attr.name);
-          } else if ((name === 'href' || name === 'src') && /^\s*javascript:/i.test(attr.value)) {
-            node.removeAttribute(attr.name);
-          }
-        }
-        if (node.tagName === 'A') {
-          node.setAttribute('target', '_blank');
-          node.setAttribute('rel', 'noopener noreferrer');
-        }
-      }
-      node = walker.nextNode();
-    }
-    for (var j = 0; j < toRemove.length; j++) {
-      if (toRemove[j].parentNode) toRemove[j].parentNode.removeChild(toRemove[j]);
-    }
-    return tpl.innerHTML;
+    _ensurePurifyHook();
+    return window.DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },   // HTML only — no SVG/MathML (kills xlink:href)
+      ADD_ATTR: ['target', 'rel'],
+      FORBID_TAGS: ['style', 'form']
+    });
   }
 
   function contentText(content) {

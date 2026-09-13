@@ -429,6 +429,77 @@ def archiver_status(client: Any, settings: Settings) -> dict[str, Any]:
 _PITR_TIMEOUT = 1800  # WAL replay can take a while
 
 
+def _parse_walg_time(value: str) -> _dt.datetime | None:
+    """Best-effort parse of a WAL-G / PostgreSQL timestamp to aware UTC."""
+    if not value:
+        return None
+    s = value.strip().replace("Z", "+00:00")
+    if " " in s and "T" not in s:
+        s = s.replace(" ", "T", 1)
+    # Pad a bare "+00"/"-05" offset to "+00:00" (fromisoformat needs minutes).
+    if re.search(r"[+-]\d{2}$", s):
+        s = s + ":00"
+    try:
+        parsed = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _select_pitr_base_backup(
+    client: Any, settings: Settings, target_time: str
+) -> str:
+    """Choose which base backup to fetch for a PITR to ``target_time``.
+
+    Returns a specific ``backup_name`` — the newest base whose consistency point
+    is at or before the target — or ``"LATEST"`` (no target, or times could not
+    be read). ``backup-fetch LATEST`` is wrong for a target in the past: if the
+    newest base is more recent than the target, PostgreSQL FATALs with "requested
+    recovery stop point is before consistent recovery point" and the cluster is
+    left down. Raises PrerequisiteNotMetError when the target predates every base
+    backup, so the caller fails BEFORE the destructive restore steps.
+    """
+    if not target_time:
+        return "LATEST"
+    target = _parse_walg_time(target_time)
+    if target is None:
+        logger.warning(
+            "Could not parse PITR target_time %r; fetching LATEST base backup",
+            target_time,
+        )
+        return "LATEST"
+    best_name = ""
+    best_ts: _dt.datetime | None = None
+    parsed_any = False
+    for entry in backup_list(client, settings):
+        name = entry.get("backup_name") or entry.get("BackupName") or ""
+        ts = _parse_walg_time(
+            entry.get("finish_time")
+            or entry.get("time")
+            or entry.get("start_time")
+            or ""
+        )
+        if not name or ts is None:
+            continue
+        parsed_any = True
+        if ts <= target and (best_ts is None or ts > best_ts):
+            best_name, best_ts = name, ts
+    if best_name:
+        return best_name
+    if not parsed_any:
+        # Unexpected wal-g output (no usable names/times) — degrade to LATEST
+        # rather than block disaster recovery entirely.
+        logger.warning("Could not read base-backup times from wal-g; fetching LATEST")
+        return "LATEST"
+    raise PrerequisiteNotMetError(
+        f"No base backup exists at or before {target_time}: the earliest base "
+        "backup is newer than the requested recovery target. Choose a later "
+        "target_time, or restore from an older base backup."
+    )
+
+
 def pitr_restore_cluster(
     settings: Settings,
     *,
@@ -472,6 +543,11 @@ def pitr_restore_cluster(
     write_walg_config(settings)
     apply_walg_config_ownership(settings, client)
 
+    # Pick the base backup BEFORE any destructive step. For a target in the past
+    # this selects the newest base at or before it; if none exists we raise here,
+    # while the container and PGDATA are still intact.
+    fetch_target = _select_pitr_base_backup(client, settings, target_time)
+
     image = settings.prod_postgres_image or settings.postgres_image
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     old_dir = f".pitr-old-{stamp}"
@@ -499,7 +575,7 @@ def pitr_restore_cluster(
         f"mkdir -p /vol/{old_dir}\n"
         f"find /vol -mindepth 1 -maxdepth 1 ! -name '.pitr-old-*' "
         f"-exec mv {{}} /vol/{old_dir}/ \\;\n"
-        f"{WALG_BIN} --config {WALG_CONF} backup-fetch /vol LATEST\n"
+        f"{WALG_BIN} --config {WALG_CONF} backup-fetch /vol {fetch_target}\n"
         f'printf "%b" "{recovery_conf}" >> /vol/postgresql.auto.conf\n'
         "touch /vol/recovery.signal\n"
         "chown -R postgres:postgres /vol\n"
@@ -567,5 +643,6 @@ def pitr_restore_cluster(
     return {
         "status": "restored",
         "target_time": target_time or "latest",
+        "base_backup": fetch_target,
         "displaced_data_dir": old_dir,
     }

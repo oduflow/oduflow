@@ -616,3 +616,100 @@ class TestReconcileOverlayMounts:
 
         assert result[0]["repaired"] is True
         assert captured["db"] == "oduflow_2_same-name"
+
+
+class TestEnsureOverlayMounted:
+    """P-H5: a start-time remount closes the gap the startup reconciliation
+    (reconcile_overlay_mounts, run only at server start) does not cover — an
+    overlay that went absent/stale mid-session, then start_environment is called.
+    """
+
+    def _team_ws(self, tmp_path):
+        ws = tmp_path / "workspaces"
+        return _team(str(ws)), str(ws)
+
+    def test_remounts_when_mount_absent_and_upper_exists(self, tmp_path, monkeypatch):
+        team, ws = self._team_ws(tmp_path)
+        os.makedirs(get_filestore_paths("feature-x", ws)["upper"])  # overlay marker
+        seen: dict = {}
+        monkeypatch.setattr(
+            env_ops,
+            "_mount_filestore",
+            lambda *a, **k: seen.update(
+                force=k.get("force_overlay"), template=k.get("template_name")
+            ),
+        )
+
+        result = env_ops.ensure_overlay_mounted(
+            MagicMock(),
+            Settings(base_data_dir=str(tmp_path)),
+            team,
+            "feature-x",
+            {"oduflow.template": "base"},
+            "odoo:19.0",
+        )
+
+        assert result is True
+        assert seen == {"force": True, "template": "base"}
+
+    def test_noop_when_mount_alive(self, tmp_path, monkeypatch):
+        team, ws = self._team_ws(tmp_path)
+        os.makedirs(get_filestore_paths("feature-x", ws)["upper"])
+        monkeypatch.setattr(
+            env_ops, "overlay_mount_state", lambda p: env_ops.MOUNT_ALIVE
+        )
+        called: list = []
+        monkeypatch.setattr(
+            env_ops, "_mount_filestore", lambda *a, **k: called.append(1)
+        )
+
+        result = env_ops.ensure_overlay_mounted(
+            MagicMock(),
+            Settings(base_data_dir=str(tmp_path)),
+            team,
+            "feature-x",
+            {"oduflow.template": "base"},
+            "odoo:19.0",
+        )
+
+        assert result is False
+        assert called == []
+
+    def test_noop_for_copy_mode_without_upper(self, tmp_path, monkeypatch):
+        team, _ = self._team_ws(tmp_path)
+        called: list = []
+        monkeypatch.setattr(
+            env_ops, "_mount_filestore", lambda *a, **k: called.append(1)
+        )
+
+        result = env_ops.ensure_overlay_mounted(
+            MagicMock(),
+            Settings(base_data_dir=str(tmp_path)),
+            team,
+            "feature-x",
+            {"oduflow.template": "base"},
+            "odoo:19.0",
+        )
+
+        assert result is False
+        assert called == []
+
+    def test_noop_when_env_has_no_template(self, tmp_path, monkeypatch):
+        team, ws = self._team_ws(tmp_path)
+        os.makedirs(get_filestore_paths("feature-x", ws)["upper"])
+        called: list = []
+        monkeypatch.setattr(
+            env_ops, "_mount_filestore", lambda *a, **k: called.append(1)
+        )
+
+        result = env_ops.ensure_overlay_mounted(
+            MagicMock(),
+            Settings(base_data_dir=str(tmp_path)),
+            team,
+            "feature-x",
+            {"oduflow.template": "none"},
+            "odoo:19.0",
+        )
+
+        assert result is False
+        assert called == []

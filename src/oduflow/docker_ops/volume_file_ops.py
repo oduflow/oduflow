@@ -259,15 +259,33 @@ def search_in_volume(
     docker_name, client = _validate_volume(team, name)
     search_path = _safe_path(path) if path else _MOUNT_POINT
 
-    cmd = [
-        "grep",
-        "-rnH",
-        "-F",
-        "--include",
-        glob,
-        pattern,
-        search_path,
-    ]
+    # The helper image ships busybox grep, which has no GNU `--include` (it
+    # exits 2 on the unknown option, so every search failed). Stick to POSIX/
+    # busybox primitives: a plain recursive grep for the default glob, and a
+    # find|grep composition for a real filename filter. `--` guards against a
+    # pattern that starts with a dash. No shell — args stay an exec array.
+    if glob in ("", "*"):
+        cmd = ["grep", "-rnH", "-F", "--", pattern, search_path]
+    else:
+        # `find -exec ... {} +` propagates grep's no-match exit 1, which the
+        # handler below already treats as zero matches; no matching files at
+        # all simply yields exit 0 with empty output.
+        cmd = [
+            "find",
+            search_path,
+            "-type",
+            "f",
+            "-name",
+            glob,
+            "-exec",
+            "grep",
+            "-nH",
+            "-F",
+            "--",
+            pattern,
+            "{}",
+            "+",
+        ]
 
     logger.info(
         "Searching in volume %s: pattern=%s path=%s glob=%s",

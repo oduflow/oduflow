@@ -435,6 +435,36 @@ class TestPruneKeepRevisions:
             dst = tmp_path / f"dst{rev}"
             chunkstore.restore(storage, "erp", rev, str(dst))
 
+    def test_untracked_snapshot_is_kept_whole(self, small_config_storage, tmp_path):
+        """P-H8: a snapshot present in storage but absent from keep_revisions —
+        e.g. a deleted production whose backups were intentionally kept — must
+        keep ALL its revisions. Collapsing to the latest would strand its
+        retained manifests on pruned revisions (all but the newest unrestorable).
+        """
+        rng = random.Random(22)
+        storage = small_config_storage
+        for sid in ("erp", "crm"):
+            src = tmp_path / f"src-{sid}"
+            _make_tree(str(src), {"a.bin": rng.randbytes(20_000)})
+            for _ in range(3):
+                with open(src / "a.bin", "wb") as f:
+                    f.write(rng.randbytes(20_000))
+                chunkstore.backup(str(src), storage, sid)
+        assert list_revisions(storage, "erp") == [1, 2, 3]
+        assert list_revisions(storage, "crm") == [1, 2, 3]
+
+        # Retention tracks only the live production "crm"; "erp" is untracked.
+        chunkstore.prune(storage, keep_revisions={"crm": {2}})
+
+        # Untracked "erp" keeps every revision; tracked "crm" keeps mapped+latest.
+        assert list_revisions(storage, "erp") == [1, 2, 3]
+        assert list_revisions(storage, "crm") == [2, 3]
+
+        # Every "erp" revision still restores — the data loss the fix prevents.
+        for rev in (1, 2, 3):
+            dst = tmp_path / f"erp-dst{rev}"
+            chunkstore.restore(storage, "erp", rev, str(dst))
+
     def test_prune_requires_a_policy(self, small_config_storage):
         with pytest.raises(ValueError, match="keep"):
             chunkstore.prune(small_config_storage)

@@ -1820,6 +1820,89 @@ class TestProductionBackupLocks:
                 locks.release_env(key)
 
 
+class TestClusterPitrSafety:
+    """P-H11: a failed cluster PITR must not leave every production stopped,
+    and a missing [backup] section must fail before anything is stopped."""
+
+    @staticmethod
+    def _settings_with_backup():
+        from oduflow.settings import BackupSettings
+
+        return replace(
+            TEST_SETTINGS,
+            prod_enabled=True,
+            backup=BackupSettings(bucket="b", access_key="k", secret_key="s"),
+        )
+
+    def test_failed_restore_restarts_stopped_productions(self):
+        from unittest.mock import MagicMock
+
+        import oduflow.server
+        from oduflow.errors import PrerequisiteNotMetError
+
+        container = MagicMock()
+        container.status = "running"
+        restarted: list[str] = []
+
+        with (
+            patch.object(oduflow.server, "_settings", self._settings_with_backup()),
+            patch("oduflow.docker_ops.client.get_client", return_value=MagicMock()),
+            patch(
+                "oduflow.production_registry.list_productions",
+                return_value={"erp": {}},
+            ),
+            patch(
+                "oduflow.docker_ops.production_ops._get_container",
+                return_value=container,
+            ),
+            patch(
+                "oduflow.docker_ops.production_ops.start_production",
+                side_effect=lambda s, t, n: restarted.append(n),
+            ),
+            patch(
+                "oduflow.walg.pitr_restore_cluster",
+                side_effect=PrerequisiteNotMetError("wal-g exploded"),
+            ),
+        ):
+            with pytest.raises(ToolError, match="wal-g exploded"):
+                _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
+
+        # The production we stopped was brought back up before the error
+        # surfaced, instead of every team being left offline.
+        container.stop.assert_called_once()
+        assert restarted == ["erp"]
+
+    def test_missing_backup_section_fails_before_stopping(self):
+        from unittest.mock import MagicMock
+
+        import oduflow.server
+
+        container = MagicMock()
+        container.status = "running"
+
+        with (
+            patch.object(
+                oduflow.server,
+                "_settings",
+                replace(TEST_SETTINGS, prod_enabled=True, backup=None),
+            ),
+            patch(
+                "oduflow.production_registry.list_productions",
+                return_value={"erp": {}},
+            ) as list_prods,
+            patch(
+                "oduflow.docker_ops.production_ops._get_container",
+                return_value=container,
+            ),
+        ):
+            with pytest.raises(ToolError, match=r"\[backup\]"):
+                _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
+
+        # Validation happened before the stop loop even enumerated productions.
+        list_prods.assert_not_called()
+        container.stop.assert_not_called()
+
+
 class TestOdooRpcToolsAreLockFree:
     """XML-RPC against a live Odoo is arbitrated by PostgreSQL, not by us."""
 

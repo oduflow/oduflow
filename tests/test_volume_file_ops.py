@@ -347,6 +347,54 @@ class TestSearchInVolume:
 
         assert result["matches"] == 1
 
+    def test_default_glob_uses_plain_busybox_grep(self, mock_docker_client):
+        """P-H14: the helper image ships busybox grep, which has no GNU
+        `--include` — the old command exited 2 on every real search. The
+        default glob needs no filter at all."""
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        mock_docker_client.containers.run.return_value = b""
+
+        volume_file_ops.search_in_volume(TEST_SETTINGS, TEST_TEAM, "mydata", "key")
+
+        cmd = mock_docker_client.containers.run.call_args.args[1]
+        assert cmd == [
+            "grep",
+            "-rnH",
+            "-F",
+            "--",
+            "key",
+            volume_file_ops._MOUNT_POINT,
+        ]
+
+    def test_custom_glob_uses_find_exec_grep(self, mock_docker_client):
+        """A real filename filter goes through find -name … -exec grep {} + —
+        POSIX/busybox primitives only, still a plain exec array (no shell)."""
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        mock_docker_client.containers.run.return_value = b""
+
+        volume_file_ops.search_in_volume(
+            TEST_SETTINGS, TEST_TEAM, "mydata", "key", glob="*.conf"
+        )
+
+        cmd = mock_docker_client.containers.run.call_args.args[1]
+        assert cmd == [
+            "find",
+            volume_file_ops._MOUNT_POINT,
+            "-type",
+            "f",
+            "-name",
+            "*.conf",
+            "-exec",
+            "grep",
+            "-nH",
+            "-F",
+            "--",
+            "key",
+            "{}",
+            "+",
+        ]
+        assert "--include" not in cmd
+
 
 # ---------------------------------------------------------------------------
 # delete_file_in_volume

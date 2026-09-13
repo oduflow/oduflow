@@ -145,6 +145,19 @@ def test_save_as_template_shows_elapsed_progress(tmp_path):
     assert "setBusy(branch, 'Saving template')" in dashboard.text
 
 
+def test_dynamic_modals_use_the_show_class(tmp_path):
+    """P-H15: only .modal-overlay.show has display:flex. Dialogs created with a
+    'modal-overlay active' class never rendered — Create/Delete/Restore
+    Production were dead and promptDialog's promise never settled."""
+    dashboard = _client(tmp_path).get("/")
+
+    assert dashboard.status_code == 200
+    assert "modal-overlay active" not in dashboard.text
+    assert "'modal-overlay show'" in dashboard.text
+    # The dynamically created production modal is Escape-closable like the rest.
+    assert "'create-prod-modal':" in dashboard.text
+
+
 def test_feedback_modal_is_registered_for_escape_key(tmp_path):
     dashboard = _client(tmp_path).get("/")
 
@@ -301,7 +314,7 @@ def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):
     assert dashboard.status_code == 200
     assert "data.default === 'opencode'" in dashboard.text
     assert "(agentType === 'opencode' ? 'OpenCode' : 'Claude')" in dashboard.text
-    assert "var CHAT_V = '6'" in dashboard.text
+    assert "var CHAT_V = '7'" in dashboard.text
 
 
 def test_minimized_window_dock_has_group_semantics_and_restores_focus(tmp_path):

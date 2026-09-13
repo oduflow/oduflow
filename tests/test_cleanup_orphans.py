@@ -83,6 +83,83 @@ def test_cleanup_orphans_unmount_receives_teamsettings(tmp_path):
     assert isinstance(seen["team"], TeamSettings)
 
 
+def _exec_sql_router(db_rows, role_rows):
+    """Return an _exec_sql side_effect that answers the DB-list and role-list
+    queries and no-ops everything else (DROP DATABASE, etc.)."""
+
+    def _router(client, settings, sql):
+        lowered = sql.lower()
+        if "pg_database" in lowered:
+            return "\n".join(db_rows)
+        if "pg_roles" in lowered:
+            return "\n".join(role_rows)
+        return ""
+
+    return _router
+
+
+def test_cleanup_orphans_excludes_productions(tmp_path):
+    """P-C1: productions carry no branch label, so they never appear in
+    live_branches. cleanup must never classify a production database, workspace,
+    port reservation, or PG role as an orphan, while still catching genuine dev
+    orphans that sit alongside them."""
+    team, settings = _team_and_settings(tmp_path)
+
+    os.makedirs(team.workspaces_dir, exist_ok=True)
+    os.makedirs(os.path.join(team.workspaces_dir, "prod-erp"))
+    os.makedirs(os.path.join(team.workspaces_dir, "feature-x"))
+
+    db_rows = ["oduflow_1_prod-erp", "oduflow_1_feature-x"]
+    role_rows = ["u_1_prod-erp", "u_1_feature-x"]
+    registry = {"prod-erp": {"web": 8069}, "feature-x": {"web": 8070}}
+
+    with (
+        patch.object(system_ops, "get_client", return_value=_FakeClient()),
+        patch.object(
+            system_ops, "_exec_sql", side_effect=_exec_sql_router(db_rows, role_rows)
+        ),
+        patch("oduflow.port_registry._load_registry", return_value=dict(registry)),
+        patch("oduflow.port_registry._save_registry"),
+    ):
+        result = system_ops.cleanup_orphans(settings, team, dry_run=True)
+
+    # Production resources are never orphans.
+    assert "oduflow_1_prod-erp" not in result["orphan_databases"]
+    assert "prod-erp" not in result["orphan_workspaces"]
+    assert "prod-erp" not in result["orphan_ports"]
+    assert "u_1_prod-erp" not in result["orphan_roles"]
+
+    # The genuine dev orphan is still detected in every category.
+    assert "oduflow_1_feature-x" in result["orphan_databases"]
+    assert "feature-x" in result["orphan_workspaces"]
+    assert "feature-x" in result["orphan_ports"]
+    assert "u_1_feature-x" in result["orphan_roles"]
+
+
+def test_cleanup_orphans_never_rmtrees_production_workspace(tmp_path):
+    """P-C1 (data-loss): a real cleanup run must leave a production workspace and
+    its filestore fully intact."""
+    team, settings = _team_and_settings(tmp_path)
+
+    os.makedirs(team.workspaces_dir, exist_ok=True)
+    prod_dir = os.path.join(team.workspaces_dir, "prod-erp")
+    os.makedirs(prod_dir)
+    sentinel = os.path.join(prod_dir, "filestore-sentinel")
+    with open(sentinel, "w") as fh:
+        fh.write("precious")
+
+    with (
+        patch.object(system_ops, "get_client", return_value=_FakeClient()),
+        patch.object(system_ops, "_exec_sql", return_value=""),
+        patch("oduflow.port_registry._load_registry", return_value={}),
+        patch("oduflow.port_registry._save_registry"),
+    ):
+        result = system_ops.cleanup_orphans(settings, team, dry_run=False)
+
+    assert "prod-erp" not in result["orphan_workspaces"]
+    assert os.path.exists(sentinel)
+
+
 def test_cleanup_orphans_drops_only_role_unused_by_renamed_environment(tmp_path):
     team, settings = _team_and_settings(tmp_path)
     workspace = os.path.join(team.workspaces_dir, "new-name")
