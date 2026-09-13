@@ -11,6 +11,7 @@ import logging
 import os
 import shlex
 import tarfile
+import time
 from typing import Any
 
 import docker
@@ -221,9 +222,15 @@ def write_file_in_volume(
         container.exec_run(["mkdir", "-p", parent], user="root")
 
         tar_stream = io.BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+        with tarfile.open(
+            fileobj=tar_stream, mode="w", format=tarfile.PAX_FORMAT
+        ) as tar:
             info = tarfile.TarInfo(name=filename)
             info.size = len(data)
+            # TarInfo defaults to epoch zero, which leaves mtime-based caches
+            # stale after replacement. PAX retains fractional seconds so rapid
+            # consecutive writes also invalidate file-hash caches such as Salt's.
+            info.mtime = time.time()
             tar.addfile(info, io.BytesIO(data))
         tar_stream.seek(0)
         container.put_archive(parent, tar_stream)

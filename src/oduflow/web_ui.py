@@ -3899,13 +3899,23 @@ def _build_routes(
             )
 
     async def api_credential_add(request: Request) -> JSONResponse:
+        """Store a git credential.
+
+        Two body shapes are accepted:
+
+        * token-first (dashboard form): ``token`` plus ``host`` (default
+          ``github.com``), optional ``username`` and optional ``repo_url`` to
+          verify against with ``git ls-remote``;
+        * legacy: ``repo_url`` carrying ``user:PAT@`` inline credentials.
+        """
         team = _get_ui_team(request)
         try:
             body = await request.json()
             repo_url = (body.get("repo_url") or "").strip()
-            if not repo_url:
+            token = (body.get("token") or "").strip()
+            if not repo_url and not token:
                 return JSONResponse(
-                    {"ok": False, "error": "repo_url is required."},
+                    {"ok": False, "error": "token (or repo_url) is required."},
                     status_code=400,
                 )
         except Exception:
@@ -3922,9 +3932,21 @@ def _build_routes(
         except BusyError as e:
             return _error_response(e)
         try:
-            result = await _offload(
-                git_ops.setup_repo_auth, repo_url, cred_file=team.git_credentials_file()
-            )
+            if token:
+                result = await _offload(
+                    git_ops.store_credential,
+                    host=(body.get("host") or "").strip() or "github.com",
+                    token=token,
+                    username=(body.get("username") or "").strip(),
+                    verify_repo_url=repo_url,
+                    cred_file=team.git_credentials_file(),
+                )
+            else:
+                result = await _offload(
+                    git_ops.setup_repo_auth,
+                    repo_url,
+                    cred_file=team.git_credentials_file(),
+                )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)

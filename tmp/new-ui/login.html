@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1080px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .login {
+    width: 400px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg);
+    padding: 2rem; display: flex; flex-direction: column; gap: 1rem;
+  }
+  .login .brand { justify-content: center; margin-bottom: 0.5rem; }
+  .login .word { font-size: var(--text-xl); }
+  .foot { margin-top: 1.25rem; font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); display: flex; gap: 1rem; }
+</style>
+</head>
+<body>
+
+<div class="login">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+  </div>
+  <div class="field">
+    <span class="lbl">Team password</span>
+    <input class="input mono focus" type="password" value="••••••••••••">
+    <span class="hint">The password identifies your team — no username needed.</span>
+  </div>
+  <button class="btn primary" style="justify-content:center">Sign in</button>
+  <div class="err-text" style="text-align:center">Wrong password. 2 attempts left before a 60s cooldown.</div>
+</div>
+
+<div class="foot">
+  <span>v1.68.1</span>
+  <span>·</span>
+  <span>docs.oduflow.dev</span>
+  <span>·</span>
+  <span>license: Oduist · valid until 2027-01-01</span>
+</div>
+
+</body>
+</html>

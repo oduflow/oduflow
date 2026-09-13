@@ -188,7 +188,7 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
 | `POST` | `/api/extra-repos/{name}/delete` | Delete the repository and unused cached revisions |
 | `GET` | `/api/credentials` | List stored credential identities (not secrets) |
-| `POST` | `/api/credentials/add` | Store credentials embedded in body `repo_url` |
+| `POST` | `/api/credentials/add` | Store an access token for a git host: body `token`, `host` (default `github.com`), optional `username`, optional `repo_url` to verify with `git ls-remote`; legacy body `repo_url` with inline `user:PAT@` |
 | `POST` | `/api/credentials/delete` | Delete by body `host` and `username` |
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
 | `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |

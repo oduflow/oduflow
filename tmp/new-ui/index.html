@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow Dashboard — UI design frames</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { width: auto; max-width: 1000px; margin: 0 auto; padding: 3rem 1.5rem; }
+  h1 { font-size: var(--text-xl); font-weight: 600; margin-bottom: 0.25rem; }
+  .sub { color: var(--muted-foreground); font-size: var(--text-sm); margin-bottom: 2rem; }
+  .group { margin-bottom: 1.5rem; }
+  .group h2 { font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); margin-bottom: 0.625rem; }
+  ul { list-style: none; display: flex; flex-direction: column; gap: 0.375rem; }
+  a { display: flex; align-items: baseline; gap: 0.75rem; padding: 0.5rem 0.875rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--foreground); text-decoration: none; font-size: var(--text-sm); }
+  a:hover { border-color: var(--primary); }
+  a .f { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); margin-left: auto; }
+</style>
+</head>
+<body>
+<h1>Oduflow Dashboard — UI design frames</h1>
+<div class="sub">The Engineer's Console · dark canonical · tokens from DESIGN.md · 1440px frames</div>
+
+<div class="group">
+  <h2>Core</h2>
+  <ul>
+    <li><a href="login.html">Login — team password<span class="f">login.html</span></a></li>
+    <li><a href="environments.html">Environments — fleet, bulk bar, sessions dock<span class="f">environments.html</span></a></li>
+    <li><a href="environment-detail.html">Environment detail — MCP, Connect As, sync result, menu<span class="f">environment-detail.html</span></a></li>
+    <li><a href="create-environment.html">Create environment — modal, template autofill<span class="f">create-environment.html</span></a></li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>Sessions</h2>
+  <ul>
+    <li><a href="logs.html">Logs — filter, ANSI, wrap, copy<span class="f">logs.html</span></a></li>
+    <li><a href="terminal.html">Terminal — bash / psql<span class="f">terminal.html</span></a></li>
+    <li><a href="agent-chat.html">Agent Chat — plan, tools, permissions, attachments<span class="f">agent-chat.html</span></a></li>
+    <li><a href="agent-cli.html">Agent CLI — terminal session<span class="f">agent-cli.html</span></a></li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>Entities</h2>
+  <ul>
+    <li><a href="templates.html">Templates<span class="f">templates.html</span></a></li>
+    <li><a href="template-import.html">Import from Odoo.sh — wizard<span class="f">template-import.html</span></a></li>
+    <li><a href="services.html">Services + presets<span class="f">services.html</span></a></li>
+    <li><a href="service-create.html">Create service — restore from preset<span class="f">service-create.html</span></a></li>
+    <li><a href="volumes.html">Volumes<span class="f">volumes.html</span></a></li>
+    <li><a href="repos.html">Extra addon repos<span class="f">repos.html</span></a></li>
+    <li><a href="credentials.html">Git credentials<span class="f">credentials.html</span></a></li>
+    <li><a href="productions.html">Productions — deploys, snapshots, restore confirm<span class="f">productions.html</span></a></li>
+    <li><a href="usage.html">Usage — team quota &amp; consumption<span class="f">usage.html</span></a></li>
+    <li><a href="guides.html">Agent guides — list + editor<span class="f">guides.html</span></a></li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>System</h2>
+  <ul>
+    <li><a href="patterns.html">UI patterns — buttons, badges, toasts, confirms<span class="f">patterns.html</span></a></li>
+  </ul>
+</div>
+</body>
+</html>

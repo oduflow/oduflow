@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1100px; overflow: hidden; }
+  .scrim { align-items: center; padding-top: 0; }
+  .sess-tab { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.75rem; border-radius: var(--r-md); font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); border: 1px solid transparent; }
+  .sess-tab.on { color: var(--foreground); background: var(--muted); border-color: var(--border); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-minimize"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+    <g id="i-terminal"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="cards">
+    <article class="card"><div class="row1"><span class="cbx"></span><h2 class="title">feature/pos-loyalty</h2><span class="badge running">running</span><span class="spacer"></span><div class="actions"><button class="btn">Stop</button><button class="btn">Sync</button><button class="btn">Logs</button></div></div></article>
+  </div>
+</main>
+
+<div class="scrim">
+  <div class="modal wide">
+    <div class="modal-h">
+      <span class="t">Terminal — feature/pos-loyalty</span>
+      <span class="sess-tab on"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-terminal"/></svg>bash</span>
+      <span class="sess-tab">psql</span>
+      <span class="spacer"></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-minimize"/></svg></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+    </div>
+    <div class="termbox" style="height:600px"><span class="ok">odoo@odoo-feature-pos-loyalty</span><span class="dim">:</span><span class="blue">/opt/odoo</span><span class="dim">$</span> ls addons/pos_loyalty
+__init__.py  __manifest__.py  models/  views/  static/  i18n/  tests/
+<span class="ok">odoo@odoo-feature-pos-loyalty</span><span class="dim">:</span><span class="blue">/opt/odoo</span><span class="dim">$</span> odoo-bin shell -d o_feature_pos_loyalty --no-http
+<span class="dim">2026-08-11 11:02:13,551 INFO o_feature_pos_loyalty odoo: Odoo version 18.0</span>
+<span class="dim">2026-08-11 11:02:14,102 INFO o_feature_pos_loyalty odoo.modules.loading: Modules loaded.</span>
+<span class="vio">env: &lt;odoo.api.Environment object&gt;</span>
+<span class="vio">odoo: &lt;module 'odoo'&gt;</span>
+<span class="dim">&gt;&gt;&gt;</span> env['loyalty.program'].search_count([])
+4
+<span class="dim">&gt;&gt;&gt;</span> env['res.users'].search([('share','=',False)]).mapped('login')
+['admin', 'mitchell.admin', 'marc.demo']
+<span class="dim">&gt;&gt;&gt;</span> <span class="cursor"></span></div>
+    <div class="modal-f" style="justify-content:space-between">
+      <span style="font-family:var(--font-mono);font-size:var(--text-2xs);color:var(--muted-foreground)">120 × 34 · session keeps running while minimized</span>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn">Minimize</button>
+        <button class="btn">End session</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
