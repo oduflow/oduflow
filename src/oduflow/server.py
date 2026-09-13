@@ -5663,6 +5663,8 @@ def _write_tuned_pg_conf(
             plan=plan,
         )
         dest.write_text(content, encoding="utf-8")
+        # PostgreSQL reads this non-secret bind mount as its container user.
+        dest.chmod(0o644)
         logger.info(
             "Config: %s (auto-tuned: %d vCPU, %d MB RAM, source=%s)",
             dest,
@@ -5924,6 +5926,7 @@ def _run_retune_postgres(
         if existing is not None:
             _backup(path)
         path.write_text(candidate, encoding="utf-8")
+        path.chmod(0o644)
         print(f"Updated: {path}")
         pg_restart.append(container)
 
@@ -5968,6 +5971,7 @@ def _copy_bundled_pg_conf(dest: pathlib.Path) -> None:
     if bundled.is_file():
         try:
             shutil.copy2(str(bundled), str(dest))
+            dest.chmod(0o644)
             logger.info("Config: %s (bundled default)", dest)
         except PermissionError:
             logger.warning("Cannot write %s (permission denied)", dest)

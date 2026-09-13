@@ -90,6 +90,10 @@ def test_startup_stack_is_applied_before_server(tmp_path):
         patch.object(server.migrations, "run_pending"),
         patch.object(server, "_ensure_initialized"),
         patch.object(server.quotas, "apply_all"),
+        patch(
+            "oduflow.docker_ops.client.wait_for_docker",
+            side_effect=lambda: events.append("docker"),
+        ),
         patch("oduflow.stack_loader.load_stack", return_value=manifest),
         patch(
             "oduflow.stack_ops.apply_stack",
@@ -101,4 +105,4 @@ def test_startup_stack_is_applied_before_server(tmp_path):
     ):
         server._run_cli()
 
-    assert events == ["stack", "server"]
+    assert events == ["docker", "stack", "server"]
