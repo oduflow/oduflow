@@ -222,3 +222,14 @@ def test_api_update_reports_an_invalid_new_name_as_a_bad_request(tmp_path):
     # Not an internal error: the message is written for the operator.
     assert resp.status_code == 400
     assert "../escape" in resp.json()["error"]
+
+
+@pytest.mark.parametrize("hostname, expected", [(" qa ", "qa"), ("", None)])
+def test_api_update_hostname(tmp_path, hostname, expected):
+    client = _client(tmp_path)
+    with patch("oduflow.web_ui.env_ops.update_environment", return_value={}) as update:
+        response = client.post(
+            "/api/environments/main/update", json={"hostname": hostname}
+        )
+    assert response.json()["ok"] is True
+    assert update.call_args.kwargs["hostname_override"] == expected

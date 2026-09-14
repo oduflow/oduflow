@@ -476,6 +476,92 @@ class TestPublicScheme:
         self._settings(routing_mode="port", scheme="http").validate()
 
 
+class TestTeamPublicScheme:
+    """[team.X] public_scheme: per-team override of the global URL scheme.
+
+    The mixed-deployment case: one team on plain HTTP over the LAN, another
+    behind a TLS-terminating upstream (Cloudflare tunnel) handing out https://
+    links — same Traefik, same tls = false.
+    """
+
+    def _settings(self, routing_mode="traefik", tls=False, scheme="", team_schemes=()):
+        teams = {}
+        for i, team_scheme in enumerate(team_schemes or ("",), start=1):
+            teams[str(i)] = TeamSettings(
+                team_id=str(i),
+                hostname=f"dev{i}.example.com",
+                port_range_start=50000 + i * 200,
+                port_range_end=50100 + i * 200,
+                public_scheme_setting=team_scheme,
+            )
+        return Settings(
+            routing_mode=routing_mode,
+            routing_tls=tls,
+            acme_email="admin@example.com",
+            public_scheme_setting=scheme,
+            teams=teams,
+        )
+
+    def test_team_override_wins_over_global(self):
+        s = self._settings(scheme="http", team_schemes=("", "https"))
+        assert s.public_scheme_for(s.teams["1"]) == "http"
+        assert s.public_scheme_for(s.teams["2"]) == "https"
+
+    def test_empty_override_falls_back_to_derived_default(self):
+        s = self._settings(team_schemes=("",))
+        assert s.public_scheme_for(s.teams["1"]) == "https"
+
+    def test_any_public_scheme_https(self):
+        assert not self._settings(
+            scheme="http", team_schemes=("", "http")
+        ).any_public_scheme_https
+        assert self._settings(
+            scheme="http", team_schemes=("", "https")
+        ).any_public_scheme_https
+        # A team without an override resolves to the global default
+        # (traefik → https), so it counts.
+        assert self._settings(team_schemes=("",)).any_public_scheme_https
+
+    def test_all_teams_http_disables_forwarded_header_trust(self):
+        # The global default derives to https, but every team overrides to
+        # http: no URL Oduflow hands out is https, so the unused global value
+        # must not keep Traefik trusting client-supplied X-Forwarded-*.
+        assert not self._settings(team_schemes=("http", "http")).any_public_scheme_https
+
+    def test_from_toml_parses_team_public_scheme(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[routing]\nmode = "traefik"\ntls = false\npublic_scheme = "http"\n'
+            '[team.1]\nhostname = "dev1.example.com"\nport_range = [50100, 50200]\n'
+            '[team.2]\nhostname = "dev2.example.com"\nport_range = [50300, 50400]\n'
+            'public_scheme = "HTTPS"\n'
+        )
+        s = Settings.from_toml(str(toml))
+        s.validate()
+        # Case-insensitive, and the other team keeps the global value.
+        assert s.public_scheme_for(s.teams["1"]) == "http"
+        assert s.public_scheme_for(s.teams["2"]) == "https"
+
+    def test_validate_rejects_other_schemes(self):
+        with pytest.raises(ValueError, match="Team '1'.*public_scheme"):
+            self._settings(team_schemes=("ftp",)).validate()
+
+    def test_validate_rejects_team_https_in_port_mode(self):
+        # Same wire-reality rule as the global setting: published ports serve
+        # plain HTTP, so per-team https:// links could never work either.
+        with pytest.raises(ValueError, match="Team '1'.*port mode"):
+            self._settings(routing_mode="port", team_schemes=("https",)).validate()
+
+    def test_validate_rejects_team_http_with_traefik_tls(self):
+        # tls = true keeps the :80->:443 redirect for every hostname, so a
+        # per-team http:// link would bounce just like a global one.
+        with pytest.raises(ValueError, match="Team '1'.*tls = false"):
+            self._settings(tls=True, team_schemes=("http",)).validate()
+
+    def test_validate_accepts_mixed_schemes_without_tls(self):
+        self._settings(scheme="http", team_schemes=("", "https")).validate()
+
+
 class TestOAuthSettings:
     def _team(self, **kw):
         defaults = {"team_id": "1", "port_range_start": 50000, "port_range_end": 50100}

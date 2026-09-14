@@ -1,4 +1,4 @@
-# 0059 — Tombstoned purge of deleted-production leftovers
+# 0060 — Tombstoned purge of deleted-production leftovers
 
 **Status:** Adopted (still in force)
 **Type:** Architecture / Data lifecycle

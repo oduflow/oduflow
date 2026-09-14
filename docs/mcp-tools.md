@@ -9,14 +9,14 @@ also available via the [REST API](web-api.md).
 | Tool | Lock | Description |
 |---|:---:|---|
 | **Environment Management** | | |
-| `create_environment` | ✓ | Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional `hostname` selects a short Traefik hostname and `env_vars` injects container environment variables, merged per key over any recorded on the template |
+| `create_environment` | ✓ | Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional `hostname` selects a short Traefik hostname and `env_vars` injects container environment variables, merged per key over any recorded on the template; `from_production` builds the environment from a production's real data through the managed `prod-<name>` template |
 | `delete_environment` | ✓ | Tear down all resources for a branch |
 | `list_environments` | | List all managed environments with status, URL, current git branch, creation/last-activity/stopped timestamps, stop source, protection, Stack ownership and operator note |
 | `get_environment_info` | | Full environment details: lifecycle/reuse metadata, DB name, URL, repo, image, template, extra addons, workspace, container status, CPU/RAM stats |
 | `start_environment` | | Start a stopped environment |
 | `stop_environment` | | Stop a running environment |
 | `restart_environment` | | Restart the Odoo container |
-| `update_environment` | ✓ | Re-create the container, preserving DB and filestore; optional `odoo_image` switches the image, `env_vars` replaces the container environment variables and `new_name` renames the environment |
+| `update_environment` | ✓ | Re-create the container, preserving DB and filestore; optional `odoo_image` switches the image, `hostname` changes the public Traefik hostname, `env_vars` replaces the container environment variables and `new_name` renames the environment |
 | `switch_branch` | ✓ | Point an existing environment at another branch and apply the difference, keeping its database, filestore, hostname and URL — the way to work when the team is out of environment slots; optional `new_name` renames the environment in the same operation (its scoped MCP endpoint moves with the name) |
 | **Odoo Operations** | | |
 | `pull_and_apply` | ✓ | Git pull + smart analysis → auto install/upgrade/restart; `summary_only=True` returns one action/status line and caches command logs for `read_output` |
@@ -45,6 +45,7 @@ also available via the [REST API](web-api.md).
 | `read_output` | | Read from a cached tool output by ID (paginate, grep, errors, tail) |
 | **Template Management** | | |
 | `save_as_template` | ✓ | ⚠️ Save a branch DB + filestore as a new template |
+| `save_production_as_template` | ✓ | ⚠️ Save a production's DB + filestore as a template (unsanitized production data; refused when the production has MCP copy-to-dev disabled) |
 | `list_templates` | | List available template profiles, including the branch/commit each database snapshot was taken from |
 | `delete_template` | ✓ | ⚠️ Delete a template profile (DB + files) |
 | `rename_template` | ✓ | Rename a template (directory + PostgreSQL template DB); refused if any environment uses it |
@@ -94,7 +95,7 @@ also available via the [REST API](web-api.md).
 | `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
-| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template |
+| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template; `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
 | `list_productions` | | List productions with status, domain, deployed commit, and auto-update state |
 | `get_production_info` | | Detailed status, configuration, deployed commit, deploy history, and backup information |
 | `start_production` | ✓ | Start a stopped production |

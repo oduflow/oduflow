@@ -212,6 +212,9 @@ class TestAdoptExistingEnvironment:
             TEST_SETTINGS.team_label: "1",
         }
         container.ports = {"8069/tcp": [{"HostPort": "50000"}]}
+        container.attrs = {
+            "NetworkSettings": {"Ports": {"8069/tcp": [{"HostPort": "50000"}]}}
+        }
         return container
 
     def test_missing_environment_returns_none(self, mock_docker_client):
@@ -1674,6 +1677,106 @@ class TestUpdateEnvironment:
             return env_ops.update_environment(
                 TEST_SETTINGS, TEST_TEAM, "main", pull_image=False, **kwargs
             )
+
+    @pytest.mark.parametrize("old_hostname", ["", "dev1", "previous"])
+    def test_update_hostname_routes_and_registry(
+        self, mock_docker_client, tmp_path, old_hostname
+    ):
+        from oduflow.hostname_registry import allocate_hostname, get_hostname
+
+        team = dataclasses.replace(TEST_TEAM, hostname="dev.example.com")
+        settings = dataclasses.replace(
+            TEST_SETTINGS, routing_mode="traefik", teams={"1": team}
+        )
+        container = self._make_container()
+        registry = env_ops._hostname_registry_path(team)
+        if old_hostname:
+            container.labels[env_ops.ENV_HOSTNAME_LABEL] = old_hostname
+            container.labels[env_ops.ENV_HOSTNAME_SOURCE_LABEL] = (
+                "slot" if old_hostname == "dev1" else "custom"
+            )
+            allocate_hostname(
+                registry,
+                "main",
+                0,
+                requested_hostname=old_hostname,
+                hostname_prefix="dev",
+            )
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.containers.list.return_value = []
+        with ExitStack() as stack:
+            for name in ("_reapply_odoo_conf", "_create_pg_role", "release_port"):
+                stack.enter_context(patch.object(env_ops, name))
+            stack.enter_context(
+                patch.object(
+                    env_ops,
+                    "load_credentials",
+                    return_value={"pg_user": "u", "pg_password": "pw"},
+                )
+            )
+            result = env_ops.update_environment(
+                settings,
+                team,
+                "main",
+                hostname_override="qa",
+                pull_image=False,
+                install_dependencies=False,
+            )
+            labels = mock_docker_client.containers.run.call_args.kwargs["labels"]
+            assert labels[env_ops.ENV_HOSTNAME_LABEL] == "qa"
+            assert labels[env_ops.ENV_HOSTNAME_SOURCE_LABEL] == "custom"
+            assert any(
+                "Host(`qa.example.com`)" in v
+                for k, v in labels.items()
+                if k.endswith(".rule")
+            )
+            assert result["url"].endswith("://qa.example.com")
+            assert get_hostname(registry, "main") == "qa"
+            # An ordinary subsequent update preserves the explicit assignment.
+            container.labels = labels
+            result = env_ops.update_environment(
+                settings, team, "main", pull_image=False, install_dependencies=False
+            )
+            assert result["hostname"] == "qa"
+
+    def test_hostname_conflict_keeps_container(self, mock_docker_client):
+        from oduflow.hostname_registry import allocate_hostname
+
+        team = dataclasses.replace(TEST_TEAM, hostname="dev.example.com")
+        settings = dataclasses.replace(
+            TEST_SETTINGS, routing_mode="traefik", teams={"1": team}
+        )
+        container = self._make_container()
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.containers.list.return_value = []
+        allocate_hostname(
+            env_ops._hostname_registry_path(team),
+            "other",
+            0,
+            requested_hostname="qa",
+            hostname_prefix="dev",
+        )
+        with pytest.raises(ConflictError):
+            env_ops.update_environment(
+                settings, team, "main", hostname_override="qa", pull_image=False
+            )
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+
+    @pytest.mark.parametrize("hostname", ["qa", "bad/name"])
+    def test_hostname_rejected_before_stop_in_port_mode(
+        self, mock_docker_client, hostname
+    ):
+        container = self._make_container()
+        mock_docker_client.containers.get.return_value = container
+        with pytest.raises(ValueError):
+            env_ops.update_environment(
+                dataclasses.replace(TEST_SETTINGS, routing_mode="port"),
+                TEST_TEAM,
+                "main",
+                hostname_override=hostname,
+            )
+        container.stop.assert_not_called()
 
     def test_the_agent_checkout_follows_the_rename(self, mock_docker_client):
         container = self._make_container()

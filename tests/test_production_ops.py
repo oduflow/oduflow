@@ -31,9 +31,9 @@ def settings(team, tmp_path):
 
 
 class TestProdUrl:
-    def test_defaults_to_https(self, settings):
+    def test_defaults_to_https(self, settings, team):
         assert (
-            production_ops.prod_url(settings, {"domain": "erp.example.com"})
+            production_ops.prod_url(settings, team, {"domain": "erp.example.com"})
             == "https://erp.example.com"
         )
 
@@ -48,8 +48,30 @@ class TestProdUrl:
             teams={"1": team},
         )
         assert (
-            production_ops.prod_url(settings, {"domain": "erp.example.com"})
+            production_ops.prod_url(settings, team, {"domain": "erp.example.com"})
             == "http://erp.example.com"
+        )
+
+    def test_follows_team_public_scheme(self, tmp_path):
+        # Per-team override: this team sits behind a TLS-terminating upstream
+        # while the deployment default is plain http.
+        team = TeamSettings(
+            team_id="1",
+            hostname="dev.example.com",
+            data_dir=str(tmp_path / "team_1"),
+            public_scheme_setting="https",
+        )
+        settings = Settings(
+            routing_mode="traefik",
+            routing_tls=False,
+            base_data_dir=str(tmp_path),
+            etc_dir=str(tmp_path / "etc"),
+            public_scheme_setting="http",
+            teams={"1": team},
+        )
+        assert (
+            production_ops.prod_url(settings, team, {"domain": "erp.example.com"})
+            == "https://erp.example.com"
         )
 
 

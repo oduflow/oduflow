@@ -24,6 +24,9 @@ mode = "port"                   # "port" | "traefik"
 #                                  # "http" with tls = false when NOTHING terminates
 #                                  # TLS in front, so the links are reachable (this
 #                                  # also stops Traefik trusting X-Forwarded-* on :80).
+#                                  # Can be overridden per team ([team.X] public_scheme)
+#                                  # to mix a plain-HTTP LAN team with a team behind a
+#                                  # TLS-terminating upstream (e.g. Cloudflare tunnel).
 
 # ── Extra routes (traefik only) ───────────────────────
 # Forward an external hostname to an arbitrary upstream URL for a service that
@@ -111,6 +114,9 @@ ui_password = ""                  # Web UI password (auto-generated on first run
 port_range = [50000, 50100]       # port range for Odoo containers
 # db_quota_gb = 50                # combined size cap for the team's PostgreSQL DBs (environments + templates); 0 = off
 # disk_quota_gb = 0               # cap on team files + databases via XFS project quotas (needs data dir on XFS with prjquota)
+# public_scheme = ""              # per-team override of [routing] public_scheme ("http" | "https");
+#                                  # empty = the global value. Lets one deployment serve a LAN team
+#                                  # over http and a Cloudflare-tunnel team over https at once.
 # agent_enabled = false           # per-team coding agent (dashboard Agent Chat / Agent CLI); off by default
 #                                  # Agent UI is hidden for local_path live-mount environments.
 # agent_default = "claude"        # "claude" | "codex" | "opencode" — default agent

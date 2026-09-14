@@ -490,7 +490,7 @@ def create_service(
             else:
                 # Upstream terminates TLS (e.g. Cloudflare tunnel): plain HTTP on
                 # the web entrypoint. The public URL below keeps the upstream's
-                # scheme (settings.public_scheme), not this entrypoint's.
+                # scheme (settings.public_scheme_for(team)), not this entrypoint's.
                 labels[f"traefik.http.routers.{container_name}.entrypoints"] = "web"
             if host_mode:
                 labels[
@@ -501,11 +501,11 @@ def create_service(
                     f"traefik.http.services.{container_name}.loadbalancer.server.port"
                 ] = str(port)
                 labels["traefik.docker.network"] = team_network
-        url = f"{settings.public_scheme}://{hostname}"
+        url = f"{settings.public_scheme_for(team)}://{hostname}"
     else:
         if not host_mode:
             run_kwargs["ports"] = {f"{port}/tcp": port}
-        url = f"{settings.public_scheme}://{team.hostname}:{port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"
 
     if resolved_env:
         run_kwargs["environment"] = resolved_env
@@ -580,7 +580,7 @@ def create_service(
         "url": url,
         "host_mode": host_mode,
         "command": list(command or []),
-        "routes": _routes_with_urls(routes, hostname, settings.public_scheme),
+        "routes": _routes_with_urls(routes, hostname, settings.public_scheme_for(team)),
     }
 
 
@@ -759,7 +759,7 @@ def _describe_service_container(
         match = re.search(r"Host\(`([^`]+)`\)", rule_value)
         if match:
             hostname = match.group(1)
-            url = f"{settings.public_scheme}://{hostname}"
+            url = f"{settings.public_scheme_for(team)}://{hostname}"
 
         if routes:
             port_num = None
@@ -786,7 +786,7 @@ def _describe_service_container(
             except Exception:
                 pass
             if port_num:
-                url = f"{settings.public_scheme}://{team.hostname}:{port_num}"
+                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port_num}"
         else:
             ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
             if ports_dict:
@@ -798,7 +798,7 @@ def _describe_service_container(
                         for mapping in mappings:
                             host_port = mapping.get("HostPort")
                             if host_port:
-                                url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+                                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
                                 break
                     break  # only process first port entry
 
@@ -835,7 +835,7 @@ def _describe_service_container(
         "port": port_num,
         "hostname": hostname,
         "url": url,
-        "routes": _routes_with_urls(routes, hostname, settings.public_scheme),
+        "routes": _routes_with_urls(routes, hostname, settings.public_scheme_for(team)),
         "env_vars": env_vars,
         "image_env_vars": image_env_vars,
         "host_mode": is_host_mode,
@@ -1211,9 +1211,9 @@ def update_service(
             h = hostname or f"{name}.{team.hostname}"
             if "." not in h:
                 h = f"{h}.{team.hostname}"
-            url = f"{settings.public_scheme}://{h}"
+            url = f"{settings.public_scheme_for(team)}://{h}"
         else:
-            url = f"{settings.public_scheme}://{team.hostname}:{port}"
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"
         return {
             "name": name,
             "container_name": container_name,
@@ -1228,7 +1228,7 @@ def update_service(
             "routes": _routes_with_urls(
                 routes,
                 h if settings.routing_mode == "traefik" else None,
-                settings.public_scheme,
+                settings.public_scheme_for(team),
             ),
         }
 

@@ -94,8 +94,11 @@ TOMBSTONE_FILENAME = "deleted.json"
 pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 
 
-def prod_url(settings: Settings, record: dict[str, Any]) -> str:
-    return f"{settings.public_scheme}://{record['domain']}"
+def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
+    # The domain is free-form (not necessarily under team.hostname); the owning
+    # team's scheme assumes it is fronted the same way as the team's other
+    # hosts (documented in docs/traefik.md). There is no per-production scheme.
+    return f"{settings.public_scheme_for(team)}://{record['domain']}"
 
 
 def _odoo_container_name(settings: Settings, team: TeamSettings, name: str) -> str:
@@ -465,6 +468,7 @@ def create_production(
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
     auto_update: bool = False,
+    allow_copy_to_dev_mcp: bool = True,
     template_name: str | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
@@ -527,6 +531,7 @@ def create_production(
             "git_user": git_user,
             "extra_addons": extra_addons or {},
             "auto_update": bool(auto_update),
+            "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
@@ -751,7 +756,7 @@ def create_production(
     )
     return {
         "name": name,
-        "url": prod_url(settings, record),
+        "url": prod_url(settings, team, record),
         "domain": domain,
         "odoo_container": container_name,
         "database": env_db,
@@ -1438,12 +1443,15 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
             {
                 "name": name,
                 "domain": record.get("domain", ""),
-                "url": prod_url(settings, record),
+                "url": prod_url(settings, team, record),
                 "status": _runtime_status(container, record),
                 "repo_url": record.get("repo_url", ""),
                 "branch": record.get("branch", ""),
                 "odoo_image": record.get("odoo_image", ""),
                 "auto_update": bool(record.get("auto_update")),
+                "allow_copy_to_dev_mcp": bool(
+                    record.get("allow_copy_to_dev_mcp", True)
+                ),
                 "commit": head,
                 "commit_short": head[:10],
                 "created_at": record.get("created_at", ""),
@@ -1486,7 +1494,7 @@ def get_production_info(
     return {
         "name": name,
         "domain": record.get("domain", ""),
-        "url": prod_url(settings, record),
+        "url": prod_url(settings, team, record),
         "status": _runtime_status(container, record),
         "healthy": healthy,
         "repo_url": record.get("repo_url", ""),
@@ -1494,6 +1502,7 @@ def get_production_info(
         "odoo_image": record.get("odoo_image", ""),
         "extra_addons": record.get("extra_addons", {}),
         "auto_update": bool(record.get("auto_update")),
+        "allow_copy_to_dev_mcp": bool(record.get("allow_copy_to_dev_mcp", True)),
         "unhealthy_flag": bool(record.get("unhealthy")),
         "deploy_in_progress": bool(record.get("deploy_in_progress")),
         "created_at": record.get("created_at", ""),

@@ -163,7 +163,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `delete_environment` — tear down an environment
 - `start_environment` / `stop_environment` / `restart_environment` — lifecycle control
 - Idle environments auto-stop after 48h without work (`[lifecycle].auto_stop_hours`). Auto-delete of long-stopped environments is opt-in and off by default (`auto_delete_hours = 0`; set a positive value to enable — destructive; protected environments are exempt). Container-level tools (pull_and_apply, shell/tests/installs/file ops) wake a stopped environment automatically and note it in the response
-- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `env_vars` replaces container environment variables)
+- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `hostname` changes the public Traefik hostname, `env_vars` replaces container environment variables)
 - `install_odoo_modules` — install Odoo modules
 - `upgrade_odoo_modules` — upgrade Odoo modules
 - `export_module_translations` — export a module's .pot/.po translation catalogue
@@ -740,7 +740,8 @@ mode = "port"               # "port" (direct host port) | "traefik" (reverse pro
 # acme_email = "admin@example.com"  # required when mode = "traefik" and tls = true
 # tls = true                # traefik only. false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)
 # public_scheme = "https"   # scheme of the URLs Oduflow hands out. Default: https (traefik) / http (port).
-                            # Set "http" with tls = false when nothing terminates TLS in front
+                            # Set "http" with tls = false when nothing terminates TLS in front.
+                            # Overridable per team ([team.X] public_scheme) for mixed deployments
 
 # ── Extra routes (Traefik only) ───────────────────────
 # [route.legacy-api]
@@ -846,7 +847,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[routing].mode` | `port` | `port` — direct host port mapping; `traefik` — reverse proxy with auto-HTTPS |
 | `[routing].acme_email` | *(empty)* | Let's Encrypt email for TLS certificates. Required when `mode = "traefik"` and `tls = true` |
 | `[routing].tls` | `true` | Traefik only. `true`: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). `false`: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay `https://` either way unless `public_scheme` says otherwise |
-| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 |
+| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 (unless a per-team override still resolves to `https`). Overridable per team with `[team.X] public_scheme` |
 
 ### Database settings
 
@@ -925,6 +926,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
 | `db_quota_gb` | `50` | Combined size cap for the team's environment and template PostgreSQL databases. `0` disables the check |
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
+| `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
 | `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
 
@@ -1438,6 +1440,32 @@ oduflow template-from-env my-branch --template-name default --reset-env-changes
 !!! info "Copy-mode templates"
     Environments created from a small (copy-mode, `use_overlay=false`) template have an independent filestore copy, not an overlay. They are not affected by template filestore updates and are left untouched.
 
+## Create a Template from Production
+
+A [production](production.md) can be published as a dev template — the reverse of seeding a production from a template. The production database is dumped out of the production cluster and restored into the dev cluster as the template database, and the production filestore becomes the template's baseline:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09"}'
+```
+
+The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`).
+
+The template records the production's `repo_url`, `odoo_image`, `git_user` and extra addons, plus [provenance](#template-metadata) — the production's branch, the commit its checkout is on, and the snapshot time — so environments created from it report code/database drift like any other template.
+
+!!! danger "The template holds unsanitized production data"
+    Real customer records, real email addresses, real API credentials. Sanitization happens **later**, when an environment is created from the template: `create_environment` runs Odoo's neutralization plus the repository's [sanitize scripts](environments.md#database-sanitization) by default. Treat the template itself — and its dump on disk — as production-confidential.
+
+Like `template-from-env`, this refuses to overwrite an existing template. Pass `overwrite=true` to deliberately re-baseline one from the current production data:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09","overwrite":true}'
+```
+
+Environments on that template keep their filestore changes (the overlay `upper` layer) unless you pass `reset_env_changes=true`, which is destructive.
+
+!!! info "MCP copies can be switched off per production"
+    A production whose administrator disabled copies to dev refuses this tool (and the first `create_environment(from_production=...)`, which would publish). A template that was already published stays usable — sanitized only — and the metadata records its `source_production`. The flag gates MCP/CLI agents only; the dashboard is never gated. See [Copying production data to dev](production.md#copying-production-data-to-dev).
+
 ## Refreshing Template Overlays
 
 Re-apply a template's current on-disk filestore to all live overlay environments without re-importing or re-saving — non-destructive by default (each environment keeps its `upper` deltas):
@@ -1656,6 +1684,28 @@ When creating an environment, Oduflow:
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
 8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
 
+### Creating an Environment from Production
+
+`from_production` builds a development environment out of a [production](production.md)'s real data — database, filestore, and the production's code origin (repo, image, extra addons):
+
+```bash
+oduflow call create_environment '{"branch":"bugfix-invoice","from_production":"erp"}'
+```
+
+It is mutually exclusive with `template_name` and `local_path`: the production supplies all of them.
+
+The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
+
+Refresh the copy when it gets stale — the next `from_production` call then reuses the fresh snapshot:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"prod-erp","overwrite":true}'
+```
+
+The environment is [sanitized](#database-sanitization) on creation like any other template-based environment (`sanitize=false` to skip it — with real production data, do so deliberately). The `prod-<name>` template itself holds **unsanitized** production data; see [Create a Template from Production](templates.md#create-a-template-from-production).
+
+An administrator can disable production→dev copies over MCP per production; publishing a new copy then refuses, while an already published `prod-<name>` template stays usable with `sanitize=true` only. See [Copying production data to dev](production.md#copying-production-data-to-dev).
+
 ### Private repository authentication
 
 For private repos, store an access token first:
@@ -1800,9 +1850,20 @@ oduflow call update_environment feature-login "WORKERS=4,LIMIT_TIME_CPU=900" odo
 # Rename it (keeps database, filestore and a pooled or explicit hostname)
 oduflow call update_environment '{"env_name": "feature-login", "new_name": "login"}'
 
+# Change the public Traefik hostname
+oduflow call update_environment '{"env_name": "feature-login", "hostname": "qa"}'
+
 # Tear down everything (container, database, filestore, workspace)
 oduflow call delete_environment feature-login
 ```
+
+The `hostname` parameter of `update_environment` accepts the same short hostname
+as `create_environment`: for team `dev.example.com`, `qa` routes to
+`qa.example.com`. It requires Traefik mode. Empty or omitted values keep the
+current hostname policy. Conflicting addresses are rejected before stopping the
+container. The database and filestore are preserved. You can also edit Hostname
+in the dashboard's **Update environment** dialog; leaving the field unchanged
+preserves the current policy, including name-derived routing during a rename.
 
 ### Reusing an Environment for the Next Branch
 
@@ -2297,6 +2358,7 @@ create_production(
     odoo_image="odoo:18.0",
     template_name="acme-prod",   # optional: seed DB+filestore from a template
     auto_update=False,
+    allow_copy_to_dev_mcp=True,  # may agents copy this production into dev?
 )
 ```
 
@@ -2385,6 +2447,46 @@ the cluster the same way.
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
 
+## Copying production data to dev
+
+Productions are seeded from templates; the same road runs backwards, so a
+developer can reproduce a bug on real data:
+
+```text
+save_production_as_template(prod_name="erp", template_name="erp-2026-09")
+create_environment(branch="bugfix-invoice", from_production="erp")
+```
+
+Both dump the production database out of the production cluster with a
+consistent `pg_dump` and restore it into the **dev** cluster, and snapshot the
+production filestore as the template's baseline. **The production keeps
+serving** — nothing is stopped or modified on its side.
+
+`create_environment(from_production=…)` routes through one managed template per
+production, `prod-<name>`, published on first use and reused afterwards; refresh
+it with `save_production_as_template(name, "prod-<name>", overwrite=True)`. See
+[Create a Template from Production](templates.md#create-a-template-from-production)
+and [Creating an Environment from Production](environments.md#creating-an-environment-from-production).
+
+!!! danger "The copy is unsanitized until an environment is created"
+    The template carries real customer data and credentials. Environments made
+    from it are neutralized and run the repository's sanitize scripts by
+    default; the template itself is production-confidential.
+
+**`allow_copy_to_dev_mcp`** (default `true`, set at `create_production`) gates
+**new copies**: when it is `false`, an MCP/CLI agent asking for either tool gets
+a refusal — and no MCP tool can turn the flag back on. It is a gate on *agents*,
+not on people: the dashboard's Production tab is never gated and is the only
+place the flag can be toggled, so an agent cannot re-enable its own access.
+Productions created before the flag existed behave as `true`.
+
+The flag does **not** revoke a copy that already exists. A `prod-<name>` (or
+any) template published from the production stays usable through
+`create_environment(template_name=...)` like every other template — its data is
+neutralized on the way into each environment. The one thing agents lose is the
+raw form: `sanitize=false` on a template whose `source_production` has the flag
+off is refused. To withdraw the data itself, `delete_template` the copy.
+
 ## Health
 
 `GET /healthz` (public, no auth, no secrets) returns 200 when healthy and
@@ -2432,6 +2534,7 @@ presumed alive and is never touched (`oduflow cleanup` skips the whole
 | `restore_production` | Restore DB + filestore from a snapshot |
 | `set_production_backup_schedule` | Per-production snapshot time / off |
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
+| `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |
 | `prune_production_backups` | Apply retention now |
 | `restore_cluster_pitr` | Cluster-wide disaster recovery / PITR |
 | `delete_production` | Remove (database/files kept unless `drop_database`) |
@@ -3258,7 +3361,7 @@ than a JSON API. Production routes are registered only when
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
-| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user` |
+| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
@@ -3456,6 +3559,8 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/update` | Start an asynchronous deploy; returns `202` |
 | `POST` | `/api/productions/{name}/rollback?to_commit=` | Roll code back to a commit |
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
+| `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
+| `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
 | `POST` | `/api/productions/{name}/delete` | Delete; body `confirm` must equal name, optional `drop_database` |
@@ -3491,14 +3596,14 @@ also available via the [REST API](web-api.md).
 | Tool | Lock | Description |
 |---|:---:|---|
 | **Environment Management** | | |
-| `create_environment` | ✓ | Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional `hostname` selects a short Traefik hostname and `env_vars` injects container environment variables, merged per key over any recorded on the template |
+| `create_environment` | ✓ | Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional `hostname` selects a short Traefik hostname and `env_vars` injects container environment variables, merged per key over any recorded on the template; `from_production` builds the environment from a production's real data through the managed `prod-<name>` template |
 | `delete_environment` | ✓ | Tear down all resources for a branch |
 | `list_environments` | | List all managed environments with status, URL, current git branch, creation/last-activity/stopped timestamps, stop source, protection, Stack ownership and operator note |
 | `get_environment_info` | | Full environment details: lifecycle/reuse metadata, DB name, URL, repo, image, template, extra addons, workspace, container status, CPU/RAM stats |
 | `start_environment` | | Start a stopped environment |
 | `stop_environment` | | Stop a running environment |
 | `restart_environment` | | Restart the Odoo container |
-| `update_environment` | ✓ | Re-create the container, preserving DB and filestore; optional `odoo_image` switches the image, `env_vars` replaces the container environment variables and `new_name` renames the environment |
+| `update_environment` | ✓ | Re-create the container, preserving DB and filestore; optional `odoo_image` switches the image, `hostname` changes the public Traefik hostname, `env_vars` replaces the container environment variables and `new_name` renames the environment |
 | `switch_branch` | ✓ | Point an existing environment at another branch and apply the difference, keeping its database, filestore, hostname and URL — the way to work when the team is out of environment slots; optional `new_name` renames the environment in the same operation (its scoped MCP endpoint moves with the name) |
 | **Odoo Operations** | | |
 | `pull_and_apply` | ✓ | Git pull + smart analysis → auto install/upgrade/restart; `summary_only=True` returns one action/status line and caches command logs for `read_output` |
@@ -3527,6 +3632,7 @@ also available via the [REST API](web-api.md).
 | `read_output` | | Read from a cached tool output by ID (paginate, grep, errors, tail) |
 | **Template Management** | | |
 | `save_as_template` | ✓ | ⚠️ Save a branch DB + filestore as a new template |
+| `save_production_as_template` | ✓ | ⚠️ Save a production's DB + filestore as a template (unsanitized production data; refused when the production has MCP copy-to-dev disabled) |
 | `list_templates` | | List available template profiles, including the branch/commit each database snapshot was taken from |
 | `delete_template` | ✓ | ⚠️ Delete a template profile (DB + files) |
 | `rename_template` | ✓ | Rename a template (directory + PostgreSQL template DB); refused if any environment uses it |
@@ -3576,7 +3682,7 @@ also available via the [REST API](web-api.md).
 | `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
-| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template |
+| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template; `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
 | `list_productions` | | List productions with status, domain, deployed commit, and auto-update state |
 | `get_production_info` | | Detailed status, configuration, deployed commit, deploy history, and backup information |
 | `start_production` | ✓ | Start a stopped production |
@@ -4152,6 +4258,59 @@ no environment or service needs recreating.
     Odoo logins, session cookies, the dashboard password and MCP bearer tokens
     all travel in cleartext. Use this only on a trusted network, never on a
     public-facing server.
+
+## Mixing HTTP and HTTPS teams in one deployment
+
+`public_scheme` can be overridden per team. The typical shape: one team is
+reached directly over the LAN in plain HTTP, another is published through a
+**Cloudflare tunnel** that terminates TLS — same server, same Traefik on plain
+`:80`:
+
+```toml
+[routing]
+mode = "traefik"
+tls = false              # Traefik listens on plain HTTP :80 only
+public_scheme = "http"   # default for teams without an override (the LAN team)
+
+[team.1]
+hostname = "dev.internal.example.com"   # LAN, http:// links
+
+[team.2]
+hostname = "dev.example.com"            # via Cloudflare tunnel
+public_scheme = "https"                 # its links are https://
+```
+
+Point the tunnel at the server's port 80 for the second team's hostnames
+(e.g. `dev.example.com` and `*.dev.example.com → http://localhost:80`); the
+first team's clients resolve its hostname to the server directly. Every URL
+Oduflow hands out — dashboard links, MCP endpoints, environment and service
+URLs — uses each team's resolved scheme. No `acme_email` is involved: with
+`tls = false` Traefik never talks to Let's Encrypt, and the tunnel's
+certificate comes from Cloudflare.
+
+!!! warning "Forwarded-header trust is deployment-wide"
+    Because at least one team resolves to `https`, the `web` entrypoint trusts
+    inbound `X-Forwarded-*` headers (as in the tunnel setup above) — so the
+    tunnel's `X-Forwarded-Proto: https` survives. That trust is
+    **entrypoint-wide**, not per team: any client that can reach port 80
+    directly can forge `X-Forwarded-Host`, `X-Forwarded-Proto` and
+    `X-Forwarded-For` on requests to *any* hostname this Traefik serves —
+    including the other team's environments and productions. Production Odoo
+    runs in proxy mode and uses those headers to rebuild absolute URLs
+    (`web.base.url`, password-reset links) and for IP logging and login
+    throttling. Only mix schemes when every network that can reach port 80 is
+    trusted for **all** teams on the deployment; otherwise split the teams
+    onto separate deployments.
+
+The per-team value obeys the same rules as the global one: `https` is invalid
+in port mode, and `http` is invalid while `tls = true` (the :80→:443 redirect
+would break the links).
+
+Production URLs are reported with the **owning team's** scheme. A production's
+domain is free-form (it need not live under the team's hostname), so make sure
+each production domain is fronted the same way as the rest of its team — a
+plain-HTTP team's production published through the other team's tunnel would be
+reported as `http://` even though only `https://` answers.
 
 ---
 

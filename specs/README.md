@@ -77,7 +77,8 @@ precursors).
 | [0056](0056-public-url-scheme.md) | 2026-09-04 | Public URL scheme (`[routing] public_scheme`) and conditional forwarded-header trust |
 | [0057](0057-service-container-lifecycle.md) | 2026-09-12 | Explicit service container lifecycle settings |
 | [0058](0058-team-secrets.md) | 2026-09-12 | Team secrets for environment variables (write-only vault, `secret:<name>` references) |
-| [0059](0059-deleted-production-purge.md) | 2026-09-13 | Tombstoned purge of deleted-production leftovers (`prod_purge_hours`, cleanup flag) |
+| [0059](0059-production-to-dev-data-flow.md) | 2026-09-13 | Production → dev data flow through a managed template, gated for MCP agents only |
+| [0060](0060-deleted-production-purge.md) | 2026-09-13 | Tombstoned purge of deleted-production leftovers (`prod_purge_hours`, cleanup flag) |
 
 ## Design docs
 

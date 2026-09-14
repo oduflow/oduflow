@@ -181,7 +181,8 @@ mode = "port"               # "port" (direct host port) | "traefik" (reverse pro
 # acme_email = "admin@example.com"  # required when mode = "traefik" and tls = true
 # tls = true                # traefik only. false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)
 # public_scheme = "https"   # scheme of the URLs Oduflow hands out. Default: https (traefik) / http (port).
-                            # Set "http" with tls = false when nothing terminates TLS in front
+                            # Set "http" with tls = false when nothing terminates TLS in front.
+                            # Overridable per team ([team.X] public_scheme) for mixed deployments
 
 # ── Extra routes (Traefik only) ───────────────────────
 # [route.legacy-api]
@@ -287,7 +288,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[routing].mode` | `port` | `port` — direct host port mapping; `traefik` — reverse proxy with auto-HTTPS |
 | `[routing].acme_email` | *(empty)* | Let's Encrypt email for TLS certificates. Required when `mode = "traefik"` and `tls = true` |
 | `[routing].tls` | `true` | Traefik only. `true`: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). `false`: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay `https://` either way unless `public_scheme` says otherwise |
-| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 |
+| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 (unless a per-team override still resolves to `https`). Overridable per team with `[team.X] public_scheme` |
 
 ### Database settings
 
@@ -366,6 +367,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
 | `db_quota_gb` | `50` | Combined size cap for the team's environment and template PostgreSQL databases. `0` disables the check |
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
+| `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
 | `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
 

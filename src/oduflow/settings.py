@@ -115,6 +115,12 @@ class TeamSettings:
     # Container image building ([team.X.image_registry]); None = the image
     # build/publish MCP tools are unavailable for this team.
     image_registry: ImageRegistrySettings | None = None
+    # Raw per-team ``public_scheme`` override; empty falls back to the global
+    # [routing] value. Read the resolved scheme via
+    # :meth:`Settings.public_scheme_for`, not this field. Lets one deployment
+    # mix teams reached over plain HTTP (e.g. LAN) with teams fronted by an
+    # upstream TLS terminator such as a Cloudflare tunnel (https).
+    public_scheme_setting: str = ""
 
     @property
     def workspaces_dir(self) -> str:
@@ -388,11 +394,35 @@ class Settings:
         and a ``tls = false`` deployment is normally fronted by an upstream
         terminator (e.g. a Cloudflare tunnel) that still serves https. An
         operator who runs plain HTTP end to end sets ``[routing]
-        public_scheme = "http"`` to override the derived default.
+        public_scheme = "http"`` to override the derived default. Team-scoped
+        URLs go through :meth:`public_scheme_for`, which lets a ``[team.X]
+        public_scheme`` override this deployment-wide value.
         """
         if self.public_scheme_setting:
             return self.public_scheme_setting
         return "https" if self.routing_mode == "traefik" else "http"
+
+    def public_scheme_for(self, team: TeamSettings) -> str:
+        """Resolved URL scheme for one team's public URLs.
+
+        A ``[team.X] public_scheme`` overrides the global ``[routing]`` value,
+        so one deployment can hand out http:// links for a LAN-only team and
+        https:// links for a team fronted by an upstream TLS terminator (e.g. a
+        Cloudflare tunnel) at the same time.
+        """
+        return team.public_scheme_setting or self.public_scheme
+
+    @property
+    def any_public_scheme_https(self) -> bool:
+        """Whether any team's resolved public scheme is https.
+
+        Derived from the resolved per-team values only (``validate`` guarantees
+        at least one team, and a team without an override already resolves to
+        the global value). The raw global default must not vote on its own:
+        when every team overrides to http, no URL Oduflow hands out is https
+        and forwarded-header trust must stay off.
+        """
+        return any(self.public_scheme_for(t) == "https" for t in self.teams.values())
 
     @property
     def oauth_enabled(self) -> bool:
@@ -408,6 +438,30 @@ class Settings:
                 return team
         return None
 
+    def _validate_public_scheme(self, value: str, prefix: str = "") -> None:
+        """The wire-reality rules for a public_scheme value (global or team).
+
+        The scheme must match what actually answers on the wire: with Traefik
+        terminating TLS, :80 redirects to :443, so http:// links would bounce
+        (POSTs drop body/Authorization) and leak tokens on the first plaintext
+        hop; in port mode nothing can terminate TLS on the published
+        per-environment ports, so https:// links (and the internal probes built
+        from them) would fail the handshake outright.
+        """
+        if value not in ("", "http", "https"):
+            raise ValueError(f"{prefix}public_scheme must be 'http' or 'https'")
+        if value == "http" and self.routing_mode == "traefik" and self.routing_tls:
+            raise ValueError(
+                f"{prefix}public_scheme = 'http' requires tls = false: with "
+                "tls = true Traefik redirects :80 to :443, so http:// links "
+                "would not work"
+            )
+        if value == "https" and self.routing_mode == "port":
+            raise ValueError(
+                f"{prefix}public_scheme = 'https' is not supported in port "
+                "mode: published environment ports serve plain HTTP"
+            )
+
     def validate(self) -> None:
         if not self.teams:
             raise ValueError(
@@ -418,29 +472,7 @@ class Settings:
         if self.routing_mode not in ("port", "traefik"):
             raise ValueError("routing_mode must be 'port' or 'traefik'")
 
-        if self.public_scheme_setting not in ("", "http", "https"):
-            raise ValueError("public_scheme must be 'http' or 'https'")
-
-        # public_scheme must match what actually answers on the wire: with
-        # Traefik terminating TLS, :80 redirects to :443, so http:// links would
-        # bounce (POSTs drop body/Authorization) and leak tokens on the first
-        # plaintext hop; in port mode nothing can terminate TLS on the published
-        # per-environment ports, so https:// links (and the internal probes
-        # built from them) would fail the handshake outright.
-        if (
-            self.public_scheme_setting == "http"
-            and self.routing_mode == "traefik"
-            and self.routing_tls
-        ):
-            raise ValueError(
-                "public_scheme = 'http' requires tls = false: with tls = true "
-                "Traefik redirects :80 to :443, so http:// links would not work"
-            )
-        if self.public_scheme_setting == "https" and self.routing_mode == "port":
-            raise ValueError(
-                "public_scheme = 'https' is not supported in port mode: "
-                "published environment ports serve plain HTTP"
-            )
+        self._validate_public_scheme(self.public_scheme_setting)
 
         if self.routing_mode == "traefik" and self.routing_tls:
             if not self.acme_email:
@@ -466,6 +498,13 @@ class Settings:
                     f"'{team.hostname}'."
                 )
             seen_team_hosts[normalized_host] = team.team_id
+            # Per-team public_scheme obeys the same wire-reality rules as the
+            # global one: it changes only the URLs handed out, not what Traefik
+            # serves, so it must still match what actually answers on that
+            # hostname.
+            self._validate_public_scheme(
+                team.public_scheme_setting, prefix=f"Team '{team.team_id}': "
+            )
             if team.port_range_start >= team.port_range_end:
                 raise ValueError(
                     f"Team '{team.team_id}': invalid port range "
@@ -728,6 +767,9 @@ class Settings:
                 or "claude",
                 agent_env={str(k): str(v) for k, v in agent_env_raw.items()},
                 image_registry=image_registry,
+                public_scheme_setting=str(team_cfg.get("public_scheme", ""))
+                .strip()
+                .lower(),
             )
 
         # Parse static extra routes ([route.<name>] → host + upstream url).

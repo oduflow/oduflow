@@ -81,6 +81,7 @@ create_production(
     odoo_image="odoo:18.0",
     template_name="acme-prod",   # optional: seed DB+filestore from a template
     auto_update=False,
+    allow_copy_to_dev_mcp=True,  # may agents copy this production into dev?
 )
 ```
 
@@ -169,6 +170,46 @@ the cluster the same way.
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
 
+## Copying production data to dev
+
+Productions are seeded from templates; the same road runs backwards, so a
+developer can reproduce a bug on real data:
+
+```text
+save_production_as_template(prod_name="erp", template_name="erp-2026-09")
+create_environment(branch="bugfix-invoice", from_production="erp")
+```
+
+Both dump the production database out of the production cluster with a
+consistent `pg_dump` and restore it into the **dev** cluster, and snapshot the
+production filestore as the template's baseline. **The production keeps
+serving** — nothing is stopped or modified on its side.
+
+`create_environment(from_production=…)` routes through one managed template per
+production, `prod-<name>`, published on first use and reused afterwards; refresh
+it with `save_production_as_template(name, "prod-<name>", overwrite=True)`. See
+[Create a Template from Production](templates.md#create-a-template-from-production)
+and [Creating an Environment from Production](environments.md#creating-an-environment-from-production).
+
+!!! danger "The copy is unsanitized until an environment is created"
+    The template carries real customer data and credentials. Environments made
+    from it are neutralized and run the repository's sanitize scripts by
+    default; the template itself is production-confidential.
+
+**`allow_copy_to_dev_mcp`** (default `true`, set at `create_production`) gates
+**new copies**: when it is `false`, an MCP/CLI agent asking for either tool gets
+a refusal — and no MCP tool can turn the flag back on. It is a gate on *agents*,
+not on people: the dashboard's Production tab is never gated and is the only
+place the flag can be toggled, so an agent cannot re-enable its own access.
+Productions created before the flag existed behave as `true`.
+
+The flag does **not** revoke a copy that already exists. A `prod-<name>` (or
+any) template published from the production stays usable through
+`create_environment(template_name=...)` like every other template — its data is
+neutralized on the way into each environment. The one thing agents lose is the
+raw form: `sanitize=false` on a template whose `source_production` has the flag
+off is refused. To withdraw the data itself, `delete_template` the copy.
+
 ## Health
 
 `GET /healthz` (public, no auth, no secrets) returns 200 when healthy and
@@ -216,6 +257,7 @@ presumed alive and is never touched (`oduflow cleanup` skips the whole
 | `restore_production` | Restore DB + filestore from a snapshot |
 | `set_production_backup_schedule` | Per-production snapshot time / off |
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
+| `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |
 | `prune_production_backups` | Apply retention now |
 | `restore_cluster_pitr` | Cluster-wide disaster recovery / PITR |
 | `delete_production` | Remove (database/files kept unless `drop_database`) |
