@@ -34,6 +34,7 @@ from oduflow.errors import (
 )
 from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
 from oduflow.naming import (
+    PROD_ENV_PREFIX,
     get_db_name,
     get_service_database_name,
     get_tablespace_name,
@@ -4660,6 +4661,13 @@ def cleanup_orphans(
                 continue
             # Protected workspaces are never cleaned up
             if os.path.exists(os.path.join(entry_path, ".protected")):
+                continue
+            # The production namespace is out of scope: production containers
+            # carry no branch label, so a live production's workspace would
+            # always look orphaned here. Deleted-production leftovers are
+            # purged by their own tombstone-gated path instead
+            # (production_ops.purge_deleted_productions).
+            if entry.startswith(PROD_ENV_PREFIX):
                 continue
             matched = any(entry == b.replace("/", "-") for b in live_branches)
             if not matched:

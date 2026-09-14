@@ -218,6 +218,29 @@ production PostgreSQL, Traefik, S3 (HeadBucket), disk usage (warn at 85%),
 and productions flagged unhealthy by a failed rollback. The dashboard's
 status bar shows the same checks as chips.
 
+## Deleting a production
+
+`delete_production` (or **Delete** in the dashboard) removes the container and
+the registry record, but **keeps the database and the workspace** (filestore,
+repo, deploy history) on disk — productions are precious, deleting bytes is
+opt-in. Pass `drop_database=true` over MCP/CLI to remove everything at once.
+
+Kept leftovers are *tombstoned* (a `deleted.json` marker in the workspace) so
+they can be reclaimed later:
+
+- **Deferred purge** — set `[lifecycle] prod_purge_hours = N` in
+  `oduflow.toml` and the background sweep permanently purges the leftovers
+  (database, PostgreSQL role, workspace) N hours after the deletion. `0`
+  (default) keeps them forever. Re-creating a production with the same name
+  clears the tombstone, so a revived production is never purged.
+- **Immediate purge** — `oduflow cleanup --purge-deleted-productions`
+  lists tombstoned leftovers; add `--force` to purge them now, regardless of
+  age.
+
+Only tombstoned leftovers are ever purged: a workspace without the marker is
+presumed alive and is never touched (`oduflow cleanup` skips the whole
+`prod-*` namespace for the same reason).
+
 ## MCP tool reference
 
 | Tool | Purpose |

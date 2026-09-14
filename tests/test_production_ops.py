@@ -1,3 +1,6 @@
+import datetime
+import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -340,3 +343,137 @@ class TestProdConfChain:
         team_conf = tmp_path / "team_1" / "odoo.prod.conf"
         team_conf.write_text("[options]\n")
         assert production_ops._prod_base_conf_path(team, str(repo)) == str(team_conf)
+
+
+class TestTombstone:
+    def test_soft_delete_writes_tombstone(self, settings, team):
+        production_registry.create_production(team, "erp", {"domain": "e.x.com"})
+        client = _mock_client()
+        with patch.object(production_ops, "get_client", return_value=client):
+            production_ops.delete_production(settings, team, "erp")
+        ts = production_ops._tombstone_path(team, "erp")
+        assert os.path.isfile(ts)
+        with open(ts) as f:
+            payload = json.load(f)
+        assert payload["name"] == "erp"
+        assert payload["db_name"] == "oduflow_1_prod-erp"
+        assert payload["deleted_at"]
+
+    def test_drop_database_leaves_no_tombstone(self, settings, team):
+        production_registry.create_production(team, "erp", {"domain": "e.x.com"})
+        client = _mock_client()
+        with (
+            patch.object(production_ops, "get_client", return_value=client),
+            patch.object(production_ops, "_exec_sql", return_value=""),
+            patch.object(production_ops, "_drop_pg_role"),
+        ):
+            production_ops.delete_production(settings, team, "erp", drop_database=True)
+        assert not os.path.isdir(production_ops._workspace(team, "erp"))
+
+
+class TestPurgeDeletedProductions:
+    def _soft_delete(self, settings, team, name="erp"):
+        production_registry.create_production(team, name, {"domain": "e.x.com"})
+        client = _mock_client()
+        with patch.object(production_ops, "get_client", return_value=client):
+            production_ops.delete_production(settings, team, name)
+
+    def _age_tombstone(self, team, name, hours):
+        ts = production_ops._tombstone_path(team, name)
+        with open(ts) as f:
+            payload = json.load(f)
+        moment = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            hours=hours
+        )
+        payload["deleted_at"] = moment.isoformat()
+        with open(ts, "w") as f:
+            json.dump(payload, f)
+
+    def test_purges_tombstoned_leftovers(self, settings, team):
+        self._soft_delete(settings, team)
+        issued = []
+        with (
+            patch.object(production_ops, "get_client", return_value=_mock_client()),
+            patch.object(
+                production_ops,
+                "_exec_sql",
+                side_effect=lambda c, s, sql, **kw: issued.append(sql) or "",
+            ),
+            patch.object(production_ops, "_drop_pg_role"),
+        ):
+            result = production_ops.purge_deleted_productions(settings, team)
+        assert result["purged"] == ["erp"]
+        assert any("DROP DATABASE" in s for s in issued)
+        assert not os.path.isdir(production_ops._workspace(team, "erp"))
+
+    def test_respects_age_cutoff(self, settings, team):
+        self._soft_delete(settings, team)
+        result = production_ops.purge_deleted_productions(
+            settings, team, older_than_hours=72
+        )
+        assert result["purged"] == []
+        assert result["pending"] == ["erp"]
+        assert os.path.isfile(production_ops._tombstone_path(team, "erp"))
+
+    def test_purges_after_cutoff(self, settings, team):
+        self._soft_delete(settings, team)
+        self._age_tombstone(team, "erp", hours=73)
+        with (
+            patch.object(production_ops, "get_client", return_value=_mock_client()),
+            patch.object(production_ops, "_exec_sql", return_value=""),
+            patch.object(production_ops, "_drop_pg_role"),
+        ):
+            result = production_ops.purge_deleted_productions(
+                settings, team, older_than_hours=72
+            )
+        assert result["purged"] == ["erp"]
+
+    def test_dry_run_touches_nothing(self, settings, team):
+        self._soft_delete(settings, team)
+        result = production_ops.purge_deleted_productions(settings, team, dry_run=True)
+        assert result["dry_run"] is True
+        assert result["purged"] == ["erp"]
+        assert os.path.isdir(production_ops._workspace(team, "erp"))
+
+    def test_registered_production_never_purged(self, settings, team):
+        # A stale tombstone inside a live production's workspace: cleared,
+        # bytes untouched.
+        production_registry.create_production(team, "erp", {"domain": "e.x.com"})
+        production_ops._write_tombstone(team, "erp", "oduflow_1_prod-erp")
+        result = production_ops.purge_deleted_productions(settings, team)
+        assert result["purged"] == []
+        assert not os.path.isfile(production_ops._tombstone_path(team, "erp"))
+        assert os.path.isdir(production_ops._workspace(team, "erp"))
+        assert "erp" in production_registry.list_productions(team)
+
+    def test_workspace_without_tombstone_ignored(self, settings, team):
+        os.makedirs(production_ops._workspace(team, "erp"))
+        result = production_ops.purge_deleted_productions(settings, team)
+        assert result["purged"] == []
+        assert os.path.isdir(production_ops._workspace(team, "erp"))
+
+    def test_db_drop_failure_keeps_workspace_for_retry(self, settings, team):
+        self._soft_delete(settings, team)
+        with (
+            patch.object(production_ops, "get_client", return_value=_mock_client()),
+            patch.object(
+                production_ops, "_exec_sql", side_effect=RuntimeError("pg down")
+            ),
+        ):
+            result = production_ops.purge_deleted_productions(settings, team)
+        assert result["purged"] == []
+        assert result["pending"] == ["erp"]
+        assert result["warnings"]
+        assert os.path.isfile(production_ops._tombstone_path(team, "erp"))
+
+    def test_unreadable_tombstone_restarts_clock(self, settings, team):
+        self._soft_delete(settings, team)
+        with open(production_ops._tombstone_path(team, "erp"), "w") as f:
+            f.write("not json")
+        result = production_ops.purge_deleted_productions(
+            settings, team, older_than_hours=72
+        )
+        assert result["purged"] == []
+        assert result["warnings"]
+        with open(production_ops._tombstone_path(team, "erp")) as f:
+            assert json.load(f)["name"] == "erp"

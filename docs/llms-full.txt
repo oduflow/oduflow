@@ -763,6 +763,7 @@ overlay_threshold_mb = 50            # template filestore size threshold (MB) �
 [lifecycle]
 auto_stop_hours = 48        # auto-stop environments idle for N hours (no MCP/dashboard work); 0 disables
 auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 disables (opt-in; DESTRUCTIVE, protected envs exempt)
+prod_purge_hours = 0        # purge DB/files kept by a production deletion after N hours; 0 disables (opt-in; DESTRUCTIVE)
 
 # ── Coding agent (optional) ───────────────────────────
 # One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven
@@ -864,6 +865,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
+| `[lifecycle].prod_purge_hours` | `0` | Purge the database and workspace kept by `delete_production` N hours after the deletion (tombstoned leftovers only; a re-created production is never purged). Default `0` = **disabled** — leftovers are kept forever; `oduflow cleanup --purge-deleted-productions --force` purges them immediately |
 
 ### Agent settings
 
@@ -2048,7 +2050,12 @@ Configure (or disable with `0`) in `oduflow.toml`:
 [lifecycle]
 auto_stop_hours = 48    # stop after N hours without work; 0 disables
 auto_delete_hours = 0   # delete N hours after stop; 0 disables (opt-in; DESTRUCTIVE)
+prod_purge_hours = 0    # purge leftovers of deleted productions after N hours; 0 disables
 ```
+
+`prod_purge_hours` concerns [productions](production.md#deleting-a-production),
+not dev environments: it reclaims the database and files that
+`delete_production` keeps on disk.
 
 ## Viewing Logs
 
@@ -2487,6 +2494,29 @@ off is refused. To withdraw the data itself, `delete_template` the copy.
 production PostgreSQL, Traefik, S3 (HeadBucket), disk usage (warn at 85%),
 and productions flagged unhealthy by a failed rollback. The dashboard's
 status bar shows the same checks as chips.
+
+## Deleting a production
+
+`delete_production` (or **Delete** in the dashboard) removes the container and
+the registry record, but **keeps the database and the workspace** (filestore,
+repo, deploy history) on disk — productions are precious, deleting bytes is
+opt-in. Pass `drop_database=true` over MCP/CLI to remove everything at once.
+
+Kept leftovers are *tombstoned* (a `deleted.json` marker in the workspace) so
+they can be reclaimed later:
+
+- **Deferred purge** — set `[lifecycle] prod_purge_hours = N` in
+  `oduflow.toml` and the background sweep permanently purges the leftovers
+  (database, PostgreSQL role, workspace) N hours after the deletion. `0`
+  (default) keeps them forever. Re-creating a production with the same name
+  clears the tombstone, so a revived production is never purged.
+- **Immediate purge** — `oduflow cleanup --purge-deleted-productions`
+  lists tombstoned leftovers; add `--force` to purge them now, regardless of
+  age.
+
+Only tombstoned leftovers are ever purged: a workspace without the marker is
+presumed alive and is never touched (`oduflow cleanup` skips the whole
+`prod-*` namespace for the same reason).
 
 ## MCP tool reference
 

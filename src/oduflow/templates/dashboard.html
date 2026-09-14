@@ -332,6 +332,8 @@
     font-size: var(--text-sm);
   }
   .prod-mono { font-family: var(--font-mono); color: var(--text-dim); }
+  .prod-domain { font-size: var(--text-sm); text-decoration: none; }
+  .prod-domain:hover { text-decoration: underline; color: var(--accent); }
   .prod-section {
     border-top: 1px solid var(--border);
     margin-top: 12px;
@@ -7574,7 +7576,7 @@ function renderProductions() {
       '<div class="env-header">' +
         '<div class="left">' +
           '<span class="branch-name">' + esc(p.name) + '</span>' +
-          '<a class="repo-link prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
+          '<a class="prod-domain prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
           '<span class="badge ' + prodBadgeClass(p.status) + '">' + esc(p.status) + '</span>' +
           (p.auto_update ? '<span class="badge badge-neutral" title="Deploys automatically on GitHub push">auto</span>' : '') +
           (allowCopy ? '' : '<span class="badge badge-neutral" title="Agents cannot publish new copies of this production into dev over MCP; the dashboard still can">copy off</span>') +

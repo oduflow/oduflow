@@ -5655,7 +5655,13 @@ def delete_production(
     """
     Delete a production environment. The container and registry record are
     removed; the DATABASE and workspace (filestore, repo, deploy history)
-    are KEPT unless drop_database=true.
+    are KEPT unless drop_database=true. Kept leftovers are tombstoned: the
+    reaper purges them [lifecycle] prod_purge_hours after the deletion
+    (0 = keep forever, the default), and `oduflow cleanup
+    --purge-deleted-productions --force` purges them immediately.
+    Re-creating a production with the same name revives the leftovers'
+    tombstone-free state (the kept database itself must still be dealt with
+    explicitly, see create_production).
 
     Args:
         name: The production name.
@@ -6681,9 +6687,32 @@ def _run_list_service_databases(settings: Settings, team: TeamSettings) -> None:
         )
 
 
-def _run_cleanup(settings: Settings, team: TeamSettings, dry_run: bool = True) -> None:
+def _run_cleanup(
+    settings: Settings,
+    team: TeamSettings,
+    dry_run: bool = True,
+    purge_deleted_productions: bool = False,
+) -> None:
     result = system_ops.cleanup_orphans(settings, team, dry_run=dry_run)
     mode = "DRY RUN" if result["dry_run"] else "CLEANUP"
+
+    if purge_deleted_productions:
+        prod_result = production_ops.purge_deleted_productions(
+            settings, team, dry_run=dry_run
+        )
+        for warning in prod_result["warnings"]:
+            print(f"[{mode}] Warning: {warning}")
+        names = prod_result["purged"]
+        if names:
+            print(f"[{mode}] Deleted-production leftovers ({len(names)}):")
+            for name in names:
+                print(f"    - {name} (database + workspace)")
+            if prod_result["dry_run"]:
+                print("  Run with --force to purge them permanently.")
+            else:
+                print(f"  {len(names)} production leftover(s) purged.")
+        else:
+            print(f"[{mode}] No deleted-production leftovers found.")
     dbs = result["orphan_databases"]
     workspaces = result["orphan_workspaces"]
     ports = result["orphan_ports"]
@@ -7060,6 +7089,15 @@ def _run_cli() -> None:
         default=False,
         help="Actually remove orphaned resources",
     )
+    p_cleanup.add_argument(
+        "--purge-deleted-productions",
+        action="store_true",
+        default=False,
+        help=(
+            "Also purge the database and workspace kept by deleted "
+            "productions (tombstoned leftovers), regardless of their age"
+        ),
+    )
     p_cleanup.add_argument("--team", default="1", help="Team ID (default: 1)")
 
     # --- Tool introspection ---
@@ -7367,7 +7405,12 @@ def _run_cli() -> None:
         return
 
     if args.command == "cleanup":
-        _run_cleanup(_settings, _cli_team(), dry_run=not args.force)
+        _run_cleanup(
+            _settings,
+            _cli_team(),
+            dry_run=not args.force,
+            purge_deleted_productions=args.purge_deleted_productions,
+        )
         return
 
     if args.command == "stack":

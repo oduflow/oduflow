@@ -423,7 +423,12 @@ Configure (or disable with `0`) in `oduflow.toml`:
 [lifecycle]
 auto_stop_hours = 48    # stop after N hours without work; 0 disables
 auto_delete_hours = 0   # delete N hours after stop; 0 disables (opt-in; DESTRUCTIVE)
+prod_purge_hours = 0    # purge leftovers of deleted productions after N hours; 0 disables
 ```
+
+`prod_purge_hours` concerns [productions](production.md#deleting-a-production),
+not dev environments: it reclaims the database and files that
+`delete_production` keeps on disk.
 
 ## Viewing Logs
 

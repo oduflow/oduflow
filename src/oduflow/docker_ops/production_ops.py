@@ -80,6 +80,14 @@ logger = logging.getLogger("oduflow")
 _DEPLOYS_FILENAME = "deploys.json"
 _DEPLOYS_CAP = 100
 
+# Written into the kept workspace by delete_production(drop_database=False):
+# the marker that these bytes belong to a *deleted* production. Only
+# tombstoned leftovers are ever purged (by the reaper after
+# [lifecycle] prod_purge_hours, or by `oduflow cleanup
+# --purge-deleted-productions`); anything without a tombstone is presumed
+# alive and never touched.
+TOMBSTONE_FILENAME = "deleted.json"
+
 # Hooks fired at the start of update_production (before the pull). The backup
 # subsystem registers a pre-update snapshot here; failures are logged and
 # never block the deploy. Signature: hook(settings, team, name) -> None.
@@ -531,6 +539,9 @@ def create_production(
     try:
         ensure_team_network(client, settings, team)
         os.makedirs(workspace, exist_ok=True)
+        # Re-creating a soft-deleted name revives it: drop the tombstone so
+        # the purge sweep never eats the new production's bytes.
+        clear_tombstone(team, name)
 
         # Full clone — commit history is the point for production.
         repo_path = get_repo_path(env_name, team.workspaces_dir)
@@ -788,37 +799,10 @@ def delete_production(
             warnings.append(f"Container removal: {exc}")
 
     if drop_database:
-        try:
-            _exec_sql(
-                client,
-                settings,
-                f'DROP DATABASE IF EXISTS "{env_db}" WITH (FORCE);',
-                container_name=settings.prod_db_container,
-            )
-        except Exception as exc:
-            warnings.append(f'Failed to drop database "{env_db}": {exc}')
-        try:
-            creds = load_credentials(
-                env_name, team.workspaces_dir, settings.db_user, settings.db_password
-            )
-            _drop_pg_role(
-                client,
-                settings,
-                creds["pg_user"],
-                container_name=settings.prod_db_container,
-            )
-        except Exception as exc:
-            warnings.append(f"Failed to drop PG role: {exc}")
-        if os.path.isdir(workspace):
-            extra_dir = os.path.join(workspace, "extra")
-            if os.path.isdir(extra_dir):
-                from oduflow.extra_addons import remove_worktree
-
-                for repo_name in os.listdir(extra_dir):
-                    wt_path = os.path.join(extra_dir, repo_name)
-                    if os.path.isdir(wt_path):
-                        remove_worktree(team, repo_name, wt_path)
-            shutil.rmtree(workspace, ignore_errors=True)
+        _, destroy_warnings = _destroy_leftovers(client, settings, team, name)
+        warnings.extend(destroy_warnings)
+    else:
+        _write_tombstone(team, name, env_db)
 
     production_registry.delete_production(team, name)
     logger.info("Production deleted", extra={"env_name": env_name})
@@ -826,6 +810,193 @@ def delete_production(
         "name": name,
         "database_dropped": drop_database,
         "kept": [] if drop_database else [f"database {env_db}", workspace],
+        "warnings": warnings,
+    }
+
+
+def _tombstone_path(team: TeamSettings, name: str) -> str:
+    return os.path.join(_workspace(team, name), TOMBSTONE_FILENAME)
+
+
+def _write_tombstone(team: TeamSettings, name: str, env_db: str) -> None:
+    """Mark the kept leftovers as deleted. The workspace is created if the
+    production never had one on disk, so the tombstone (and with it the
+    kept database) is always discoverable by the purge sweep."""
+    workspace = _workspace(team, name)
+    os.makedirs(workspace, exist_ok=True)
+    payload = {
+        "name": name,
+        "db_name": env_db,
+        "deleted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    with open(_tombstone_path(team, name), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def clear_tombstone(team: TeamSettings, name: str) -> None:
+    try:
+        os.remove(_tombstone_path(team, name))
+    except FileNotFoundError:
+        pass
+
+
+def _destroy_leftovers(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    *,
+    require_db_drop: bool = False,
+) -> tuple[bool, list[str]]:
+    """Drop a production's database, PG role and workspace. Returns
+    (db_dropped, warnings). With ``require_db_drop`` the workspace is kept
+    when the DROP DATABASE fails, so the tombstone survives and a later
+    sweep retries instead of orphaning the database silently."""
+    env_name = prod_env_name(name)
+    env_db = prod_db_name(team, name)
+    workspace = _workspace(team, name)
+    warnings: list[str] = []
+
+    db_dropped = True
+    try:
+        _exec_sql(
+            client,
+            settings,
+            f'DROP DATABASE IF EXISTS "{env_db}" WITH (FORCE);',
+            container_name=settings.prod_db_container,
+        )
+    except Exception as exc:
+        db_dropped = False
+        warnings.append(f'Failed to drop database "{env_db}": {exc}')
+    if require_db_drop and not db_dropped:
+        return False, warnings
+    try:
+        creds = load_credentials(
+            env_name, team.workspaces_dir, settings.db_user, settings.db_password
+        )
+        _drop_pg_role(
+            client,
+            settings,
+            creds["pg_user"],
+            container_name=settings.prod_db_container,
+        )
+    except Exception as exc:
+        warnings.append(f"Failed to drop PG role: {exc}")
+    if os.path.isdir(workspace):
+        extra_dir = os.path.join(workspace, "extra")
+        if os.path.isdir(extra_dir):
+            from oduflow.extra_addons import remove_worktree
+
+            for repo_name in os.listdir(extra_dir):
+                wt_path = os.path.join(extra_dir, repo_name)
+                if os.path.isdir(wt_path):
+                    remove_worktree(team, repo_name, wt_path)
+        shutil.rmtree(workspace, ignore_errors=True)
+    return db_dropped, warnings
+
+
+def purge_deleted_productions(
+    settings: Settings,
+    team: TeamSettings,
+    *,
+    older_than_hours: float = 0,
+    dry_run: bool = False,
+    locks: Any | None = None,
+) -> dict[str, Any]:
+    """Permanently remove the leftovers (database, PG role, workspace) of
+    soft-deleted productions — those whose workspace carries a tombstone
+    written by delete_production(drop_database=False).
+
+    ``older_than_hours`` keeps leftovers younger than the cutoff (the reaper
+    passes ``[lifecycle] prod_purge_hours``); ``0`` purges immediately (the
+    ``cleanup --purge-deleted-productions`` CLI). A tombstone on a production
+    that is back in the registry is stale (the name was re-created): it is
+    removed and the leftovers are NOT touched. Pass the server's LockManager
+    as ``locks`` to skip productions busy with another operation.
+
+    Returns ``{"dry_run", "purged", "pending", "warnings"}`` where purged and
+    pending are lists of production names (with dry_run, "purged" means
+    "would be purged").
+    """
+    from oduflow import production_registry
+    from oduflow.locking import prod_lock_key
+    from oduflow.naming import PROD_ENV_PREFIX
+
+    registered = production_registry.list_productions(team)
+    purged: list[str] = []
+    pending: list[str] = []
+    warnings: list[str] = []
+    client: DockerClient | None = None
+    now = time.time()
+
+    if not os.path.isdir(team.workspaces_dir):
+        return {"dry_run": dry_run, "purged": [], "pending": [], "warnings": []}
+
+    for entry in sorted(os.listdir(team.workspaces_dir)):
+        if not entry.startswith(PROD_ENV_PREFIX):
+            continue
+        name = entry[len(PROD_ENV_PREFIX) :]
+        ts_path = os.path.join(team.workspaces_dir, entry, TOMBSTONE_FILENAME)
+        if not os.path.isfile(ts_path):
+            continue
+        if name in registered:
+            warnings.append(
+                f"Stale tombstone on registered production '{name}' — removed."
+            )
+            if not dry_run:
+                clear_tombstone(team, name)
+            continue
+        try:
+            with open(ts_path, encoding="utf-8") as f:
+                deleted_at = datetime.datetime.fromisoformat(
+                    json.load(f)["deleted_at"]
+                ).timestamp()
+        except Exception:
+            # Unreadable tombstone: restart its clock instead of guessing an
+            # age (a purge must never fire off a corrupt timestamp).
+            warnings.append(
+                f"Unreadable tombstone for '{name}' — deletion clock restarted."
+            )
+            if not dry_run:
+                _write_tombstone(team, name, prod_db_name(team, name))
+            continue
+        if older_than_hours > 0 and now - deleted_at < older_than_hours * 3600:
+            pending.append(name)
+            continue
+        if dry_run:
+            purged.append(name)
+            continue
+        if locks is not None:
+            try:
+                locks.acquire_env(
+                    prod_lock_key(team.team_id, name), operation="prod-purge"
+                )
+            except Exception:
+                pending.append(name)
+                continue
+        try:
+            client = client or get_client()
+            db_dropped, destroy_warnings = _destroy_leftovers(
+                client, settings, team, name, require_db_drop=True
+            )
+            warnings.extend(destroy_warnings)
+            if db_dropped:
+                purged.append(name)
+                logger.info(
+                    "Purged leftovers of deleted production '%s'",
+                    name,
+                    extra={"env_name": prod_env_name(name)},
+                )
+            else:
+                pending.append(name)
+        finally:
+            if locks is not None:
+                locks.release_env(prod_lock_key(team.team_id, name))
+
+    return {
+        "dry_run": dry_run,
+        "purged": purged,
+        "pending": pending,
         "warnings": warnings,
     }
 
