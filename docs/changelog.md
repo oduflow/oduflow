@@ -16,6 +16,17 @@
   streamed straight from the production cluster into the dev cluster's
   exchange dir, and a publish that fails halfway is rolled back. (#240)
 
+- **Purge deleted-production leftovers via tombstones** — a soft
+  `delete_production` (without `drop_database`) keeps the database and
+  workspace by design, but the leftovers had no lifecycle and accumulated
+  forever. Deletion now writes a `deleted.json` tombstone, and tombstoned
+  leftovers can be reclaimed either automatically — new opt-in
+  `[lifecycle] prod_purge_hours = N` (default `0` = keep forever) lets the
+  reaper purge the database, PG role and workspace N hours after deletion —
+  or immediately via `oduflow cleanup --purge-deleted-productions` (dry-run
+  by default, `--force` to apply). Only tombstoned leftovers are ever
+  purged. (#242)
+
 - **Per-team `public_scheme`** — `[team.X] public_scheme` overrides the global
   `[routing]` value, so one `tls = false` deployment can serve a plain-HTTP
   LAN team and a team behind a TLS-terminating upstream (e.g. a Cloudflare
