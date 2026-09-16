@@ -714,6 +714,20 @@ class TestReconfigureProduction:
         assert any("drifted" in note for note in result["notes"])
         client.containers.run.assert_called_once()
 
+    def test_stack_can_repair_runtime_when_registry_already_matches(
+        self, settings, team
+    ):
+        _seed_prod_record(team)
+        client = self._client_with_container(settings)
+        with _PatchAll(_patch_reconfigure_stack(client)) as mocks:
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", force_recreate=True
+            )
+        assert result["healthy"] is True
+        client.containers.run.assert_called_once()
+        mocks["fetch_branch"].assert_not_called()
+        client.images.pull.assert_not_called()
+
     def test_domain_conflict_rejected(self, settings, team):
         _seed_prod_record(team)
         production_registry.create_production(

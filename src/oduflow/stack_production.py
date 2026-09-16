@@ -241,9 +241,7 @@ def apply_production(
                 team,
                 target.name,
                 set_options=desired["odoo_conf"],
-                unset_options=sorted(
-                    set(record.get("odoo_conf", {})) - set(desired["odoo_conf"])
-                ),
+                replace=True,
                 restart=False,
             )
         infrastructure = {
@@ -257,7 +255,7 @@ def apply_production(
         )
         if must_reconfigure:
             result = production_ops.reconfigure_production(
-                settings, team, target.name, **infrastructure
+                settings, team, target.name, force_recreate=True, **infrastructure
             )
             if not result.get("healthy"):
                 raise ConflictError(

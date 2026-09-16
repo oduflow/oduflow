@@ -248,6 +248,7 @@ def test_failed_reconfiguration_leaves_pending_state_and_retries(setup):
     manifest.spec.production.env = {"MODE": "updated"}
 
     def fail(_settings, _team, name, **kwargs):
+        kwargs.pop("force_recreate")
         production_registry.update_production(team, name, kwargs)
         raise RuntimeError("container create failed")
 
@@ -355,7 +356,7 @@ def test_configuration_replacement_removes_omitted_overrides(setup):
         apply_stack(*setup)
     assert conf.call_args.kwargs == {
         "set_options": {"workers": "2"},
-        "unset_options": ["limit_time_real"],
+        "replace": True,
         "restart": False,
     }
 
@@ -424,3 +425,17 @@ def test_runtime_inspection_detects_effective_drift(setup):
         ]
         labels[settings.team_label] = "another"
         assert inspect_runtime(settings, team, record) == ["container ownership"]
+
+
+def test_odoo_conf_keys_follow_odoo_case_normalization(setup):
+    raw = setup[2].model_dump(by_alias=True)
+    raw["spec"]["production"]["odooConf"] = {"Workers": "2"}
+    assert StackManifest.model_validate(raw).spec.production.odoo_conf == {
+        "workers": "2"
+    }
+    raw["spec"]["production"]["odooConf"] = {"DB_HOST": "wrong"}
+    with pytest.raises(ValidationError, match="reserved"):
+        StackManifest.model_validate(raw)
+    raw["spec"]["production"]["odooConf"] = {"workers": "2", "Workers": "3"}
+    with pytest.raises(ValidationError, match="Duplicate"):
+        StackManifest.model_validate(raw)

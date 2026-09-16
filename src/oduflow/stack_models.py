@@ -198,14 +198,19 @@ class Production(StackModel):
     def valid_odoo_conf(cls, value: dict[str, str]) -> dict[str, str]:
         from oduflow.docker_ops.production_ops import RESERVED_ODOO_CONF_KEYS
 
+        normalized = {}
         for key, option in value.items():
+            key = key.lower()
+            if key in normalized:
+                raise ValueError(f"Duplicate odoo.conf option: {key}")
             if key in RESERVED_ODOO_CONF_KEYS or not re.fullmatch(
                 r"[A-Za-z0-9_.-]+", key
             ):
                 raise ValueError(f"Invalid or reserved odoo.conf option: {key}")
             if "\n" in option or "\r" in option:
                 raise ValueError(f"odoo.conf option must be a single line: {key}")
-        return value
+            normalized[key] = option
+        return normalized
 
 
 class Volume(StackModel):

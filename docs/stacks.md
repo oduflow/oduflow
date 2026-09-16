@@ -1,8 +1,8 @@
 # Declarative Stacks
 
 An Oduflow Stack is a versioned YAML manifest describing the complete desired
-state of one development environment or production and its supporting resources. It keeps the
-host-level `oduflow.toml` separate from project configuration: teams, routing,
+state of one development environment or production and its supporting resources.
+It keeps the host-level `oduflow.toml` separate from project configuration: teams, routing,
 authentication, quotas, and backups remain operator settings, while the Stack
 file can live beside the project's code and move between Oduflow installations.
 
