@@ -2466,6 +2466,19 @@
 // on the page is presentation — hiding controls whose endpoints are denied.
 var SCOPED_ENV = document.body.getAttribute('data-scoped-env') || '';
 
+// Whether the Promote-to-Production feature is enabled for this page. The
+// server substitutes the production-tab placeholder (see
+// web_ui._render_dashboard) with '' (enabled) or 'hidden' — both in the tab
+// button's markup and in the string literal below, so this flag is the
+// authoritative client-side signal rather than sniffing the button's
+// presentation. The tab button's hidden state and _prodEnabled() both derive
+// from it.
+var PROD_ENABLED = '__PRODUCTION_TAB_HIDDEN__' !== 'hidden';
+(function () {
+  var tab = document.querySelector('.tab-btn[data-tab="production"]');
+  if (tab) tab.hidden = !PROD_ENABLED;
+})();
+
 // Path of the scoped page itself. Environment names may contain slashes
 // (feature/x), which stay separators in the URL.
 function scopedPagePath() {
@@ -5431,7 +5444,10 @@ function resetTimers() {
     loadStats();
     loadHealth();
     var prodTab = document.getElementById('tab-production');
-    if (prodTab && prodTab.classList.contains('active')) loadProductions();
+    // Skip the periodic re-render while a production Settings form has unsaved
+    // edits or focus — re-rendering would silently discard them. Manual loads
+    // (tab switch, explicit actions) still refresh normally.
+    if (prodTab && prodTab.classList.contains('active') && !_prodSettingsEditing()) loadProductions();
   }, ms);
 }
 
@@ -7521,7 +7537,16 @@ const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
 var _prodWebhookSecret = '';
 var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | 'settings' | undefined
-var _prodConfCache = {};  // name -> odoo.conf overrides as loaded (for unset diffing)
+// name -> true while the Settings form holds unsaved edits (set by the form's
+// oninput). The auto-refresh timer skips re-rendering the productions list
+// while any form is dirty or focused, so in-progress edits are not wiped.
+var _prodSettingsDirty = Object.create(null);
+
+function _prodSettingsEditing() {
+  var dirty = Object.keys(_prodSettingsDirty).some(function(n) { return _prodSettingsDirty[n]; });
+  var ae = document.activeElement;
+  return dirty || !!(ae && ae.closest && ae.closest('.prod-settings'));
+}
 
 function prodBadgeClass(status) {
   if (status === 'running') return 'badge-running';
@@ -7678,7 +7703,7 @@ async function _loadProdSection(name, section) {
       var r5 = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name));
       var d5 = await readResult(r5);
       if (!d5.ok) { el.textContent = d5.error || 'Failed to load settings'; return; }
-      _prodConfCache[name] = d5.odoo_conf || {};
+      _prodSettingsDirty[name] = false;  // freshly rendered from server state
       el.innerHTML = _prodSettingsHtml(d5);
     }
   } catch (e) {
@@ -7690,26 +7715,26 @@ async function _loadProdSection(name, section) {
 // the MCP copy gate, and per-production odoo.conf overrides.
 function _prodSettingsHtml(p) {
   var n = escAttr(p.name);
-  var extras = Object.keys(p.extra_addons || {}).map(function(k) {
-    return k + '=' + p.extra_addons[k];
-  }).join('\n');
+  var extras = formatEnvLines(p.extra_addons || {});
   var conf = Object.keys(p.odoo_conf || {}).sort().map(function(k) {
     return k + ' = ' + p.odoo_conf[k];
   }).join('\n');
-  return '<div class="prod-settings">' +
+  // Form values use escHtmlAttr (round-trips ' and \ unchanged); escAttr is
+  // only for the JS-string-in-attribute contexts (oninput/onclick/onchange).
+  return '<div class="prod-settings" oninput="_prodSettingsDirty[\'' + n + '\']=true">' +
     '<div class="form-group"><label for="ps-domain-' + n + '">Domain</label>' +
-      '<input type="text" id="ps-domain-' + n + '" value="' + escAttr(p.domain || '') + '">' +
+      '<input type="text" id="ps-domain-' + n + '" value="' + escHtmlAttr(p.domain || '') + '">' +
       '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
     '<div class="form-group"><label for="ps-image-' + n + '">Odoo image</label>' +
-      '<input type="text" id="ps-image-' + n + '" value="' + escAttr(p.odoo_image || '') + '">' +
+      '<input type="text" id="ps-image-' + n + '" value="' + escHtmlAttr(p.odoo_image || '') + '">' +
       '<div class="hint">Changing the image does not migrate the database</div></div>' +
     '<div class="form-group"><label for="ps-repo-' + n + '">Repository URL</label>' +
-      '<input type="text" id="ps-repo-' + n + '" value="' + escAttr(p.repo_url || '') + '"></div>' +
+      '<input type="text" id="ps-repo-' + n + '" value="' + escHtmlAttr(p.repo_url || '') + '"></div>' +
     '<div class="form-group"><label for="ps-branch-' + n + '">Branch</label>' +
-      '<input type="text" id="ps-branch-' + n + '" value="' + escAttr(p.branch || '') + '">' +
+      '<input type="text" id="ps-branch-' + n + '" value="' + escHtmlAttr(p.branch || '') + '">' +
       '<div class="hint">Switching deploys the new branch as-is; run Update afterwards if modules need install/upgrade</div></div>' +
     '<div class="form-group"><label for="ps-gituser-' + n + '">Git user (credential matching, optional)</label>' +
-      '<input type="text" id="ps-gituser-' + n + '" value="' + escAttr(p.git_user || '') + '"></div>' +
+      '<input type="text" id="ps-gituser-' + n + '" value="' + escHtmlAttr(p.git_user || '') + '"></div>' +
     '<div class="form-group"><label for="ps-extras-' + n + '">Extra addon repos (one per line, repo=branch)</label>' +
       '<textarea id="ps-extras-' + n + '" rows="3">' + esc(extras) + '</textarea></div>' +
     '<div class="form-group"><label class="select-box"><input type="checkbox" id="ps-copy-' + n + '"' +
@@ -7724,13 +7749,15 @@ function _prodSettingsHtml(p) {
   '</div>';
 }
 
-function _parseKvLines(raw, sep, errLabel) {
-  var out = {};
+function _parseKvLines(raw, errLabel) {
+  // Null prototype, like parseEnvLines: a key literally named __proto__ must
+  // land as an own key instead of hitting the setter and vanishing.
+  var out = Object.create(null);
   var lines = (raw || '').split('\n');
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim();
     if (!line || line.charAt(0) === '#' || line.charAt(0) === ';') continue;
-    var idx = line.indexOf(sep);
+    var idx = line.indexOf('=');
     if (idx < 1) { showToast(errLabel, true); return null; }
     out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
   }
@@ -7743,7 +7770,7 @@ async function prodApplySettings(name) {
     return e ? e.value.trim() : '';
   };
   var extras = _parseKvLines(document.getElementById('ps-extras-' + name).value,
-    '=', 'Extra addons: each line must be repo=branch');
+    'Extra addons: each line must be repo=branch');
   if (extras === null) return;
   var body = {
     domain: v('ps-domain'),
@@ -7759,24 +7786,32 @@ async function prodApplySettings(name) {
     confirmLabel: 'Apply'
   }))) return;
   showToast('Reconfiguring "' + name + '"… this can take a minute');
+  // Clear the dirty flag before the successful save reloads the list, so the
+  // fresh form renders; restore it on failure — the unsaved edits are still
+  // in the form and must keep their auto-refresh protection.
+  _prodSettingsDirty[name] = false;
   var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/reconfigure', body, null);
   if (data) {
     showToast(data.changed && data.changed.length
       ? 'Reconfigured "' + name + '": ' + data.changed.join(', ') +
         (data.healthy === false ? ' — NOT healthy yet, check logs' : '')
       : (data.message || 'No settings changed'));
+  } else {
+    _prodSettingsDirty[name] = true;
   }
 }
 
 async function prodSaveOdooConf(name) {
   var raw = document.getElementById('ps-conf-' + name).value;
-  var options = _parseKvLines(raw, '=', 'odoo.conf: each line must be key = value');
+  var options = _parseKvLines(raw, 'odoo.conf: each line must be key = value');
   if (options === null) return;
-  var current = _prodConfCache[name] || {};
-  var unset = Object.keys(current).filter(function(k) { return !(k in options); });
-  await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/odoo-conf',
-    { options: options, unset: unset },
+  // replace: true makes the sent options the complete new override set (the
+  // server computes removals itself), so no stale client-side diffing.
+  _prodSettingsDirty[name] = false;
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/odoo-conf',
+    { options: options, replace: true },
     'odoo.conf overrides saved for "' + name + '" (Odoo restarted)');
+  if (!data) _prodSettingsDirty[name] = true;
 }
 
 async function prodRefreshSnapshots(name) {
@@ -7786,13 +7821,16 @@ async function prodRefreshSnapshots(name) {
   } catch (e) { showToast('Connection error: ' + e.message, true); }
 }
 
-async function _prodPost(url, body, okMsg) {
+// skipReload: don't re-render the productions list on success — for controls
+// that live inside the Settings form, where a re-render would wipe the
+// surrounding unsaved edits.
+async function _prodPost(url, body, okMsg, skipReload) {
   try {
     var r = await fetch(url, body !== undefined
       ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
       : { method: 'POST' });
     var data = await readResult(r);
-    if (data.ok) { if (okMsg) showToast(okMsg); await loadProductions(); return data; }
+    if (data.ok) { if (okMsg) showToast(okMsg); if (!skipReload) await loadProductions(); return data; }
     showToast(data.error || 'Request failed', true);
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
@@ -7838,10 +7876,22 @@ function prodAutoUpdate(name, enabled) {
     'Auto-deploy ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"');
 }
 
-function prodCopyToDevMcp(name, enabled) {
-  _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/copy-to-dev-mcp',
+async function prodCopyToDevMcp(name, enabled) {
+  // skipReload: this checkbox sits inside the Settings form; a full reload
+  // would re-render the form and wipe any other in-progress edits.
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/copy-to-dev-mcp',
     { enabled: enabled },
-    'Agent copy to dev ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"');
+    'Agent copy to dev ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"',
+    true);
+  if (data) {
+    // Keep the cached record in sync so a later re-render shows the new state.
+    cachedProds.forEach(function(p) {
+      if (p.name === name) p.allow_copy_to_dev_mcp = enabled;
+    });
+  } else {
+    var cb = document.getElementById('ps-copy-' + name);
+    if (cb) cb.checked = !enabled;
+  }
 }
 
 // Publish a production's database + filestore as a dev template. The dashboard
@@ -7975,8 +8025,7 @@ function promptDialog(opts) {
 }
 
 function _prodEnabled() {
-  var tab = document.querySelector('.tab-btn[data-tab="production"]');
-  return !!tab && !tab.hidden;
+  return PROD_ENABLED;
 }
 
 function openCreateProductionModal(fromEnv) {
@@ -7989,7 +8038,7 @@ function openCreateProductionModal(fromEnv) {
       '<div class="modal-body">' +
         '<div class="form-group"><label for="cp-name">Name</label><input type="text" id="cp-name" placeholder="erp"></div>' +
         '<div class="form-group"><label for="cp-fromenv">Promote from environment (optional)</label>' +
-          '<input type="text" id="cp-fromenv" value="' + escAttr(fromEnv || '') + '" placeholder="empty = fresh or template seed">' +
+          '<input type="text" id="cp-fromenv" value="' + escHtmlAttr(fromEnv || '') + '" placeholder="empty = fresh or template seed">' +
           '<div class="hint">Copies the environment\'s database and filestore (its Odoo briefly stops for a consistent copy); repository, branch and image default to the environment\'s</div></div>' +
         '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/org/repo.git"></div>' +
         '<div class="form-group"><label for="cp-branch">Branch</label><input type="text" id="cp-branch" placeholder="production"></div>' +

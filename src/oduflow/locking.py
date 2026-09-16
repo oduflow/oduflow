@@ -263,6 +263,18 @@ class LockManager:
         with self._map_lock:
             return self._env_holder_hint(env_name)
 
+    @contextmanager
+    def env_lock(
+        self, env_name: str, team_id: str | None = None, operation: str = ""
+    ) -> Iterator[None]:
+        """acquire_env/release_env as a context manager, for callers that
+        need a secondary lock scoped to part of an operation."""
+        self.acquire_env(env_name, team_id, operation=operation)
+        try:
+            yield
+        finally:
+            self.release_env(env_name)
+
     def release_env(self, env_name: str) -> None:
         with self._map_lock:
             lock = self._env_locks.get(env_name)

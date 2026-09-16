@@ -30,6 +30,21 @@ GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,63}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
+# odoo.conf [options] keys managed via container env vars (HOST, USER, ...).
+# Stripped from generated confs and refused as per-production overrides; kept
+# in one place so the two sites cannot drift.
+DB_CONN_CONF_KEYS = ("db_host", "db_port", "db_user", "db_password")
+
+
+def validate_extra_repo_name(name: str) -> None:
+    """Reject repo names unsafe as path components (used under workspaces)."""
+    if not _NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid repo name '{name}': only [a-zA-Z0-9_-] allowed, "
+            "no dots or slashes, max 63 chars."
+        )
+
+
 _REPO_LOCKS_GUARD = threading.Lock()
 _REPO_LOCKS: dict[str, threading.RLock] = {}
 
@@ -62,11 +77,7 @@ def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
 def clone_extra_repo(
     team: TeamSettings, name: str, repo_url: str, git_user: str = ""
 ) -> dict[str, Any]:
-    if not _NAME_RE.match(name):
-        raise ValueError(
-            f"Invalid repo name '{name}': only [a-zA-Z0-9_-] allowed, "
-            "no dots or slashes, max 63 chars."
-        )
+    validate_extra_repo_name(name)
 
     target = os.path.join(team.shared_repos_dir, name)
     if os.path.exists(target):
@@ -148,11 +159,7 @@ def create_local_repo(
     that the repo has no origin; :func:`fetch_extra_repo` short-circuits on it,
     so worktree creation and pulls never attempt a (non-existent) fetch.
     """
-    if not _NAME_RE.match(name):
-        raise ValueError(
-            f"Invalid repo name '{name}': only [a-zA-Z0-9_-] allowed, "
-            "no dots or slashes, max 63 chars."
-        )
+    validate_extra_repo_name(name)
     if not branch:
         raise ValueError("A branch name is required for a local extra repo.")
 
@@ -951,8 +958,11 @@ def generate_odoo_conf(
     # Strip DB connection keys — these are managed via container env vars
     # (HOST, USER, PASSWORD).  If left in the conf file the Odoo entrypoint
     # uses them instead of the env vars, breaking per-environment credentials.
-    for key in ("db_host", "db_port", "db_user", "db_password"):
-        parser.remove_option("options", key)
+    # Case-insensitive: Odoo lowercases option names on read, so a DB_HOST in
+    # the conf would still override the env vars.
+    for key in list(parser.options("options")):
+        if key.lower() in DB_CONN_CONF_KEYS:
+            parser.remove_option("options", key)
 
     with open(output_path, "w") as f:
         parser.write(f)

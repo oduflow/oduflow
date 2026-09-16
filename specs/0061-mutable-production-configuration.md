@@ -2,7 +2,7 @@
 
 **Status:** Adopted (still in force)
 **Type:** Architecture / Production lifecycle
-**First introduced:** `parched-bullfrog` branch (2026-09-16)
+**First introduced:** `investigate-prod-domain-traefik` branch (2026-09-16)
 **Key code today:** `docker_ops/production_ops.py` (`reconfigure_production`, `set_production_odoo_conf`, `_container_spec`, `RESERVED_ODOO_CONF_KEYS`), `production_registry.py` (`odoo_conf` field), `server.py` (both MCP tools), `web_ui.py` (`/reconfigure`, `/odoo-conf`), dashboard Settings panel
 
 ## Context
@@ -40,6 +40,22 @@ tools, mirrored in the dashboard:
 The dashboard gains a per-production **Settings** panel (More → Settings)
 exposing both, plus the `allow_copy_to_dev_mcp` gate — which deliberately
 remains dashboard-only, so an agent cannot lift its own restriction.
+
+## How it works (macro)
+
+The registry record is the single source of intent, and convergence flows one
+way from it. A reconfigure writes the changed fields to the record, then
+brings the workspace up to the recorded code state (re-clone on a repo change,
+fetch + checkout otherwise; extra addon worktrees diffed against the recorded
+list) and recreates the container from the record — the only downtime is the
+container swap itself, because database and filestore live outside it. Conf
+overrides never touch a file directly: they sit in the record's `odoo_conf`
+field, and every conf rebuild layers merged base conf → auto-tuned worker
+settings → user overrides, so an override set once survives every later
+deploy, retune, and reconfigure. The MCP tools and the dashboard Settings
+panel are thin frontends over the same `production_ops` functions, each run
+under the per-production lock, so both paths converge identically and never
+race a deploy.
 
 ## Consequences
 

@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -578,6 +579,44 @@ class TestSetProductionOdooConf:
         assert result["applied"] is True
         assert result["restarted"] is True
 
+    def test_reserved_key_rejected_case_insensitively(self, settings, team):
+        # Odoo lowercases option names on read: DB_HOST would become db_host.
+        production_registry.create_production(team, "erp", {})
+        with pytest.raises(ValueError, match="db_host"):
+            production_ops.set_production_odoo_conf(
+                settings, team, "erp", set_options={"DB_HOST": "evil"}
+            )
+
+    def test_unchanged_overrides_skip_container_restart(self, settings, team):
+        production_registry.create_production(
+            team, "erp", {"odoo_conf": {"workers": "2"}}
+        )
+        container = MagicMock()
+        container.status = "running"
+        container.labels = {settings.team_label: "1"}
+        client = MagicMock()
+        client.containers.get.return_value = container
+        with patch.object(production_ops, "get_client", return_value=client):
+            result = production_ops.set_production_odoo_conf(
+                settings, team, "erp", set_options={"workers": "2"}
+            )
+        container.restart.assert_not_called()
+        assert result["restarted"] is False
+        assert "unchanged" in result["message"]
+
+    def test_replace_makes_options_the_full_set(self, settings, team):
+        production_registry.create_production(
+            team, "erp", {"odoo_conf": {"workers": "2", "limit_time_real": "300"}}
+        )
+        client = _mock_client()
+        with patch.object(production_ops, "get_client", return_value=client):
+            result = production_ops.set_production_odoo_conf(
+                settings, team, "erp", set_options={"workers": "3"}, replace=True
+            )
+        assert result["odoo_conf"] == {"workers": "3"}
+        record = production_registry.get_production(team, "erp")
+        assert record["odoo_conf"] == {"workers": "3"}
+
 
 def _seed_prod_record(team, **overrides):
     record = {
@@ -590,10 +629,18 @@ def _seed_prod_record(team, **overrides):
         "created_at": "2026-01-01T00:00:00+00:00",
     }
     record.update(overrides)
+    # A checkout on disk matches the record (reconfigure treats a missing
+    # checkout as drift to repair, not as a no-op).
+    from oduflow.naming import get_repo_path, prod_env_name
+
+    os.makedirs(get_repo_path(prod_env_name("erp"), team.workspaces_dir), exist_ok=True)
     return production_registry.create_production(team, "erp", record)
 
 
 def _patch_reconfigure_stack(client):
+    def fake_clone(repo_url, branch, repo_path, team, **kw):
+        os.makedirs(repo_path, exist_ok=True)
+
     patches = {
         "get_client": patch.object(production_ops, "get_client", return_value=client),
         "load_credentials": patch.object(
@@ -622,15 +669,25 @@ def _patch_reconfigure_stack(client):
             "oduflow.git_ops.checkout_branch", return_value=("a", "b", [])
         ),
         "rev_parse": patch("oduflow.git_ops.rev_parse", return_value="cafebabe" * 5),
-        "_clone_repo": patch("oduflow.docker_ops.env_ops._clone_repo"),
+        "_clone_repo": patch(
+            "oduflow.docker_ops.env_ops._clone_repo", side_effect=fake_clone
+        ),
     }
     return patches
 
 
 class TestReconfigureProduction:
+    def _client_with_container(self, settings):
+        # A present, team-owned container: no drift to repair.
+        container = MagicMock()
+        container.labels = {settings.team_label: "1"}
+        client = MagicMock()
+        client.containers.get.return_value = container
+        return client
+
     def test_noop_leaves_container_alone(self, settings, team):
         _seed_prod_record(team)
-        client = _mock_client()
+        client = self._client_with_container(settings)
         with _PatchAll(_patch_reconfigure_stack(client)):
             result = production_ops.reconfigure_production(settings, team, "erp")
         assert result["changed"] == []
@@ -638,13 +695,24 @@ class TestReconfigureProduction:
 
     def test_same_values_are_a_noop(self, settings, team):
         _seed_prod_record(team)
-        client = _mock_client()
+        client = self._client_with_container(settings)
         with _PatchAll(_patch_reconfigure_stack(client)):
             result = production_ops.reconfigure_production(
                 settings, team, "erp", domain="erp.example.com", branch="production"
             )
         assert result["changed"] == []
         client.containers.run.assert_not_called()
+
+    def test_missing_container_is_repaired_not_reported_as_noop(self, settings, team):
+        # A previous convergence failed after the registry update: the same
+        # call must recreate the container from the record, not early-return.
+        _seed_prod_record(team)
+        client = _mock_client()  # containers.get raises NotFound
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(settings, team, "erp")
+        assert result["changed"] == []
+        assert any("drifted" in note for note in result["notes"])
+        client.containers.run.assert_called_once()
 
     def test_domain_conflict_rejected(self, settings, team):
         _seed_prod_record(team)
@@ -720,7 +788,101 @@ class TestReconfigureProduction:
                 settings, team, "erp", repo_url="https://github.com/o/r2.git"
             )
         mocks["_clone_repo"].assert_called_once()
+        # The clone is staged beside the live checkout and swapped in during
+        # the container-stop window, never leaving the bind-mounted path empty.
+        assert mocks["_clone_repo"].call_args[0][2].endswith("repo.new")
         assert result["changed"] == ["repo_url"]
+
+    def test_traversal_extra_addons_key_rejected(self, settings, team):
+        # Keys become path components; ".." must never reach the rmtree.
+        _seed_prod_record(team)
+        client = self._client_with_container(settings)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(ValueError, match="Invalid repo name"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", extra_addons={"..": "main"}
+                )
+        # Rejected before the registry intent changed.
+        assert production_registry.get_production(team, "erp")["extra_addons"] == {}
+
+    def test_traversal_extra_addons_key_rejected_on_create(self, settings, team):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)):
+            with pytest.raises(ValueError, match="Invalid repo name"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:18.0",
+                    extra_addons={"../../etc": "main"},
+                )
+
+    def test_unchanged_worktrees_survive_extra_addons_update(self, settings, team):
+        _seed_prod_record(team, extra_addons={"acme": "main"})
+        workspace = production_ops._workspace(team, "erp")
+        os.makedirs(os.path.join(workspace, "extra", "acme"), exist_ok=True)
+        client = self._client_with_container(settings)
+        patches = _patch_reconfigure_stack(client)
+        patches["create_worktree"] = patch(
+            "oduflow.extra_addons.create_worktree",
+            side_effect=lambda team, repo, branch, path: os.makedirs(
+                path, exist_ok=True
+            ),
+        )
+        patches["remove_worktree"] = patch("oduflow.extra_addons.remove_worktree")
+        with _PatchAll(patches) as mocks:
+            result = production_ops.reconfigure_production(
+                settings,
+                team,
+                "erp",
+                extra_addons={"acme": "main", "billing": "dev"},
+            )
+        assert result["changed"] == ["extra_addons"]
+        # acme's branch did not change: its worktree is left alone.
+        mocks["remove_worktree"].assert_not_called()
+        created = [c.args[1] for c in mocks["create_worktree"].call_args_list]
+        assert created == ["billing"]
+
+    def test_domain_only_change_does_not_pull_image(self, settings, team):
+        _seed_prod_record(team)
+        client = self._client_with_container(settings)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            production_ops.reconfigure_production(
+                settings, team, "erp", domain="new.example.com"
+            )
+        client.images.pull.assert_not_called()
+
+    def test_image_change_rechowns_data_dirs(self, settings, team):
+        _seed_prod_record(team)
+        workspace = production_ops._workspace(team, "erp")
+        os.makedirs(os.path.join(workspace, "filestore"), exist_ok=True)
+        os.makedirs(os.path.join(workspace, "sessions"), exist_ok=True)
+        client = self._client_with_container(settings)
+        patches = _patch_reconfigure_stack(client)
+        patches["get_odoo_uid_gid"] = patch.object(
+            production_ops, "get_odoo_uid_gid", return_value="1000:1000"
+        )
+        patches["chown_recursive"] = patch.object(production_ops, "chown_recursive")
+        with _PatchAll(patches) as mocks:
+            production_ops.reconfigure_production(
+                settings, team, "erp", odoo_image="custom/odoo:18"
+            )
+        chowned = [c.args[0] for c in mocks["chown_recursive"].call_args_list]
+        assert os.path.join(workspace, "filestore") in chowned
+        assert os.path.join(workspace, "sessions") in chowned
+
+    def test_git_user_empty_string_clears(self, settings, team):
+        _seed_prod_record(team, git_user="bob")
+        client = self._client_with_container(settings)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", git_user=""
+            )
+        assert result["changed"] == ["git_user"]
+        assert production_registry.get_production(team, "erp")["git_user"] == ""
 
 
 class TestCreateFromEnvironment:
@@ -758,6 +920,12 @@ class TestCreateFromEnvironment:
         patches = _patch_create_stack(client)
         patches["_seed_db_from_environment"] = patch.object(
             production_ops, "_seed_db_from_environment"
+        )
+        # The copy refuses a missing/dead source filestore; give it a real dir.
+        patches["get_filestore_paths"] = patch.object(
+            production_ops,
+            "get_filestore_paths",
+            return_value={"merged": tempfile.mkdtemp(prefix="env-filestore-")},
         )
         patches["create_worktree"] = patch(
             "oduflow.extra_addons.create_worktree",

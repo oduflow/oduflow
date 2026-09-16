@@ -2,7 +2,7 @@
 
 **Status:** Adopted (still in force)
 **Type:** Architecture / Data flow
-**First introduced:** `parched-bullfrog` branch (2026-09-16)
+**First introduced:** `investigate-prod-domain-traefik` branch (2026-09-16)
 **Key code today:** `docker_ops/production_ops.py` (`from_environment` in `create_production`, `_source_env_info`, `_copy_env_data_into_production`, `_copy_db_into_prod_cluster`), `server.py`/`web_ui.py` (parameter + locks), dashboard "Promote to Production" env action
 
 ## Context
@@ -39,6 +39,21 @@ directly, as the mirror of `create_environment(from_production=...)`:
 
 Both the source environment's branch lock and the new production's lock are
 held for the duration.
+
+## How it works (macro)
+
+Promotion is the normal production-creation pipeline with a different seed.
+`create_production(from_environment=...)` first reads the source
+environment's container labels to fill in whatever the caller omitted —
+repo, branch, Odoo image, git user, extra addons — so the form/call defaults
+to exactly what the environment runs. It then stops the environment's Odoo
+just long enough to take the database (cross-cluster dump/restore into the
+production cluster) and the filestore (copied from the merged mount) as one
+consistent pair, and restarts it — the environment is a read-only source,
+never reset, and no intermediate template is created. From there provisioning
+is identical to any other new production: full workspace clone, production
+PG cluster, Traefik routing, registry record. Sanitization is skipped by
+design, since the data flows *into* production rather than out of it.
 
 ## Consequences
 
