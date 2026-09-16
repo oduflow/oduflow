@@ -34,8 +34,9 @@ import re
 import shutil
 import tempfile
 import time
+from contextlib import nullcontext
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any, Callable, ContextManager
 
 import docker
 from docker import DockerClient
@@ -63,6 +64,7 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
+from oduflow.extra_addons import DB_CONN_CONF_KEYS, validate_extra_repo_name
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     PRODUCTION_TEMPLATE_PREFIX,
@@ -104,8 +106,9 @@ pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 # addons_path is generated from the repo + extra addon worktrees, data_dir
 # anchors the filestore bind mount, and the db_* connection keys are managed
 # via container env vars (a conf value would override them inside Odoo).
-RESERVED_ODOO_CONF_KEYS = frozenset(
-    {"addons_path", "data_dir", "db_host", "db_port", "db_user", "db_password"}
+# Compared lowercased: Odoo lowercases option names on read.
+RESERVED_ODOO_CONF_KEYS = frozenset({"addons_path", "data_dir"}) | frozenset(
+    DB_CONN_CONF_KEYS
 )
 
 
@@ -215,8 +218,8 @@ def _build_prod_odoo_conf(
 
     user_conf = production_registry.get_production(team, name).get("odoo_conf") or {}
     for key, value in user_conf.items():
-        if str(key) not in RESERVED_ODOO_CONF_KEYS:
-            overrides[str(key)] = str(value)
+        if str(key).lower() not in RESERVED_ODOO_CONF_KEYS:
+            overrides[str(key).lower()] = str(value)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
         _prod_base_conf_path(team, repo_path),
@@ -495,14 +498,24 @@ def _source_env_info(
         raise NotFoundError(
             f"Environment '{env_name}' not found (no container '{container_name}')."
         )
+    from oduflow.docker_ops.env_ops import _assert_team_owns, _normalize_extra_addons
+    from oduflow.git_ops import rev_parse
+
+    _assert_team_owns(container, settings, team, env_name)
     labels = container.labels or {}
-    team_label = labels.get(settings.team_label)
-    if team_label is not None and team_label != team.team_id:
-        raise NotFoundError(f"Environment '{env_name}' not found for this team.")
     try:
-        extra_addons = json.loads(labels.get("oduflow.extra_addons", "{}"))
+        extra_addons = _normalize_extra_addons(
+            json.loads(labels.get("oduflow.extra_addons", "{}"))
+        )
     except (json.JSONDecodeError, TypeError):
         extra_addons = {}
+    # The env's actual checked-out commit: promotion copies the env's DATA, so
+    # the caller can warn when the cloned remote tip diverges from it.
+    head_commit = ""
+    try:
+        head_commit = rev_parse(get_repo_path(env_name, team.workspaces_dir))
+    except Exception:
+        pass
     try:
         env_vars = json.loads(labels.get("oduflow.env_vars", "{}"))
         if not isinstance(env_vars, dict):
@@ -518,8 +531,9 @@ def _source_env_info(
         "branch": labels.get("oduflow.git_branch", env_name),
         "odoo_image": labels.get(settings.image_label, ""),
         "git_user": labels.get("oduflow.git_user", ""),
-        "extra_addons": extra_addons if isinstance(extra_addons, dict) else {},
+        "extra_addons": extra_addons,
         "template": labels.get("oduflow.template", ""),
+        "head_commit": head_commit,
     }
 
 
@@ -531,21 +545,35 @@ def _copy_env_data_into_production(
     source: str,
     name: str,
     env_db: str,
-) -> None:
+) -> list[str]:
     """Copy the source environment's database and filestore into the new
     production, with the environment's Odoo stopped over both copies for a
-    consistent pair. The environment itself is left as it was (not reset)."""
+    consistent pair. The environment itself is left as it was (not reset).
+    Returns user-facing notes (e.g. when the env could not be restarted)."""
     container = source_env["container"]
+    # The cached SDK object may be minutes old (fetched before infra checks
+    # and the full clone); refresh so the stop/restart decision is current.
+    try:
+        container.reload()
+    except Exception:
+        pass
     was_running = getattr(container, "status", "") == "running"
     if was_running:
         container.stop(timeout=60)
+    notes: list[str] = []
     try:
         _seed_db_from_environment(client, settings, team, source, env_db)
         src_filestore = get_filestore_paths(source, team.workspaces_dir)["merged"]
+        if not os.path.isdir(src_filestore):
+            # A dead overlay mount (or missing dir) would silently promote a
+            # DB without its attachments; refuse the inconsistent pair.
+            raise PrerequisiteNotMetError(
+                f"Source environment filestore is not accessible at "
+                f"{src_filestore}; restart the environment and retry."
+            )
         filestore_path = prod_filestore_dir(team, name)
         os.makedirs(filestore_path, mode=0o777, exist_ok=True)
-        if os.path.isdir(src_filestore):
-            shutil.copytree(src_filestore, filestore_path, dirs_exist_ok=True)
+        shutil.copytree(src_filestore, filestore_path, dirs_exist_ok=True)
     finally:
         if was_running:
             try:
@@ -554,6 +582,11 @@ def _copy_env_data_into_production(
                 logger.warning(
                     "Could not restart source environment '%s': %s", source, exc
                 )
+                notes.append(
+                    f"Source environment '{source}' could not be restarted "
+                    f"after the copy ({exc}); start it manually."
+                )
+    return notes
 
 
 def _cleanup_partial_production(
@@ -739,6 +772,8 @@ def create_production(
     template_name: str | None = None,
     from_environment: str | None = None,
     env_vars: dict[str, str] | None = None,
+    env_lock: Callable[[], ContextManager[None]] | None = None,
+    stack_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
 
@@ -750,7 +785,10 @@ def create_production(
     filestore are copied (under a briefly stopped Odoo, for consistency) and
     empty ``repo_url``/``branch``/``odoo_image``/``git_user``/``extra_addons``
     default to the environment's own. The source environment is left as it
-    was — unlike the save-as-template path, nothing is reset.
+    was — unlike the save-as-template path, nothing is reset. ``env_lock``
+    (a context-manager factory for the source environment's lock) is held
+    only over the stop/copy/restart slice, so the env is not blocked for the
+    remaining multi-minute provisioning.
     """
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import _clone_repo, _init_empty_database
@@ -794,6 +832,8 @@ def create_production(
                 f"Environment '{from_environment}' has no image label; pass "
                 "odoo_image explicitly."
             )
+    for repo_name in extra_addons or {}:
+        validate_extra_repo_name(repo_name)
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
     container_name = _odoo_container_name(settings, team, name)
@@ -835,10 +875,12 @@ def create_production(
             "env_vars": env_vars,
             "auto_update": bool(auto_update),
             "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
+            "meta": {"stack": stack_metadata} if stack_metadata else {},
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
 
+    promo_notes: list[str] = []
     try:
         ensure_team_network(client, settings, team)
         os.makedirs(workspace, exist_ok=True)
@@ -851,6 +893,22 @@ def create_production(
         _clone_repo(
             repo_url, branch, repo_path, team, git_user=git_user, depth=0, timeout=300
         )
+        if source_env is not None and source_env.get("head_commit"):
+            from oduflow.git_ops import rev_parse
+
+            env_head = source_env["head_commit"]
+            cloned_head = rev_parse(repo_path)
+            if env_head != cloned_head:
+                # Data comes from the env, code from the remote tip: warn when
+                # the pair may be inconsistent (unpushed commits, or the
+                # remote moved ahead of the env's last pull).
+                promo_notes.append(
+                    f"Environment '{from_environment}' has commit "
+                    f"{env_head[:10]} checked out but the remote tip of "
+                    f"branch '{branch}' is {cloned_head[:10]}; the promoted "
+                    "code may not match the copied database (push or pull "
+                    "the environment first if this is unexpected)."
+                )
 
         extra_mount_paths: list[tuple[str, str]] = []
         if extra_addons:
@@ -873,9 +931,20 @@ def create_production(
             _seed_db_from_template(client, settings, team, template_name, env_db)
         if source_env is not None:
             assert from_environment is not None
-            _copy_env_data_into_production(
-                client, settings, team, source_env, from_environment, name, env_db
-            )
+            # The source env is only touched here; scope its lock (when the
+            # caller provides one) to this slice instead of the whole build.
+            with env_lock() if env_lock is not None else nullcontext():
+                promo_notes.extend(
+                    _copy_env_data_into_production(
+                        client,
+                        settings,
+                        team,
+                        source_env,
+                        from_environment,
+                        name,
+                        env_db,
+                    )
+                )
 
         env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
         _create_pg_role(
@@ -998,7 +1067,7 @@ def create_production(
         "Production created",
         extra={"env_name": env_name, "domain": domain},
     )
-    notes: list[str] = []
+    notes: list[str] = list(promo_notes)
     if source_env is not None and str(source_env.get("template", "")).startswith(
         PRODUCTION_TEMPLATE_PREFIX
     ):
@@ -1036,19 +1105,27 @@ def set_production_odoo_conf(
     set_options: dict[str, str] | None = None,
     unset_options: list[str] | None = None,
     restart: bool = True,
+    replace: bool = False,
 ) -> dict[str, Any]:
     """Update a production's odoo.conf [options] overrides and re-apply.
 
     Overrides live in the registry record and are merged into the managed
     conf chain (base conf > auto-tuned workers > these overrides) on every
-    conf rebuild, so they survive deploys, retunes and reconfigures. The
-    caller must hold the production's lock.
+    conf rebuild, so they survive deploys, retunes and reconfigures. With
+    ``replace`` the passed options become the complete new override set
+    (removals are computed here, so callers need no stale client-side diff).
+    Option names are lowercased — Odoo lowercases them on read anyway, and a
+    case-variant must not bypass the reserved-key refusal. A call that leaves
+    the overrides unchanged returns early without touching (or restarting)
+    the container. The caller must hold the production's lock.
     """
     from oduflow import production_registry
 
     record = production_registry.get_production(team, name)
-    cleaned = {str(k).strip(): str(v) for k, v in (set_options or {}).items()}
-    unset_list = [str(k).strip() for k in (unset_options or []) if str(k).strip()]
+    cleaned = {str(k).strip().lower(): str(v) for k, v in (set_options or {}).items()}
+    unset_list = [
+        str(k).strip().lower() for k in (unset_options or []) if str(k).strip()
+    ]
     reserved = sorted(k for k in cleaned if k in RESERVED_ODOO_CONF_KEYS)
     if reserved:
         raise ValueError(
@@ -1060,10 +1137,24 @@ def set_production_odoo_conf(
     if invalid:
         raise ValueError(f"Invalid odoo.conf option names: {', '.join(invalid)}.")
 
-    conf = dict(record.get("odoo_conf") or {})
-    conf.update(cleaned)
-    for key in unset_list:
-        conf.pop(key, None)
+    old_conf = {
+        str(k).lower(): str(v) for k, v in (record.get("odoo_conf") or {}).items()
+    }
+    if replace:
+        conf = dict(cleaned)
+    else:
+        conf = dict(old_conf)
+        conf.update(cleaned)
+        for key in unset_list:
+            conf.pop(key, None)
+    if conf == old_conf:
+        return {
+            "name": name,
+            "odoo_conf": conf,
+            "applied": False,
+            "restarted": False,
+            "message": "Overrides unchanged; the container was left alone.",
+        }
     production_registry.update_production(team, name, {"odoo_conf": conf})
 
     client = get_client()
@@ -1096,6 +1187,7 @@ def reconfigure_production(
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
+    force_recreate: bool = False,
 ) -> dict[str, Any]:
     """Change a production's infrastructure settings and recreate its
     container to match. Only the passed (non-None) fields change.
@@ -1104,10 +1196,13 @@ def reconfigure_production(
     preserved; expect a brief downtime while the container is replaced.
     The registry record (intent) is updated first, then the workspace and
     container are converged to it — on a mid-way failure re-running the
-    same call resumes the convergence. Changing ``odoo_image`` does NOT
-    migrate the database: a major Odoo version bump additionally needs an
-    explicit module upgrade plan. The caller must hold the production's
-    lock.
+    same call resumes the convergence: a request that changes nothing
+    still repairs a missing container or repo checkout instead of
+    reporting a no-op. Changing ``odoo_image`` does NOT migrate the
+    database: a major Odoo version bump additionally needs an explicit
+    module upgrade plan. The caller must hold the production's lock.
+    ``force_recreate`` lets Stack repair verified runtime drift or complete an
+    interrupted apply whose registry intent already matches the request.
     """
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import _clone_repo
@@ -1139,17 +1234,25 @@ def reconfigure_production(
         updates["branch"] = branch
     if git_user is not None and git_user != record.get("git_user", ""):
         updates["git_user"] = git_user
-    if extra_addons is not None and dict(extra_addons) != (
-        record.get("extra_addons") or {}
-    ):
-        updates["extra_addons"] = dict(extra_addons)
+    if extra_addons is not None:
+        for repo_name in extra_addons:
+            # Keys become path components under the workspace; a ".." or
+            # absolute-path key must never reach the rmtree below.
+            validate_extra_repo_name(repo_name)
+        if dict(extra_addons) != (record.get("extra_addons") or {}):
+            updates["extra_addons"] = dict(extra_addons)
 
     if env_vars is not None:
         env_vars = _production_env_vars(env_vars)
         if env_vars != (record.get("env_vars") or {}):
             updates["env_vars"] = env_vars
 
-    if not updates:
+    # No-op only when the request changes nothing AND actual state matches
+    # the record; a missing container or checkout (a previous run failed
+    # mid-way) is drift that the run below repairs from the record.
+    container = _get_container(client, settings, team, name)
+    drift = force_recreate or container is None or not os.path.isdir(repo_path)
+    if not updates and not drift:
         return {
             "name": name,
             "changed": [],
@@ -1166,19 +1269,26 @@ def reconfigure_production(
     except Exception:
         pass
 
+    old_extras_record: dict[str, str] = dict(record.get("extra_addons") or {})
     # Registry first: the record is the authoritative intent, and the
     # convergence below is idempotent against it.
-    record = production_registry.update_production(team, name, updates)
+    if updates:
+        record = production_registry.update_production(team, name, updates)
 
     # --- Converge the workspace (repo checkout + extra addon worktrees). ---
-    if "repo_url" in updates or "git_user" in updates:
+    staged_clone_path: str | None = None
+    if "repo_url" in updates or "git_user" in updates or not os.path.isdir(repo_path):
         # A changed remote (or credential identity) invalidates the clone.
-        if os.path.isdir(repo_path):
-            shutil.rmtree(repo_path)
+        # Clone beside the live checkout — the running container bind-mounts
+        # repo_path, so the old tree must keep serving until the container
+        # swap below; the directories are switched inside that window.
+        staged_clone_path = repo_path + ".new"
+        if os.path.isdir(staged_clone_path):
+            shutil.rmtree(staged_clone_path)
         _clone_repo(
             record["repo_url"],
             record["branch"],
-            repo_path,
+            staged_clone_path,
             team,
             git_user=record.get("git_user", ""),
             depth=0,
@@ -1188,32 +1298,27 @@ def reconfigure_production(
         fetch_branch(repo_path, record["branch"], team.git_credentials_file())
         checkout_branch(repo_path, record["branch"])
 
+    def _remove_extra_worktree(repo_name: str, wt_path: str) -> None:
+        try:
+            remove_worktree(team, repo_name, wt_path)
+        except Exception as exc:
+            logger.warning("Could not remove worktree %s: %s", wt_path, exc)
+        shutil.rmtree(wt_path, ignore_errors=True)
+
     new_extras: dict[str, str] = record.get("extra_addons") or {}
     extra_dir = os.path.join(workspace, "extra")
-    if "extra_addons" in updates:
-        old_extras = {}
-        if os.path.isdir(extra_dir):
-            old_extras = {
-                entry: "" for entry in os.listdir(extra_dir) if entry not in new_extras
-            }
-        for repo_name in old_extras:
-            wt_path = os.path.join(extra_dir, repo_name)
-            try:
-                remove_worktree(team, repo_name, wt_path)
-            except Exception as exc:
-                logger.warning("Could not remove worktree %s: %s", wt_path, exc)
-            shutil.rmtree(wt_path, ignore_errors=True)
+    if os.path.isdir(extra_dir):
+        for entry in os.listdir(extra_dir):
+            if entry not in new_extras:
+                _remove_extra_worktree(entry, os.path.join(extra_dir, entry))
     extra_mount_paths: list[tuple[str, str]] = []
     for repo_name, addon_branch in new_extras.items():
         wt_path = os.path.join(extra_dir, repo_name)
         os.makedirs(extra_dir, exist_ok=True)
-        # A branch change needs a fresh worktree; recreate rather than switch.
-        if "extra_addons" in updates and os.path.isdir(wt_path):
-            try:
-                remove_worktree(team, repo_name, wt_path)
-            except Exception as exc:
-                logger.warning("Could not remove worktree %s: %s", wt_path, exc)
-            shutil.rmtree(wt_path, ignore_errors=True)
+        # A branch change needs a fresh worktree; recreate rather than
+        # switch — but leave worktrees whose branch did not change alone.
+        if os.path.isdir(wt_path) and old_extras_record.get(repo_name) != addon_branch:
+            _remove_extra_worktree(repo_name, wt_path)
         if not os.path.isdir(wt_path):
             create_worktree(team, repo_name, addon_branch, wt_path)
         extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
@@ -1229,13 +1334,37 @@ def reconfigure_production(
         settings, team, name, record, env_creds, extra_mount_paths
     )
     odoo_image_new = record["odoo_image"]
-    try:
-        logger.info("Pulling image %s", odoo_image_new)
-        client.images.pull(odoo_image_new)
-    except Exception as exc:
-        logger.warning(
-            "Could not pull image %s, using local copy: %s", odoo_image_new, exc
-        )
+    # Pull only when the image actually changed (or is absent locally) — an
+    # unrelated reconfigure must not silently move the production onto a
+    # newer build of the same tag, nor pay a registry round-trip.
+    need_pull = "odoo_image" in updates
+    if not need_pull:
+        try:
+            client.images.get(odoo_image_new)
+        except Exception:
+            need_pull = True
+    if need_pull:
+        try:
+            logger.info("Pulling image %s", odoo_image_new)
+            client.images.pull(odoo_image_new)
+        except Exception as exc:
+            logger.warning(
+                "Could not pull image %s, using local copy: %s", odoo_image_new, exc
+            )
+    if "odoo_image" in updates:
+        # Re-establish the create-time invariant: data dirs owned by the
+        # image's odoo uid/gid (a different image may use a different uid).
+        uid_str, gid_str = get_odoo_uid_gid(client, odoo_image_new).split(":")
+        filestore_path = prod_filestore_dir(team, name)
+        if os.path.isdir(filestore_path):
+            chown_recursive(
+                filestore_path, int(uid_str), int(gid_str), client, odoo_image_new
+            )
+        sessions_path = os.path.join(workspace, "sessions")
+        if os.path.isdir(sessions_path):
+            chown_recursive(
+                sessions_path, int(uid_str), int(gid_str), client, odoo_image_new
+            )
 
     container = _get_container(client, settings, team, name)
     if container is not None:
@@ -1244,6 +1373,13 @@ def reconfigure_production(
         except Exception as exc:
             logger.warning("Stopping old container failed (removing anyway): %s", exc)
         container.remove(force=True)
+
+    if staged_clone_path is not None:
+        # The old container is gone; swap the staged clone in. The gap is a
+        # rename, not a multi-minute clone.
+        if os.path.isdir(repo_path):
+            shutil.rmtree(repo_path)
+        os.rename(staged_clone_path, repo_path)
 
     container, setup_logs = _run_odoo_container(
         client,
@@ -1283,6 +1419,12 @@ def reconfigure_production(
         )
 
     notes: list[str] = []
+    if not updates:
+        notes.append(
+            "No settings changed, but drifted state was repaired (the "
+            "container and/or repo checkout was missing and has been "
+            "recreated from the record)."
+        )
     if "odoo_image" in updates:
         notes.append(
             "The database was NOT migrated to the new image's Odoo version; "

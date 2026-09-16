@@ -5308,12 +5308,17 @@ def _build_routes(
             locks.acquire_env(_prod_lock_key(team, name))
         except FlowError as e:
             return _error_response(e)
-        if from_environment:
-            try:
-                locks.acquire_env(from_environment, team.team_id)
-            except FlowError as e:
-                locks.release_env(_prod_lock_key(team, name))
-                return _error_response(e)
+        # The source env's lock is scoped inside create_production to the
+        # brief stop/copy/restart slice (not the whole provisioning).
+        env_lock = (
+            (
+                lambda: locks.env_lock(
+                    from_environment, team.team_id, operation="create_production"
+                )
+            )
+            if from_environment
+            else None
+        )
         try:
             result = await _offload(
                 production_ops.create_production,
@@ -5333,6 +5338,7 @@ def _build_routes(
                 auto_update=bool(data.get("auto_update")),
                 template_name=str(data.get("template_name", "")).strip() or None,
                 from_environment=from_environment or None,
+                env_lock=env_lock,
             )
             return JSONResponse({"ok": True, **result})
         except FlowError as e:
@@ -5345,8 +5351,6 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
         finally:
-            if from_environment:
-                locks.release_env(from_environment)
             locks.release_env(_prod_lock_key(team, name))
 
     def _production_action(
@@ -5389,6 +5393,46 @@ def _build_routes(
         finally:
             if with_backup_store:
                 locks.release_env(prod_backups_lock_key(team.team_id))
+            locks.release_env(_prod_lock_key(team, name))
+
+    async def _production_body_action(
+        request: Request,
+        action: Callable[..., dict[str, Any]],
+    ) -> JSONResponse:
+        """Async sibling of _production_action for POST handlers with a JSON
+        body: same lock/error contract, action(settings, team, name, data)
+        runs off the event loop via _offload."""
+        settings = get_settings()
+        team = _get_ui_team(request)
+        name = request.path_params["name"]
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body"}, status_code=400
+            )
+        if not isinstance(data, dict):
+            return JSONResponse(
+                {"ok": False, "error": "Body must be a JSON object."},
+                status_code=400,
+            )
+        try:
+            locks.acquire_env(_prod_lock_key(team, name))
+        except FlowError as e:
+            return _error_response(e)
+        try:
+            result = await _offload(action, settings, team, name, data)
+            return JSONResponse({"ok": True, **result})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("production action failed for '%s'", name)
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+        finally:
             locks.release_env(_prod_lock_key(team, name))
 
     def api_production_start(request: Request) -> JSONResponse:
@@ -5516,105 +5560,55 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    def _reconfigure_action(
+        settings: Settings, team: TeamSettings, name: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        repo_url = str(data.get("repo_url", "")).strip()
+        if repo_url:
+            git_ops.validate_repo_url(repo_url)
+        raw_extra = data.get("extra_addons")
+        return production_ops.reconfigure_production(
+            settings,
+            team,
+            name,
+            domain=str(data.get("domain", "")).strip() or None,
+            odoo_image=str(data.get("odoo_image", "")).strip() or None,
+            branch=str(data.get("branch", "")).strip() or None,
+            repo_url=repo_url or None,
+            # Present-but-empty means "clear" (the dashboard always submits
+            # the field); only an absent key means "leave unchanged".
+            git_user=(str(data["git_user"]).strip() if "git_user" in data else None),
+            extra_addons=(
+                _normalize_extra_addons(raw_extra) if raw_extra is not None else None
+            ),
+        )
+
     async def api_production_reconfigure(request: Request) -> JSONResponse:
         """Change infra settings (domain/image/branch/repo/extra addons) and
         recreate the production container to match; DB/filestore preserved."""
-        settings = get_settings()
-        team = _get_ui_team(request)
-        name = request.path_params["name"]
-        try:
-            data = await request.json()
-        except ValueError:
-            return JSONResponse(
-                {"ok": False, "error": "Invalid JSON body"}, status_code=400
-            )
-        repo_url = str(data.get("repo_url", "")).strip()
-        try:
-            if repo_url:
-                git_ops.validate_repo_url(repo_url)
-        except FlowError as e:
-            return _error_response(e)
-        raw_extra = data.get("extra_addons")
-        extra_addons = (
-            _normalize_extra_addons(raw_extra) if raw_extra is not None else None
-        )
-        try:
-            locks.acquire_env(_prod_lock_key(team, name))
-        except FlowError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                production_ops.reconfigure_production,
-                settings,
-                team,
-                name,
-                domain=str(data.get("domain", "")).strip() or None,
-                odoo_image=str(data.get("odoo_image", "")).strip() or None,
-                branch=str(data.get("branch", "")).strip() or None,
-                repo_url=repo_url or None,
-                git_user=str(data.get("git_user", "")).strip() or None,
-                extra_addons=extra_addons,
-            )
-            return JSONResponse({"ok": True, **result})
-        except FlowError as e:
-            return _error_response(e)
-        except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-        except Exception:
-            logger.exception("api_production_reconfigure failed")
-            return JSONResponse(
-                {"ok": False, "error": "Internal server error."}, status_code=500
-            )
-        finally:
-            locks.release_env(_prod_lock_key(team, name))
+        return await _production_body_action(request, _reconfigure_action)
 
-    async def api_production_odoo_conf(request: Request) -> JSONResponse:
-        """Set/remove per-production odoo.conf [options] overrides."""
-        settings = get_settings()
-        team = _get_ui_team(request)
-        name = request.path_params["name"]
-        try:
-            data = await request.json()
-        except ValueError:
-            return JSONResponse(
-                {"ok": False, "error": "Invalid JSON body"}, status_code=400
-            )
+    def _odoo_conf_action(
+        settings: Settings, team: TeamSettings, name: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
         options = data.get("options") or {}
         unset = data.get("unset") or []
         if not isinstance(options, dict) or not isinstance(unset, list):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": 'Body must be {"options": {...}, "unset": [...]}.',
-                },
-                status_code=400,
-            )
-        try:
-            locks.acquire_env(_prod_lock_key(team, name))
-        except FlowError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                production_ops.set_production_odoo_conf,
-                settings,
-                team,
-                name,
-                set_options={str(k): str(v) for k, v in options.items()},
-                unset_options=[str(k) for k in unset],
-                restart=bool(data.get("restart", True)),
-            )
-            return JSONResponse({"ok": True, **result})
-        except FlowError as e:
-            return _error_response(e)
-        except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-        except Exception:
-            logger.exception("api_production_odoo_conf failed")
-            return JSONResponse(
-                {"ok": False, "error": "Internal server error."}, status_code=500
-            )
-        finally:
-            locks.release_env(_prod_lock_key(team, name))
+            raise ValueError('Body must be {"options": {...}, "unset": [...]}.')
+        return production_ops.set_production_odoo_conf(
+            settings,
+            team,
+            name,
+            set_options={str(k): str(v) for k, v in options.items()},
+            unset_options=[str(k) for k in unset],
+            restart=bool(data.get("restart", True)),
+            replace=bool(data.get("replace", False)),
+        )
+
+    async def api_production_odoo_conf(request: Request) -> JSONResponse:
+        """Set/remove per-production odoo.conf [options] overrides. With
+        "replace": true the passed options become the complete override set."""
+        return await _production_body_action(request, _odoo_conf_action)
 
     async def api_production_save_as_template(request: Request) -> JSONResponse:
         """Publish a production's database and filestore as a dev template.

@@ -5143,34 +5143,39 @@ def create_production(
     team = _resolve_team(ctx)
     if repo_url:
         git_ops.validate_repo_url(repo_url)
-    if from_environment:
-        _locks.acquire_env(
-            from_environment, team.team_id, operation="create_production"
+    # The source env's lock is scoped inside create_production to the brief
+    # stop/copy/restart slice, so dev work on the branch is not blocked for
+    # the whole multi-minute provisioning.
+    env_lock = (
+        (
+            lambda: _locks.env_lock(
+                from_environment, team.team_id, operation="create_production"
+            )
         )
-    try:
-        result = production_ops.create_production(
-            settings,
-            team,
-            name,
-            repo_url,
-            branch,
-            domain,
-            odoo_image,
-            git_user=git_user,
-            extra_addons=(
-                env_ops._normalize_extra_addons(extra_addons)
-                if extra_addons is not None
-                else None
-            ),
-            auto_update=auto_update,
-            allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
-            template_name=template_name or None,
-            from_environment=from_environment or None,
-            env_vars=env_vars,
-        )
-    finally:
-        if from_environment:
-            _locks.release_env(from_environment)
+        if from_environment
+        else None
+    )
+    result = production_ops.create_production(
+        settings,
+        team,
+        name,
+        repo_url,
+        branch,
+        domain,
+        odoo_image,
+        git_user=git_user,
+        extra_addons=(
+            env_ops._normalize_extra_addons(extra_addons)
+            if extra_addons is not None
+            else None
+        ),
+        auto_update=auto_update,
+        allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
+        template_name=template_name or None,
+        from_environment=from_environment or None,
+        env_vars=env_vars,
+        env_lock=env_lock,
+    )
     lines = [
         f"Production '{name}' created in {result['elapsed_seconds']}s.",
         f"URL: {result['url']}",
@@ -5343,7 +5348,7 @@ def reconfigure_production(
     odoo_image: str = "",
     branch: str = "",
     repo_url: str = "",
-    git_user: str = "",
+    git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
     ctx: Context | None = None,
@@ -5369,7 +5374,8 @@ def reconfigure_production(
         odoo_image: New Docker image, e.g. "odoo:19.0".
         branch: New git branch to deploy.
         repo_url: New HTTPS git repository URL.
-        git_user: New git username for credential matching.
+        git_user: New git username for credential matching. Pass "" to
+                clear it; omit to leave unchanged.
         env_vars: Full replacement user environment variables, including
                 secret:<name> references. Omit to preserve; {} clears them.
         extra_addons: New full set of extra addon repos {repo_name: branch};
@@ -5377,6 +5383,8 @@ def reconfigure_production(
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
+    if repo_url:
+        git_ops.validate_repo_url(repo_url)
     result = production_ops.reconfigure_production(
         settings,
         team,
@@ -5385,14 +5393,15 @@ def reconfigure_production(
         odoo_image=odoo_image or None,
         branch=branch or None,
         repo_url=repo_url or None,
-        git_user=git_user or None,
+        git_user=git_user,
         extra_addons=extra_addons,
         env_vars=env_vars,
     )
-    if not result.get("changed"):
-        return str(result.get("message", "No settings changed."))
+    if result.get("message"):
+        return str(result["message"])
+    changed = ", ".join(result["changed"]) or "none; repaired drifted state"
     lines = [
-        f"Reconfigured production '{name}' (changed: {', '.join(result['changed'])}).",
+        f"Reconfigured production '{name}' (changed: {changed}).",
         f"URL: {result['url']}",
         f"Healthy: {result['healthy']}",
     ]
@@ -5439,6 +5448,8 @@ def set_production_odoo_conf(
     )
     conf = result["odoo_conf"]
     conf_desc = "\n".join(f"  {k} = {v}" for k, v in sorted(conf.items())) or "  (none)"
+    if result.get("message"):
+        return f"{result['message']}\nCurrent overrides:\n{conf_desc}"
     status = (
         "applied to the running container"
         if result["applied"]

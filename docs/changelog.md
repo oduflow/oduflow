@@ -1,13 +1,19 @@
 # Changelog
 
-## v1.77.0
-
-### Fixes
+## Unreleased
 
 - Production updates check module state in the production PostgreSQL cluster,
   preserving development database settings for concurrent requests. Exceptions
   after pulling source now enter the same code rollback path as failed module
   commands, with the failed commit and exit status recorded in deploy history.
+
+- Add production targets to declarative Stacks, with explicit adoption of matching
+  existing productions, registry ownership, production value references and
+  retryable configuration reconciliation. Development Stacks remain compatible.
+
+## v1.77.0
+
+### Fixes
 
 - Preserve user environment variables and `secret:<name>` references when
   promoting a development environment to production and recreating its

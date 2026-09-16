@@ -141,8 +141,11 @@ reconfigure_production(name="erp", branch="18.0-stable")
 reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
 ```
 
-Omitted arguments are left unchanged. Two things reconfigure deliberately
-does **not** do:
+Omitted arguments are left unchanged (`git_user=""` explicitly clears the
+git user). The registry record is updated first and the workspace/container
+are converged to it, so re-running the same call after a mid-way failure
+repairs a missing container or checkout instead of reporting a no-op. Two
+things reconfigure deliberately does **not** do:
 
 - Changing `odoo_image` does not migrate the database. A minor image refresh
   is safe; a major Odoo version bump additionally needs an explicit module
@@ -169,10 +172,12 @@ set_production_odoo_conf(name="erp", unset="limit_time_real")
 
 An explicit override beats the auto-tuned value (e.g. pin `workers`). Keys
 managed by Oduflow are refused: `addons_path` and `data_dir` are generated,
-and the `db_*` connection keys come from container env vars. Current
-overrides are shown by `get_production_info`; the dashboard edits them in
-the same **Settings** panel. Applying restarts the container (brief
-downtime) unless `restart=false`.
+and the `db_*` connection keys come from container env vars (option names
+are compared case-insensitively and stored lowercased, matching how Odoo
+reads them). Current overrides are shown by `get_production_info`; the
+dashboard edits them in the same **Settings** panel. Applying restarts the
+container (brief downtime) unless `restart=false`; a call that leaves the
+overrides unchanged skips the restart entirely.
 
 ## Deploys and rollback
 
