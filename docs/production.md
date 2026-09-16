@@ -181,6 +181,11 @@ overrides unchanged skips the restart entirely.
 
 ## Deploys and rollback
 
+Module preflight and post-install checks use the production PostgreSQL cluster
+and the production's own database role. Development requests retain their
+separate cluster. An exception after source synchronization, including a module
+preflight SQL failure, triggers code rollback just like a failed module command.
+
 `update_production(name)` pulls the branch (and extra-addon worktrees),
 classifies the changes (or takes explicit `install=` / `upgrade=` /
 `restart=true`), applies them, and **verifies** the deploy — module exit

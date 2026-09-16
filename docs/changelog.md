@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Production updates check module state in the production PostgreSQL cluster,
+  preserving development database settings for concurrent requests. Exceptions
+  after pulling source now enter the same code rollback path as failed module
+  commands, with the failed commit and exit status recorded in deploy history.
+
 - Add production targets to declarative Stacks, with explicit adoption of matching
   existing productions, registry ownership, production value references and
   retryable configuration reconciliation. Development Stacks remain compatible.
