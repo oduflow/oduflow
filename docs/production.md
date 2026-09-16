@@ -93,6 +93,92 @@ filestore into the production's plain (non-overlay) directory.
 The clone is **full** (not shallow): the branch's commit history is the
 production's deploy history and the source of rollback targets.
 
+### Promoting a dev environment
+
+`from_environment` turns an existing dev environment into the seed — the
+promotion path from "it works on the branch" to "it serves customers":
+
+```text
+create_production(name="erp", domain="erp.acme.com", from_environment="feature-x")
+```
+
+The environment's database and filestore are copied (its Odoo container is
+briefly stopped so the pair is consistent, then restarted), and omitted
+`repo_url` / `branch` / `odoo_image` / `git_user` / `extra_addons` default to
+the environment's own — explicit arguments still win. Unlike the
+save-as-template detour, no intermediate template is created and the source
+environment is **not reset** — it keeps living as a dev environment.
+`from_environment` and `template_name` are mutually exclusive.
+
+Promotion also inherits the source environment's user environment variables.
+`secret:<name>` references stay in the production registry and container labels;
+values are resolved from the team's secret store only for the container runtime.
+They survive domain/image/branch reconfiguration. Missing secrets are rejected
+before the source is stopped. Pass `env_vars={...}` to replace the inherited set,
+or `{}` to inherit none. `reconfigure_production(env_vars={...})` replaces the
+stored set; omitting it preserves the existing variables. The managed database
+variables `HOST`, `PORT`, `USER`, and `PASSWORD` cannot be overridden.
+
+No sanitization happens — the data goes *into* production. One caveat: if
+the source environment was itself created from a production
+(`from_production`), its data was sanitized on that copy, and the new
+production starts with that sanitized data (the result warns about this).
+
+The dashboard offers the same via **More → Promote to Production** on an
+environment card, which opens the create-production form pre-filled.
+
+## Reconfiguring a production
+
+A production's settings are not frozen at creation.
+`reconfigure_production` changes any of the domain, Odoo image, deployed
+branch, repository URL, git user, or the extra addon repos, then **recreates
+the container** to match — the database and filestore live outside the
+container and are preserved; expect a brief downtime:
+
+```text
+reconfigure_production(name="erp", domain="erp.newcustomer.com")
+reconfigure_production(name="erp", branch="18.0-stable")
+reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
+```
+
+Omitted arguments are left unchanged (`git_user=""` explicitly clears the
+git user). The registry record is updated first and the workspace/container
+are converged to it, so re-running the same call after a mid-way failure
+repairs a missing container or checkout instead of reporting a no-op. Two
+things reconfigure deliberately does **not** do:
+
+- Changing `odoo_image` does not migrate the database. A minor image refresh
+  is safe; a major Odoo version bump additionally needs an explicit module
+  upgrade plan.
+- Changing `branch`/`repo_url` deploys the new code as-is (restart only).
+  Run `update_production(install=..., upgrade=...)` afterwards if the new
+  code needs module changes.
+
+The dashboard offers the same settings on each production card under
+**More → Settings**, together with the *agent copy to dev* gate
+(dashboard-only, see [Copying production data to dev](#copying-production-data-to-dev)).
+
+### odoo.conf overrides
+
+The generated production `odoo.conf` merges a base conf chain
+(`.oduflow/odoo.prod.conf` in the repo > team `odoo.prod.conf` > bundled)
+with [auto-tuned](#configuration) worker/limit settings. Per-production
+overrides sit on top of both and survive deploys, retunes and reconfigures:
+
+```text
+set_production_odoo_conf(name="erp", options={"limit_time_real": "300"})
+set_production_odoo_conf(name="erp", unset="limit_time_real")
+```
+
+An explicit override beats the auto-tuned value (e.g. pin `workers`). Keys
+managed by Oduflow are refused: `addons_path` and `data_dir` are generated,
+and the `db_*` connection keys come from container env vars (option names
+are compared case-insensitively and stored lowercased, matching how Odoo
+reads them). Current overrides are shown by `get_production_info`; the
+dashboard edits them in the same **Settings** panel. Applying restarts the
+container (brief downtime) unless `restart=false`; a call that leaves the
+overrides unchanged skips the restart entirely.
+
 ## Deploys and rollback
 
 `update_production(name)` pulls the branch (and extra-addon worktrees),
@@ -253,6 +339,8 @@ presumed alive and is never touched (`oduflow cleanup` skips the whole
 | `production_logs` | Container logs |
 | `start_production` / `stop_production` / `restart_production` | Lifecycle |
 | `set_production_auto_update` | Toggle webhook auto-deploy |
+| `reconfigure_production` | Change domain/image/branch/repo/extra addons; recreates the container |
+| `set_production_odoo_conf` | Per-production odoo.conf overrides on top of auto-tuning |
 | `snapshot_production` / `list_production_snapshots` | Snapshots to S3 |
 | `restore_production` | Restore DB + filestore from a snapshot |
 | `set_production_backup_schedule` | Per-production snapshot time / off |

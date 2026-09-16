@@ -30,13 +30,16 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
-from typing import Any, Callable
+from contextlib import nullcontext
+from typing import Any, Callable, ContextManager
 
 import docker
 from docker import DockerClient
+from oduflow import secret_store
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -60,13 +63,18 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
+from oduflow.extra_addons import DB_CONN_CONF_KEYS, validate_extra_repo_name
 from oduflow.naming import (
+    PROD_ENV_PREFIX,
+    PRODUCTION_TEMPLATE_PREFIX,
     get_db_name,
+    get_filestore_paths,
     get_repo_path,
     get_resource_name,
     get_team_network_name,
     get_template_db_name,
     get_workspace_path,
+    normalize_env_vars,
     prod_env_name,
     sanitize_repo_url,
     validate_domain,
@@ -92,6 +100,15 @@ TOMBSTONE_FILENAME = "deleted.json"
 # subsystem registers a pre-update snapshot here; failures are logged and
 # never block the deploy. Signature: hook(settings, team, name) -> None.
 pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
+
+# odoo.conf [options] keys a per-production override may not touch:
+# addons_path is generated from the repo + extra addon worktrees, data_dir
+# anchors the filestore bind mount, and the db_* connection keys are managed
+# via container env vars (a conf value would override them inside Odoo).
+# Compared lowercased: Odoo lowercases option names on read.
+RESERVED_ODOO_CONF_KEYS = frozenset({"addons_path", "data_dir"}) | frozenset(
+    DB_CONN_CONF_KEYS
+)
 
 
 def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
@@ -192,6 +209,16 @@ def _build_prod_odoo_conf(
         workers_cap=settings.prod_workers_cap,
         plan=plan,
     )
+    # Per-production user overrides (registry record) win over auto-tuning:
+    # an explicit `workers = 2` must beat the computed value. Reserved keys
+    # are dropped defensively — set_production_odoo_conf refuses them, but
+    # a hand-edited productions.json must not break the managed conf.
+    from oduflow import production_registry
+
+    user_conf = production_registry.get_production(team, name).get("odoo_conf") or {}
+    for key, value in user_conf.items():
+        if str(key).lower() not in RESERVED_ODOO_CONF_KEYS:
+            overrides[str(key).lower()] = str(value)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
         _prod_base_conf_path(team, repo_path),
@@ -358,36 +385,30 @@ def _assert_domain_free(
             raise ConflictError(f"Domain '{domain}' is already used by a production.")
 
 
-def _seed_db_from_template(
+def _copy_db_into_prod_cluster(
     client: DockerClient,
     settings: Settings,
-    team: TeamSettings,
-    template_name: str,
+    source_db: str,
     target_db: str,
+    label: str,
 ) -> None:
-    """Copy a (dev-cluster) template database into the production cluster.
+    """Copy a dev-cluster database into the production cluster.
 
     ``CREATE DATABASE ... TEMPLATE`` cannot cross clusters, so this dumps the
-    template from the dev instance and restores it into the production one
+    source from the dev instance and restores it into the production one
     (pg_dump -Fc | pg_restore --no-owner). The production image's pg_restore
     is same-or-newer than the dev dump's format, so defaults are compatible.
     """
-    tpl_db = get_template_db_name(template_name, team.team_id)
-    if not _db_exists(client, settings, tpl_db):
-        raise NotFoundError(
-            f"Template database '{tpl_db}' not found. Import or create the "
-            f"template '{template_name}' first."
-        )
     dev = client.containers.get(settings.shared_db_container)
     prod = client.containers.get(settings.prod_db_container)
     dump_in_container = f"/tmp/{target_db}.seed.pgdump"
 
     exit_code, output = dev.exec_run(
-        ["pg_dump", "-U", settings.db_user, "-Fc", "-f", dump_in_container, tpl_db]
+        ["pg_dump", "-U", settings.db_user, "-Fc", "-f", dump_in_container, source_db]
     )
     if exit_code != 0:
         text = output.decode("utf-8", errors="replace") if output else ""
-        raise ExternalCommandError("pg_dump (template seed)", exit_code, text[-2000:])
+        raise ExternalCommandError(f"pg_dump ({label})", exit_code, text[-2000:])
 
     with tempfile.TemporaryDirectory() as tmpdir:
         host_dump = os.path.join(tmpdir, "seed.pgdump")
@@ -409,10 +430,162 @@ def _seed_db_from_template(
             if exit_code != 0:
                 text = output.decode("utf-8", errors="replace") if output else ""
                 raise ExternalCommandError(
-                    "pg_restore (template seed)", exit_code, text[-2000:]
+                    f"pg_restore ({label})", exit_code, text[-2000:]
                 )
         finally:
             prod.exec_run(["rm", "-f", f"/tmp/{os.path.basename(host_dump)}"])
+
+
+def _seed_db_from_template(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    template_name: str,
+    target_db: str,
+) -> None:
+    """Copy a (dev-cluster) template database into the production cluster."""
+    tpl_db = get_template_db_name(template_name, team.team_id)
+    if not _db_exists(client, settings, tpl_db):
+        raise NotFoundError(
+            f"Template database '{tpl_db}' not found. Import or create the "
+            f"template '{template_name}' first."
+        )
+    _copy_db_into_prod_cluster(client, settings, tpl_db, target_db, "template seed")
+
+
+def _seed_db_from_environment(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    source_env: str,
+    target_db: str,
+) -> None:
+    """Copy a dev environment's database into the production cluster."""
+    src_db = get_db_name(source_env, team.team_id)
+    if not _db_exists(client, settings, src_db):
+        raise NotFoundError(
+            f"Environment database '{src_db}' not found for environment '{source_env}'."
+        )
+    _copy_db_into_prod_cluster(client, settings, src_db, target_db, "environment seed")
+
+
+def _production_env_vars(raw: object) -> dict[str, str]:
+    """Validate user variables without allowing replacement of managed DB access."""
+    env_vars = normalize_env_vars(raw)
+    reserved = {"HOST", "PORT", "USER", "PASSWORD"} & env_vars.keys()
+    if reserved:
+        raise ValueError(
+            "Managed production environment variables: " + ", ".join(sorted(reserved))
+        )
+    return env_vars
+
+
+def _source_env_info(
+    client: DockerClient, settings: Settings, team: TeamSettings, env_name: str
+) -> dict[str, Any]:
+    """Resolve the source dev environment of a promotion from its container
+    labels: repo/branch/image/git_user/extra_addons defaults plus the template
+    provenance (to warn when the data was sanitized on its way from prod)."""
+    if env_name.startswith(PROD_ENV_PREFIX):
+        raise ValueError(
+            f"'{env_name}' is in the production namespace, not a dev environment."
+        )
+    container_name = get_resource_name(env_name, "odoo", settings.prefix, team.team_id)
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        raise NotFoundError(
+            f"Environment '{env_name}' not found (no container '{container_name}')."
+        )
+    from oduflow.docker_ops.env_ops import _assert_team_owns, _normalize_extra_addons
+    from oduflow.git_ops import rev_parse
+
+    _assert_team_owns(container, settings, team, env_name)
+    labels = container.labels or {}
+    try:
+        extra_addons = _normalize_extra_addons(
+            json.loads(labels.get("oduflow.extra_addons", "{}"))
+        )
+    except (json.JSONDecodeError, TypeError):
+        extra_addons = {}
+    # The env's actual checked-out commit: promotion copies the env's DATA, so
+    # the caller can warn when the cloned remote tip diverges from it.
+    head_commit = ""
+    try:
+        head_commit = rev_parse(get_repo_path(env_name, team.workspaces_dir))
+    except Exception:
+        pass
+    try:
+        env_vars = json.loads(labels.get("oduflow.env_vars", "{}"))
+        if not isinstance(env_vars, dict):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise PrerequisiteNotMetError(
+            "Source environment variables metadata is invalid."
+        ) from None
+    return {
+        "env_vars": _production_env_vars(env_vars),
+        "container": container,
+        "repo_url": sanitize_repo_url(labels.get(settings.repo_label, "")),
+        "branch": labels.get("oduflow.git_branch", env_name),
+        "odoo_image": labels.get(settings.image_label, ""),
+        "git_user": labels.get("oduflow.git_user", ""),
+        "extra_addons": extra_addons,
+        "template": labels.get("oduflow.template", ""),
+        "head_commit": head_commit,
+    }
+
+
+def _copy_env_data_into_production(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    source_env: dict[str, Any],
+    source: str,
+    name: str,
+    env_db: str,
+) -> list[str]:
+    """Copy the source environment's database and filestore into the new
+    production, with the environment's Odoo stopped over both copies for a
+    consistent pair. The environment itself is left as it was (not reset).
+    Returns user-facing notes (e.g. when the env could not be restarted)."""
+    container = source_env["container"]
+    # The cached SDK object may be minutes old (fetched before infra checks
+    # and the full clone); refresh so the stop/restart decision is current.
+    try:
+        container.reload()
+    except Exception:
+        pass
+    was_running = getattr(container, "status", "") == "running"
+    if was_running:
+        container.stop(timeout=60)
+    notes: list[str] = []
+    try:
+        _seed_db_from_environment(client, settings, team, source, env_db)
+        src_filestore = get_filestore_paths(source, team.workspaces_dir)["merged"]
+        if not os.path.isdir(src_filestore):
+            # A dead overlay mount (or missing dir) would silently promote a
+            # DB without its attachments; refuse the inconsistent pair.
+            raise PrerequisiteNotMetError(
+                f"Source environment filestore is not accessible at "
+                f"{src_filestore}; restart the environment and retry."
+            )
+        filestore_path = prod_filestore_dir(team, name)
+        os.makedirs(filestore_path, mode=0o777, exist_ok=True)
+        shutil.copytree(src_filestore, filestore_path, dirs_exist_ok=True)
+    finally:
+        if was_running:
+            try:
+                container.start()
+            except Exception as exc:
+                logger.warning(
+                    "Could not restart source environment '%s': %s", source, exc
+                )
+                notes.append(
+                    f"Source environment '{source}' could not be restarted "
+                    f"after the copy ({exc}); start it manually."
+                )
+    return notes
 
 
 def _cleanup_partial_production(
@@ -456,6 +629,132 @@ def _cleanup_partial_production(
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def _container_spec(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    record: dict[str, Any],
+    env_creds: dict[str, str],
+    extra_mount_paths: list[tuple[str, str]],
+) -> tuple[dict[str, str], dict[str, dict[str, str]], dict[str, str]]:
+    """Env vars, volume binds and labels for a production Odoo container.
+
+    Derived entirely from the authoritative registry record, so that
+    create_production and reconfigure_production produce identical
+    containers for the same record. The referenced host paths (repo,
+    worktrees, filestore, sessions) must already exist.
+    """
+    env_name = prod_env_name(name)
+    env_db = prod_db_name(team, name)
+    repo_path = get_repo_path(env_name, team.workspaces_dir)
+    odoo_env = {
+        "HOST": settings.prod_db_container,
+        "USER": env_creds["pg_user"],
+        "PASSWORD": env_creds["pg_password"],
+    }
+    user_env = _production_env_vars(record.get("env_vars"))
+    odoo_env.update(secret_store.resolve_env_secrets(team, user_env) or {})
+    odoo_volumes: dict[str, dict[str, str]] = {
+        repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
+    }
+    for host_path, container_path in extra_mount_paths:
+        odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
+    odoo_volumes[prod_filestore_dir(team, name)] = {
+        "bind": f"/var/lib/odoo/.local/share/Odoo/filestore/{env_db}",
+        "mode": "rw",
+    }
+    odoo_volumes[os.path.join(_workspace(team, name), "sessions")] = {
+        "bind": "/var/lib/odoo/.local/share/Odoo/sessions",
+        "mode": "rw",
+    }
+
+    # Deliberately NO branch label (keeps dev listings/reaper blind) and
+    # NO scoped-MCP token (productions are not agent playgrounds).
+    domain = record["domain"]
+    traefik_router = f"oduflow-{team.team_id}-{env_name}"
+    labels = {
+        settings.managed_label: "true",
+        settings.team_label: team.team_id,
+        settings.repo_label: record["repo_url"],
+        settings.image_label: record["odoo_image"],
+        "oduflow.prod": "true",
+        "oduflow.prod_name": name,
+        "oduflow.domain": domain,
+        "oduflow.git_branch": record["branch"],
+        "oduflow.created_at": record["created_at"],
+        "traefik.enable": "true",
+        f"traefik.http.routers.{traefik_router}.rule": f"Host(`{domain}`)",
+        f"traefik.http.services.{traefik_router}.loadbalancer.server.port": "8069",
+        "traefik.docker.network": get_team_network_name(team.team_id, settings.prefix),
+    }
+    if user_env:
+        labels["oduflow.env_vars"] = json.dumps(user_env, sort_keys=True)
+    if record.get("extra_addons"):
+        labels["oduflow.extra_addons"] = json.dumps(record["extra_addons"])
+    if record.get("git_user"):
+        labels["oduflow.git_user"] = record["git_user"]
+    if settings.routing_tls:
+        labels.update(
+            {
+                f"traefik.http.routers.{traefik_router}.entrypoints": "websecure",
+                f"traefik.http.routers.{traefik_router}.tls": "true",
+                f"traefik.http.routers.{traefik_router}.tls.certresolver": (
+                    "letsencrypt"
+                ),
+            }
+        )
+    else:
+        labels[f"traefik.http.routers.{traefik_router}.entrypoints"] = "web"
+    return odoo_env, odoo_volumes, labels
+
+
+def _run_odoo_container(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    odoo_image: str,
+    odoo_env: dict[str, str],
+    odoo_volumes: dict[str, dict[str, str]],
+    labels: dict[str, str],
+    generated_conf: str,
+    repo_path: str,
+) -> tuple[Any, list[str]]:
+    """Run the production Odoo container and finish its in-container setup
+    (odoo.conf copy, apt/pip requirements, one restart picking both up)."""
+    from oduflow.docker_ops.env_ops import (
+        _install_apt_packages,
+        _install_pip_requirements,
+    )
+
+    container = client.containers.run(
+        image=odoo_image,
+        name=_odoo_container_name(settings, team, name),
+        detach=True,
+        network=get_team_network_name(team.team_id, settings.prefix),
+        extra_hosts={"host.docker.internal": "host-gateway"},
+        **default_env_limits(),
+        environment=odoo_env,
+        labels=labels,
+        volumes=odoo_volumes,
+        restart_policy={"Name": "unless-stopped"},
+        # No --dev=xml: production serves with workers>0 and never
+        # auto-reloads assets; any change requires at least a restart.
+        command=f"odoo -d {prod_db_name(team, name)}",
+    )
+    setup_logs: list[str] = []
+    _copy_file_to_container(container, generated_conf, "/etc/odoo")
+    apt_log = _install_apt_packages(container, repo_path)
+    if apt_log:
+        setup_logs.append(apt_log)
+    _, pip_log = _install_pip_requirements(container, repo_path, restart=False)
+    if pip_log:
+        setup_logs.append(pip_log)
+    # One restart picks up both the copied odoo.conf and pip packages.
+    container.restart()
+    return container, setup_logs
+
+
 def create_production(
     settings: Settings,
     team: TeamSettings,
@@ -470,20 +769,27 @@ def create_production(
     auto_update: bool = False,
     allow_copy_to_dev_mcp: bool = True,
     template_name: str | None = None,
+    from_environment: str | None = None,
+    env_vars: dict[str, str] | None = None,
+    env_lock: Callable[[], ContextManager[None]] | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
 
     The registry record is created first (reserving the name and — on the
     team's first production — generating the webhook secret); on any failure
     the partial resources AND the record are rolled back.
+
+    ``from_environment`` promotes a dev environment: its database and
+    filestore are copied (under a briefly stopped Odoo, for consistency) and
+    empty ``repo_url``/``branch``/``odoo_image``/``git_user``/``extra_addons``
+    default to the environment's own. The source environment is left as it
+    was — unlike the save-as-template path, nothing is reset. ``env_lock``
+    (a context-manager factory for the source environment's lock) is held
+    only over the stop/copy/restart slice, so the env is not blocked for the
+    remaining multi-minute provisioning.
     """
     from oduflow import production_registry
-    from oduflow.docker_ops.env_ops import (
-        _clone_repo,
-        _init_empty_database,
-        _install_apt_packages,
-        _install_pip_requirements,
-    )
+    from oduflow.docker_ops.env_ops import _clone_repo, _init_empty_database
 
     validate_prod_name(name)
     domain = validate_domain(domain)
@@ -492,14 +798,48 @@ def create_production(
             'Production hosting requires routing_mode = "traefik" (custom '
             "domains are routed via Traefik Host rules)."
         )
+    if template_name is not None and from_environment:
+        raise ConflictError("Pass either template_name or from_environment, not both.")
+    if not from_environment and not (repo_url and branch and odoo_image):
+        raise ValueError(
+            "repo_url, branch and odoo_image are required "
+            "(or pass from_environment to inherit them)."
+        )
     _assert_domain_free(settings, domain, own_team=team.team_id, own_name=name)
 
     start_time = time.time()
     client = get_client()
+    source_env: dict[str, Any] | None = None
+    if from_environment:
+        source_env = _source_env_info(client, settings, team, from_environment)
+        if env_vars is None:
+            env_vars = source_env["env_vars"]
+        repo_url = repo_url or source_env["repo_url"]
+        branch = branch or source_env["branch"]
+        odoo_image = odoo_image or source_env["odoo_image"]
+        git_user = git_user or source_env["git_user"]
+        if extra_addons is None and source_env["extra_addons"]:
+            extra_addons = dict(source_env["extra_addons"])
+        if not repo_url:
+            raise PrerequisiteNotMetError(
+                f"Environment '{from_environment}' has no repository URL "
+                "(local-path environment?); pass repo_url explicitly."
+            )
+        if not odoo_image:
+            raise PrerequisiteNotMetError(
+                f"Environment '{from_environment}' has no image label; pass "
+                "odoo_image explicitly."
+            )
+    for repo_name in extra_addons or {}:
+        validate_extra_repo_name(repo_name)
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
     container_name = _odoo_container_name(settings, team, name)
     workspace = _workspace(team, name)
+
+    env_vars = _production_env_vars(env_vars)
+    # Fail before creating resources or interrupting the source environment.
+    secret_store.resolve_env_secrets(team, env_vars)
 
     # Bring up (or verify) the production tier before touching anything else.
     ensure_prod_infra(client, settings, force=True)
@@ -530,12 +870,14 @@ def create_production(
             "odoo_image": odoo_image,
             "git_user": git_user,
             "extra_addons": extra_addons or {},
+            "env_vars": env_vars,
             "auto_update": bool(auto_update),
             "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
 
+    promo_notes: list[str] = []
     try:
         ensure_team_network(client, settings, team)
         os.makedirs(workspace, exist_ok=True)
@@ -548,6 +890,22 @@ def create_production(
         _clone_repo(
             repo_url, branch, repo_path, team, git_user=git_user, depth=0, timeout=300
         )
+        if source_env is not None and source_env.get("head_commit"):
+            from oduflow.git_ops import rev_parse
+
+            env_head = source_env["head_commit"]
+            cloned_head = rev_parse(repo_path)
+            if env_head != cloned_head:
+                # Data comes from the env, code from the remote tip: warn when
+                # the pair may be inconsistent (unpushed commits, or the
+                # remote moved ahead of the env's last pull).
+                promo_notes.append(
+                    f"Environment '{from_environment}' has commit "
+                    f"{env_head[:10]} checked out but the remote tip of "
+                    f"branch '{branch}' is {cloned_head[:10]}; the promoted "
+                    "code may not match the copied database (push or pull "
+                    "the environment first if this is unexpected)."
+                )
 
         extra_mount_paths: list[tuple[str, str]] = []
         if extra_addons:
@@ -568,6 +926,22 @@ def create_production(
         )
         if template_name is not None:
             _seed_db_from_template(client, settings, team, template_name, env_db)
+        if source_env is not None:
+            assert from_environment is not None
+            # The source env is only touched here; scope its lock (when the
+            # caller provides one) to this slice instead of the whole build.
+            with env_lock() if env_lock is not None else nullcontext():
+                promo_notes.extend(
+                    _copy_env_data_into_production(
+                        client,
+                        settings,
+                        team,
+                        source_env,
+                        from_environment,
+                        name,
+                        env_db,
+                    )
+                )
 
         env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
         _create_pg_role(
@@ -578,7 +952,7 @@ def create_production(
             env_db,
             container_name=settings.prod_db_container,
         )
-        if template_name is not None:
+        if template_name is not None or source_env is not None:
             reassign_db_ownership(
                 client,
                 settings,
@@ -593,17 +967,6 @@ def create_production(
                 container_name=settings.prod_db_container,
             )
 
-        odoo_env = {
-            "HOST": settings.prod_db_container,
-            "USER": env_creds["pg_user"],
-            "PASSWORD": env_creds["pg_password"],
-        }
-        odoo_volumes: dict[str, dict[str, str]] = {
-            repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
-        }
-        for host_path, container_path in extra_mount_paths:
-            odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
-
         # Plain filestore directory — production is long-lived and must not
         # depend on a fuse overlay over a template.
         filestore_path = prod_filestore_dir(team, name)
@@ -615,54 +978,15 @@ def create_production(
                 shutil.copytree(tpl_filestore, filestore_path, dirs_exist_ok=True)
         uid_str, gid_str = get_odoo_uid_gid(client, odoo_image).split(":")
         chown_recursive(filestore_path, int(uid_str), int(gid_str), client, odoo_image)
-        odoo_volumes[filestore_path] = {
-            "bind": f"/var/lib/odoo/.local/share/Odoo/filestore/{env_db}",
-            "mode": "rw",
-        }
 
         sessions_path = os.path.join(workspace, "sessions")
         os.makedirs(sessions_path, mode=0o777, exist_ok=True)
         os.chmod(sessions_path, 0o777)
         chown_recursive(sessions_path, int(uid_str), int(gid_str), client, odoo_image)
-        odoo_volumes[sessions_path] = {
-            "bind": "/var/lib/odoo/.local/share/Odoo/sessions",
-            "mode": "rw",
-        }
 
-        # Deliberately NO branch label (keeps dev listings/reaper blind) and
-        # NO scoped-MCP token (productions are not agent playgrounds).
-        traefik_router = f"oduflow-{team.team_id}-{env_name}"
-        labels = {
-            settings.managed_label: "true",
-            settings.team_label: team.team_id,
-            settings.repo_label: repo_url,
-            settings.image_label: odoo_image,
-            "oduflow.prod": "true",
-            "oduflow.prod_name": name,
-            "oduflow.domain": domain,
-            "oduflow.git_branch": branch,
-            "oduflow.created_at": record["created_at"],
-            "traefik.enable": "true",
-            f"traefik.http.routers.{traefik_router}.rule": f"Host(`{domain}`)",
-            f"traefik.http.services.{traefik_router}.loadbalancer.server.port": "8069",
-            "traefik.docker.network": get_team_network_name(
-                team.team_id, settings.prefix
-            ),
-        }
-        if extra_addons:
-            labels["oduflow.extra_addons"] = json.dumps(extra_addons)
-        if git_user:
-            labels["oduflow.git_user"] = git_user
-        if settings.routing_tls:
-            labels.update(
-                {
-                    f"traefik.http.routers.{traefik_router}.entrypoints": "websecure",
-                    f"traefik.http.routers.{traefik_router}.tls": "true",
-                    f"traefik.http.routers.{traefik_router}.tls.certresolver": "letsencrypt",
-                }
-            )
-        else:
-            labels[f"traefik.http.routers.{traefik_router}.entrypoints"] = "web"
+        odoo_env, odoo_volumes, labels = _container_spec(
+            settings, team, name, record, env_creds, extra_mount_paths
+        )
 
         generated_conf = _build_prod_odoo_conf(
             settings,
@@ -681,7 +1005,7 @@ def create_production(
             )
 
         setup_logs: list[str] = []
-        if template_name is None:
+        if template_name is None and source_env is None:
             setup_logs.append(
                 _init_empty_database(
                     client,
@@ -695,33 +1019,19 @@ def create_production(
                 )
             )
 
-        container = client.containers.run(
-            image=odoo_image,
-            name=container_name,
-            detach=True,
-            network=get_team_network_name(team.team_id, settings.prefix),
-            extra_hosts={"host.docker.internal": "host-gateway"},
-            **default_env_limits(),
-            environment=odoo_env,
-            labels=labels,
-            volumes=odoo_volumes,
-            restart_policy={"Name": "unless-stopped"},
-            # No --dev=xml: production serves with workers>0 and never
-            # auto-reloads assets; any change requires at least a restart.
-            command=f"odoo -d {env_db}",
+        container, run_logs = _run_odoo_container(
+            client,
+            settings,
+            team,
+            name,
+            odoo_image,
+            odoo_env,
+            odoo_volumes,
+            labels,
+            generated_conf,
+            repo_path,
         )
-
-        _copy_file_to_container(container, generated_conf, "/etc/odoo")
-        apt_log = _install_apt_packages(container, repo_path)
-        if apt_log:
-            setup_logs.append(apt_log)
-        pip_installed, pip_log = _install_pip_requirements(
-            container, repo_path, restart=False
-        )
-        if pip_log:
-            setup_logs.append(pip_log)
-        # One restart picks up both the copied odoo.conf and pip packages.
-        container.restart()
+        setup_logs.extend(run_logs)
 
         from oduflow.git_ops import rev_parse
 
@@ -754,10 +1064,20 @@ def create_production(
         "Production created",
         extra={"env_name": env_name, "domain": domain},
     )
+    notes: list[str] = list(promo_notes)
+    if source_env is not None and str(source_env.get("template", "")).startswith(
+        PRODUCTION_TEMPLATE_PREFIX
+    ):
+        notes.append(
+            f"Environment '{from_environment}' was created from production "
+            "data that was sanitized on copy; this production starts with "
+            "that sanitized data."
+        )
     return {
         "name": name,
         "url": prod_url(settings, team, record),
         "domain": domain,
+        "notes": notes,
         "odoo_container": container_name,
         "database": env_db,
         "workspace": workspace,
@@ -767,6 +1087,363 @@ def create_production(
             "GitHub webhook: POST /api/webhooks/github with the team secret "
             "(see get_production_info / the dashboard Production tab)."
         ),
+        "elapsed_seconds": round(time.time() - start_time, 1),
+    }
+
+
+_ODOO_CONF_KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+def set_production_odoo_conf(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    *,
+    set_options: dict[str, str] | None = None,
+    unset_options: list[str] | None = None,
+    restart: bool = True,
+    replace: bool = False,
+) -> dict[str, Any]:
+    """Update a production's odoo.conf [options] overrides and re-apply.
+
+    Overrides live in the registry record and are merged into the managed
+    conf chain (base conf > auto-tuned workers > these overrides) on every
+    conf rebuild, so they survive deploys, retunes and reconfigures. With
+    ``replace`` the passed options become the complete new override set
+    (removals are computed here, so callers need no stale client-side diff).
+    Option names are lowercased — Odoo lowercases them on read anyway, and a
+    case-variant must not bypass the reserved-key refusal. A call that leaves
+    the overrides unchanged returns early without touching (or restarting)
+    the container. The caller must hold the production's lock.
+    """
+    from oduflow import production_registry
+
+    record = production_registry.get_production(team, name)
+    cleaned = {str(k).strip().lower(): str(v) for k, v in (set_options or {}).items()}
+    unset_list = [
+        str(k).strip().lower() for k in (unset_options or []) if str(k).strip()
+    ]
+    reserved = sorted(k for k in cleaned if k in RESERVED_ODOO_CONF_KEYS)
+    if reserved:
+        raise ValueError(
+            f"odoo.conf keys managed by Oduflow cannot be overridden: "
+            f"{', '.join(reserved)}. addons_path and data_dir are generated; "
+            "db_* connection keys come from container env vars."
+        )
+    invalid = sorted(k for k in cleaned if not _ODOO_CONF_KEY_RE.match(k))
+    if invalid:
+        raise ValueError(f"Invalid odoo.conf option names: {', '.join(invalid)}.")
+
+    old_conf = {
+        str(k).lower(): str(v) for k, v in (record.get("odoo_conf") or {}).items()
+    }
+    if replace:
+        conf = dict(cleaned)
+    else:
+        conf = dict(old_conf)
+        conf.update(cleaned)
+        for key in unset_list:
+            conf.pop(key, None)
+    if conf == old_conf:
+        return {
+            "name": name,
+            "odoo_conf": conf,
+            "applied": False,
+            "restarted": False,
+            "message": "Overrides unchanged; the container was left alone.",
+        }
+    production_registry.update_production(team, name, {"odoo_conf": conf})
+
+    client = get_client()
+    container = _get_container(client, settings, team, name)
+    applied = False
+    restarted = False
+    if container is not None:
+        reapply_prod_odoo_conf(settings, team, name, container)
+        applied = True
+        if restart and container.status == "running":
+            container.restart()
+            restarted = True
+    return {
+        "name": name,
+        "odoo_conf": conf,
+        "applied": applied,
+        "restarted": restarted,
+    }
+
+
+def reconfigure_production(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    *,
+    domain: str | None = None,
+    odoo_image: str | None = None,
+    branch: str | None = None,
+    repo_url: str | None = None,
+    git_user: str | None = None,
+    extra_addons: dict[str, str] | None = None,
+    env_vars: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Change a production's infrastructure settings and recreate its
+    container to match. Only the passed (non-None) fields change.
+
+    The database and filestore live outside the container and are
+    preserved; expect a brief downtime while the container is replaced.
+    The registry record (intent) is updated first, then the workspace and
+    container are converged to it — on a mid-way failure re-running the
+    same call resumes the convergence: a request that changes nothing
+    still repairs a missing container or repo checkout instead of
+    reporting a no-op. Changing ``odoo_image`` does NOT migrate the
+    database: a major Odoo version bump additionally needs an explicit
+    module upgrade plan. The caller must hold the production's lock.
+    """
+    from oduflow import production_registry
+    from oduflow.docker_ops.env_ops import _clone_repo
+    from oduflow.extra_addons import create_worktree, remove_worktree
+    from oduflow.git_ops import checkout_branch, fetch_branch, rev_parse
+
+    record = production_registry.get_production(team, name)
+    start_time = time.time()
+    client = get_client()
+    env_name = prod_env_name(name)
+    repo_path = get_repo_path(env_name, team.workspaces_dir)
+    workspace = _workspace(team, name)
+
+    updates: dict[str, Any] = {}
+    if domain is not None:
+        new_domain = validate_domain(domain)
+        if new_domain != record.get("domain"):
+            _assert_domain_free(
+                settings, new_domain, own_team=team.team_id, own_name=name
+            )
+            updates["domain"] = new_domain
+    if odoo_image is not None and odoo_image != record.get("odoo_image"):
+        updates["odoo_image"] = odoo_image
+    if repo_url is not None:
+        clean_url = sanitize_repo_url(repo_url)
+        if clean_url != record.get("repo_url"):
+            updates["repo_url"] = clean_url
+    if branch is not None and branch != record.get("branch"):
+        updates["branch"] = branch
+    if git_user is not None and git_user != record.get("git_user", ""):
+        updates["git_user"] = git_user
+    if extra_addons is not None:
+        for repo_name in extra_addons:
+            # Keys become path components under the workspace; a ".." or
+            # absolute-path key must never reach the rmtree below.
+            validate_extra_repo_name(repo_name)
+        if dict(extra_addons) != (record.get("extra_addons") or {}):
+            updates["extra_addons"] = dict(extra_addons)
+
+    if env_vars is not None:
+        env_vars = _production_env_vars(env_vars)
+        if env_vars != (record.get("env_vars") or {}):
+            updates["env_vars"] = env_vars
+
+    # No-op only when the request changes nothing AND actual state matches
+    # the record; a missing container or checkout (a previous run failed
+    # mid-way) is drift that the run below repairs from the record.
+    container = _get_container(client, settings, team, name)
+    drift = container is None or not os.path.isdir(repo_path)
+    if not updates and not drift:
+        return {
+            "name": name,
+            "changed": [],
+            "message": "No settings changed; the container was left alone.",
+        }
+
+    # Resolve before changing registry intent, the checkout or the live container.
+    secret_store.resolve_env_secrets(
+        team, _production_env_vars(updates.get("env_vars", record.get("env_vars")))
+    )
+    old_head = ""
+    try:
+        old_head = rev_parse(repo_path)
+    except Exception:
+        pass
+
+    old_extras_record: dict[str, str] = dict(record.get("extra_addons") or {})
+    # Registry first: the record is the authoritative intent, and the
+    # convergence below is idempotent against it.
+    if updates:
+        record = production_registry.update_production(team, name, updates)
+
+    # --- Converge the workspace (repo checkout + extra addon worktrees). ---
+    staged_clone_path: str | None = None
+    if "repo_url" in updates or "git_user" in updates or not os.path.isdir(repo_path):
+        # A changed remote (or credential identity) invalidates the clone.
+        # Clone beside the live checkout — the running container bind-mounts
+        # repo_path, so the old tree must keep serving until the container
+        # swap below; the directories are switched inside that window.
+        staged_clone_path = repo_path + ".new"
+        if os.path.isdir(staged_clone_path):
+            shutil.rmtree(staged_clone_path)
+        _clone_repo(
+            record["repo_url"],
+            record["branch"],
+            staged_clone_path,
+            team,
+            git_user=record.get("git_user", ""),
+            depth=0,
+            timeout=300,
+        )
+    elif "branch" in updates:
+        fetch_branch(repo_path, record["branch"], team.git_credentials_file())
+        checkout_branch(repo_path, record["branch"])
+
+    def _remove_extra_worktree(repo_name: str, wt_path: str) -> None:
+        try:
+            remove_worktree(team, repo_name, wt_path)
+        except Exception as exc:
+            logger.warning("Could not remove worktree %s: %s", wt_path, exc)
+        shutil.rmtree(wt_path, ignore_errors=True)
+
+    new_extras: dict[str, str] = record.get("extra_addons") or {}
+    extra_dir = os.path.join(workspace, "extra")
+    if os.path.isdir(extra_dir):
+        for entry in os.listdir(extra_dir):
+            if entry not in new_extras:
+                _remove_extra_worktree(entry, os.path.join(extra_dir, entry))
+    extra_mount_paths: list[tuple[str, str]] = []
+    for repo_name, addon_branch in new_extras.items():
+        wt_path = os.path.join(extra_dir, repo_name)
+        os.makedirs(extra_dir, exist_ok=True)
+        # A branch change needs a fresh worktree; recreate rather than
+        # switch — but leave worktrees whose branch did not change alone.
+        if os.path.isdir(wt_path) and old_extras_record.get(repo_name) != addon_branch:
+            _remove_extra_worktree(repo_name, wt_path)
+        if not os.path.isdir(wt_path):
+            create_worktree(team, repo_name, addon_branch, wt_path)
+        extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
+
+    # --- Prepare everything, then swap the container (minimal downtime). ---
+    env_creds = load_credentials(
+        env_name, team.workspaces_dir, settings.db_user, settings.db_password
+    )
+    generated_conf = _build_prod_odoo_conf(
+        settings, team, name, repo_path, [cp for _, cp in extra_mount_paths]
+    )
+    odoo_env, odoo_volumes, labels = _container_spec(
+        settings, team, name, record, env_creds, extra_mount_paths
+    )
+    odoo_image_new = record["odoo_image"]
+    # Pull only when the image actually changed (or is absent locally) — an
+    # unrelated reconfigure must not silently move the production onto a
+    # newer build of the same tag, nor pay a registry round-trip.
+    need_pull = "odoo_image" in updates
+    if not need_pull:
+        try:
+            client.images.get(odoo_image_new)
+        except Exception:
+            need_pull = True
+    if need_pull:
+        try:
+            logger.info("Pulling image %s", odoo_image_new)
+            client.images.pull(odoo_image_new)
+        except Exception as exc:
+            logger.warning(
+                "Could not pull image %s, using local copy: %s", odoo_image_new, exc
+            )
+    if "odoo_image" in updates:
+        # Re-establish the create-time invariant: data dirs owned by the
+        # image's odoo uid/gid (a different image may use a different uid).
+        uid_str, gid_str = get_odoo_uid_gid(client, odoo_image_new).split(":")
+        filestore_path = prod_filestore_dir(team, name)
+        if os.path.isdir(filestore_path):
+            chown_recursive(
+                filestore_path, int(uid_str), int(gid_str), client, odoo_image_new
+            )
+        sessions_path = os.path.join(workspace, "sessions")
+        if os.path.isdir(sessions_path):
+            chown_recursive(
+                sessions_path, int(uid_str), int(gid_str), client, odoo_image_new
+            )
+
+    container = _get_container(client, settings, team, name)
+    if container is not None:
+        try:
+            container.stop(timeout=30)
+        except Exception as exc:
+            logger.warning("Stopping old container failed (removing anyway): %s", exc)
+        container.remove(force=True)
+
+    if staged_clone_path is not None:
+        # The old container is gone; swap the staged clone in. The gap is a
+        # rename, not a multi-minute clone.
+        if os.path.isdir(repo_path):
+            shutil.rmtree(repo_path)
+        os.rename(staged_clone_path, repo_path)
+
+    container, setup_logs = _run_odoo_container(
+        client,
+        settings,
+        team,
+        name,
+        odoo_image_new,
+        odoo_env,
+        odoo_volumes,
+        labels,
+        generated_conf,
+        repo_path,
+    )
+    healthy = wait_production_healthy(client, settings, team, name, timeout=180)
+    production_registry.update_production(team, name, {"unhealthy": not healthy})
+
+    new_head = ""
+    try:
+        new_head = rev_parse(repo_path)
+    except Exception:
+        pass
+    code_changed = bool({"branch", "repo_url", "extra_addons"} & set(updates))
+    if code_changed:
+        append_deploy(
+            team,
+            name,
+            {
+                "ts_start": _now_iso(),
+                "ts_end": _now_iso(),
+                "trigger": "reconfigure",
+                "from_commit": old_head,
+                "to_commit": new_head,
+                "action": "reconfigure",
+                "status": "success" if healthy else "failed",
+                "worktrees": _worktree_heads(team, name),
+            },
+        )
+
+    notes: list[str] = []
+    if not updates:
+        notes.append(
+            "No settings changed, but drifted state was repaired (the "
+            "container and/or repo checkout was missing and has been "
+            "recreated from the record)."
+        )
+    if "odoo_image" in updates:
+        notes.append(
+            "The database was NOT migrated to the new image's Odoo version; "
+            "a major version bump needs an explicit module upgrade plan."
+        )
+    if code_changed:
+        notes.append(
+            "The new code is running but no modules were installed/upgraded; "
+            "use update_production(install=..., upgrade=...) if the new code "
+            "needs them."
+        )
+    logger.info(
+        "Production reconfigured",
+        extra={"env_name": env_name, "changed": sorted(updates)},
+    )
+    return {
+        "name": name,
+        "changed": sorted(updates),
+        "domain": record["domain"],
+        "url": prod_url(settings, team, record),
+        "odoo_container": _odoo_container_name(settings, team, name),
+        "commit": new_head,
+        "healthy": healthy,
+        "setup_logs": setup_logs,
+        "notes": notes,
         "elapsed_seconds": round(time.time() - start_time, 1),
     }
 
@@ -1500,8 +2177,10 @@ def get_production_info(
         "repo_url": record.get("repo_url", ""),
         "branch": record.get("branch", ""),
         "odoo_image": record.get("odoo_image", ""),
+        "git_user": record.get("git_user", ""),
         "extra_addons": record.get("extra_addons", {}),
         "auto_update": bool(record.get("auto_update")),
+        "odoo_conf": record.get("odoo_conf", {}),
         "allow_copy_to_dev_mcp": bool(record.get("allow_copy_to_dev_mcp", True)),
         "unhealthy_flag": bool(record.get("unhealthy")),
         "deploy_in_progress": bool(record.get("deploy_in_progress")),

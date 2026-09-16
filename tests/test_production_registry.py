@@ -24,6 +24,7 @@ class TestCreate:
         assert record["domain"] == "erp.example.com"
         assert record["auto_update"] is False
         assert record["deploy_in_progress"] is False
+        assert record["odoo_conf"] == {}
 
     def test_duplicate_raises_conflict(self, team):
         reg.create_production(team, "erp", {})
