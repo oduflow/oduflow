@@ -136,6 +136,100 @@
       "title": "Modules",
       "type": "object"
     },
+    "Production": {
+      "additionalProperties": false,
+      "description": "A long-lived production target, mutually exclusive with a dev environment.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "domain": {
+          "minLength": 1,
+          "title": "Domain",
+          "type": "string"
+        },
+        "repoUrl": {
+          "minLength": 1,
+          "title": "Repourl",
+          "type": "string"
+        },
+        "branch": {
+          "minLength": 1,
+          "title": "Branch",
+          "type": "string"
+        },
+        "odooImage": {
+          "minLength": 1,
+          "title": "Odooimage",
+          "type": "string"
+        },
+        "gitUser": {
+          "default": "",
+          "title": "Gituser",
+          "type": "string"
+        },
+        "env": {
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/ValueFrom"
+                }
+              ]
+            }
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "autoUpdate": {
+          "default": false,
+          "title": "Autoupdate",
+          "type": "boolean"
+        },
+        "allowCopyToDevMcp": {
+          "default": true,
+          "title": "Allowcopytodevmcp",
+          "type": "boolean"
+        },
+        "odooConf": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Odooconf",
+          "type": "object"
+        },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template"
+        },
+        "adoptExisting": {
+          "default": false,
+          "title": "Adoptexisting",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "domain",
+        "repoUrl",
+        "branch",
+        "odooImage"
+      ],
+      "title": "Production",
+      "type": "object"
+    },
     "Service": {
       "additionalProperties": false,
       "properties": {
@@ -363,9 +457,60 @@
     },
     "StackSpec": {
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "environment": {
+              "not": {
+                "type": "null"
+              }
+            },
+            "production": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "environment"
+          ]
+        },
+        {
+          "properties": {
+            "production": {
+              "not": {
+                "type": "null"
+              }
+            },
+            "environment": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "production"
+          ]
+        }
+      ],
       "properties": {
         "environment": {
-          "$ref": "#/$defs/Environment"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Environment"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "production": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Production"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "extraRepositories": {
           "patternProperties": {
@@ -411,9 +556,6 @@
           "type": "object"
         }
       },
-      "required": [
-        "environment"
-      ],
       "title": "StackSpec",
       "type": "object"
     },
@@ -448,6 +590,23 @@
           ],
           "default": null,
           "title": "Environmentfield"
+        },
+        "productionField": {
+          "anyOf": [
+            {
+              "enum": [
+                "url",
+                "containerName",
+                "database"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Productionfield"
         },
         "database": {
           "anyOf": [

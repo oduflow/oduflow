@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add production targets to declarative Stacks, with explicit adoption of matching
+  existing productions, registry ownership, production value references and
+  retryable configuration reconciliation. Development Stacks remain compatible.
+
 ## v1.77.0
 
 ### Fixes

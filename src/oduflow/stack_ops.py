@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel
 
-from oduflow import git_ops
+from oduflow import git_ops, stack_production
 from oduflow.docker_ops import (
     env_ops,
     odoo_ops,
@@ -23,6 +23,7 @@ from oduflow.docker_ops import (
     volume_ops,
 )
 from oduflow.errors import ConflictError, NotFoundError
+from oduflow.locking import prod_lock_key
 from oduflow.naming import sanitize_repo_url, validate_env_name
 from oduflow.service_runtime import normalize_runtime
 from oduflow.settings import Settings, TeamSettings
@@ -72,7 +73,22 @@ def _resource_hash(value: BaseModel | dict[str, Any] | list[Any]) -> str:
         if isinstance(value, BaseModel)
         else value
     )
-    encoded = json.dumps(raw, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    # Adding productionField must not invalidate existing dev service ownership hashes.
+    def compatible(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                k: compatible(v)
+                for k, v in value.items()
+                if not (k == "productionField" and v is None)
+            }
+        if isinstance(value, list):
+            return [compatible(item) for item in value]
+        return value
+
+    encoded = json.dumps(compatible(raw), sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -92,6 +108,7 @@ def _environment_labels(stack: str, manifest: StackManifest) -> dict[str, str]:
     Module installation is reconciled independently and must not leave the
     environment container carrying a stale hash when only that list changes.
     """
+    assert manifest.spec.environment is not None
     value = manifest.spec.environment.model_dump(mode="json", by_alias=True)
     value.pop("modules", None)
     labels = _stack_labels(stack, "environment", value)
@@ -100,6 +117,7 @@ def _environment_labels(stack: str, manifest: StackManifest) -> dict[str, str]:
 
 
 def _environment_hash_with_sanitize(manifest: StackManifest, sanitize: bool) -> str:
+    assert manifest.spec.environment is not None
     value = manifest.spec.environment.model_dump(mode="json", by_alias=True)
     value.pop("modules", None)
     value["sanitize"] = sanitize
@@ -229,8 +247,11 @@ def build_plan(
     stack = manifest.metadata.name
     spec = manifest.spec
     desired_env = spec.environment
-    validate_env_name(desired_env.name)
-    git_ops.validate_repo_url(desired_env.repo_url)
+    target = desired_env or spec.production
+    assert target is not None
+    if desired_env is not None:
+        validate_env_name(desired_env.name)
+    git_ops.validate_repo_url(target.repo_url)
     for desired_repo in spec.extra_repositories.values():
         git_ops.validate_repo_url(desired_repo.repo_url)
     actions: list[PlanAction] = []
@@ -322,92 +343,112 @@ def build_plan(
                 )
             )
 
-    desired_env_vars = resolve_env_values(
-        desired_env.env,
-        settings=settings,
-        team=team,
-        env_name=desired_env.name,
-        environ=environ,
-    )
-
-    environments = {
-        item["env_name"]: item for item in env_ops.list_environments(settings, team)
-    }
-    actual_env = environments.get(desired_env.name)
-    env_resource = "environment"
-    env_needs_create = actual_env is None
-    if actual_env is None:
-        actions.append(PlanAction("create", env_resource, desired_env.name))
-        if desired_env.template is not None:
-            templates = {
-                item["template_name"]: item
-                for item in system_ops.list_templates(settings, team)
-            }
-            template = templates.get(desired_env.template)
-            if template is None or not template.get("db_loaded", False):
-                actions.append(
-                    PlanAction(
-                        "conflict",
-                        env_resource,
-                        f"template '{desired_env.template}' is not available",
-                    )
-                )
-    elif not _owned_by(actual_env, stack, env_resource):
-        actions.append(
-            PlanAction(
-                "conflict",
-                env_resource,
-                "existing environment is not owned by this stack",
-            )
+    if desired_env is not None:
+        desired_env_vars = resolve_env_values(
+            desired_env.env,
+            settings=settings,
+            team=team,
+            env_name=desired_env.name,
+            environ=environ,
         )
-    else:
-        immutable_drift: list[str] = []
-        if sanitize_repo_url(str(actual_env.get("repo_url", ""))) != sanitize_repo_url(
-            desired_env.repo_url
-        ):
-            immutable_drift.append("repoUrl")
-        if actual_env.get("git_branch") != desired_env.branch:
-            immutable_drift.append("branch")
-        if desired_env.hostname and actual_env.get("hostname") != desired_env.hostname:
-            immutable_drift.append("hostname")
-        if _normalized_template(
-            actual_env.get("template_name")
-        ) != _normalized_template(desired_env.template):
-            immutable_drift.append("template")
-        desired_extras = {
-            name: item.branch for name, item in spec.extra_repositories.items()
+
+        environments = {
+            item["env_name"]: item for item in env_ops.list_environments(settings, team)
         }
-        if actual_env.get("extra_addons", {}) != desired_extras:
-            immutable_drift.append("extraRepositories")
-        actual_sanitize = actual_env.get("stack_sanitize", "")
-        if actual_sanitize in ("true", "false"):
-            sanitize_changed = (actual_sanitize == "true") != desired_env.sanitize
-        else:
-            # Older Stack environments predate the explicit policy label. Their
-            # spec hash can prove the current manifest has the same policy, but
-            # any other mismatch is ambiguous: sanitization happens only during
-            # creation, so never stamp a policy through an ordinary update.
-            sanitize_changed = actual_env.get(
-                "stack_spec_hash"
-            ) != _environment_hash_with_sanitize(manifest, desired_env.sanitize)
-        if sanitize_changed:
-            immutable_drift.append("sanitize")
-        if immutable_drift:
+        actual_env = environments.get(desired_env.name)
+        env_resource = "environment"
+        env_needs_create = actual_env is None
+        if actual_env is None:
+            actions.append(PlanAction("create", env_resource, desired_env.name))
+            if desired_env.template is not None:
+                templates = {
+                    item["template_name"]: item
+                    for item in system_ops.list_templates(settings, team)
+                }
+                template = templates.get(desired_env.template)
+                if template is None or not template.get("db_loaded", False):
+                    actions.append(
+                        PlanAction(
+                            "conflict",
+                            env_resource,
+                            f"template '{desired_env.template}' is not available",
+                        )
+                    )
+        elif not _owned_by(actual_env, stack, env_resource):
             actions.append(
                 PlanAction(
                     "conflict",
                     env_resource,
-                    "replacement required for: " + ", ".join(immutable_drift),
+                    "existing environment is not owned by this stack",
                 )
             )
-        mutable_drift: list[str] = []
-        if actual_env.get("odoo_image") != desired_env.odoo_image:
-            mutable_drift.append("odooImage")
-        current_info = env_ops.get_environment_info(settings, team, desired_env.name)
-        if current_info.get("env_vars", {}) != desired_env_vars:
-            mutable_drift.append("env")
-        if mutable_drift:
-            actions.append(PlanAction("update", env_resource, ", ".join(mutable_drift)))
+        else:
+            immutable_drift: list[str] = []
+            if sanitize_repo_url(
+                str(actual_env.get("repo_url", ""))
+            ) != sanitize_repo_url(desired_env.repo_url):
+                immutable_drift.append("repoUrl")
+            if actual_env.get("git_branch") != desired_env.branch:
+                immutable_drift.append("branch")
+            if (
+                desired_env.hostname
+                and actual_env.get("hostname") != desired_env.hostname
+            ):
+                immutable_drift.append("hostname")
+            if _normalized_template(
+                actual_env.get("template_name")
+            ) != _normalized_template(desired_env.template):
+                immutable_drift.append("template")
+            desired_extras = {
+                name: item.branch for name, item in spec.extra_repositories.items()
+            }
+            if actual_env.get("extra_addons", {}) != desired_extras:
+                immutable_drift.append("extraRepositories")
+            actual_sanitize = actual_env.get("stack_sanitize", "")
+            if actual_sanitize in ("true", "false"):
+                sanitize_changed = (actual_sanitize == "true") != desired_env.sanitize
+            else:
+                # Older Stack environments predate the explicit policy label. Their
+                # spec hash can prove the current manifest has the same policy, but
+                # any other mismatch is ambiguous: sanitization happens only during
+                # creation, so never stamp a policy through an ordinary update.
+                sanitize_changed = actual_env.get(
+                    "stack_spec_hash"
+                ) != _environment_hash_with_sanitize(manifest, desired_env.sanitize)
+            if sanitize_changed:
+                immutable_drift.append("sanitize")
+            if immutable_drift:
+                actions.append(
+                    PlanAction(
+                        "conflict",
+                        env_resource,
+                        "replacement required for: " + ", ".join(immutable_drift),
+                    )
+                )
+            mutable_drift: list[str] = []
+            if actual_env.get("odoo_image") != desired_env.odoo_image:
+                mutable_drift.append("odooImage")
+            current_info = env_ops.get_environment_info(
+                settings, team, desired_env.name
+            )
+            if current_info.get("env_vars", {}) != desired_env_vars:
+                mutable_drift.append("env")
+            if mutable_drift:
+                actions.append(
+                    PlanAction("update", env_resource, ", ".join(mutable_drift))
+                )
+
+    else:
+        production_actions = stack_production.plan_production(
+            settings, team, manifest, environ
+        )
+        actions.extend(
+            PlanAction(operation, "production", detail)
+            for operation, detail in production_actions
+        )
+        env_needs_create = any(
+            operation == "create" for operation, _ in production_actions
+        )
 
     for item in spec.files:
         content = read_stack_file(manifest_path, item.source)
@@ -467,7 +508,10 @@ def build_plan(
             )
             continue
         has_environment_value = any(
-            getattr(value, "environment_field", None) is not None
+            (
+                getattr(value, "environment_field", None) is not None
+                or getattr(value, "production_field", None) is not None
+            )
             for value in desired_service.env.values()
         )
         has_pending_database_value = any(
@@ -491,7 +535,8 @@ def build_plan(
                 desired_service.env,
                 settings=settings,
                 team=team,
-                env_name=desired_env.name,
+                env_name=target.name if desired_env is not None else "",
+                production_name=target.name if spec.production is not None else "",
                 environ=environ,
             )
         desired_caps = (
@@ -561,8 +606,8 @@ def build_plan(
                 PlanAction("update", resource, ", ".join(drift) or "metadata")
             )
 
-    modules = list(desired_env.modules.install)
-    if modules:
+    modules = list(desired_env.modules.install) if desired_env is not None else []
+    if modules and desired_env is not None:
         installed = (
             set()
             if env_needs_create
@@ -582,6 +627,7 @@ def format_plan(plan: StackPlan) -> str:
         "write": ">",
         "install": "+",
         "conflict": "!",
+        "adopt": "=",
     }
     lines = [f"Stack {plan.stack}:"]
     if not plan.actions:
@@ -608,7 +654,10 @@ def _service_kwargs(
         desired.env,
         settings=settings,
         team=team,
-        env_name=manifest.spec.environment.name,
+        env_name=manifest.spec.environment.name if manifest.spec.environment else "",
+        production_name=manifest.spec.production.name
+        if manifest.spec.production
+        else "",
         environ=environ,
     )
     return {
@@ -642,10 +691,15 @@ def apply_stack(
 ) -> StackPlan:
     """Converge live resources to a preflighted, non-destructive V1 plan."""
     acquired = False
+    production_key = None
     if lock_manager is not None:
         lock_manager.acquire_team(team.team_id, operation="stack_apply")
         acquired = True
     try:
+        if lock_manager is not None and manifest.spec.production is not None:
+            key = prod_lock_key(team.team_id, manifest.spec.production.name)
+            lock_manager.acquire_env(key, operation="stack_apply")
+            production_key = key
         plan = build_plan(settings, team, manifest, manifest_path, environ=environ)
         if plan.has_conflicts:
             conflicts = "; ".join(
@@ -691,39 +745,49 @@ def apply_stack(
                 )
 
         desired_env = spec.environment
-        env_vars = resolve_env_values(
-            desired_env.env,
-            settings=settings,
-            team=team,
-            env_name=desired_env.name,
-            environ=environ,
-        )
-        env_labels = _environment_labels(stack, manifest)
-        extras = {name: item.branch for name, item in spec.extra_repositories.items()}
-        if ("create", "environment") in operations:
-            env_ops.create_environment(
-                settings,
-                team,
-                desired_env.branch,
-                desired_env.repo_url,
-                desired_env.odoo_image,
+        if desired_env is not None:
+            env_vars = resolve_env_values(
+                desired_env.env,
+                settings=settings,
+                team=team,
                 env_name=desired_env.name,
-                template_name=desired_env.template,
-                extra_addons=extras or None,
-                sanitize=desired_env.sanitize,
-                env_vars=env_vars or None,
-                stack_labels=env_labels,
-                hostname=desired_env.hostname or "",
+                environ=environ,
             )
-        elif ("update", "environment") in operations:
-            env_ops.update_environment(
-                settings,
-                team,
-                desired_env.name,
-                env_override=env_vars,
-                image_override=desired_env.odoo_image,
-                label_overrides=env_labels,
-            )
+            env_labels = _environment_labels(stack, manifest)
+            extras = {
+                name: item.branch for name, item in spec.extra_repositories.items()
+            }
+            if ("create", "environment") in operations:
+                env_ops.create_environment(
+                    settings,
+                    team,
+                    desired_env.branch,
+                    desired_env.repo_url,
+                    desired_env.odoo_image,
+                    env_name=desired_env.name,
+                    template_name=desired_env.template,
+                    extra_addons=extras or None,
+                    sanitize=desired_env.sanitize,
+                    env_vars=env_vars or None,
+                    stack_labels=env_labels,
+                    hostname=desired_env.hostname or "",
+                )
+            elif ("update", "environment") in operations:
+                env_ops.update_environment(
+                    settings,
+                    team,
+                    desired_env.name,
+                    env_override=env_vars,
+                    image_override=desired_env.odoo_image,
+                    label_overrides=env_labels,
+                )
+
+        else:
+            for operation in ("create", "adopt", "update"):
+                if (operation, "production") in operations:
+                    stack_production.apply_production(
+                        settings, team, manifest, operation, environ
+                    )
 
         for item in spec.files:
             resource = f"files.{item.volume}:{item.path}"
@@ -767,7 +831,7 @@ def apply_stack(
                 )
 
         module_action = operations.get(("install", "modules"))
-        if module_action:
+        if module_action and desired_env is not None:
             modules = [item.strip() for item in module_action.detail.split(",")]
             result = odoo_ops.install_odoo_modules(
                 settings, team, desired_env.name, *modules
@@ -784,16 +848,24 @@ def apply_stack(
             stack,
             manifest_hash(manifest),
             {
-                "environment": desired_env.name,
+                **(
+                    {"environment": desired_env.name}
+                    if desired_env is not None
+                    else {"production": spec.production.name if spec.production else ""}
+                ),
                 "extraRepositories": sorted(spec.extra_repositories),
                 "volumes": sorted(spec.volumes),
                 "databases": sorted(spec.databases),
                 "services": sorted(spec.services),
-                "modules": list(desired_env.modules.install),
+                "modules": list(desired_env.modules.install)
+                if desired_env is not None
+                else [],
             },
         )
         return plan
     finally:
+        if production_key is not None:
+            lock_manager.release_env(production_key)
         if acquired:
             lock_manager.release_team(team.team_id)
 

@@ -772,6 +772,7 @@ def create_production(
     from_environment: str | None = None,
     env_vars: dict[str, str] | None = None,
     env_lock: Callable[[], ContextManager[None]] | None = None,
+    stack_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
 
@@ -873,6 +874,7 @@ def create_production(
             "env_vars": env_vars,
             "auto_update": bool(auto_update),
             "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
+            "meta": {"stack": stack_metadata} if stack_metadata else {},
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
@@ -1184,6 +1186,7 @@ def reconfigure_production(
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
+    force_recreate: bool = False,
 ) -> dict[str, Any]:
     """Change a production's infrastructure settings and recreate its
     container to match. Only the passed (non-None) fields change.
@@ -1197,6 +1200,8 @@ def reconfigure_production(
     reporting a no-op. Changing ``odoo_image`` does NOT migrate the
     database: a major Odoo version bump additionally needs an explicit
     module upgrade plan. The caller must hold the production's lock.
+    ``force_recreate`` lets Stack repair verified runtime drift or complete an
+    interrupted apply whose registry intent already matches the request.
     """
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import _clone_repo
@@ -1245,7 +1250,7 @@ def reconfigure_production(
     # the record; a missing container or checkout (a previous run failed
     # mid-way) is drift that the run below repairs from the record.
     container = _get_container(client, settings, team, name)
-    drift = container is None or not os.path.isdir(repo_path)
+    drift = force_recreate or container is None or not os.path.isdir(repo_path)
     if not updates and not drift:
         return {
             "name": name,

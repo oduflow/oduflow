@@ -82,6 +82,8 @@ precursors).
 | [0061](0061-mutable-production-configuration.md) | 2026-09-16 | Mutable production configuration: `reconfigure_production`, per-production odoo.conf overrides, dashboard Settings panel |
 | [0062](0062-dev-to-production-promotion.md) | 2026-09-16 | Dev → production promotion: `create_production(from_environment=...)` copies a dev environment's data directly, no intermediate template |
 
+| [0063](0063-production-stack-targets.md) | 2026-09-16 | Production Stack targets, explicit adoption, registry ownership and retryable reconciliation |
+
 ## Design docs
 
 Forward-looking feature design docs also live here, named by date:
