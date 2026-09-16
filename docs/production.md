@@ -110,6 +110,15 @@ save-as-template detour, no intermediate template is created and the source
 environment is **not reset** — it keeps living as a dev environment.
 `from_environment` and `template_name` are mutually exclusive.
 
+Promotion also inherits the source environment's user environment variables.
+`secret:<name>` references stay in the production registry and container labels;
+values are resolved from the team's secret store only for the container runtime.
+They survive domain/image/branch reconfiguration. Missing secrets are rejected
+before the source is stopped. Pass `env_vars={...}` to replace the inherited set,
+or `{}` to inherit none. `reconfigure_production(env_vars={...})` replaces the
+stored set; omitting it preserves the existing variables. The managed database
+variables `HOST`, `PORT`, `USER`, and `PASSWORD` cannot be overridden.
+
 No sanitization happens — the data goes *into* production. One caveat: if
 the source environment was itself created from a production
 (`from_production`), its data was sanitized on that copy, and the new

@@ -2,6 +2,12 @@
 
 ## v1.77.0
 
+### Fixes
+
+- Preserve user environment variables and `secret:<name>` references when
+  promoting a development environment to production and recreating its
+  container. Validate secrets before changing the source or production.
+
 ### Features
 
 - **Publish productions as dev templates and create environments from

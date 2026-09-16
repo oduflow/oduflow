@@ -38,6 +38,7 @@ from typing import Any, Callable
 
 import docker
 from docker import DockerClient
+from oduflow import secret_store
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -71,6 +72,7 @@ from oduflow.naming import (
     get_team_network_name,
     get_template_db_name,
     get_workspace_path,
+    normalize_env_vars,
     prod_env_name,
     sanitize_repo_url,
     validate_domain,
@@ -464,6 +466,17 @@ def _seed_db_from_environment(
     _copy_db_into_prod_cluster(client, settings, src_db, target_db, "environment seed")
 
 
+def _production_env_vars(raw: object) -> dict[str, str]:
+    """Validate user variables without allowing replacement of managed DB access."""
+    env_vars = normalize_env_vars(raw)
+    reserved = {"HOST", "PORT", "USER", "PASSWORD"} & env_vars.keys()
+    if reserved:
+        raise ValueError(
+            "Managed production environment variables: " + ", ".join(sorted(reserved))
+        )
+    return env_vars
+
+
 def _source_env_info(
     client: DockerClient, settings: Settings, team: TeamSettings, env_name: str
 ) -> dict[str, Any]:
@@ -489,7 +502,16 @@ def _source_env_info(
         extra_addons = json.loads(labels.get("oduflow.extra_addons", "{}"))
     except (json.JSONDecodeError, TypeError):
         extra_addons = {}
+    try:
+        env_vars = json.loads(labels.get("oduflow.env_vars", "{}"))
+        if not isinstance(env_vars, dict):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise PrerequisiteNotMetError(
+            "Source environment variables metadata is invalid."
+        ) from None
     return {
+        "env_vars": _production_env_vars(env_vars),
         "container": container,
         "repo_url": sanitize_repo_url(labels.get(settings.repo_label, "")),
         "branch": labels.get("oduflow.git_branch", env_name),
@@ -597,6 +619,8 @@ def _container_spec(
         "USER": env_creds["pg_user"],
         "PASSWORD": env_creds["pg_password"],
     }
+    user_env = _production_env_vars(record.get("env_vars"))
+    odoo_env.update(secret_store.resolve_env_secrets(team, user_env) or {})
     odoo_volumes: dict[str, dict[str, str]] = {
         repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
     }
@@ -630,6 +654,8 @@ def _container_spec(
         f"traefik.http.services.{traefik_router}.loadbalancer.server.port": "8069",
         "traefik.docker.network": get_team_network_name(team.team_id, settings.prefix),
     }
+    if user_env:
+        labels["oduflow.env_vars"] = json.dumps(user_env, sort_keys=True)
     if record.get("extra_addons"):
         labels["oduflow.extra_addons"] = json.dumps(record["extra_addons"])
     if record.get("git_user"):
@@ -711,6 +737,7 @@ def create_production(
     allow_copy_to_dev_mcp: bool = True,
     template_name: str | None = None,
     from_environment: str | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
 
@@ -748,6 +775,8 @@ def create_production(
     source_env: dict[str, Any] | None = None
     if from_environment:
         source_env = _source_env_info(client, settings, team, from_environment)
+        if env_vars is None:
+            env_vars = source_env["env_vars"]
         repo_url = repo_url or source_env["repo_url"]
         branch = branch or source_env["branch"]
         odoo_image = odoo_image or source_env["odoo_image"]
@@ -768,6 +797,10 @@ def create_production(
     env_db = prod_db_name(team, name)
     container_name = _odoo_container_name(settings, team, name)
     workspace = _workspace(team, name)
+
+    env_vars = _production_env_vars(env_vars)
+    # Fail before creating resources or interrupting the source environment.
+    secret_store.resolve_env_secrets(team, env_vars)
 
     # Bring up (or verify) the production tier before touching anything else.
     ensure_prod_infra(client, settings, force=True)
@@ -798,6 +831,7 @@ def create_production(
             "odoo_image": odoo_image,
             "git_user": git_user,
             "extra_addons": extra_addons or {},
+            "env_vars": env_vars,
             "auto_update": bool(auto_update),
             "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1060,6 +1094,7 @@ def reconfigure_production(
     repo_url: str | None = None,
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Change a production's infrastructure settings and recreate its
     container to match. Only the passed (non-None) fields change.
@@ -1108,6 +1143,11 @@ def reconfigure_production(
     ):
         updates["extra_addons"] = dict(extra_addons)
 
+    if env_vars is not None:
+        env_vars = _production_env_vars(env_vars)
+        if env_vars != (record.get("env_vars") or {}):
+            updates["env_vars"] = env_vars
+
     if not updates:
         return {
             "name": name,
@@ -1115,6 +1155,10 @@ def reconfigure_production(
             "message": "No settings changed; the container was left alone.",
         }
 
+    # Resolve before changing registry intent, the checkout or the live container.
+    secret_store.resolve_env_secrets(
+        team, _production_env_vars(updates.get("env_vars", record.get("env_vars")))
+    )
     old_head = ""
     try:
         old_head = rev_parse(repo_path)

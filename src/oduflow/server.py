@@ -5093,6 +5093,7 @@ def create_production(
     allow_copy_to_dev_mcp: bool = True,
     template_name: str = "",
     from_environment: str = "",
+    env_vars: dict[str, str] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5126,6 +5127,10 @@ def create_production(
         template_name: Optional template to seed the database and filestore
                 from (e.g. an import of the customer's existing production).
                 Empty = fresh database (odoo -i base).
+        env_vars: User environment variables; values may be secret:<name>
+                references. Omit to inherit the source environment's variables;
+                pass {} to inherit none. Managed HOST/PORT/USER/PASSWORD cannot
+                be overridden. References survive production reconfiguration.
         from_environment: Optional dev environment (branch name) to PROMOTE:
                 its database and filestore are copied (Odoo briefly stopped
                 for a consistent copy, then restarted — the environment is
@@ -5161,6 +5166,7 @@ def create_production(
             allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
             template_name=template_name or None,
             from_environment=from_environment or None,
+            env_vars=env_vars,
         )
     finally:
         if from_environment:
@@ -5339,6 +5345,7 @@ def reconfigure_production(
     repo_url: str = "",
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
+    env_vars: dict[str, str] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5363,6 +5370,8 @@ def reconfigure_production(
         branch: New git branch to deploy.
         repo_url: New HTTPS git repository URL.
         git_user: New git username for credential matching.
+        env_vars: Full replacement user environment variables, including
+                secret:<name> references. Omit to preserve; {} clears them.
         extra_addons: New full set of extra addon repos {repo_name: branch};
                       pass {} to remove all. Omit to leave unchanged.
     """
@@ -5378,6 +5387,7 @@ def reconfigure_production(
         repo_url=repo_url or None,
         git_user=git_user or None,
         extra_addons=extra_addons,
+        env_vars=env_vars,
     )
     if not result.get("changed"):
         return str(result.get("message", "No settings changed."))

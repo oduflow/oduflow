@@ -874,3 +874,147 @@ class TestCreateFromEnvironment:
         assert record["repo_url"] == "https://github.com/o/r.git"
         # Env not from production data: no sanitized note.
         assert result["notes"] == []
+
+
+class TestProductionEnvironmentVariables(TestCreateFromEnvironment):
+    def test_promotion_keeps_references_and_injects_values(self, settings, team):
+        from oduflow import secret_store
+
+        secret_store.set_secret(team, "api-key", "test-sensitive-value")
+        source = self._env_container(settings)
+        user_env = {"API_KEY": "secret:api-key", "MODE": "live"}
+        source.labels["oduflow.env_vars"] = json.dumps(user_env)
+        client = self._client_with_env(settings, source)
+        with _PatchAll(self._stack(client)):
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "",
+                "",
+                "erp.example.com",
+                "",
+                from_environment="feature-x",
+            )
+        record = production_registry.get_production(team, "erp")
+        assert record["env_vars"] == user_env
+        spec = client.containers.run.call_args.kwargs
+        assert spec["environment"]["API_KEY"] == "test-sensitive-value"
+        assert spec["environment"]["MODE"] == "live"
+        assert json.loads(spec["labels"]["oduflow.env_vars"]) == user_env
+        assert "test-sensitive-value" not in json.dumps(record)
+        assert "test-sensitive-value" not in json.dumps(spec["labels"])
+        # Domain recreation resolves the stored reference again, including rotation.
+        secret_store.set_secret(team, "api-key", "rotated-sensitive-value")
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            production_ops.reconfigure_production(
+                settings, team, "erp", domain="new.example.com"
+            )
+        spec = client.containers.run.call_args.kwargs
+        assert spec["environment"]["API_KEY"] == "rotated-sensitive-value"
+        assert json.loads(spec["labels"]["oduflow.env_vars"]) == user_env
+        assert production_registry.get_production(team, "erp")["env_vars"] == user_env
+
+    def test_missing_secret_does_not_interrupt_source(self, settings, team):
+        source = self._env_container(settings)
+        source.labels["oduflow.env_vars"] = json.dumps({"TOKEN": "secret:missing"})
+        client = self._client_with_env(settings, source)
+        with _PatchAll(self._stack(client)) as mocks:
+            with pytest.raises(PrerequisiteNotMetError, match="Undefined secret"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "",
+                    "",
+                    "erp.example.com",
+                    "",
+                    from_environment="feature-x",
+                )
+        source.stop.assert_not_called()
+        mocks["ensure_prod_infra"].assert_not_called()
+        client.containers.run.assert_not_called()
+        with pytest.raises(NotFoundError):
+            production_registry.get_production(team, "erp")
+
+    def test_explicit_empty_set_does_not_inherit(self, settings, team):
+        source = self._env_container(settings)
+        source.labels["oduflow.env_vars"] = json.dumps({"TOKEN": "secret:missing"})
+        client = self._client_with_env(settings, source)
+        with _PatchAll(self._stack(client)):
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "",
+                "",
+                "erp.example.com",
+                "",
+                from_environment="feature-x",
+                env_vars={},
+            )
+        assert production_registry.get_production(team, "erp")["env_vars"] == {}
+        assert "TOKEN" not in client.containers.run.call_args.kwargs["environment"]
+
+    @pytest.mark.parametrize("raw", ["broken json", "[]", '"token"'])
+    def test_malformed_source_metadata_fails_closed(self, settings, team, raw):
+        source = self._env_container(settings)
+        source.labels["oduflow.env_vars"] = raw
+        client = self._client_with_env(settings, source)
+        with _PatchAll(self._stack(client)):
+            with pytest.raises(PrerequisiteNotMetError, match="metadata is invalid"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "",
+                    "",
+                    "erp.example.com",
+                    "",
+                    from_environment="feature-x",
+                )
+        source.stop.assert_not_called()
+
+    @pytest.mark.parametrize("key", ["HOST", "PORT", "USER", "PASSWORD"])
+    def test_managed_database_variables_rejected(self, settings, team, key):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)) as mocks:
+            with pytest.raises(ValueError, match="Managed production"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:19.0",
+                    env_vars={key: "override"},
+                )
+        mocks["ensure_prod_infra"].assert_not_called()
+
+    def test_reconfigure_missing_secret_preserves_intent_and_container(
+        self, settings, team
+    ):
+        original = _seed_prod_record(team, env_vars={"MODE": "live"})
+        old_container = MagicMock()
+        client = MagicMock()
+        client.containers.get.return_value = old_container
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(PrerequisiteNotMetError, match="Undefined secret"):
+                production_ops.reconfigure_production(
+                    settings,
+                    team,
+                    "erp",
+                    env_vars={"TOKEN": "secret:missing"},
+                )
+        assert production_registry.get_production(team, "erp") == original
+        old_container.stop.assert_not_called()
+        old_container.remove.assert_not_called()
+
+    def test_reconfigure_can_clear_user_variables(self, settings, team):
+        _seed_prod_record(team, env_vars={"MODE": "live"})
+        client = _mock_client()
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            production_ops.reconfigure_production(settings, team, "erp", env_vars={})
+        assert production_registry.get_production(team, "erp")["env_vars"] == {}
+        assert "MODE" not in client.containers.run.call_args.kwargs["environment"]
