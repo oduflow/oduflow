@@ -4,6 +4,11 @@
 
 ### Fixes
 
+- Production updates check module state in the production PostgreSQL cluster,
+  preserving development database settings for concurrent requests. Exceptions
+  after pulling source now enter the same code rollback path as failed module
+  commands, with the failed commit and exit status recorded in deploy history.
+
 - Preserve user environment variables and `secret:<name>` references when
   promoting a development environment to production and recreating its
   container. Validate secrets before changing the source or production.

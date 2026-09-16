@@ -34,6 +34,7 @@ import re
 import shutil
 import tempfile
 import time
+from dataclasses import replace
 from typing import Any, Callable
 
 import docker
@@ -1714,14 +1715,25 @@ def update_production(
                     exc,
                 )
 
-        result = pull_environment(
-            settings,
-            team,
-            env_name,
-            install=install,
-            upgrade=upgrade,
-            restart=restart,
+        # Shared module checks use shared_db_container. Scope that dependency
+        # to production without changing the settings used by concurrent dev
+        # requests or the production-specific configuration/health helpers.
+        apply_settings = replace(
+            settings, shared_db_container=settings.prod_db_container
         )
+        try:
+            result = pull_environment(
+                apply_settings,
+                team,
+                env_name,
+                install=install,
+                upgrade=upgrade,
+                restart=restart,
+            )
+        except Exception as exc:
+            # A preflight SQL error can happen after Git advanced. Route it
+            # through the same code rollback as a nonzero module exit code.
+            result = {"action": "error", "exit_code": 1, "output": str(exc)}
         new_head = rev_parse(repo_path)
         deploy.update(
             {
