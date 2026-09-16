@@ -85,6 +85,7 @@ def resolve_env_values(
     settings: Any = None,
     team: Any = None,
     env_name: str = "",
+    production_name: str = "",
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Resolve literal, host-env, Odoo, and database values at apply time."""
@@ -125,6 +126,22 @@ def resolve_env_values(
                 )
             field = raw.database_field or ""
             result[key] = str(database[field])
+            continue
+        if raw.production_field is not None:
+            if settings is None or team is None or not production_name:
+                raise StackValidationError(f"'{key}' requires an existing production")
+            from oduflow import production_registry
+            from oduflow.docker_ops import production_ops
+
+            record = production_registry.get_production(team, production_name)
+            if raw.production_field == "url":
+                result[key] = production_ops.prod_url(settings, team, record)
+            elif raw.production_field == "database":
+                result[key] = production_ops.prod_db_name(team, production_name)
+            else:
+                result[key] = production_ops._odoo_container_name(
+                    settings, team, production_name
+                )
             continue
         if settings is None or team is None or not env_name:
             raise StackValidationError(f"'{key}' requires an existing Odoo environment")

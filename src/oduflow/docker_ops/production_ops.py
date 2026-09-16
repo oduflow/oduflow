@@ -772,6 +772,7 @@ def create_production(
     from_environment: str | None = None,
     env_vars: dict[str, str] | None = None,
     env_lock: Callable[[], ContextManager[None]] | None = None,
+    stack_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Provision a production environment.
 
@@ -873,6 +874,7 @@ def create_production(
             "env_vars": env_vars,
             "auto_update": bool(auto_update),
             "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
+            "meta": {"stack": stack_metadata} if stack_metadata else {},
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
