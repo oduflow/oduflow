@@ -3068,6 +3068,10 @@ function renderEnvironments(envs, force) {
                   (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>' +
                 '<button role="menuitem" onclick="doNewTemplate(\'' + escAttr(env.branch) + '\')" ' + dis +
                   'title="Save this environment (DB + filestore) as a new template">New Template</button>' +
+                (_prodEnabled()
+                  ? '<button role="menuitem" onclick="openCreateProductionModal(\'' + escAttr(env.branch) + '\')" ' +
+                      'title="Create a production from a copy of this environment (database + filestore); the environment itself is not changed">Promote to Production</button>'
+                  : '') +
                 '<button role="menuitem" class="danger" onclick="doDelete(\'' + escAttr(env.branch) + '\')" ' + dis +
                   (env.protected ? 'disabled title="Environment is protected"' : '') + '>Delete</button>') +
             '</div>' +
@@ -7516,7 +7520,8 @@ console.log(
 const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
 var _prodWebhookSecret = '';
-var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | undefined
+var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | 'settings' | undefined
+var _prodConfCache = {};  // name -> odoo.conf overrides as loaded (for unset diffing)
 
 function prodBadgeClass(status) {
   if (status === 'running') return 'badge-running';
@@ -7591,6 +7596,7 @@ function renderProductions() {
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
+              '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'settings\')">Settings</button>' +
               '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'deploys\')">Deploy history</button>' +
               (window._prodBackupConfigured
                 ? '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'snapshots\')">Snapshots &amp; restore</button>'
@@ -7599,9 +7605,6 @@ function renderProductions() {
                 (p.auto_update ? 'Disable auto-deploy' : 'Enable auto-deploy') + '</button>' +
               '<button role="menuitem" onclick="prodSaveAsTemplate(\'' + escAttr(p.name) + '\')">Save as template</button>' +
               '<button role="menuitem" onclick="prodCreateEnvironment(\'' + escAttr(p.name) + '\')">Create environment</button>' +
-              '<button role="menuitem" title="Whether coding agents may publish new copies of this production into dev over MCP (an already published template stays usable, sanitized). The dashboard is never gated." ' +
-                'onclick="prodCopyToDevMcp(\'' + escAttr(p.name) + '\',' + (allowCopy ? 'false' : 'true') + ')">' +
-                (allowCopy ? 'Disable agent copy to dev' : 'Enable agent copy to dev') + '</button>' +
               (p.status === 'stopped'
                 ? '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'start\')">Start</button>'
                 : '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'stop\')">Stop</button>') +
@@ -7671,10 +7674,109 @@ async function _loadProdSection(name, section) {
         ? '<table><thead><tr><th>Snapshot</th><th>Created</th><th>DB size</th><th>Commit</th><th>Trigger</th><th></th></tr></thead><tbody>' + rows3 + '</tbody></table>'
         : 'No snapshots yet.') +
         '<div style="margin-top:8px"><button class="btn" onclick="prodRefreshSnapshots(\'' + escAttr(name) + '\')">Refresh from S3</button></div>';
+    } else if (section === 'settings') {
+      var r5 = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name));
+      var d5 = await readResult(r5);
+      if (!d5.ok) { el.textContent = d5.error || 'Failed to load settings'; return; }
+      _prodConfCache[name] = d5.odoo_conf || {};
+      el.innerHTML = _prodSettingsHtml(d5);
     }
   } catch (e) {
     el.textContent = 'Connection error: ' + e.message;
   }
+}
+
+// Settings panel: oduflow-level options (applied via container recreation),
+// the MCP copy gate, and per-production odoo.conf overrides.
+function _prodSettingsHtml(p) {
+  var n = escAttr(p.name);
+  var extras = Object.keys(p.extra_addons || {}).map(function(k) {
+    return k + '=' + p.extra_addons[k];
+  }).join('\n');
+  var conf = Object.keys(p.odoo_conf || {}).sort().map(function(k) {
+    return k + ' = ' + p.odoo_conf[k];
+  }).join('\n');
+  return '<div class="prod-settings">' +
+    '<div class="form-group"><label for="ps-domain-' + n + '">Domain</label>' +
+      '<input type="text" id="ps-domain-' + n + '" value="' + escAttr(p.domain || '') + '">' +
+      '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
+    '<div class="form-group"><label for="ps-image-' + n + '">Odoo image</label>' +
+      '<input type="text" id="ps-image-' + n + '" value="' + escAttr(p.odoo_image || '') + '">' +
+      '<div class="hint">Changing the image does not migrate the database</div></div>' +
+    '<div class="form-group"><label for="ps-repo-' + n + '">Repository URL</label>' +
+      '<input type="text" id="ps-repo-' + n + '" value="' + escAttr(p.repo_url || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-branch-' + n + '">Branch</label>' +
+      '<input type="text" id="ps-branch-' + n + '" value="' + escAttr(p.branch || '') + '">' +
+      '<div class="hint">Switching deploys the new branch as-is; run Update afterwards if modules need install/upgrade</div></div>' +
+    '<div class="form-group"><label for="ps-gituser-' + n + '">Git user (credential matching, optional)</label>' +
+      '<input type="text" id="ps-gituser-' + n + '" value="' + escAttr(p.git_user || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-extras-' + n + '">Extra addon repos (one per line, repo=branch)</label>' +
+      '<textarea id="ps-extras-' + n + '" rows="3">' + esc(extras) + '</textarea></div>' +
+    '<div class="form-group"><label class="select-box"><input type="checkbox" id="ps-copy-' + n + '"' +
+      (p.allow_copy_to_dev_mcp !== false ? ' checked' : '') +
+      ' onchange="prodCopyToDevMcp(\'' + n + '\', this.checked)"> ' +
+      'Agents may copy this production into dev over MCP (the dashboard is never gated)</label></div>' +
+    '<div style="margin-bottom:16px"><button class="btn btn-start" onclick="prodApplySettings(\'' + n + '\')">Apply — recreates container</button></div>' +
+    '<div class="form-group"><label for="ps-conf-' + n + '">odoo.conf overrides (one per line, key = value)</label>' +
+      '<textarea id="ps-conf-' + n + '" rows="4" placeholder="limit_time_real = 300">' + esc(conf) + '</textarea>' +
+      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*) are refused.</div></div>' +
+    '<div><button class="btn" onclick="prodSaveOdooConf(\'' + n + '\')">Save odoo.conf — restarts Odoo</button></div>' +
+  '</div>';
+}
+
+function _parseKvLines(raw, sep, errLabel) {
+  var out = {};
+  var lines = (raw || '').split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line || line.charAt(0) === '#' || line.charAt(0) === ';') continue;
+    var idx = line.indexOf(sep);
+    if (idx < 1) { showToast(errLabel, true); return null; }
+    out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  }
+  return out;
+}
+
+async function prodApplySettings(name) {
+  var v = function(prefix) {
+    var e = document.getElementById(prefix + '-' + name);
+    return e ? e.value.trim() : '';
+  };
+  var extras = _parseKvLines(document.getElementById('ps-extras-' + name).value,
+    '=', 'Extra addons: each line must be repo=branch');
+  if (extras === null) return;
+  var body = {
+    domain: v('ps-domain'),
+    odoo_image: v('ps-image'),
+    repo_url: v('ps-repo'),
+    branch: v('ps-branch'),
+    git_user: v('ps-gituser'),
+    extra_addons: extras
+  };
+  if (!(await confirmDialog({
+    title: 'Reconfigure production',
+    message: 'Apply the settings to "' + name + '"? The container is recreated (brief downtime); the database and filestore are preserved.',
+    confirmLabel: 'Apply'
+  }))) return;
+  showToast('Reconfiguring "' + name + '"… this can take a minute');
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/reconfigure', body, null);
+  if (data) {
+    showToast(data.changed && data.changed.length
+      ? 'Reconfigured "' + name + '": ' + data.changed.join(', ') +
+        (data.healthy === false ? ' — NOT healthy yet, check logs' : '')
+      : (data.message || 'No settings changed'));
+  }
+}
+
+async function prodSaveOdooConf(name) {
+  var raw = document.getElementById('ps-conf-' + name).value;
+  var options = _parseKvLines(raw, '=', 'odoo.conf: each line must be key = value');
+  if (options === null) return;
+  var current = _prodConfCache[name] || {};
+  var unset = Object.keys(current).filter(function(k) { return !(k in options); });
+  await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/odoo-conf',
+    { options: options, unset: unset },
+    'odoo.conf overrides saved for "' + name + '" (Odoo restarted)');
 }
 
 async function prodRefreshSnapshots(name) {
@@ -7872,7 +7974,12 @@ function promptDialog(opts) {
   });
 }
 
-function openCreateProductionModal() {
+function _prodEnabled() {
+  var tab = document.querySelector('.tab-btn[data-tab="production"]');
+  return !!tab && !tab.hidden;
+}
+
+function openCreateProductionModal(fromEnv) {
   var overlay = document.createElement('div');
   overlay.className = 'modal-overlay active';
   overlay.id = 'create-prod-modal';
@@ -7881,6 +7988,9 @@ function openCreateProductionModal() {
       '<div class="modal-header"><h3>Create Production</h3></div>' +
       '<div class="modal-body">' +
         '<div class="form-group"><label for="cp-name">Name</label><input type="text" id="cp-name" placeholder="erp"></div>' +
+        '<div class="form-group"><label for="cp-fromenv">Promote from environment (optional)</label>' +
+          '<input type="text" id="cp-fromenv" value="' + escAttr(fromEnv || '') + '" placeholder="empty = fresh or template seed">' +
+          '<div class="hint">Copies the environment\'s database and filestore (its Odoo briefly stops for a consistent copy); repository, branch and image default to the environment\'s</div></div>' +
         '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/org/repo.git"></div>' +
         '<div class="form-group"><label for="cp-branch">Branch</label><input type="text" id="cp-branch" placeholder="production"></div>' +
         '<div class="form-group"><label for="cp-domain">Domain</label><input type="text" id="cp-domain" placeholder="erp.customer.com"><div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
@@ -7906,10 +8016,19 @@ async function submitCreateProduction() {
     domain: v('cp-domain'),
     odoo_image: v('cp-image'),
     template_name: v('cp-template'),
+    from_environment: v('cp-fromenv'),
     auto_update: document.getElementById('cp-auto').checked
   };
-  if (!body.name || !body.repo_url || !body.branch || !body.domain || !body.odoo_image) {
-    showToast('Name, repository, branch, domain and image are required', true);
+  if (!body.name || !body.domain) {
+    showToast('Name and domain are required', true);
+    return;
+  }
+  if (!body.from_environment && (!body.repo_url || !body.branch || !body.odoo_image)) {
+    showToast('Repository, branch and image are required (or promote from an environment)', true);
+    return;
+  }
+  if (body.from_environment && body.template_name) {
+    showToast('Pick either a template or an environment to seed from, not both', true);
     return;
   }
   showToast('Creating production "' + body.name + '"… this can take a few minutes');

@@ -5083,15 +5083,16 @@ def delete_file_in_volume(
 @with_prod_lock
 def create_production(
     name: str,
-    repo_url: str,
-    branch: str,
-    domain: str,
-    odoo_image: str,
+    repo_url: str = "",
+    branch: str = "",
+    domain: str = "",
+    odoo_image: str = "",
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
     auto_update: bool = False,
     allow_copy_to_dev_mcp: bool = True,
     template_name: str = "",
+    from_environment: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5103,11 +5104,14 @@ def create_production(
 
     Args:
         name: Production name, e.g. "erp" (lowercase letters/digits/dashes).
-        repo_url: HTTPS git repository URL.
-        branch: Git branch to deploy (full history is kept).
+        repo_url: HTTPS git repository URL. Required unless from_environment
+                is given (then it defaults to the environment's).
+        branch: Git branch to deploy (full history is kept). Required unless
+                from_environment is given.
         domain: The production's public domain, e.g. "erp.customer.com"
                 (DNS must point at this server; TLS via Let's Encrypt).
-        odoo_image: Docker image, e.g. "odoo:18.0".
+        odoo_image: Docker image, e.g. "odoo:18.0". Required unless
+                from_environment is given.
         git_user: Optional git username for credential matching.
         extra_addons: Optional {repo_name: branch} extra addon repos.
         auto_update: Deploy automatically on GitHub push webhooks.
@@ -5122,24 +5126,45 @@ def create_production(
         template_name: Optional template to seed the database and filestore
                 from (e.g. an import of the customer's existing production).
                 Empty = fresh database (odoo -i base).
+        from_environment: Optional dev environment (branch name) to PROMOTE:
+                its database and filestore are copied (Odoo briefly stopped
+                for a consistent copy, then restarted — the environment is
+                not reset), and empty repo_url/branch/odoo_image/git_user/
+                extra_addons default to the environment's own. Mutually
+                exclusive with template_name. No sanitization — the data
+                goes INTO production.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
-    git_ops.validate_repo_url(repo_url)
-    result = production_ops.create_production(
-        settings,
-        team,
-        name,
-        repo_url,
-        branch,
-        domain,
-        odoo_image,
-        git_user=git_user,
-        extra_addons=env_ops._normalize_extra_addons(extra_addons),
-        auto_update=auto_update,
-        allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
-        template_name=template_name or None,
-    )
+    if repo_url:
+        git_ops.validate_repo_url(repo_url)
+    if from_environment:
+        _locks.acquire_env(
+            from_environment, team.team_id, operation="create_production"
+        )
+    try:
+        result = production_ops.create_production(
+            settings,
+            team,
+            name,
+            repo_url,
+            branch,
+            domain,
+            odoo_image,
+            git_user=git_user,
+            extra_addons=(
+                env_ops._normalize_extra_addons(extra_addons)
+                if extra_addons is not None
+                else None
+            ),
+            auto_update=auto_update,
+            allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
+            template_name=template_name or None,
+            from_environment=from_environment or None,
+        )
+    finally:
+        if from_environment:
+            _locks.release_env(from_environment)
     lines = [
         f"Production '{name}' created in {result['elapsed_seconds']}s.",
         f"URL: {result['url']}",
@@ -5149,6 +5174,7 @@ def create_production(
     ]
     if result.get("setup_logs"):
         lines.append("\nSetup:\n" + "\n".join(result["setup_logs"]))
+    lines.extend(f"Note: {note}" for note in result.get("notes", []))
     lines.append(
         "\nNote: point the domain's DNS at this server. Use update_production "
         "to deploy new commits (failed updates roll the code back "
@@ -5299,6 +5325,120 @@ def set_production_auto_update(
     production_registry.update_production(team, name, {"auto_update": bool(enabled)})
     state = "enabled" if enabled else "disabled"
     return f"Auto-update {state} for production '{name}'."
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_prod_lock
+def reconfigure_production(
+    name: str,
+    domain: str = "",
+    odoo_image: str = "",
+    branch: str = "",
+    repo_url: str = "",
+    git_user: str = "",
+    extra_addons: dict[str, str] | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """
+    Change a production's infrastructure settings and recreate its container
+    to match. Empty/omitted arguments are left unchanged. The database and
+    filestore are preserved; expect a brief downtime while the container is
+    replaced.
+
+    Changeable: the public domain (Traefik Host rule + Let's Encrypt), the
+    Odoo Docker image, the deployed git branch or repository URL, the git
+    credential user, and the extra addon repos. Changing the image does NOT
+    migrate the database — a major Odoo version bump additionally needs an
+    explicit module upgrade plan. After a branch/repo change, run
+    update_production(install=..., upgrade=...) if the new code needs module
+    changes.
+
+    Args:
+        name: The production name.
+        domain: New public domain, e.g. "erp.customer.com" (DNS must point
+                at this server; TLS via Let's Encrypt).
+        odoo_image: New Docker image, e.g. "odoo:19.0".
+        branch: New git branch to deploy.
+        repo_url: New HTTPS git repository URL.
+        git_user: New git username for credential matching.
+        extra_addons: New full set of extra addon repos {repo_name: branch};
+                      pass {} to remove all. Omit to leave unchanged.
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    result = production_ops.reconfigure_production(
+        settings,
+        team,
+        name,
+        domain=domain or None,
+        odoo_image=odoo_image or None,
+        branch=branch or None,
+        repo_url=repo_url or None,
+        git_user=git_user or None,
+        extra_addons=extra_addons,
+    )
+    if not result.get("changed"):
+        return str(result.get("message", "No settings changed."))
+    lines = [
+        f"Reconfigured production '{name}' (changed: {', '.join(result['changed'])}).",
+        f"URL: {result['url']}",
+        f"Healthy: {result['healthy']}",
+    ]
+    lines.extend(f"Note: {note}" for note in result.get("notes", []))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_prod_lock
+def set_production_odoo_conf(
+    name: str,
+    options: dict[str, str] | None = None,
+    unset: str = "",
+    restart: bool = True,
+    ctx: Context | None = None,
+) -> str:
+    """
+    Set or remove odoo.conf [options] overrides for a production and re-apply
+    the config. Overrides are stored per production, win over the auto-tuned
+    worker settings, and survive deploys and retunes. Keys managed by Oduflow
+    (addons_path, data_dir, db_*) cannot be overridden. Current overrides are
+    shown by get_production_info.
+
+    Args:
+        name: The production name.
+        options: Options to set, e.g. {"limit_time_real": "300"}.
+        unset: Comma-separated option names to remove (reverting them to the
+               managed/base value).
+        restart: Restart the container so Odoo picks the change up
+                 (default True; brief downtime).
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    unset_list = [k.strip() for k in unset.split(",") if k.strip()]
+    result = production_ops.set_production_odoo_conf(
+        settings,
+        team,
+        name,
+        set_options=options,
+        unset_options=unset_list,
+        restart=restart,
+    )
+    conf = result["odoo_conf"]
+    conf_desc = "\n".join(f"  {k} = {v}" for k, v in sorted(conf.items())) or "  (none)"
+    status = (
+        "applied to the running container"
+        if result["applied"]
+        else "recorded (no container to apply to)"
+    )
+    if result["restarted"]:
+        status += ", container restarted"
+    return (
+        f"odoo.conf overrides for '{name}' {status}.\nCurrent overrides:\n{conf_desc}"
+    )
 
 
 @mcp.tool()

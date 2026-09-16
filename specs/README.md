@@ -79,6 +79,8 @@ precursors).
 | [0058](0058-team-secrets.md) | 2026-09-12 | Team secrets for environment variables (write-only vault, `secret:<name>` references) |
 | [0059](0059-production-to-dev-data-flow.md) | 2026-09-13 | Production → dev data flow through a managed template, gated for MCP agents only |
 | [0060](0060-deleted-production-purge.md) | 2026-09-13 | Tombstoned purge of deleted-production leftovers (`prod_purge_hours`, cleanup flag) |
+| [0061](0061-mutable-production-configuration.md) | 2026-09-16 | Mutable production configuration: `reconfigure_production`, per-production odoo.conf overrides, dashboard Settings panel |
+| [0062](0062-dev-to-production-promotion.md) | 2026-09-16 | Dev → production promotion: `create_production(from_environment=...)` copies a dev environment's data directly, no intermediate template |
 
 ## Design docs
 

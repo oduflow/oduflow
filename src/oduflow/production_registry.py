@@ -24,6 +24,7 @@ Top-level schema::
           "odoo_image": ..., "git_user": ..., "extra_addons": {...},
           "auto_update": false, "created_at": "...",
           "allow_copy_to_dev_mcp": true,
+          "odoo_conf": {},   # user [options] overrides (win over auto-tuning)
           "unhealthy": false, "deploy_in_progress": false,
           "meta": {},        # free-form attach point (reserved)
           "backup": {}       # backup subsystem state (schedule, last run)
@@ -168,6 +169,9 @@ def create_production(
             # the key is missing so pre-existing records keep working; only the
             # dashboard can turn it off.
             "allow_copy_to_dev_mcp": True,
+            # User odoo.conf [options] overrides, applied on top of the base
+            # conf chain and the auto-tuned worker settings.
+            "odoo_conf": {},
             "created_at": "",
             "unhealthy": False,
             "deploy_in_progress": False,
