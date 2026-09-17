@@ -1872,6 +1872,46 @@ class TestClusterPitrSafety:
         container.stop.assert_called_once()
         assert restarted == ["erp"]
 
+    def test_failed_stop_loop_restarts_already_stopped_productions(self):
+        from unittest.mock import MagicMock
+
+        import oduflow.server
+
+        # Two productions: the first stops cleanly, the second fails to stop.
+        # The failure happens before the restore ever runs (PostgreSQL is
+        # untouched), so the first production must be brought back up instead
+        # of being left offline.
+        ok = MagicMock()
+        ok.status = "running"
+        broken = MagicMock()
+        broken.status = "running"
+        broken.stop.side_effect = RuntimeError("stop exploded")
+        restarted: list[str] = []
+
+        with (
+            patch.object(oduflow.server, "_settings", self._settings_with_backup()),
+            patch("oduflow.docker_ops.client.get_client", return_value=MagicMock()),
+            patch(
+                "oduflow.production_registry.list_productions",
+                return_value={"erp": {}, "crm": {}},
+            ),
+            patch(
+                "oduflow.docker_ops.production_ops._get_container",
+                side_effect=[ok, broken],
+            ),
+            patch(
+                "oduflow.docker_ops.production_ops.start_production",
+                side_effect=lambda s, t, n: restarted.append(n),
+            ),
+            patch("oduflow.walg.pitr_restore_cluster") as restore,
+        ):
+            with pytest.raises(RuntimeError, match="stop exploded"):
+                _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
+
+        restore.assert_not_called()
+        ok.stop.assert_called_once()
+        assert restarted == ["erp"]
+
     def test_missing_backup_section_fails_before_stopping(self):
         from unittest.mock import MagicMock
 

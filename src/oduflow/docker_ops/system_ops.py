@@ -3572,11 +3572,24 @@ def destroy_system(settings: Settings) -> dict[str, str]:
         for team in settings.teams.values()
         for name in production_registry.list_productions(team)
     ]
-    if active_prods:
+    # The registry is not authoritative for survivors: a failed
+    # delete_production removes the record even when the container could not
+    # be stopped/removed, so a live production may have no registry entry.
+    # Its container name is still in the reserved prod- namespace
+    # ({prefix}{team_id}-prod-{name}-...), which dev environments cannot
+    # enter, so scan the managed containers independently.
+    prod_prefixes = tuple(
+        f"{settings.prefix}{team.team_id}-prod-" for team in settings.teams.values()
+    )
+    stray_prods = [
+        c.name for c in containers if prod_prefixes and c.name.startswith(prod_prefixes)
+    ]
+    if active_prods or stray_prods:
         from oduflow.errors import ConflictError
 
         raise ConflictError(
-            f"Active productions exist: {', '.join(active_prods)}. "
+            "Active productions exist: "
+            f"{', '.join(active_prods + stray_prods)}. "
             "Delete them first (delete_production)."
         )
 

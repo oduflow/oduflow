@@ -448,28 +448,28 @@ def _parse_walg_time(value: str) -> _dt.datetime | None:
     return parsed.astimezone(_dt.timezone.utc)
 
 
-def _select_pitr_base_backup(
-    client: Any, settings: Settings, target_time: str
-) -> str:
+def _select_pitr_base_backup(client: Any, settings: Settings, target_time: str) -> str:
     """Choose which base backup to fetch for a PITR to ``target_time``.
 
     Returns a specific ``backup_name`` — the newest base whose consistency point
-    is at or before the target — or ``"LATEST"`` (no target, or times could not
-    be read). ``backup-fetch LATEST`` is wrong for a target in the past: if the
-    newest base is more recent than the target, PostgreSQL FATALs with "requested
+    is at or before the target — or ``"LATEST"`` (no target given).
+    ``backup-fetch LATEST`` is wrong for a target in the past: if the newest
+    base is more recent than the target, PostgreSQL FATALs with "requested
     recovery stop point is before consistent recovery point" and the cluster is
-    left down. Raises PrerequisiteNotMetError when the target predates every base
-    backup, so the caller fails BEFORE the destructive restore steps.
+    left down. So with a target, every problem that prevents picking a correct
+    base — unparseable target, no readable backup inventory, target older than
+    every base — raises PrerequisiteNotMetError, and the caller fails BEFORE
+    the destructive restore steps.
     """
     if not target_time:
         return "LATEST"
     target = _parse_walg_time(target_time)
     if target is None:
-        logger.warning(
-            "Could not parse PITR target_time %r; fetching LATEST base backup",
-            target_time,
+        raise PrerequisiteNotMetError(
+            f"Could not parse PITR target_time {target_time!r}. Use an ISO "
+            'timestamp like "2026-07-10 12:00:00+00", or omit target_time to '
+            "replay the whole archive."
         )
-        return "LATEST"
     best_name = ""
     best_ts: _dt.datetime | None = None
     parsed_any = False
@@ -489,10 +489,15 @@ def _select_pitr_base_backup(
     if best_name:
         return best_name
     if not parsed_any:
-        # Unexpected wal-g output (no usable names/times) — degrade to LATEST
-        # rather than block disaster recovery entirely.
-        logger.warning("Could not read base-backup times from wal-g; fetching LATEST")
-        return "LATEST"
+        # No usable names/times in the wal-g inventory. With an explicit
+        # target we cannot know whether LATEST satisfies it, and finding out
+        # only after PGDATA is displaced leaves the cluster down.
+        raise PrerequisiteNotMetError(
+            "Could not read base-backup names/times from wal-g backup-list, "
+            "so no base backup can be matched to target_time "
+            f"{target_time!r}. Verify backups exist (production_backup_status)"
+            ", or omit target_time to fetch the latest base backup."
+        )
     raise PrerequisiteNotMetError(
         f"No base backup exists at or before {target_time}: the earliest base "
         "backup is newer than the requested recovery target. Choose a later "

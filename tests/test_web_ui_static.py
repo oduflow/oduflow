@@ -581,3 +581,55 @@ process.stdout.write(JSON.stringify({
             "unchanged and omitted here."
         ),
     }
+
+
+def test_chat_markdown_is_sanitized_with_vendored_dompurify(tmp_path):
+    """Regression for the bypassable hand-rolled sanitizer (entity-encoded
+    scheme whitespace like ``java&Tab;script:``, SVG ``xlink:href``): marked's
+    raw-HTML output must go through the vendored DOMPurify with the HTML-only
+    profile, keep a plain-text fallback when DOMPurify is unavailable, and the
+    dashboard must load purify.min.js before chat.js. (Static wiring checks:
+    the repo has no DOM test harness — jsdom is not available — so a
+    behavioral render test cannot run here.)"""
+    chat = (_DASHBOARD.parent / "static" / "chat.js").read_text(encoding="utf-8")
+
+    # marked output is sanitized by DOMPurify, HTML profile only (no
+    # SVG/MathML — kills xlink:href), with style/form forbidden.
+    assert "window.DOMPurify.sanitize(html," in chat
+    assert "USE_PROFILES: { html: true }" in chat
+    assert "FORBID_TAGS: ['style', 'form']" in chat
+    # Missing-DOMPurify (or marked failure) fallback: plain escaped text, never
+    # unsanitized HTML.
+    assert "if (html == null || !window.DOMPurify)" in chat
+    assert "d.textContent = text;" in chat
+    # Every kept anchor is forced external-safe.
+    assert "afterSanitizeAttributes" in chat
+    assert "node.setAttribute('rel', 'noopener noreferrer');" in chat
+
+    client = _client(tmp_path)
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    # purify.min.js loads before chat.js (renderMarkdown needs it at parse
+    # time), and the vendored asset is actually served with its license intact.
+    purify_at = dashboard.text.index("loadScript('/static/purify.min.js')")
+    chat_at = dashboard.text.index("/static/chat.js?v=")
+    assert purify_at < chat_at
+    purify = client.get("/static/purify.min.js")
+    assert purify.status_code == 200
+    assert b"DOMPurify" in purify.content
+    assert b"@license DOMPurify" in purify.content
+
+
+def test_prompt_dialog_escape_is_handled_on_the_overlay(tmp_path):
+    """The typed-confirmation prompt (Delete/Restore Production) has no id, so
+    the global MODAL_CLOSERS Escape handler cannot close it. Escape must be
+    handled on the overlay itself — the input-only listener stopped working as
+    soon as focus moved to the Cancel/confirm buttons."""
+    dashboard = _client(tmp_path).get("/")
+
+    assert dashboard.status_code == 200
+    assert re.search(
+        r"overlay\.addEventListener\('keydown',\s*function\(e\)\s*\{\s*"
+        r"if \(e\.key === 'Escape'\) \{ e\.stopPropagation\(\); close\(null\); \}",
+        dashboard.text,
+    )

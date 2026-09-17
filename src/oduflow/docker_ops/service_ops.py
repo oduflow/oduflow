@@ -1171,6 +1171,16 @@ def update_service(
 
     _validate_service_exposure(settings, port, routes)
 
+    # Validate the candidate hostname before any destructive action.
+    # create_service re-validates, but it only runs after the old container is
+    # stopped and removed below — a rejected hostname there would leave the
+    # service deleted instead of unchanged. Same resolution as create_service.
+    if settings.routing_mode == "traefik":
+        candidate_host = hostname or f"{name}.{team.hostname}"
+        if "." not in candidate_host:
+            candidate_host = f"{candidate_host}.{team.hostname}"
+        validate_domain(candidate_host)
+
     # Determine the image to pull (override or current)
     target_image = image_override if image_override else old_image
     if image_override and image_override != old_image:

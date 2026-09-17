@@ -694,6 +694,34 @@ class TestEnsureOverlayMounted:
         assert result is False
         assert called == []
 
+    def test_failed_remount_aborts_start(self, tmp_path, monkeypatch):
+        # start_environment must not start Odoo over an unmounted merged dir:
+        # attachments would be missing and new writes hidden by a later
+        # successful remount. A failed remount is a prerequisite failure.
+        from oduflow.errors import PrerequisiteNotMetError
+
+        team, _ = self._team_ws(tmp_path)
+        settings = Settings(base_data_dir=str(tmp_path))
+        db = MagicMock(status="running")
+        odoo = MagicMock()
+        odoo.labels = {"oduflow.team": "1", "oduflow.template": "base"}
+        client = MagicMock()
+        client.containers.get.side_effect = lambda name: (
+            db if name == settings.shared_db_container else odoo
+        )
+        monkeypatch.setattr(env_ops, "get_client", lambda: client)
+        monkeypatch.setattr(env_ops, "_assert_team_owns", lambda *a, **k: None)
+
+        def boom(*a, **k):
+            raise RuntimeError("fuse-overlayfs unavailable")
+
+        monkeypatch.setattr(env_ops, "ensure_overlay_mounted", boom)
+
+        with pytest.raises(PrerequisiteNotMetError, match="overlay"):
+            env_ops.start_environment(settings, "feature-x", team)
+
+        odoo.start.assert_not_called()
+
     def test_noop_when_env_has_no_template(self, tmp_path, monkeypatch):
         team, ws = self._team_ws(tmp_path)
         os.makedirs(get_filestore_paths("feature-x", ws)["upper"])

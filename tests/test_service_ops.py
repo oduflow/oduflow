@@ -1703,6 +1703,42 @@ class TestUpdateService:
         container.remove.assert_not_called()
         mock_docker_client.images.pull.assert_not_called()
 
+    def test_update_invalid_hostname_preflight_does_not_remove_running_service(
+        self, mock_docker_client
+    ):
+        # create_service validates the Traefik hostname, but by the time it
+        # runs the old container is already removed — a rejected hostname
+        # override must fail up front and leave the running service untouched.
+        container = self._make_container(
+            image_tags=["redis:7"],
+            labels={"oduflow.managed": "true", "oduflow.service": "redis"},
+            attrs={"Config": {"Env": []}},
+        )
+        mock_docker_client.containers.get.return_value = container
+        preset = {
+            "name": "redis",
+            "image": "redis:7",
+            "port": 6379,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            with pytest.raises(ValueError, match="omain"):
+                service_ops.update_service(
+                    TRAEFIK_SETTINGS,
+                    TRAEFIK_TEAM,
+                    "redis",
+                    hostname_override="https://qa.example.com",
+                )
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+        mock_docker_client.images.pull.assert_not_called()
+
     def test_update_image_fallback_to_config(self, mock_docker_client):
         """When image.tags is empty, fall back to Config.Image."""
         container = self._make_container(

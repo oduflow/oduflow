@@ -99,6 +99,20 @@ def _run_scripts_from_dir(
                 sql = f.read().strip()
             if not sql:
                 continue
+            # The scoped role confines SQL, but psql itself interprets
+            # backslash metacommands client-side: `\! cmd` runs a shell inside
+            # the shared PostgreSQL container no matter which role executes the
+            # script. Reject any script with a line that starts with a
+            # backslash — sanitize scripts are plain SQL and never need psql
+            # metacommands.
+            if re.search(r"^\s*\\", sql, re.MULTILINE):
+                warning = (
+                    f"[SANITIZE:{label}] WARNING: {name} skipped: psql "
+                    "backslash metacommands are not allowed in sanitize scripts"
+                )
+                logger.warning(warning)
+                logs.append(warning)
+                continue
             _exec_sql(client, settings, sql, db=env_db, user=creds["pg_user"])
             logger.info("[%s] Executed sanitize script %s", label, name)
             logs.append(f"[SANITIZE:{label}] Executed {name}")

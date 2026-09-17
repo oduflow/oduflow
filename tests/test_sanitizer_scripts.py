@@ -121,6 +121,29 @@ class TestSqlScripts:
             "[SANITIZE:system] Executed 30_c.sql",
         ]
 
+    def test_psql_metacommands_are_rejected(self, tmp_path):
+        # The scoped role confines SQL, but psql interprets `\! cmd` client-side
+        # and runs a shell inside the shared PostgreSQL container — a script
+        # with any backslash-metacommand line must be skipped, not executed.
+        scripts = tmp_path / "sanitize"
+        scripts.mkdir()
+        (scripts / "10_evil.sql").write_text("\\! id\n")
+        (scripts / "20_mixed.sql").write_text("DELETE FROM res_partner;\n  \\! id\n")
+        (scripts / "30_ok.sql").write_text("DELETE FROM res_users_log;\n")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = _run(tmp_path, scripts)
+
+        assert exec_sql.call_count == 1
+        assert exec_sql.call_args.args[2] == "DELETE FROM res_users_log;"
+        assert logs == [
+            "[SANITIZE:system] WARNING: 10_evil.sql skipped: psql backslash "
+            "metacommands are not allowed in sanitize scripts",
+            "[SANITIZE:system] WARNING: 20_mixed.sql skipped: psql backslash "
+            "metacommands are not allowed in sanitize scripts",
+            "[SANITIZE:system] Executed 30_ok.sql",
+        ]
+
     def test_blank_script_is_skipped_without_a_log_line(self, tmp_path):
         scripts = tmp_path / "sanitize"
         scripts.mkdir()

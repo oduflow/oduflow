@@ -7289,7 +7289,7 @@ window.addEventListener('resize', function() {
 
 var MODAL_CLOSERS = {
   // Created dynamically by openCreateProductionModal; promptDialog overlays
-  // handle Escape themselves via their input's keydown.
+  // handle Escape themselves via their own overlay keydown listener.
   'create-prod-modal': function() {
     var m = document.getElementById('create-prod-modal');
     if (m) m.remove();
@@ -7720,7 +7720,12 @@ function promptDialog(opts) {
     overlay.addEventListener('click', function(e) { if (e.target === overlay) close(null); });
     input.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') close(input.value.trim());
-      if (e.key === 'Escape') close(null);
+    });
+    // Escape on the overlay, not the input: it must also dismiss when a
+    // button has focus, and the id-less overlay is invisible to the global
+    // MODAL_CLOSERS Escape handler.
+    overlay.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { e.stopPropagation(); close(null); }
     });
   });
 }

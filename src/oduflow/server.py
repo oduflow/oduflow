@@ -5309,15 +5309,18 @@ def restore_cluster_pitr(
                         "Could not restart production %s%s: %s", entry, suffix, exc
                     )
 
-        for team_cfg in settings.teams.values():
-            for prod_name in production_registry.list_productions(team_cfg):
-                container = production_ops._get_container(
-                    client, settings, team_cfg, prod_name
-                )
-                if container is not None and container.status == "running":
-                    container.stop()
-                    stopped.append(f"{team_cfg.team_id}/{prod_name}")
         try:
+            # The stop loop is inside the guarded block: a failure on the Nth
+            # production (container stop, registry read) must restart the ones
+            # already stopped, not leave them offline with nothing restored.
+            for team_cfg in settings.teams.values():
+                for prod_name in production_registry.list_productions(team_cfg):
+                    container = production_ops._get_container(
+                        client, settings, team_cfg, prod_name
+                    )
+                    if container is not None and container.status == "running":
+                        container.stop()
+                        stopped.append(f"{team_cfg.team_id}/{prod_name}")
             result = walg.pitr_restore_cluster(settings, target_time=target_time)
         except BaseException:
             # The restore failed. walg raises before touching PGDATA for
@@ -6516,9 +6519,7 @@ def _run_call(argv: list[str]) -> None:
             param = params[i]
             hint = hints.get(param.name)
             default = (
-                param.default
-                if param.default is not inspect.Parameter.empty
-                else None
+                param.default if param.default is not inspect.Parameter.empty else None
             )
             try:
                 kwargs[param.name] = _coerce_cli_value(value, hint, default)

@@ -209,6 +209,24 @@ class TestDestroySystem:
         ):
             system_ops.destroy_system(TEST_SETTINGS)
 
+    def test_destroy_blocked_by_unregistered_production_container(
+        self, mock_docker_client
+    ):
+        # A failed delete_production can remove the registry record while the
+        # container survives. The registry guard misses it, so destroy must
+        # also refuse on live containers in the reserved prod- name namespace
+        # (which dev environments cannot enter) — or the prod PG teardown
+        # below would remove the database out from under it.
+        stray = MagicMock()
+        stray.labels = {"oduflow.managed": "true"}
+        stray.name = "oduflow-1-prod-erp-odoo"
+        mock_docker_client.containers.list.return_value = [stray]
+        with (
+            patch("oduflow.production_registry.list_productions", return_value={}),
+            pytest.raises(ConflictError, match="oduflow-1-prod-erp-odoo"),
+        ):
+            system_ops.destroy_system(TEST_SETTINGS)
+
     def test_destroy_removes_production_pg(self, mock_docker_client):
         # The prod PG container + volume persist past the last production and
         # must be torn down (P-H4), or they leak and keep the shared network busy.
@@ -232,9 +250,7 @@ class TestDestroySystem:
         mock_docker_client.networks.list.return_value = []
         mock_docker_client.networks.get.return_value = MagicMock()
 
-        with patch(
-            "oduflow.production_registry.list_productions", return_value={}
-        ):
+        with patch("oduflow.production_registry.list_productions", return_value={}):
             result = system_ops.destroy_system(TEST_SETTINGS)
 
         prod_db.stop.assert_called_once()
@@ -255,9 +271,7 @@ class TestDestroySystem:
         net.remove.side_effect = docker.errors.APIError("has active endpoints")
         mock_docker_client.networks.get.return_value = net
 
-        with patch(
-            "oduflow.production_registry.list_productions", return_value={}
-        ):
+        with patch("oduflow.production_registry.list_productions", return_value={}):
             result = system_ops.destroy_system(TEST_SETTINGS)
 
         assert result["status"] == "destroyed"
