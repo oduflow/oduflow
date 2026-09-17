@@ -155,6 +155,100 @@ If the server is behind a reverse proxy with HTTPS (see [Traefik Routing](traefi
 }
 ```
 
+### Claude Desktop (remote server via `mcp-remote`)
+
+Claude Desktop only launches MCP servers as local processes — it cannot call a
+remote HTTP endpoint with a custom `Authorization` header on its own. Use the
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge: Claude Desktop
+starts it over stdio, and it forwards everything to Oduflow's `/mcp` endpoint
+with the Bearer token attached. Node.js (which provides `npx`) must be installed.
+
+Edit `claude_desktop_config.json` — **Settings → Developer → Edit Config** opens
+it directly:
+
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+=== "Windows"
+
+    ```json
+    {
+      "mcpServers": {
+        "oduflow": {
+          "command": "cmd.exe",
+          "args": [
+            "/c",
+            "npx",
+            "-y",
+            "mcp-remote",
+            "https://your.oduflow.server/mcp",
+            "--header",
+            "Authorization:${AUTH_HEADER}",
+            "--transport",
+            "http-only"
+          ],
+          "env": {
+            "AUTH_HEADER": "Bearer TOKEN"
+          }
+        }
+      }
+    }
+    ```
+
+=== "macOS / Linux"
+
+    ```json
+    {
+      "mcpServers": {
+        "oduflow": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "mcp-remote",
+            "https://your.oduflow.server/mcp",
+            "--header",
+            "Authorization:${AUTH_HEADER}",
+            "--transport",
+            "http-only"
+          ],
+          "env": {
+            "AUTH_HEADER": "Bearer TOKEN"
+          }
+        }
+      }
+    }
+    ```
+
+Replace:
+
+- `https://your.oduflow.server/mcp` — your Oduflow MCP endpoint (in
+  [traefik mode](traefik.md), the team's own hostname; in port mode,
+  `http://<host>:8000/mcp`).
+- `TOKEN` — the team's `auth_token` from `oduflow.toml`. Keep the `Bearer `
+  prefix: the header value must read `Bearer <auth_token>`.
+
+!!! note "Why the token lives in `env`"
+
+    `mcp-remote` substitutes `${AUTH_HEADER}` into the `--header` value at
+    startup. Keeping the secret in `env` instead of inline in `args` avoids
+    both the shell-quoting problems of a space inside an argument and leaking
+    the token into process listings and logs.
+
+`--transport http-only` pins the bridge to Streamable HTTP, which is what
+Oduflow serves; without it `mcp-remote` first probes for an SSE endpoint and the
+connection can fail. Do **not** use the OAuth setup from
+[Authentication & Security](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients)
+here — that flow is for Claude.ai custom connectors; Claude Desktop authenticates
+with the static Bearer token above.
+
+To scope the connection to a single environment, point the URL at
+`https://your.oduflow.server/mcp/<env>` and use that environment's Secret Key as
+the token instead — see
+[Scoped single-environment access](security.md#scoped-single-environment-access-mcpenv).
+
+After saving the file, quit Claude Desktop completely (not just close the
+window) and start it again. The Oduflow tools then appear in the tools menu.
+
 ### Web Dashboard
 
 When running in HTTP mode, a web dashboard is available at the root URL (`http://your-server:8000/`). Sign in as `admin` with the `ui_password` from `oduflow.toml`. It provides environment management, service controls, a WebSocket terminal, and more. See [Web Dashboard & REST API](web-api.md) for details.
