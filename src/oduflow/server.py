@@ -5086,6 +5086,7 @@ def create_production(
     repo_url: str = "",
     branch: str = "",
     domain: str = "",
+    extra_domains: list[str] | None = None,
     odoo_image: str = "",
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
@@ -5109,8 +5110,15 @@ def create_production(
                 is given (then it defaults to the environment's).
         branch: Git branch to deploy (full history is kept). Required unless
                 from_environment is given.
-        domain: The production's public domain, e.g. "erp.customer.com"
-                (DNS must point at this server; TLS via Let's Encrypt).
+        domain: The production's public domain (DNS must point at this
+                server; TLS via Let's Encrypt). In a team with base_domain
+                configured it must be the zone apex or a subdomain of it
+                (e.g. "erp.demo.example.com"); empty defaults to the apex
+                for the team's first production and "<name>.<base_domain>"
+                afterwards. Client-owned domains go in extra_domains.
+        extra_domains: Additional public FQDNs routed to the same production
+                (e.g. the client's own domain "erp.customer.com"). Each gets
+                its own Let's Encrypt certificate; DNS must point here.
         odoo_image: Docker image, e.g. "odoo:18.0". Required unless
                 from_environment is given.
         git_user: Optional git username for credential matching.
@@ -5163,6 +5171,7 @@ def create_production(
         branch,
         domain,
         odoo_image,
+        extra_domains=extra_domains,
         git_user=git_user,
         extra_addons=(
             env_ops._normalize_extra_addons(extra_addons)
@@ -5345,6 +5354,7 @@ def set_production_auto_update(
 def reconfigure_production(
     name: str,
     domain: str = "",
+    extra_domains: list[str] | None = None,
     odoo_image: str = "",
     branch: str = "",
     repo_url: str = "",
@@ -5369,8 +5379,13 @@ def reconfigure_production(
 
     Args:
         name: The production name.
-        domain: New public domain, e.g. "erp.customer.com" (DNS must point
-                at this server; TLS via Let's Encrypt).
+        domain: New public domain (DNS must point at this server; TLS via
+                Let's Encrypt). In a team with base_domain configured it
+                must be the zone apex or a subdomain of it; client-owned
+                domains go in extra_domains.
+        extra_domains: New full set of additional public FQDNs routed to
+                this production (e.g. the client's own domain); pass [] to
+                remove all. Omit to leave unchanged.
         odoo_image: New Docker image, e.g. "odoo:19.0".
         branch: New git branch to deploy.
         repo_url: New HTTPS git repository URL.
@@ -5390,6 +5405,7 @@ def reconfigure_production(
         team,
         name,
         domain=domain or None,
+        extra_domains=extra_domains,
         odoo_image=odoo_image or None,
         branch=branch or None,
         repo_url=repo_url or None,
@@ -5638,32 +5654,62 @@ def list_production_snapshots(
 # Same lock order as snapshot_production: production first, then backup store.
 @with_key_lock(prod_backups_lock_key, require_name=False)
 def restore_production(
-    name: str, snapshot_id: str, confirm: str = "", ctx: Context | None = None
+    name: str,
+    snapshot_id: str = "",
+    from_environment: str = "",
+    confirm: str = "",
+    ctx: Context | None = None,
 ) -> str:
     """
-    Restore a production's DATABASE and FILESTORE from a snapshot.
-    DESTRUCTIVE for current data (swap-based: a failed restore leaves the
-    previous state in place). The code checkout is NOT touched — a warning
-    is returned if it does not match the snapshot's commit.
+    Restore a production's DATABASE and FILESTORE from a snapshot, or replace
+    them with a dev environment's data (promotion into an EXISTING
+    production). DESTRUCTIVE for current data (swap-based: a failed restore
+    leaves the previous state in place) — take snapshot_production first if
+    the current data may still be needed. The code checkout is NOT touched —
+    a warning is returned if it does not match the source's commit.
 
     Args:
         name: The production name.
         snapshot_id: Snapshot to restore (see list_production_snapshots).
+                Mutually exclusive with from_environment.
+        from_environment: Dev environment (branch name) whose database and
+                filestore replace this production's. The environment's Odoo
+                is briefly stopped for a consistent copy, then restarted —
+                the environment itself is not reset. No sanitization — the
+                data goes INTO production.
         confirm: Must equal the production name (safety check).
     """
     if confirm != name:
         raise ToolError(
             f'Confirmation failed: pass confirm="{name}" to restore this production.'
         )
+    if bool(snapshot_id) == bool(from_environment):
+        raise ToolError("Pass exactly one of snapshot_id or from_environment.")
     from oduflow import backup_ops
 
     settings = _get_settings()
     team = _resolve_team(ctx)
-    result = backup_ops.restore_production(settings, team, name, snapshot_id)
-    lines = [
-        f"Production '{name}' restored from snapshot {snapshot_id}.",
-        f"Healthy: {result['healthy']}",
-    ]
+    if from_environment:
+        # Same scoping as create_production: the source env's lock covers
+        # only the brief stop/copy/restart slice inside the restore.
+        env_lock = lambda: _locks.env_lock(  # noqa: E731
+            from_environment, team.team_id, operation="restore_production"
+        )
+        result = backup_ops.restore_production_from_environment(
+            settings, team, name, from_environment, env_lock=env_lock
+        )
+        lines = [
+            f"Production '{name}' restored from environment '{from_environment}'.",
+            f"Healthy: {result['healthy']}",
+        ]
+        for note in result.get("notes", []):
+            lines.append(f"NOTE: {note}")
+    else:
+        result = backup_ops.restore_production(settings, team, name, snapshot_id)
+        lines = [
+            f"Production '{name}' restored from snapshot {snapshot_id}.",
+            f"Healthy: {result['healthy']}",
+        ]
     if result.get("warning"):
         lines.append(f"WARNING: {result['warning']}")
     return "\n".join(lines)
@@ -7299,6 +7345,14 @@ def _run_cli() -> None:
             p_stack_command.add_argument(
                 "--team", default="1", help="Team ID (default: 1)"
             )
+            p_stack_command.add_argument(
+                "--env-file",
+                default=None,
+                help=(
+                    "dotenv file supplying fromEnv values "
+                    "(default: .env next to the manifest, if present)"
+                ),
+            )
 
     # --- Systemd ---
     sub.add_parser(
@@ -7426,7 +7480,7 @@ def _run_cli() -> None:
             _ensure_initialized(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
-                from oduflow.stack_loader import load_stack
+                from oduflow.stack_loader import load_stack, stack_environ
                 from oduflow.stack_ops import apply_stack, format_plan
 
                 stack_team = _settings.get_team(args.stack_team)
@@ -7436,6 +7490,7 @@ def _run_cli() -> None:
                     stack_team,
                     stack_manifest,
                     args.stack_manifest,
+                    environ=stack_environ(args.stack_manifest),
                     lock_manager=_locks,
                 )
                 logger.info("Startup stack reconciliation:\n%s", format_plan(applied))
@@ -7578,13 +7633,20 @@ def _run_cli() -> None:
         if args.stack_command is None:
             p_stack.print_help()
             return
-        from oduflow.stack_loader import load_stack
+        from oduflow.stack_loader import load_stack, stack_environ
         from oduflow.stack_ops import apply_stack, build_plan, format_plan, stack_status
 
         manifest = load_stack(args.manifest)
+        environ = stack_environ(args.manifest, args.env_file)
         team = _cli_team()
         if args.stack_command == "plan":
-            print(format_plan(build_plan(_settings, team, manifest, args.manifest)))
+            print(
+                format_plan(
+                    build_plan(
+                        _settings, team, manifest, args.manifest, environ=environ
+                    )
+                )
+            )
             return
         if args.stack_command == "apply":
             migrations.run_pending(_settings)
@@ -7595,6 +7657,7 @@ def _run_cli() -> None:
                 team,
                 manifest,
                 args.manifest,
+                environ=environ,
                 lock_manager=_locks,
             )
             print(format_plan(stack_result))
@@ -7602,7 +7665,10 @@ def _run_cli() -> None:
         if args.stack_command == "status":
             print(
                 json.dumps(
-                    stack_status(_settings, team, manifest, args.manifest), indent=2
+                    stack_status(
+                        _settings, team, manifest, args.manifest, environ=environ
+                    ),
+                    indent=2,
                 )
             )
             return

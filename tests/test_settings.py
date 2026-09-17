@@ -216,6 +216,84 @@ class TestSettings:
         with pytest.raises(ValueError, match="service_slots"):
             settings.validate()
 
+    def test_base_domain_defaults_hostname(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[routing]\nmode = "traefik"\ntls = false\n'
+            '[team.1]\nbase_domain = "demo.example.com"\n'
+        )
+
+        team = Settings.from_toml(str(toml)).get_team("1")
+
+        assert team.base_domain == "demo.example.com"
+        assert team.hostname == "oduflow.demo.example.com"
+
+    def test_explicit_hostname_wins_over_base_domain_default(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[routing]\nmode = "traefik"\ntls = false\n'
+            '[team.1]\nbase_domain = "demo.example.com"\n'
+            'hostname = "panel.demo.example.com"\n'
+        )
+
+        assert (
+            Settings.from_toml(str(toml)).get_team("1").hostname
+            == "panel.demo.example.com"
+        )
+
+    def test_base_domain_requires_traefik(self):
+        team = TeamSettings(
+            team_id="1",
+            hostname="oduflow.demo.example.com",
+            base_domain="demo.example.com",
+        )
+
+        with pytest.raises(ValueError, match="base_domain requires"):
+            Settings(teams={"1": team}).validate()
+
+    def test_invalid_base_domain_rejected(self):
+        team = TeamSettings(
+            team_id="1", hostname="oduflow.example.com", base_domain="not a domain"
+        )
+        settings = Settings(
+            routing_mode="traefik", routing_tls=False, teams={"1": team}
+        )
+
+        with pytest.raises(ValueError, match="invalid base_domain"):
+            settings.validate()
+
+    def test_duplicate_base_domain_rejected(self):
+        teams = {
+            "1": TeamSettings(
+                team_id="1",
+                hostname="a.demo.example.com",
+                base_domain="demo.example.com",
+            ),
+            "2": TeamSettings(
+                team_id="2",
+                hostname="b.demo.example.com",
+                base_domain="demo.example.com",
+            ),
+        }
+        settings = Settings(routing_mode="traefik", routing_tls=False, teams=teams)
+
+        with pytest.raises(ValueError, match="duplicate base_domain"):
+            settings.validate()
+
+    def test_team_hostname_inside_other_team_zone_rejected(self):
+        teams = {
+            "1": TeamSettings(
+                team_id="1",
+                hostname="oduflow.demo.example.com",
+                base_domain="demo.example.com",
+            ),
+            "2": TeamSettings(team_id="2", hostname="intruder.demo.example.com"),
+        }
+        settings = Settings(routing_mode="traefik", routing_tls=False, teams=teams)
+
+        with pytest.raises(ValueError, match="lies inside team '1'"):
+            settings.validate()
+
     def test_invalid_environment_hostname_mode_rejected(self):
         team = TeamSettings(team_id="1", environment_hostname_mode="magic")
 

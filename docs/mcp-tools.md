@@ -95,14 +95,14 @@ also available via the [REST API](web-api.md).
 | `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
-| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (`from_environment` copies its DB + filestore and inherits repo/branch/image); `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
+| `create_production` | ✓ | Provision a long-lived production with its own domain (defaults into the team `base_domain` zone when configured) plus optional `extra_domains`, on the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (`from_environment` copies its DB + filestore and inherits repo/branch/image); `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
 | `list_productions` | | List productions with status, domain, deployed commit, and auto-update state |
 | `get_production_info` | | Detailed status, configuration, deployed commit, deploy history, and backup information |
 | `start_production` | ✓ | Start a stopped production |
 | `stop_production` | ✓ | Stop a production, taking it offline |
 | `restart_production` | ✓ | Restart a production's Odoo container |
 | `set_production_auto_update` | ✓ | Enable or disable GitHub push webhook deployments |
-| `reconfigure_production` | ✓ | Change domain, Odoo image, branch, repository, git user, or extra addon repos; recreates the container (database and filestore preserved, brief downtime) |
+| `reconfigure_production` | ✓ | Change domain, extra domains, Odoo image, branch, repository, git user, or extra addon repos; recreates the container (database and filestore preserved, brief downtime) |
 | `set_production_odoo_conf` | ✓ | Set or remove per-production `odoo.conf` overrides that win over the auto-tuned worker settings and survive deploys; managed keys (`addons_path`, `data_dir`, `db_*`) are refused |
 | `update_production` | ✓ | Deploy pulled commits with explicit/automatic actions, health verification, and automatic code rollback on failure |
 | `rollback_production` | ✓ | Roll production code back to a selected commit and restart it; does not roll back the database |
@@ -110,7 +110,7 @@ also available via the [REST API](web-api.md).
 | `production_logs` | | Read production Odoo logs with line, substring, and level filtering |
 | `snapshot_production` | ✓ | Create an S3 snapshot containing the database, deduplicated filestore, and deployed commit |
 | `list_production_snapshots` | | List S3 snapshots; `refresh=True` bypasses the cached index |
-| `restore_production` | ✓ | Restore one production's database and filestore; requires its name in `confirm` |
+| `restore_production` | ✓ | Restore one production's database and filestore from a snapshot or a dev environment; requires its name in `confirm` |
 | `production_backup_status` | | Inspect snapshot schedules, WAL archiving, base backups, and S3 reachability |
 | `set_production_backup_schedule` | ✓ | Set a production's daily snapshot time (`HH:MM`) or disable it with `off` |
 | `prune_production_backups` | ✓ | Apply configured snapshot and chunk-store retention immediately |

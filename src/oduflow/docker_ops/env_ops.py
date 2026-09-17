@@ -38,6 +38,7 @@ from oduflow.docker_ops.system_ops import (
     pg_clone_strategy_clause,
     reassign_db_ownership,
 )
+from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
 from oduflow.env_tokens import MCP_TOKEN_LABEL, generate_token, invalidate_cache
 from oduflow.errors import (
@@ -66,7 +67,6 @@ from oduflow.naming import (
     get_agent_upload_dir,
     get_agent_workspace_volume_name,
     get_db_name,
-    get_env_hostname,
     get_env_short_hostname,
     get_filestore_paths,
     get_repo_path,
@@ -254,6 +254,58 @@ def _active_environment_names(
     return active_envs
 
 
+def _team_parent_domain(team: TeamSettings) -> str:
+    """The domain environment/service hostnames are allocated under: the
+    team's base_domain when set, else the parent of the team hostname
+    (slots/custom-hostname legacy layout)."""
+    if team.base_domain:
+        return team.base_domain
+    _prefix, parent_domain = split_team_hostname(team.hostname)
+    return parent_domain
+
+
+def _assert_env_hostname_available(
+    settings: Settings, team: TeamSettings, env_name: str, route_hostname: str
+) -> None:
+    """Refuse an environment hostname already claimed elsewhere in the global
+    Host() namespace (dashboard hostnames, production domains, static routes,
+    other teams' zones, live environment and service containers)."""
+    if settings.routing_mode != "traefik":
+        return
+    from oduflow.domains import assert_public_hostname_free
+
+    fqdn = env_hostname(team, env_name, route_hostname)
+    assert_public_hostname_free(
+        settings,
+        fqdn,
+        own_team=team.team_id,
+        # update_environment re-runs this while the environment's own
+        # container still carries its Host() rule; it must not collide
+        # with itself.
+        exclude_env=env_name,
+        purpose=f"the hostname of environment '{env_name}'",
+    )
+
+
+def container_route_host(container: Any) -> str:
+    """The FQDN a container's Traefik router rule actually matches, or ''.
+
+    Traefik labels are frozen at container creation, so this — not a recompute
+    from current settings — is what an existing environment really answers on.
+    It matters after ``base_domain`` is turned on for a team that already has
+    environments: ADR 0064 deliberately performs no migration, so those keep
+    their old nested hostname until their next ``update_environment``.
+    """
+    from oduflow.domains import _HOST_RULE_RE
+
+    for key, value in (container.labels or {}).items():
+        if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
+            found = _HOST_RULE_RE.findall(value)
+            if found:
+                return str(found[0]).lower()
+    return ""
+
+
 def _environment_hostname_usage(
     client: DockerClient,
     settings: Settings,
@@ -269,8 +321,7 @@ def _environment_hostname_usage(
     """
     active_envs: set[str] = set()
     used_hostnames: set[str] = set()
-    _hostname_prefix, parent_domain = split_team_hostname(team.hostname)
-    suffix = f".{parent_domain}"
+    suffix = f".{_team_parent_domain(team)}"
     for configured_team in settings.teams.values():
         if configured_team.hostname.endswith(suffix):
             used_hostnames.add(configured_team.hostname[: -len(suffix)])
@@ -1694,7 +1745,7 @@ def build_env_traefik_labels(
         return {}
     slug = slugify_branch(env_name)
     router = f"oduflow-{team.team_id}-{slug}"
-    host = get_env_hostname(env_name, team.hostname, route_hostname)
+    host = env_hostname(team, env_name, route_hostname)
     labels: dict[str, str] = {
         "traefik.enable": "true",
         f"traefik.http.routers.{router}.rule": f"Host(`{host}`)",
@@ -2016,6 +2067,12 @@ def _create_environment_impl(
                 f"is already used by environment '{other_branch}'. Choose a name "
                 "that does not normalise to the same database."
             )
+
+    # Claim the public name before anything is provisioned or destroyed: the
+    # cleanup below drops a leftover database, role and workspace, and the
+    # credential move writes to the team store, so a name rejected further
+    # down would still have had side effects.
+    _assert_env_hostname_available(settings, team, env_name, hostname)
 
     est_db_bytes = estimate_new_db_bytes(client, settings, team, template_name)
     check_db_quota(client, settings, team, estimated_new_db_bytes=est_db_bytes)
@@ -2359,7 +2416,7 @@ def _create_environment_impl(
         raise
 
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{env_hostname(team, env_name, hostname)}"
     else:
         url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
     logger.info(
@@ -3458,8 +3515,12 @@ def get_env_base_url(
                 raise NotFoundError(
                     f"Environment '{env_name}' does not exist. Use create_environment first."
                 )
-        host = get_env_hostname(
-            env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, "")
+        # The container's own router rule wins over a recompute from current
+        # settings: an environment created before the team gained a
+        # base_domain still routes on its old nested name, and reporting the
+        # zone name would hand out a URL Traefik does not serve.
+        host = container_route_host(container) or env_hostname(
+            team, env_name, container.labels.get(ENV_HOSTNAME_LABEL, "")
         )
         return f"{settings.public_scheme_for(team)}://{host}", host
 
@@ -4962,6 +5023,7 @@ def update_environment(
     # traefik→port switch drops them and a renamed router does not linger.
     labels = {k: v for k, v in labels.items() if not k.startswith("traefik.")}
     route_hostname = labels.get(ENV_HOSTNAME_LABEL, "")
+    _assert_env_hostname_available(settings, team, env_name, route_hostname)
     labels.update(build_env_traefik_labels(settings, team, env_name, route_hostname))
     if settings.routing_mode == "traefik":
         # No published port in traefik mode; drop any stale reservation left from
@@ -5091,7 +5153,7 @@ def update_environment(
     # 6. Build URL and return result
     # ------------------------------------------------------------------
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme_for(team)}://{get_env_hostname(env_name, team.hostname, route_hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{env_hostname(team, env_name, route_hostname)}"
     else:
         url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
 

@@ -22,6 +22,7 @@ from oduflow.docker_ops import (
     volume_file_ops,
     volume_ops,
 )
+from oduflow.domains import service_hostname
 from oduflow.errors import ConflictError, NotFoundError
 from oduflow.locking import prod_lock_key
 from oduflow.naming import sanitize_repo_url, validate_env_name
@@ -177,12 +178,16 @@ def _actual_mounts(raw: Any) -> list[dict[str, str]]:
 def _desired_hostname(
     settings: Settings, team: TeamSettings, name: str, hostname: str | None
 ) -> str | None:
+    """What ``create_service`` would assign, so drift compares like with like.
+
+    Must stay delegated to ``domains.service_hostname``: when this spelled the
+    rule out itself it kept nesting under the team hostname after base_domain
+    landed, so every plan reported drift and every apply recreated the
+    container.
+    """
     if settings.routing_mode != "traefik":
         return hostname
-    result = hostname or f"{name}.{team.hostname}"
-    if "." not in result:
-        result = f"{result}.{team.hostname}"
-    return result
+    return service_hostname(team, name, hostname)
 
 
 def _installed_modules(

@@ -96,10 +96,9 @@ def runtime_drift(
     if labels.get("oduflow.git_user", "") != record.get("git_user", ""):
         drift.append("container git_user")
     router = f"oduflow-{team.team_id}-prod-{record['name']}"
-    if (
-        labels.get(f"traefik.http.routers.{router}.rule")
-        != f"Host(`{record['domain']}`)"
-    ):
+    if labels.get(
+        f"traefik.http.routers.{router}.rule"
+    ) != production_ops.prod_host_rule(record):
         drift.append("container route")
     if declared != record.get("env_vars", {}):
         drift.append("container env references")

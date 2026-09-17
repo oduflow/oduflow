@@ -205,7 +205,11 @@ def get_service_database_role(name: str, team_id: str) -> str:
 # container names, database identifiers, filesystem paths, Traefik router
 # names and S3 key prefixes without any slugification step, so only
 # lowercase alphanumerics and dashes are allowed.
-_PROD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+# A production name also becomes a DNS label: in a base_domain team the
+# default domain is "<name>.<base_domain>", so a trailing hyphen would
+# build an FQDN validate_domain then rejects — for a domain the user
+# never typed.
+_PROD_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,29}[a-z0-9])?$")
 
 # Internal namespace prefix separating production environments from dev
 # environments in every name-derived resource (containers, databases, PG
@@ -219,8 +223,9 @@ def validate_prod_name(name: str) -> str:
     """Validate a production environment name and return it unchanged."""
     if not name or not _PROD_NAME_RE.match(name):
         raise ValueError(
-            f"Invalid production name '{name}': must start with a lowercase "
-            "letter or digit and contain only [a-z0-9-] (max 31 chars)."
+            f"Invalid production name '{name}': must start and end with a "
+            "lowercase letter or digit and contain only [a-z0-9-] "
+            "(max 31 chars)."
         )
     return name
 
@@ -371,8 +376,14 @@ def split_team_hostname(hostname: str) -> tuple[str, str]:
     return prefix, parent_domain
 
 
-def get_env_hostname(env_name: str, hostname: str, route_hostname: str = "") -> str:
+def get_env_hostname(
+    env_name: str, hostname: str, route_hostname: str = "", base_domain: str = ""
+) -> str:
     short_hostname = get_env_short_hostname(env_name, route_hostname)
+    if base_domain:
+        # Team base-domain mode: every environment is a direct child of the
+        # base domain (feature.example.com), a sibling of the dashboard host.
+        return f"{short_hostname}.{base_domain}"
     if not route_hostname:
         return f"{short_hostname}.{hostname}"
     _prefix, parent_domain = split_team_hostname(hostname)

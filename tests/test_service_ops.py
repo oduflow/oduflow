@@ -2497,3 +2497,167 @@ class TestServiceSecrets:
         assert result["image_updated"] is False
         container.stop.assert_not_called()
         container.remove.assert_not_called()
+
+
+class TestServiceHostnamesUnderATeamZone:
+    """Short service names hang off base_domain when the team has one.
+
+    Every place that needs to know where a service answers must agree, or the
+    dashboard shows an unroutable URL and the Stack drift check recreates the
+    container on every apply.
+    """
+
+    @staticmethod
+    def _zone_team(tmp_path):
+        return TeamSettings(
+            team_id="1",
+            hostname="oduflow.demo.example.com",
+            base_domain="demo.example.com",
+            data_dir=str(tmp_path),
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+
+    @staticmethod
+    def _zone_settings(team, routing_tls=True):
+        return Settings(
+            routing_mode="traefik",
+            routing_tls=routing_tls,
+            acme_email="admin@example.com",
+            base_data_dir="/tmp/flow-test",
+            db_user="odoo",
+            db_password="odoo",
+            teams={"1": team},
+        )
+
+    def test_create_puts_a_short_name_in_the_zone(self, mock_docker_client, tmp_path):
+        team = self._zone_team(tmp_path)
+        settings = self._zone_settings(team)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        result = service_ops.create_service(settings, team, "redis", "redis:7", 6379)
+
+        assert result["url"] == "https://redis.demo.example.com"
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        rule = labels["traefik.http.routers.oduflow-1-svc-redis.rule"]
+        assert rule == "Host(`redis.demo.example.com`)"
+
+    def test_preset_stores_the_short_name_not_the_fqdn(
+        self, mock_docker_client, tmp_path
+    ):
+        """A preset pinned to the full FQDN stops following the team zone, so
+        changing base_domain would leave restores on the old domain."""
+        from oduflow.docker_ops import service_presets
+
+        team = self._zone_team(tmp_path)
+        settings = self._zone_settings(team)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(settings, team, "redis", "redis:7", 6379)
+
+        assert service_presets.get_preset(team, "redis")["hostname"] == "redis"
+
+    def test_no_change_update_reports_the_zone_url(self, mock_docker_client, tmp_path):
+        """The recreate path delegates to create_service and was already right;
+        this branch built the URL itself and kept the legacy nesting."""
+        team = self._zone_team(tmp_path)
+        # TLS off keeps the container off the implicit ACME-mount upgrade path,
+        # which would itself count as a config change and force a recreate.
+        settings = self._zone_settings(team, routing_tls=False)
+        container = MagicMock()
+        container.image.tags = ["redis:7"]
+        container.image.id = "sha256:same"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        container.attrs = {"Config": {"Env": []}}
+        mock_docker_client.containers.get.return_value = container
+        new_image = MagicMock()
+        new_image.id = "sha256:same"
+        mock_docker_client.images.pull.return_value = new_image
+        preset = {
+            "name": "redis",
+            "image": "redis:7",
+            "port": 6379,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            result = service_ops.update_service(settings, team, "redis")
+
+        assert result["image_updated"] is False
+        assert result["url"] == "https://redis.demo.example.com"
+        mock_docker_client.containers.run.assert_not_called()
+
+
+class TestServiceHostnameCollisions:
+    def test_catch_all_service_cannot_take_the_dashboard_host(
+        self, mock_docker_client, tmp_path
+    ):
+        team = TeamSettings(
+            team_id="1",
+            hostname="dev.example.com",
+            data_dir=str(tmp_path),
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+        settings = Settings(
+            routing_mode="traefik",
+            acme_email="admin@example.com",
+            base_data_dir="/tmp/flow-test",
+            db_user="odoo",
+            db_password="odoo",
+            teams={"1": team},
+        )
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(ConflictError, match="dashboard hostname"):
+            service_ops.create_service(
+                settings,
+                team,
+                "grafana",
+                "grafana:11",
+                3000,
+                hostname="dev.example.com",
+            )
+
+    def test_path_routed_service_may_share_the_dashboard_host(
+        self, mock_docker_client, tmp_path
+    ):
+        """With `routes` no catch-all router is created, only
+        Host() && PathPrefix() ones, so the dashboard keeps every other path."""
+        team = TeamSettings(
+            team_id="1",
+            hostname="dev.example.com",
+            data_dir=str(tmp_path),
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+        settings = Settings(
+            routing_mode="traefik",
+            acme_email="admin@example.com",
+            base_data_dir="/tmp/flow-test",
+            db_user="odoo",
+            db_password="odoo",
+            teams={"1": team},
+        )
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(
+            settings,
+            team,
+            "grafana",
+            "grafana:11",
+            None,
+            hostname="dev.example.com",
+            routes=[{"path": "/grafana", "port": 3000}],
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        rule = labels["traefik.http.routers.oduflow-1-svc-grafana-route-1.rule"]
+        assert "Host(`dev.example.com`)" in rule
+        assert "PathPrefix(`/grafana/`)" in rule
+        # No catch-all router that would swallow the dashboard.
+        assert "traefik.http.routers.oduflow-1-svc-grafana.rule" not in labels

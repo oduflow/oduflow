@@ -80,6 +80,13 @@ class TeamSettings:
 
     team_id: str
     hostname: str = "localhost"
+    # The team's DNS zone (e.g. "demo.example.com"). When set, environments
+    # and services live directly under it (feature.demo.example.com), the
+    # dashboard hostname defaults to "oduflow.<base_domain>", and production
+    # domains must be the base domain itself (apex) or a subdomain of it —
+    # extra_domains cover arbitrary client-owned names. Empty = legacy layout:
+    # environments/services nest under the team hostname.
+    base_domain: str = ""
     auth_token: str = ""
     ui_password: str = ""
     port_range_start: int = 50000
@@ -490,6 +497,20 @@ class Settings:
                 raise ValueError(
                     f"Team '{team.team_id}': hostname must be set explicitly."
                 )
+            if team.base_domain:
+                if self.routing_mode != "traefik":
+                    raise ValueError(
+                        f"Team '{team.team_id}': base_domain requires "
+                        "routing_mode=traefik"
+                    )
+                from oduflow.naming import validate_domain
+
+                try:
+                    validate_domain(team.base_domain)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Team '{team.team_id}': invalid base_domain: {exc}"
+                    ) from exc
             normalized_host = team.hostname.lower()
             if normalized_host in seen_team_hosts:
                 raise ValueError(
@@ -548,6 +569,40 @@ class Settings:
                         f"Team '{team.team_id}': environment_hostname_mode='slots' "
                         "requires a hostname such as 'dev.example.com'"
                     ) from exc
+
+        # Base domains are exclusive team zones: environment, service and
+        # production names are allocated inside them, so no duplicates, and
+        # no other team may place its hostname or base domain in the zone —
+        # that is how one team is prevented from squatting names that would
+        # route into another team's zone.
+        # Local import: domains.py imports Settings, and the zone-containment
+        # rule must have exactly one definition or config-time validation and
+        # run-time claim checks can disagree.
+        from oduflow.domains import in_zone
+
+        zones: dict[str, str] = {}
+        for team in self.teams.values():
+            if not team.base_domain:
+                continue
+            if team.base_domain in zones:
+                raise ValueError(
+                    f"Teams '{zones[team.base_domain]}' and '{team.team_id}' "
+                    f"have duplicate base_domain '{team.base_domain}'."
+                )
+            zones[team.base_domain] = team.team_id
+        for team in self.teams.values():
+            for zone, owner in zones.items():
+                if owner == team.team_id:
+                    continue
+                for label, value in (
+                    ("hostname", team.hostname.lower()),
+                    ("base_domain", team.base_domain),
+                ):
+                    if value and in_zone(value, zone):
+                        raise ValueError(
+                            f"Team '{team.team_id}': {label} '{value}' lies "
+                            f"inside team '{owner}' base_domain '{zone}'."
+                        )
 
         # Validate static extra routes ([route.*]). They only make sense in
         # traefik mode (port mode has no shared reverse proxy) and must forward
@@ -722,8 +777,17 @@ class Settings:
                     f"got {port_range!r}"
                 )
 
+            raw_base_domain = str(team_cfg.get("base_domain", ""))
+            base_domain = (
+                re.sub(r"^https?://", "", raw_base_domain).strip().lower().rstrip(".")
+            )
+
             raw_hostname = str(team_cfg.get("hostname", ""))
             hostname = re.sub(r"^https?://", "", raw_hostname).strip()
+            if not hostname and base_domain:
+                # The dashboard's default home in a team zone. An explicit
+                # hostname still wins.
+                hostname = f"oduflow.{base_domain}"
 
             agent_env_raw = team_cfg.get("agent_env", {})
             if not isinstance(agent_env_raw, dict):
@@ -743,6 +807,7 @@ class Settings:
             teams[team_id] = TeamSettings(
                 team_id=team_id,
                 hostname=hostname,
+                base_domain=base_domain,
                 auth_token=str(team_cfg.get("auth_token", "")),
                 ui_password=str(team_cfg.get("ui_password", "")),
                 port_range_start=port_start,

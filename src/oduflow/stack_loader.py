@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +16,9 @@ from oduflow.stack_models import EnvValue, StackManifest, ValueFrom
 
 _MAX_MANIFEST_BYTES = 1_000_000
 _MAX_FILE_BYTES = 1_000_000
+
+STACK_ENV_FILE = ".env"
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class StackValidationError(ValueError):
@@ -157,6 +161,86 @@ def resolve_env_values(
                 )
             result[key] = token
     return result
+
+
+def load_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
+    """Parse a dotenv file into a mapping for ``fromEnv`` lookups.
+
+    Deliberately dumb: ``KEY=VALUE`` lines, blank lines and ``#`` comments,
+    an optional ``export `` prefix, and matching surrounding quotes stripped.
+    No interpolation, no escapes, no multi-line values; malformed lines and
+    duplicate keys are rejected rather than guessed at.
+    """
+    env_path = Path(path).expanduser().resolve()
+    try:
+        size = env_path.stat().st_size
+    except OSError as exc:
+        raise StackValidationError(f"cannot read env file '{path}': {exc}") from exc
+    if not env_path.is_file():
+        raise StackValidationError(f"env file '{path}' is not a regular file")
+    if size > _MAX_FILE_BYTES:
+        raise StackValidationError(
+            f"env file '{path}' exceeds {_MAX_FILE_BYTES} byte limit"
+        )
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise StackValidationError(f"cannot read env file '{path}': {exc}") from exc
+    values: dict[str, str] = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
+        key, sep, value = stripped.partition("=")
+        key = key.strip()
+        if not sep or not _ENV_NAME_RE.fullmatch(key):
+            raise StackValidationError(
+                f"invalid line {number} in env file '{env_path.name}': "
+                "expected KEY=VALUE"
+            )
+        if key in values:
+            raise StackValidationError(
+                f"duplicate key '{key}' at line {number} in env file '{env_path.name}'"
+            )
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def stack_environ(
+    manifest_path: str | os.PathLike[str],
+    env_file: str | os.PathLike[str] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Mapping[str, str] | None:
+    """The ``fromEnv`` lookup mapping for one stack invocation.
+
+    An explicit ``env_file`` must exist; without one, a ``.env`` sitting next
+    to the manifest is used when present. Real process environment variables
+    override file values, so CI can override a default without editing the
+    file. Returns None when no file contributes values, keeping the caller on
+    the live ``os.environ`` fallback.
+    """
+    base = os.environ if environ is None else environ
+    if env_file is None:
+        directory = Path(manifest_path).expanduser().resolve().parent
+        candidate = directory / STACK_ENV_FILE
+        if not candidate.exists():
+            return None
+        try:
+            candidate.resolve().relative_to(directory)
+        except ValueError as exc:
+            raise StackValidationError(
+                f"'{STACK_ENV_FILE}' next to the manifest escapes the stack directory"
+            ) from exc
+        env_file = candidate
+    merged = load_env_file(env_file)
+    merged.update(base)
+    return merged
 
 
 def read_stack_file(manifest_path: str | os.PathLike[str], source: str) -> str:

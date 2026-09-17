@@ -19,7 +19,9 @@ oduflow stack status oduflow.yaml --team 1
 live state without changing it. `apply` validates and plans again under the
 team lock, refuses all conflicts before creating anything, and then converges
 resources in dependency order. `status` emits JSON containing the current plan
-and last successful apply record.
+and last successful apply record. `plan`, `apply`, and `status` also accept
+`--env-file` to supply `fromEnv` values from a dotenv file; see
+[Secrets from a `.env` file](#secrets-from-a-env-file).
 
 To reconcile before the MCP server accepts clients:
 
@@ -123,6 +125,31 @@ It can be read from the process starting Oduflow:
 ESL_PASSWORD:
   fromEnv: FS_ESL_PASSWORD
 ```
+
+### Secrets from a `.env` file
+
+`fromEnv` values do not have to come from exported shell variables. If a
+`.env` file sits next to the manifest, `stack plan`, `stack apply`,
+`stack status`, and the `--stack` startup reconciliation parse it and use it
+for `fromEnv` lookups. Pass `--env-file path/to/file` to read a different
+file instead; an explicitly named file must exist.
+
+```dotenv
+# .env — keep this file out of version control
+FS_ESL_PASSWORD=s3cret
+export ACME_PRIVATE_API_KEY="matching surrounding quotes are stripped"
+```
+
+The format is deliberately dumb: `KEY=VALUE` lines, blank lines and `#`
+comments, an optional `export ` prefix. There is no `${VAR}` interpolation,
+no escape processing, and no multi-line values; malformed lines and duplicate
+keys are rejected. Real process environment variables override file values,
+so CI can override a checked-in default without editing the file.
+
+The file only feeds `fromEnv:` references. It never defines container
+variables by itself, is never persisted anywhere, and never enters the
+manifest hash. Add `.env` to `.gitignore`: it is the one file in a stack
+directory meant to hold secrets.
 
 Or a service can consume a value generated for the Stack's Odoo environment:
 
