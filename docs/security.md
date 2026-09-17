@@ -289,6 +289,31 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 
 Validation checks the credential against the provider's API (GitHub, GitLab, Bitbucket). For other hosts, it reports `"valid"` if the credential exists. Tokens are always masked in API responses (e.g. `ghp_****`).
 
+### SSH deploy key
+
+As an alternative to tokens, each team has an SSH deploy key: an ed25519
+keypair generated automatically at server start and stored at
+`{team_data_dir}/ssh/id_ed25519` with owner-only permissions. The dashboard's
+**Credentials** tab, `GET /api/ssh-key`, and the `get_ssh_public_key` MCP tool
+expose only the public key. Register it with your git hosting (repository
+deploy key or machine-user key) and SSH repository URLs
+(`git@github.com:owner/repo.git`) work for environments, extra addon repos and
+productions.
+
+Like the team's git credential store, the private key is also provisioned
+into the team's coding-agent container so agent-side clones work over SSH.
+Anyone who can drive that agent — including a visitor holding a scoped
+environment share link, via Agent Chat — can therefore read it. Treat the
+deploy key as a team-level credential: prefer registering it read-only and
+per-repository, and regenerate it when a share should no longer grant repo
+access.
+
+Git runs SSH with `BatchMode=yes` (it can never block on a prompt) and
+`StrictHostKeyChecking=accept-new` with a per-team `known_hosts` file, so a
+host key is pinned on first contact and a later change is refused.
+`POST /api/ssh-key/generate` with `{"force": true}` regenerates the keypair;
+the old key stops working everywhere it was registered.
+
 ## Secrets for Environment Variables
 
 Environment variables on services and environments are visible to coding agents through `get_service_info`, `list_services`, `get_environment_info` and the dashboard — so putting a password or API key directly into `env_vars` leaks it into every agent conversation that inspects the resource.

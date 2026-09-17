@@ -89,6 +89,7 @@ also available via the [REST API](web-api.md).
 | `cancel_image_build` | | Terminate a running build and its Docker connection, including a silent Dockerfile step |
 | **Repository Auth** | | |
 | `setup_repo_auth` | ✓ | Cache git credentials for a private repository |
+| `get_ssh_public_key` | | The team's SSH public key (generated automatically); register it with your git hosting as a deploy key or machine-user key, then use SSH repository URLs such as `git@github.com:owner/repo.git` |
 | **Extra Addons** | | |
 | `add_extra_repo` | | Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments |
 | `list_extra_repos` | | List all cloned extra addons repositories |

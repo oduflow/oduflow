@@ -1680,7 +1680,7 @@ def _clone_repo(
     passes ``depth=0`` for a full clone — commit history is the point there
     (rollback targets, deploy history display).
     """
-    git_env = git_env_for_team(team.git_credentials_file())
+    git_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     from oduflow.git_ops import inject_credential_user
 
@@ -1712,6 +1712,17 @@ def _clone_repo(
             e.stderr.decode("utf-8") if e.stderr else str(e)
         )
         if any(kw.lower() in error_msg.lower() for kw in auth_keywords):
+            from oduflow.git_ops import is_ssh_url
+
+            # SSH and HTTPS remotes have different remedies: pointing an SSH
+            # failure at setup_repo_auth (the PAT flow) is a dead end.
+            if is_ssh_url(repo_url):
+                raise RepoAuthError(
+                    f"Git authentication failed for {sanitize_repo_url(repo_url)}. "
+                    "The remote uses SSH: register the team deploy key "
+                    "(get_ssh_public_key) with the git host, or use an "
+                    "HTTPS URL with setup_repo_auth."
+                )
             raise RepoAuthError(
                 f"Git authentication failed for {sanitize_repo_url(repo_url)}. "
                 f"Call 'setup_repo_auth' first to cache credentials."
@@ -2622,23 +2633,28 @@ def _agent_container_config(
 
 
 def _agent_config_hash(
-    container_config: dict[str, Any], has_git_credentials: bool
+    container_config: dict[str, Any],
+    has_git_credentials: bool,
+    ssh_key_fingerprint: str = "",
 ) -> str:
     """Fingerprint of the config the agent container was created with.
 
     Stored as a container label; a mismatch on ensure means the image, injected
     config, or Docker run specification changed, so the container is recreated.
-    HOME and /workspace are volumes — nothing is lost. Git credentials are
-    copied into HOME by the volume init step at container creation, so their
-    presence is also part of the fingerprint: a container created before
-    setup_repo_auth would otherwise keep matching forever and never pick up the
-    file."""
+    HOME and /workspace are volumes — nothing is lost. Git credentials and the
+    team SSH key are copied into HOME by the volume init step at container
+    creation, so their presence is also part of the fingerprint: a container
+    created before setup_repo_auth (or before the key existed) would otherwise
+    keep matching forever and never pick up the file. The SSH part is the key's
+    fingerprint, not a boolean, so a regenerated key also recreates the
+    container."""
     import hashlib
 
     payload = json.dumps(
         {
             "container": container_config,
             "has_git_credentials": has_git_credentials,
+            "ssh_key_fingerprint": ssh_key_fingerprint,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -2652,14 +2668,16 @@ def _prepare_agent_volumes(
     home_volume: str,
     workspace_volume: str,
     cred_file: str | None,
+    ssh_key_file: str | None = None,
 ) -> None:
     """Make persistent agent data usable by the unprivileged image user.
 
     Older coder images mounted HOME at ``/root`` and consequently left both
     named volumes root-owned. A short-lived, networkless init container runs
     as root only to migrate that existing data and copy the host credential
-    store; the long-lived container and every agent exec run as ``agent``.
-    Marker files avoid recursively walking large checkouts after migration.
+    store and team SSH deploy key; the long-lived container and every agent
+    exec run as ``agent``. Marker files avoid recursively walking large
+    checkouts after migration.
     """
     volumes: dict[str, dict[str, str]] = {
         home_volume: {"bind": AGENT_HOME, "mode": "rw"},
@@ -2668,6 +2686,11 @@ def _prepare_agent_volumes(
     if cred_file:
         volumes[cred_file] = {
             "bind": "/run/oduflow/git-credentials",
+            "mode": "ro",
+        }
+    if ssh_key_file:
+        volumes[ssh_key_file] = {
+            "bind": "/run/oduflow/ssh-key",
             "mode": "ro",
         }
 
@@ -2690,6 +2713,28 @@ fi
 if [ -f /run/oduflow/git-credentials ]; then
     install -m 600 -o agent -g agent \
         /run/oduflow/git-credentials /home/agent/.git-credentials
+fi
+if [ -f /run/oduflow/ssh-key ]; then
+    install -d -m 700 -o agent -g agent /home/agent/.ssh
+    install -m 600 -o agent -g agent \
+        /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
+    # Oduflow's SSH policy lives in its own file, rewritten on every
+    # container creation so policy changes reach existing (persistent) homes;
+    # the user-editable config only carries the Include. Mirrors the
+    # server-side team_ssh_command options.
+    printf '%s\\n' 'Host *' '  IdentitiesOnly yes' '  BatchMode yes' \
+        '  StrictHostKeyChecking accept-new' > /home/agent/.ssh/oduflow_config
+    chown agent:agent /home/agent/.ssh/oduflow_config
+    chmod 600 /home/agent/.ssh/oduflow_config
+    if [ ! -f /home/agent/.ssh/config ]; then
+        printf 'Include oduflow_config\\n' > /home/agent/.ssh/config
+    elif ! grep -q 'Include oduflow_config' /home/agent/.ssh/config; then
+        { printf 'Include oduflow_config\\n'; \
+          cat /home/agent/.ssh/config; } > /home/agent/.ssh/config.tmp
+        mv /home/agent/.ssh/config.tmp /home/agent/.ssh/config
+    fi
+    chown agent:agent /home/agent/.ssh/config
+    chmod 600 /home/agent/.ssh/config
 fi
 """
     client.containers.run(
@@ -2747,8 +2792,14 @@ def _ensure_agent_container(
         agent_env = dict(_agent_env_vars(settings, team))
         cred_file = team.git_credentials_file()
         has_git_credentials = os.path.isfile(cred_file)
+        from oduflow import git_ops
+
+        ssh_key_file = git_ops.ssh_key_path(team.ssh_dir())
+        ssh_fingerprint = git_ops.ssh_key_fingerprint(team.ssh_dir())
         container_config = _agent_container_config(settings, team, agent_env)
-        config_hash = _agent_config_hash(container_config, has_git_credentials)
+        config_hash = _agent_config_hash(
+            container_config, has_git_credentials, ssh_fingerprint
+        )
 
         container_name = get_agent_container_name(team.team_id, settings.prefix)
         existing_container = None
@@ -2812,6 +2863,9 @@ def _ensure_agent_container(
             home_volume,
             workspace_volume,
             cred_file if has_git_credentials else None,
+            # Gate the mount on the key file itself; the fingerprint only
+            # feeds the config hash and may be "" while the key is usable.
+            ssh_key_file if os.path.isfile(ssh_key_file) else None,
         )
         client.containers.run(
             name=container_name,

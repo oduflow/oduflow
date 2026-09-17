@@ -1723,6 +1723,26 @@ plain URL without credentials. The legacy inline form
 `oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git`
 still works.
 
+#### SSH deploy key
+
+Alternatively, use SSH instead of a token. Oduflow keeps one SSH deploy key
+per team (an ed25519 keypair generated automatically at server start; the
+dashboard, API and MCP tools expose only the public key). Copy the public key from the
+dashboard's **Credentials** tab (SSH deploy key section) — or fetch it with
+`oduflow call get_ssh_public_key` — and register it with your git hosting as
+a repository **deploy key** (read access is enough) or on a machine-user
+account. After that, SSH repository URLs work everywhere a repository URL is
+accepted:
+
+```bash
+oduflow call create_environment '{"branch": "feature-x", "repo_url": "git@github.com:owner/private-repo.git"}'
+```
+
+Note: GitHub allows a given deploy key on **one** repository only; to reach
+several repositories with the same key, attach it to a machine-user account
+instead. Regenerating the key (dashboard, *Regenerate*) invalidates the old
+one everywhere it was registered.
+
 ### Auto-dependency installation
 
 Place these files in your repository for automatic installation during environment creation:
@@ -3757,6 +3777,8 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/credentials/add` | Store an access token for a git host: body `token`, `host` (default `github.com`), optional `username`, optional `repo_url` to verify with `git ls-remote`; legacy body `repo_url` with inline `user:PAT@` |
 | `POST` | `/api/credentials/delete` | Delete by body `host` and `username` |
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
+| `GET` | `/api/ssh-key` | The team's SSH public key and fingerprint (only the public key is returned) |
+| `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
 | `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
 | `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
@@ -3925,6 +3947,7 @@ also available via the [REST API](web-api.md).
 | `cancel_image_build` | | Terminate a running build and its Docker connection, including a silent Dockerfile step |
 | **Repository Auth** | | |
 | `setup_repo_auth` | ✓ | Cache git credentials for a private repository |
+| `get_ssh_public_key` | | The team's SSH public key (generated automatically); register it with your git hosting as a deploy key or machine-user key, then use SSH repository URLs such as `git@github.com:owner/repo.git` |
 | **Extra Addons** | | |
 | `add_extra_repo` | | Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments |
 | `list_extra_repos` | | List all cloned extra addons repositories |
@@ -5065,6 +5088,31 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 | **Validate** a credential against the provider | `POST /api/credentials/validate` (body: `host`, `username`) |
 
 Validation checks the credential against the provider's API (GitHub, GitLab, Bitbucket). For other hosts, it reports `"valid"` if the credential exists. Tokens are always masked in API responses (e.g. `ghp_****`).
+
+### SSH deploy key
+
+As an alternative to tokens, each team has an SSH deploy key: an ed25519
+keypair generated automatically at server start and stored at
+`{team_data_dir}/ssh/id_ed25519` with owner-only permissions. The dashboard's
+**Credentials** tab, `GET /api/ssh-key`, and the `get_ssh_public_key` MCP tool
+expose only the public key. Register it with your git hosting (repository
+deploy key or machine-user key) and SSH repository URLs
+(`git@github.com:owner/repo.git`) work for environments, extra addon repos and
+productions.
+
+Like the team's git credential store, the private key is also provisioned
+into the team's coding-agent container so agent-side clones work over SSH.
+Anyone who can drive that agent — including a visitor holding a scoped
+environment share link, via Agent Chat — can therefore read it. Treat the
+deploy key as a team-level credential: prefer registering it read-only and
+per-repository, and regenerate it when a share should no longer grant repo
+access.
+
+Git runs SSH with `BatchMode=yes` (it can never block on a prompt) and
+`StrictHostKeyChecking=accept-new` with a per-team `known_hosts` file, so a
+host key is pinned on first contact and a later change is refused.
+`POST /api/ssh-key/generate` with `{"force": true}` regenerates the keypair;
+the old key stops working everywhere it was registered.
 
 ## Secrets for Environment Variables
 
