@@ -188,6 +188,14 @@ class TeamSettings:
     def git_credentials_file(self) -> str:
         return os.path.join(self.data_dir, ".git-credentials")
 
+    def ssh_dir(self) -> str:
+        """Team SSH deploy key directory (keypair + known_hosts).
+
+        git_ops derives this path from the credential file's directory, so it
+        must stay a sibling of :meth:`git_credentials_file`.
+        """
+        return os.path.join(self.data_dir, "ssh")
+
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _KEEP_PAIR_RE = re.compile(r"^\d+:\d+$")

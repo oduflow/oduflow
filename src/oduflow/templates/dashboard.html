@@ -1442,6 +1442,11 @@
     <button class="btn-create" onclick="openSecretModal()">+ Add Secret</button>
   </div>
   <div id="credentials-list"></div>
+  <div id="ssh-key-section" style="margin-top:24px;">
+    <h2 class="section-subtitle">SSH deploy key</h2>
+    <div class="hint">The team's SSH public key, generated and kept by Oduflow (only the public key is shown here). Add it to your git hosting as a repository deploy key (read access is enough) or to a machine-user account, then use SSH repository URLs such as <code>git@github.com:owner/repo.git</code>. Note: GitHub allows a deploy key on one repository only — use a machine user to cover several.</div>
+    <div id="ssh-key-body"></div>
+  </div>
   <div id="secrets-section" style="margin-top:24px;">
     <h2 class="section-subtitle">Secrets</h2>
     <div class="hint">Named values for environment variables. Reference one as <code>KEY=secret:&lt;name&gt;</code> in any service or environment. Values are write-only: agents and the API can only see the name, never the value.</div>
@@ -4316,7 +4321,7 @@ function switchTab(name) {
   if (name === 'volumes') loadVolumes();
   if (name === 'agent-guides') loadAgentGuides();
   if (name === 'extra-addons') loadExtraRepos();
-  if (name === 'credentials') { loadCredentials(); loadSecrets(); }
+  if (name === 'credentials') { loadCredentials(); loadSshKey(); loadSecrets(); }
 }
 
 async function loadTemplates() {
@@ -6833,6 +6838,78 @@ function renderCredentials(creds) {
       '</div>' +
     '</div>';
   }).join('');
+}
+
+var cachedSshKey = '';
+
+async function loadSshKey() {
+  try {
+    var r = await fetch('/api/ssh-key');
+    var data = await readResult(r);
+    if (data.ok) {
+      renderSshKey(data);
+    } else {
+      showToast(data.error || 'Failed to load SSH key', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+function renderSshKey(data) {
+  cachedSshKey = data.public_key || '';
+  var el = document.getElementById('ssh-key-body');
+  if (!cachedSshKey) {
+    el.innerHTML = '<div class="empty">No SSH key yet. ' +
+      '<button class="btn btn-sm" onclick="generateSshKey(false)">Generate key</button></div>';
+    return;
+  }
+  el.innerHTML = '<div class="svc-card">' +
+    '<div class="svc-header">' +
+      '<div class="left">' +
+        '<span class="svc-name">id_ed25519.pub</span>' +
+        '<code style="margin-left:8px;color:var(--text-dim);">' + esc(data.fingerprint || '') + '</code>' +
+      '</div>' +
+      '<div class="svc-actions">' +
+        '<button class="btn btn-sm" onclick="copySshKey()">Copy</button>' +
+        '<button class="btn btn-delete" onclick="regenerateSshKey()">Regenerate</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="svc-meta"><code style="word-break:break-all;">' + esc(cachedSshKey) + '</code></div>' +
+  '</div>';
+}
+
+function copySshKey() {
+  if (cachedSshKey) copyToClipboard(cachedSshKey, 'Public key copied');
+}
+
+async function generateSshKey(force) {
+  try {
+    var r = await fetch('/api/ssh-key/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: !!force})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(force ? 'SSH key regenerated' : 'SSH key generated');
+      renderSshKey(data);
+    } else {
+      showToast(data.error || 'SSH key generation failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+async function regenerateSshKey() {
+  if (!(await confirmDialog({
+    title: 'Regenerate SSH key',
+    message: 'Generate a new key? The current key stops working immediately — every repository or account where it is registered will need the new public key.',
+    confirmLabel: 'Regenerate',
+    danger: true
+  }))) return;
+  await generateSshKey(true);
 }
 
 function openAddCredentialModal() {

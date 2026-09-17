@@ -4048,6 +4048,63 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    def api_ssh_key(request: Request) -> JSONResponse:
+        """The team's SSH public key (the response carries no private material)."""
+        from oduflow import git_ops
+
+        try:
+            team = _get_ui_team(request)
+            public_key, fingerprint = git_ops.ssh_key_info(team.ssh_dir())
+            return JSONResponse(
+                {"ok": True, "public_key": public_key, "fingerprint": fingerprint}
+            )
+        except Exception:
+            logger.exception("Unexpected error in api_ssh_key")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_ssh_key_generate(request: Request) -> JSONResponse:
+        """Create the team SSH key if absent; ``{"force": true}`` regenerates.
+
+        Regeneration invalidates the old key on every host where it was
+        registered — the dashboard confirms before sending force.
+        """
+        from oduflow import git_ops
+
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        force = bool(body.get("force"))
+        key = credentials_lock_key(team.team_id)
+        try:
+            locks.acquire_env(key, operation="generate_ssh_key")
+        except BusyError as e:
+            return _error_response(e)
+        try:
+            # One offloaded unit: keygen is a blocking subprocess, and reading
+            # the result inside it keeps the ASGI event loop untouched.
+            def _generate() -> tuple[str, str]:
+                comment = git_ops.ssh_key_comment(team.team_id)
+                git_ops.ensure_ssh_key(team.ssh_dir(), comment=comment, force=force)
+                return git_ops.ssh_key_info(team.ssh_dir())
+
+            public_key, fingerprint = await _offload(_generate)
+            return JSONResponse(
+                {"ok": True, "public_key": public_key, "fingerprint": fingerprint}
+            )
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_ssh_key_generate")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+        finally:
+            locks.release_env(key)
+
     def api_secrets(request: Request) -> JSONResponse:
         """Names and timestamps only — secret values never leave the server."""
         try:
@@ -6255,6 +6312,8 @@ def _build_routes(
         Route("/api/credentials/add", api_credential_add, methods=["POST"]),
         Route("/api/credentials/delete", api_credential_delete, methods=["POST"]),
         Route("/api/credentials/validate", api_credential_validate, methods=["POST"]),
+        Route("/api/ssh-key", api_ssh_key, methods=["GET"]),
+        Route("/api/ssh-key/generate", api_ssh_key_generate, methods=["POST"]),
         # Secrets are write-only: the list returns names + timestamps, and no
         # endpoint anywhere returns a stored value. Deliberately absent from
         # the ui_scope allowlist, so scoped share sessions cannot touch them.

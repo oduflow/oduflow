@@ -503,12 +503,21 @@ def sanitize_repo_url(url: str) -> str:
         return url
     try:
         parsed = urlparse(url)
-        if parsed.username or parsed.password:
+        # Only HTTP(S) userinfo is a credential. An SSH URL's user (git@) is
+        # part of the protocol and must survive for later clones.
+        if parsed.scheme in ("https", "http") and (parsed.username or parsed.password):
             # Strip only userinfo.  Keep the original host spelling, IPv6
             # brackets, and explicit port: this sanitized URL is also used for
             # subsequent clones, not just display.
             clean = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1])
             return urlunparse(clean)
+        if parsed.password:
+            # Non-HTTP schemes (ssh://): keep the protocol user, but an
+            # embedded password is a secret and must not reach container
+            # labels, environment info, or the dashboard.
+            host = parsed.netloc.rsplit("@", 1)[-1]
+            user = f"{parsed.username}@" if parsed.username else ""
+            return urlunparse(parsed._replace(netloc=user + host))
     except Exception:
         pass
     return url

@@ -93,6 +93,26 @@ plain URL without credentials. The legacy inline form
 `oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git`
 still works.
 
+#### SSH deploy key
+
+Alternatively, use SSH instead of a token. Oduflow keeps one SSH deploy key
+per team (an ed25519 keypair generated automatically at server start; the
+dashboard, API and MCP tools expose only the public key). Copy the public key from the
+dashboard's **Credentials** tab (SSH deploy key section) — or fetch it with
+`oduflow call get_ssh_public_key` — and register it with your git hosting as
+a repository **deploy key** (read access is enough) or on a machine-user
+account. After that, SSH repository URLs work everywhere a repository URL is
+accepted:
+
+```bash
+oduflow call create_environment '{"branch": "feature-x", "repo_url": "git@github.com:owner/private-repo.git"}'
+```
+
+Note: GitHub allows a given deploy key on **one** repository only; to reach
+several repositories with the same key, attach it to a machine-user account
+instead. Regenerating the key (dashboard, *Regenerate*) invalidates the old
+one everywhere it was registered.
+
 ### Auto-dependency installation
 
 Place these files in your repository for automatic installation during environment creation:

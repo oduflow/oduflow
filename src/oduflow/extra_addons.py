@@ -88,7 +88,7 @@ def clone_extra_repo(
     from oduflow.git_ops import inject_credential_user
 
     clone_url = inject_credential_user(repo_url, git_user)
-    cred_env = git_env_for_team(team.git_credentials_file())
+    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     try:
         # Shallow clone (--depth 1): drop history so large repos like Odoo
@@ -116,6 +116,15 @@ def clone_extra_repo(
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
         if any(kw in stderr for kw in _AUTH_ERROR_KEYWORDS):
+            from oduflow.git_ops import is_ssh_url
+
+            if is_ssh_url(repo_url):
+                raise RepoAuthError(
+                    f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
+                    "The remote uses SSH: register the team deploy key "
+                    "(get_ssh_public_key) with the git host, or use an "
+                    "HTTPS URL with setup_repo_auth."
+                )
             raise RepoAuthError(
                 f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
                 "Use setup_repo_auth to configure credentials first."
@@ -476,7 +485,7 @@ def _fetch_extra_repo_unlocked(
         pass  # best-effort; fetch will still run
 
     refs_before = _get_branch_refs(path)
-    cred_env = git_env_for_team(team.git_credentials_file())
+    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     if branch:
         # Targeted single-branch fetch: pull only the requested branch's tip so

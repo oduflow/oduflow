@@ -561,6 +561,36 @@ def setup_repo_auth(
     )
 
 
+@mcp.tool()
+@handle_errors
+@with_key_lock(credentials_lock_key, require_name=False)
+def get_ssh_public_key(ctx: Context | None = None) -> str:
+    """
+    Get the team's SSH public key for git access over SSH.
+
+    Oduflow maintains one SSH deploy key per team (generated automatically at
+    server start). Register this public key with your git hosting — as a
+    repository deploy key (read access is enough) or on a machine-user
+    account — and SSH repository URLs (git@github.com:owner/repo.git) work in
+    create_environment, add_extra_repo and productions without a token.
+
+    Note: GitHub allows a given deploy key on only one repository; to reach
+    several repositories with the same key, attach it to a (machine) user
+    account instead.
+    """
+    team = _resolve_team(ctx)
+    git_ops.ensure_ssh_key(
+        team.ssh_dir(), comment=git_ops.ssh_key_comment(team.team_id)
+    )
+    public_key, fingerprint = git_ops.ssh_key_info(team.ssh_dir())
+    return (
+        f"Team SSH public key ({fingerprint}):\n\n"
+        f"{public_key}\n\n"
+        "Add it to your git hosting (deploy key or machine-user key), then use "
+        "SSH repository URLs such as git@github.com:owner/repo.git."
+    )
+
+
 # =============================================================================
 # MCP Tools — Extra addons repos
 #
@@ -584,7 +614,9 @@ def add_extra_repo(name: str, repo_url: str, ctx: Context | None = None) -> str:
 
     Args:
         name: Short name for the repo (e.g. "enterprise", "custom-themes").
-        repo_url: HTTPS URL of the repository (e.g. https://github.com/owner/repo.git).
+        repo_url: Repository URL — HTTPS (https://github.com/owner/repo.git)
+            or SSH (git@github.com:owner/repo.git, needs the team deploy key,
+            see get_ssh_public_key).
     """
     from oduflow.extra_addons import clone_extra_repo
 
@@ -5388,7 +5420,7 @@ def reconfigure_production(
                 remove all. Omit to leave unchanged.
         odoo_image: New Docker image, e.g. "odoo:19.0".
         branch: New git branch to deploy.
-        repo_url: New HTTPS git repository URL.
+        repo_url: New git repository URL (HTTPS or SSH).
         git_user: New git username for credential matching. Pass "" to
                 clear it; omit to leave unchanged.
         env_vars: Full replacement user environment variables, including
@@ -5981,6 +6013,19 @@ def _ensure_initialized(settings: Settings) -> None:
 
         os.makedirs(os.path.join(team.data_dir, "odoo_sanitize"), exist_ok=True)
         os.makedirs(os.path.join(team.data_dir, "agent_guides"), exist_ok=True)
+
+        # Team SSH deploy key, so SSH remotes work out of the box once the
+        # public key is registered with the git host. Never fatal: HTTPS+PAT
+        # remains fully functional without ssh-keygen on the server.
+        try:
+            if git_ops.ensure_ssh_key(
+                team.ssh_dir(), comment=git_ops.ssh_key_comment(team_id)
+            ):
+                logger.info("[team.%s] SSH deploy key generated", team_id)
+        except Exception:
+            logger.warning(
+                "[team.%s] SSH deploy key generation failed", team_id, exc_info=True
+            )
         for managed in _managed_bundled_files(bundled_dir, team_id, team):
             if bundled_upgrade.seed_managed_file(managed):
                 logger.info("[team.%s] Bundled file: %s", team_id, managed.destination)
