@@ -89,6 +89,14 @@ Dynamic Client Registration (`/register`) is **disabled** — clients must use t
 
 The issued access token is an independent, expiring token bound to that team (not the `auth_token`), so each team's claude.ai connector ends up scoped to its own workspaces, templates, and credentials while Claude never stores the master secret. Claude.ai transparently uses its refresh token to obtain a new access token when the old one expires; the connection also survives an Oduflow restart because minted tokens are persisted.
 
+### Connecting from Claude Desktop
+
+Claude Desktop does **not** use this OAuth flow — it can only start MCP servers
+as local processes. Connect it through the `mcp-remote` stdio bridge with the
+team's `auth_token` as a plain Bearer header; the full
+`claude_desktop_config.json` example is in
+[Quick Start → Claude Desktop](quick-start.md#claude-desktop-remote-server-via-mcp-remote).
+
 ### Bearer-only mode (CLI / automation)
 
 For curl, IDE clients, or anything that doesn't need OAuth, simply send the `auth_token` as a Bearer header:
