@@ -1051,6 +1051,44 @@ class TestProductionFeatureGate:
         mock_list.assert_called_once()
 
 
+class TestRestoreProductionSource:
+    @pytest.fixture(autouse=True)
+    def _enable_production(self):
+        import oduflow.server
+
+        oduflow.server._settings = Settings(prod_enabled=True, teams={"1": TEST_TEAM})
+        yield
+
+    def test_requires_exactly_one_source(self):
+        restore_tool = _get_tool_fn("restore_production")
+        with pytest.raises(ToolError, match="exactly one"):
+            restore_tool(name="erp", confirm="erp")
+        with pytest.raises(ToolError, match="exactly one"):
+            restore_tool(
+                name="erp",
+                snapshot_id="snap",
+                from_environment="feature",
+                confirm="erp",
+            )
+
+    def test_environment_source_dispatches_to_environment_restore(self):
+        with patch(
+            "oduflow.backup_ops.restore_production_from_environment",
+            return_value={"healthy": True, "warning": "", "notes": ["a note"]},
+        ) as restore:
+            result = _get_tool_fn("restore_production")(
+                name="erp",
+                from_environment="feature",
+                confirm="erp",
+            )
+
+        assert "restored from environment 'feature'" in result
+        assert "NOTE: a note" in result
+        args = restore.call_args
+        assert args.args[2:] == ("erp", "feature")
+        assert callable(args.kwargs["env_lock"])
+
+
 def _get_tool_fn(tool_name: str):
     """Get a sync-callable wrapper for a registered MCP tool."""
     import asyncio

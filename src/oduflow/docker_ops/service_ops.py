@@ -15,6 +15,11 @@ from oduflow.docker_ops.client import (
     docker_operation_error,
     get_client,
 )
+from oduflow.domains import (
+    assert_public_hostname_free,
+    service_hostname,
+    service_parent_domain,
+)
 from oduflow.errors import (
     ConflictError,
     FlowError,
@@ -438,10 +443,23 @@ def create_service(
         run_kwargs["network"] = team_network
 
     if settings.routing_mode == "traefik":
-        if not hostname:
-            hostname = f"{name}.{team.hostname}"
-        elif "." not in hostname:
-            hostname = f"{hostname}.{team.hostname}"
+        # Short names attach to the team zone (base_domain) when configured,
+        # else legacy-nest under the team hostname; a dotted value is a full
+        # FQDN used as-is. Either way the final name must be free in the
+        # global Host() namespace.
+        hostname = service_hostname(team, name, hostname)
+        assert_public_hostname_free(
+            settings,
+            hostname,
+            own_team=team.team_id,
+            # With `routes` no catch-all router is created, only
+            # Host() && PathPrefix() ones, so a path-routed service may share
+            # the team dashboard host — that is the documented way to publish
+            # a URL prefix next to the dashboard.
+            allow_own_team_host=bool(routes),
+            exclude_service=name,
+            purpose=f"the hostname of service '{name}'",
+        )
         labels["traefik.enable"] = "true"
         if routes:
             labels[_HTTP_ROUTES_LABEL] = json.dumps(
@@ -561,7 +579,7 @@ def create_service(
             port,
             hostname=hostname,
             env_vars=env_vars,
-            base_hostname=team.hostname,
+            base_hostname=service_parent_domain(team),
             host_mode=host_mode,
             volumes=volumes,
             cap_add=cap_add,
@@ -1208,9 +1226,7 @@ def update_service(
         logger.info("No changes for service %s: %s", name, new_digest[:19])
         # Compute URL for return
         if settings.routing_mode == "traefik":
-            h = hostname or f"{name}.{team.hostname}"
-            if "." not in h:
-                h = f"{h}.{team.hostname}"
+            h = service_hostname(team, name, hostname)
             url = f"{settings.public_scheme_for(team)}://{h}"
         else:
             url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"

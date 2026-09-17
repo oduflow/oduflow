@@ -34,8 +34,9 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator
+from contextlib import nullcontext
+from typing import Any, ContextManager
 
 from oduflow import chunkstore, production_registry, s3_client
 from oduflow.chunkstore.prune import parse_keep, select_revisions_to_keep
@@ -53,7 +54,11 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.naming import prod_env_name
+from oduflow.naming import (
+    PRODUCTION_TEMPLATE_PREFIX,
+    get_filestore_paths,
+    prod_env_name,
+)
 from oduflow.settings import BackupSettings, Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -375,6 +380,119 @@ def _rollback_database_swap(
     )
 
 
+def _commit_restored_pair(
+    client: Any,
+    settings: Settings,
+    name: str,
+    container: Any,
+    was_running: bool,
+    db_name: str,
+    restore_db: str,
+    old_db: str,
+    restore_dir: str,
+    filestore_dir: str,
+    old_dir: str,
+    pg_container: str,
+) -> None:
+    """Swap a fully staged (database, filestore) pair into the live production.
+
+    Downtime starts here: the production container is stopped, the staged
+    pair is renamed in, and the container is restarted only once the live
+    state is provably coherent again (committed, or completely rolled back).
+    On failure the previous state is back in place and the staged database —
+    under ``restore_db`` again after a compensated filestore failure — is
+    left for the caller's cleanup.
+    """
+    container_stopped = False
+    live_state_safe = True
+    try:
+        if container is not None and was_running:
+            container.stop()
+            container_stopped = True
+        _exec_sql(
+            client,
+            settings,
+            f'DROP DATABASE IF EXISTS "{old_db}" WITH (FORCE);',
+            container_name=pg_container,
+        )
+        _exec_sql(
+            client,
+            settings,
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            f"WHERE datname = '{db_name}';",
+            container_name=pg_container,
+        )
+        # From the first live rename until either the filestore commit or a
+        # complete rollback, an exception leaves the database name uncertain.
+        # Keep Odoo stopped unless one of those paths proves the live pair is
+        # coherent again.
+        live_state_safe = False
+        _exec_sql(
+            client,
+            settings,
+            f'ALTER DATABASE "{db_name}" RENAME TO "{old_db}";',
+            container_name=pg_container,
+        )
+        try:
+            _exec_sql(
+                client,
+                settings,
+                f'ALTER DATABASE "{restore_db}" RENAME TO "{db_name}";',
+                container_name=pg_container,
+            )
+        except BaseException:
+            # Roll the old database back into place.
+            _exec_sql(
+                client,
+                settings,
+                f'ALTER DATABASE "{old_db}" RENAME TO "{db_name}";',
+                container_name=pg_container,
+            )
+            live_state_safe = True
+            raise
+
+        try:
+            had_previous_filestore = _swap_restored_filestore(
+                restore_dir, filestore_dir, old_dir
+            )
+        except BaseException:
+            # The filesystem helper has already put the old filestore back.
+            # Compensate the successful database rename so callers never get a
+            # restored DB paired with stale/missing attachment files.
+            _rollback_database_swap(
+                client, settings, db_name, restore_db, old_db, pg_container
+            )
+            live_state_safe = True
+            raise
+
+        live_state_safe = True
+
+        if had_previous_filestore and os.path.isdir(old_dir):
+            shutil.rmtree(old_dir, ignore_errors=True)
+
+        # Old database dropped only after everything else succeeded.
+        _exec_sql(
+            client,
+            settings,
+            f'DROP DATABASE IF EXISTS "{old_db}" WITH (FORCE);',
+            container_name=pg_container,
+        )
+    finally:
+        if container is not None and container_stopped and live_state_safe:
+            try:
+                container.start()
+            except Exception:
+                logger.exception("Could not restart production '%s'", name)
+        elif container is not None and container_stopped:
+            logger.error(
+                "Production '%s' remains stopped because database rollback "
+                "did not complete; inspect %s and %s before restarting",
+                name,
+                db_name,
+                old_db,
+            )
+
+
 def restore_production(
     settings: Settings,
     team: TeamSettings,
@@ -417,9 +535,7 @@ def restore_production(
     filestore_parent = os.path.dirname(filestore_dir)
     restore_dir = ""
     old_dir = ""
-    container_stopped = False
-    live_state_safe = True
-    swapped = False
+    committed = False
     try:
         os.makedirs(filestore_parent, exist_ok=True)
         restore_dir = tempfile.mkdtemp(
@@ -497,88 +613,28 @@ def restore_production(
             client, settings, restore_db, container_name=pg_container
         )
 
-        # Swap: terminate live connections, rename out, rename in.
-        # Everything above is prepared while Odoo remains available; downtime
-        # starts only for the paired database + filestore commit below.
-        if container is not None and was_running:
-            container.stop()
-            container_stopped = True
-        _exec_sql(
+        # Swap: everything above is prepared while Odoo remains available;
+        # downtime starts only for the paired database + filestore commit.
+        _commit_restored_pair(
             client,
             settings,
-            f'DROP DATABASE IF EXISTS "{old_db}" WITH (FORCE);',
-            container_name=pg_container,
+            name,
+            container,
+            was_running,
+            db_name,
+            restore_db,
+            old_db,
+            restore_dir,
+            filestore_dir,
+            old_dir,
+            pg_container,
         )
-        _exec_sql(
-            client,
-            settings,
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            f"WHERE datname = '{db_name}';",
-            container_name=pg_container,
-        )
-        # From the first live rename until either the filestore commit or a
-        # complete rollback, an exception leaves the database name uncertain.
-        # Keep Odoo stopped unless one of those paths proves the live pair is
-        # coherent again.
-        live_state_safe = False
-        _exec_sql(
-            client,
-            settings,
-            f'ALTER DATABASE "{db_name}" RENAME TO "{old_db}";',
-            container_name=pg_container,
-        )
-        try:
-            _exec_sql(
-                client,
-                settings,
-                f'ALTER DATABASE "{restore_db}" RENAME TO "{db_name}";',
-                container_name=pg_container,
-            )
-            swapped = True
-        except BaseException:
-            # Roll the old database back into place.
-            _exec_sql(
-                client,
-                settings,
-                f'ALTER DATABASE "{old_db}" RENAME TO "{db_name}";',
-                container_name=pg_container,
-            )
-            live_state_safe = True
-            raise
-
-        # ------------------------ filestore ------------------------------
-        try:
-            had_previous_filestore = _swap_restored_filestore(
-                restore_dir, filestore_dir, old_dir
-            )
-        except BaseException:
-            # The filesystem helper has already put the old filestore back.
-            # Compensate the successful database rename so callers never get a
-            # restored DB paired with stale/missing attachment files.
-            swapped = False
-            _rollback_database_swap(
-                client, settings, db_name, restore_db, old_db, pg_container
-            )
-            live_state_safe = True
-            raise
-
-        live_state_safe = True
-
-        if had_previous_filestore and os.path.isdir(old_dir):
-            shutil.rmtree(old_dir, ignore_errors=True)
-
-        # Old database dropped only after everything else succeeded.
-        _exec_sql(
-            client,
-            settings,
-            f'DROP DATABASE IF EXISTS "{old_db}" WITH (FORCE);',
-            container_name=pg_container,
-        )
+        committed = True
     finally:
         if restore_dir and os.path.isdir(restore_dir):
             shutil.rmtree(restore_dir, ignore_errors=True)
-        if not swapped:
-            # Failed before the swap: clean the half-restored database.
+        if not committed:
+            # Failed before the commit (or rolled back): clean the staged DB.
             try:
                 _exec_sql(
                     client,
@@ -588,24 +644,17 @@ def restore_production(
                 )
             except Exception:
                 pass
-        if container is not None and container_stopped and live_state_safe:
-            try:
-                container.start()
-            except Exception:
-                logger.exception("Could not restart production '%s'", name)
-        elif container is not None and container_stopped:
-            logger.error(
-                "Production '%s' remains stopped because database rollback "
-                "did not complete; inspect %s and %s before restarting",
-                name,
-                db_name,
-                old_db,
-            )
 
-    healthy = production_ops.wait_production_healthy(
-        client, settings, team, name, timeout=180
-    )
-    production_registry.update_production(team, name, {"unhealthy": not healthy})
+    # A production that was stopped before the restore is left stopped by
+    # _commit_restored_pair, so probing it would burn the full timeout and then
+    # brand a successful restore as a failed deploy. Only a production that was
+    # serving before is expected to be serving after.
+    healthy = True
+    if was_running:
+        healthy = production_ops.wait_production_healthy(
+            client, settings, team, name, timeout=180
+        )
+        production_registry.update_production(team, name, {"unhealthy": not healthy})
     production_registry.set_nested(
         team, name, "backup", {"last_restore_id": snapshot_id}
     )
@@ -645,6 +694,7 @@ def restore_production(
             "action": f"restore:{snapshot_id}",
             "status": "success" if healthy else "rollback_failed",
             "error": "" if healthy else "Health check failed after restore.",
+            "note": "" if was_running else "Production was stopped; not probed.",
         },
     )
     return {
@@ -654,6 +704,203 @@ def restore_production(
         "warning": warning,
         "db_bytes": manifest["db"]["bytes"],
         "filestore_revision": fs_revision,
+    }
+
+
+def restore_production_from_environment(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    source: str,
+    env_lock: Callable[[], ContextManager[None]] | None = None,
+) -> dict[str, Any]:
+    """Replace a production's database + filestore with a dev environment's.
+
+    The promotion counterpart of the snapshot restore: the environment's
+    database and filestore are copied while its Odoo is briefly stopped for a
+    consistent pair (the environment itself is not reset), staged next to the
+    production, and committed with the same swap mechanics as
+    ``restore_production`` — a failed restore leaves the previous state in
+    place. No backup/S3 configuration is required, and no sanitization
+    happens: the data goes INTO production. The caller holds the production's
+    lock; ``env_lock`` scopes the source environment's lock to the copy slice
+    so dev work on the branch is not blocked by the whole restore.
+    """
+    record = production_registry.get_production(team, name)
+    client = get_client()
+    source_env = production_ops._source_env_info(client, settings, team, source)
+    env_name = prod_env_name(name)
+    db_name = production_ops.prod_db_name(team, name)
+    filestore_dir = production_ops.prod_filestore_dir(team, name)
+    pg_container = settings.prod_db_container
+
+    # Free disk pre-check for the filestore copy. The staging directory is a
+    # sibling of the live filestore on the volume that also holds the running
+    # production's PGDATA, so an oversized source would not merely fail the
+    # copy — it could wedge the production before ENOSPC is raised. The
+    # snapshot path guards its dump download the same way.
+    filestore_parent = os.path.dirname(filestore_dir)
+    os.makedirs(filestore_parent, exist_ok=True)
+    src_filestore = get_filestore_paths(source, team.workspaces_dir)["merged"]
+    if os.path.isdir(src_filestore):
+        from oduflow.docker_ops.stats import _dir_size_bytes
+
+        need = _dir_size_bytes(src_filestore)
+        free = shutil.disk_usage(filestore_parent).free
+        if free < need:
+            raise PrerequisiteNotMetError(
+                f"Not enough free disk to stage the filestore of environment "
+                f"'{source}': need ~{need // 1024**2} MB in {filestore_parent}, "
+                f"have {free // 1024**2} MB."
+            )
+
+    container = production_ops._get_container(client, settings, team, name)
+    was_running = container is not None and container.status == "running"
+
+    restore_db = f"{db_name}__restore"
+    old_db = f"{db_name}__old"
+    restore_dir = ""
+    committed = False
+    notes: list[str] = []
+    try:
+        os.makedirs(filestore_parent, exist_ok=True)
+        restore_dir = tempfile.mkdtemp(dir=filestore_parent, prefix=".restore-env-")
+        old_dir = tempfile.mkdtemp(dir=filestore_parent, prefix=".old-env-")
+        os.rmdir(old_dir)  # reserve a unique sibling path that does not yet exist
+
+        _exec_sql(
+            client,
+            settings,
+            f'DROP DATABASE IF EXISTS "{restore_db}" WITH (FORCE);',
+            container_name=pg_container,
+        )
+        _exec_sql(
+            client,
+            settings,
+            f'CREATE DATABASE "{restore_db}";',
+            container_name=pg_container,
+        )
+
+        # Stage the environment's pair; the production stays up for this
+        # multi-minute part, only the source environment stops briefly.
+        with env_lock() if env_lock is not None else nullcontext():
+            notes.extend(
+                production_ops._copy_env_data_into_production(
+                    client,
+                    settings,
+                    team,
+                    source_env,
+                    source,
+                    name,
+                    restore_db,
+                    filestore_dest=restore_dir,
+                )
+            )
+
+        odoo_image = record.get("odoo_image", "")
+        if odoo_image:
+            uid_str, gid_str = get_odoo_uid_gid(client, odoo_image).split(":")
+            chown_recursive(restore_dir, int(uid_str), int(gid_str), client, odoo_image)
+
+        creds = load_credentials(
+            env_name, team.workspaces_dir, settings.db_user, settings.db_password
+        )
+        reassign_db_ownership(
+            client, settings, restore_db, creds["pg_user"], container_name=pg_container
+        )
+        drop_signaling_sequences(
+            client, settings, restore_db, container_name=pg_container
+        )
+
+        _commit_restored_pair(
+            client,
+            settings,
+            name,
+            container,
+            was_running,
+            db_name,
+            restore_db,
+            old_db,
+            restore_dir,
+            filestore_dir,
+            old_dir,
+            pg_container,
+        )
+        committed = True
+    finally:
+        if restore_dir and os.path.isdir(restore_dir):
+            shutil.rmtree(restore_dir, ignore_errors=True)
+        if not committed:
+            # Failed before the commit (or rolled back): clean the staged DB.
+            try:
+                _exec_sql(
+                    client,
+                    settings,
+                    f'DROP DATABASE IF EXISTS "{restore_db}" WITH (FORCE);',
+                    container_name=pg_container,
+                )
+            except Exception:
+                pass
+
+    # A production that was stopped before the restore is left stopped by
+    # _commit_restored_pair, so probing it would burn the full timeout and then
+    # brand a successful restore as a failed deploy. Only a production that was
+    # serving before is expected to be serving after.
+    healthy = True
+    if was_running:
+        healthy = production_ops.wait_production_healthy(
+            client, settings, team, name, timeout=180
+        )
+        production_registry.update_production(team, name, {"unhealthy": not healthy})
+
+    if str(source_env.get("template", "")).startswith(PRODUCTION_TEMPLATE_PREFIX):
+        notes.append(
+            f"Environment '{source}' was created from production data that "
+            "was sanitized on copy; the production now runs that sanitized "
+            "data."
+        )
+
+    warning = ""
+    current_commit = ""
+    from oduflow.git_ops import rev_parse
+    from oduflow.naming import get_repo_path
+
+    repo_path = get_repo_path(env_name, team.workspaces_dir)
+    if os.path.isdir(repo_path):
+        try:
+            current_commit = rev_parse(repo_path)
+        except Exception:
+            current_commit = ""
+    env_head = str(source_env.get("head_commit", ""))
+    if env_head and current_commit and env_head != current_commit:
+        warning = (
+            f"Environment '{source}' has commit {env_head[:10]} checked out "
+            f"but the production code is at {current_commit[:10]} — the "
+            "copied data may not match the deployed code (update_production "
+            "or push the environment's branch if this is unexpected)."
+        )
+
+    production_ops.append_deploy(
+        team,
+        name,
+        {
+            "ts_start": _now_utc().isoformat(),
+            "ts_end": _now_utc().isoformat(),
+            "trigger": "restore",
+            "from_commit": current_commit,
+            "to_commit": current_commit,
+            "action": f"restore:env:{source}",
+            "status": "success" if healthy else "rollback_failed",
+            "error": "" if healthy else "Health check failed after restore.",
+            "note": "" if was_running else "Production was stopped; not probed.",
+        },
+    )
+    return {
+        "name": name,
+        "source_environment": source,
+        "healthy": healthy,
+        "warning": warning,
+        "notes": notes,
     }
 
 

@@ -63,13 +63,45 @@ does not cover `dev1.example.com`.
 The configured team hostname must include a distinct prefix
 (`dev.example.com`, not bare `example.com`) for pooled or explicit short names.
 
+## Team base domain
+
+Setting `base_domain` gives the team one flat DNS zone instead of nesting
+everything under the dashboard hostname:
+
+```toml
+[team.1]
+base_domain = "demo.example.com"
+# hostname defaults to "oduflow.demo.example.com" (the dashboard)
+```
+
+With a base domain, environments and services live **directly under the
+zone** — `feature-login.demo.example.com`, `meilisearch.demo.example.com` —
+instead of `feature-login.oduflow.demo.example.com`, and production domains
+default into the zone too (the apex `demo.example.com` for the team's first
+production, `<name>.demo.example.com` afterwards; see
+[Production Hosting](production.md#domains)). One `*.demo.example.com` DNS
+record (plus the apex, if a production uses it) covers everything.
+
+The zone is exclusive to the team, and every name handed out is checked
+against the whole routed namespace — the dashboard hostname, production
+domains of all teams, static `[route.*]` hosts, other teams' zones and the
+names live environment and service containers currently serve — so two
+resources can never claim the same FQDN. Existing environments keep their old
+nested hostname until their next `update_environment`, which moves them into
+the zone; until then that is the name they are reported at and checked
+against, because a container's Traefik rule is fixed when it is created.
+
+A service with `routes` is the one deliberate exception: it publishes only
+`Host() && PathPrefix()` routers and no catch-all, so it may share the team's
+dashboard hostname to expose a URL prefix beside the dashboard.
+
 ## OAuth on each team's hostname
 
 The self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled automatically whenever a team has an `auth_token` and runs on **each team's own hostname** in every routing mode. With Traefik, the incoming host already has a Let's Encrypt certificate; with `tls = false`, the upstream tunnel provides it. There is no separate OAuth section: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
 
 ## Service routing with Traefik
 
-Auxiliary services also get Traefik routing. A service named `meilisearch` with base domain `dev.example.com` becomes accessible at `https://meilisearch.dev.example.com`. Custom hostnames are also supported.
+Auxiliary services also get Traefik routing. A service named `meilisearch` under team hostname `dev.example.com` becomes accessible at `https://meilisearch.dev.example.com`; with a team `base_domain` it attaches to the zone instead (`meilisearch.demo.example.com`). Custom hostnames are also supported.
 
 ## Routing extra domains to external services
 

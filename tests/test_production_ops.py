@@ -272,6 +272,127 @@ class TestCreateProduction:
         assert "erp" not in production_registry.list_productions(team)
 
 
+class TestBaseDomainProductions:
+    @pytest.fixture
+    def zone_team(self, tmp_path):
+        data_dir = tmp_path / "team_z"
+        data_dir.mkdir()
+        return TeamSettings(
+            team_id="1",
+            hostname="oduflow.demo.example.com",
+            base_domain="demo.example.com",
+            data_dir=str(data_dir),
+        )
+
+    @pytest.fixture
+    def zone_settings(self, zone_team, tmp_path):
+        return Settings(
+            routing_mode="traefik",
+            acme_email="a@b.co",
+            base_data_dir=str(tmp_path),
+            etc_dir=str(tmp_path / "etc"),
+            teams={"1": zone_team},
+        )
+
+    def test_prod_host_rule_joins_all_domains(self):
+        assert (
+            production_ops.prod_host_rule(
+                {"domain": "demo.example.com", "extra_domains": ["myodoo.pl"]}
+            )
+            == "Host(`demo.example.com`) || Host(`myodoo.pl`)"
+        )
+        assert (
+            production_ops.prod_host_rule({"domain": "erp.example.com"})
+            == "Host(`erp.example.com`)"
+        )
+
+    def test_out_of_zone_primary_rejected(self, zone_settings, zone_team):
+        with pytest.raises(ValueError, match="outside the team zone"):
+            production_ops.create_production(
+                zone_settings,
+                zone_team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "erp.customer.com",
+                "odoo:18.0",
+            )
+
+    def test_first_production_defaults_to_apex(self, zone_settings, zone_team):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)):
+            result = production_ops.create_production(
+                zone_settings,
+                zone_team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "",
+                "odoo:18.0",
+            )
+
+        assert result["domain"] == "demo.example.com"
+        record = production_registry.get_production(zone_team, "erp")
+        assert record["domain"] == "demo.example.com"
+
+    def test_second_production_defaults_to_subdomain(self, zone_settings, zone_team):
+        production_registry.create_production(
+            zone_team, "erp", {"domain": "demo.example.com"}
+        )
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)):
+            result = production_ops.create_production(
+                zone_settings,
+                zone_team,
+                "crm",
+                "https://github.com/o/r.git",
+                "main",
+                "",
+                "odoo:18.0",
+            )
+
+        assert result["domain"] == "crm.demo.example.com"
+
+    def test_extra_domains_stored_and_routed(self, zone_settings, zone_team):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)):
+            production_ops.create_production(
+                zone_settings,
+                zone_team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "demo.example.com",
+                "odoo:18.0",
+                extra_domains=["myodoo.pl", "MYODOO.pl", "demo.example.com"],
+            )
+
+        record = production_registry.get_production(zone_team, "erp")
+        # Deduplicated, lowercased, primary overlap dropped.
+        assert record["extra_domains"] == ["myodoo.pl"]
+        labels = client.containers.run.call_args[1]["labels"]
+        assert (
+            labels["traefik.http.routers.oduflow-1-prod-erp.rule"]
+            == "Host(`demo.example.com`) || Host(`myodoo.pl`)"
+        )
+
+    def test_extra_domain_conflict_rejected(self, zone_settings, zone_team):
+        production_registry.create_production(
+            zone_team, "other", {"domain": "x.demo.example.com"}
+        )
+        with pytest.raises(ConflictError, match="already used"):
+            production_ops.create_production(
+                zone_settings,
+                zone_team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "demo.example.com",
+                "odoo:18.0",
+                extra_domains=["x.demo.example.com"],
+            )
+
+
 class TestDeleteProduction:
     def test_missing_raises(self, settings, team):
         with pytest.raises(NotFoundError):
@@ -766,6 +887,39 @@ class TestReconfigureProduction:
         )
         # Pure infra change: no deploy history entry.
         assert production_ops.read_deploys(team, "erp") == []
+
+    def test_promoting_an_extra_domain_drops_it_from_extras(self, settings, team):
+        """The record's own extras are excluded from the free-name check, so
+        without this the FQDN stays in both fields and prod_host_rule emits
+        Host(`x`) || Host(`x`)."""
+        _seed_prod_record(team, extra_domains=["myodoo.pl"])
+        client = _mock_client()
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", domain="myodoo.pl"
+            )
+
+        assert set(result["changed"]) == {"domain", "extra_domains"}
+        record = production_registry.get_production(team, "erp")
+        assert record["domain"] == "myodoo.pl"
+        assert record["extra_domains"] == []
+        labels = client.containers.run.call_args[1]["labels"]
+        assert (
+            labels["traefik.http.routers.oduflow-1-prod-erp.rule"]
+            == "Host(`myodoo.pl`)"
+        )
+
+    def test_unrelated_domain_change_keeps_extras(self, settings, team):
+        _seed_prod_record(team, extra_domains=["myodoo.pl"])
+        client = _mock_client()
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            production_ops.reconfigure_production(
+                settings, team, "erp", domain="new.example.com"
+            )
+
+        assert production_registry.get_production(team, "erp")["extra_domains"] == [
+            "myodoo.pl"
+        ]
 
     def test_branch_change_switches_checkout_and_records_deploy(self, settings, team):
         _seed_prod_record(team)

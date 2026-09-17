@@ -736,3 +736,67 @@ def test_plan_reports_route_mode_conflict_before_apply(
         )
         in plan.actions
     )
+
+
+class TestDesiredServiceHostname:
+    """Stack drift must compare against what create_service actually assigns.
+
+    When this helper spelled the nesting rule out itself it kept using the team
+    hostname after base_domain landed, so in a zone team every plan reported
+    hostname drift and every apply — including the `--stack` reconciliation on
+    each server restart — recreated the container.
+    """
+
+    @staticmethod
+    def _team(tmp_path, **kw):
+        return TeamSettings(
+            team_id="1",
+            hostname=kw.pop("hostname", "oduflow.demo.example.com"),
+            data_dir=str(tmp_path / "team"),
+            **kw,
+        )
+
+    def test_zone_team_matches_create_service(self, tmp_path):
+        from oduflow.domains import service_hostname
+        from oduflow.stack_ops import _desired_hostname
+
+        team = self._team(tmp_path, base_domain="demo.example.com")
+        settings = Settings(routing_mode="traefik", teams={"1": team})
+
+        assert (
+            _desired_hostname(settings, team, "meilisearch", None)
+            == "meilisearch.demo.example.com"
+        )
+        assert _desired_hostname(settings, team, "meilisearch", None) == (
+            service_hostname(team, "meilisearch", None)
+        )
+
+    def test_legacy_team_layout_is_unchanged(self, tmp_path):
+        from oduflow.stack_ops import _desired_hostname
+
+        team = self._team(tmp_path, hostname="dev.example.com")
+        settings = Settings(routing_mode="traefik", teams={"1": team})
+
+        assert (
+            _desired_hostname(settings, team, "meilisearch", None)
+            == "meilisearch.dev.example.com"
+        )
+
+    def test_explicit_fqdn_is_left_alone(self, tmp_path):
+        from oduflow.stack_ops import _desired_hostname
+
+        team = self._team(tmp_path, base_domain="demo.example.com")
+        settings = Settings(routing_mode="traefik", teams={"1": team})
+
+        assert (
+            _desired_hostname(settings, team, "meilisearch", "search.customer.com")
+            == "search.customer.com"
+        )
+
+    def test_port_routing_keeps_the_raw_value(self, tmp_path):
+        from oduflow.stack_ops import _desired_hostname
+
+        team = self._team(tmp_path, base_domain="demo.example.com")
+        settings = Settings(routing_mode="port", teams={"1": team})
+
+        assert _desired_hostname(settings, team, "meilisearch", None) is None

@@ -6,7 +6,8 @@ environments it was built for. Productions get special treatment:
 - a **dedicated PostgreSQL cluster** (`oduflow-prod-db`) — physically
   separate from the dev one, auto-tuned for production workloads;
 - a **custom domain** per production (`erp.customer.com`), routed by Traefik
-  with a Let's Encrypt certificate;
+  with a Let's Encrypt certificate — plus optional **extra domains** routed to
+  the same production (e.g. the client's own public domain);
 - an **auto-tuned production `odoo.conf`** (workers from host CPU/RAM, cron
   enabled, proxy mode) — never the dev profile;
 - **no sanitization/neutralization**, no idle reaper, no `--dev=xml`;
@@ -85,6 +86,29 @@ create_production(
 )
 ```
 
+### Domains
+
+In a team with [`base_domain`](traefik.md#team-base-domain) configured, the
+primary `domain` must lie in the team zone — the zone apex
+(`demo.example.com`) or a subdomain (`erp.demo.example.com`) — and may be
+omitted: the team's **first** production defaults to the apex, later ones to
+`<name>.<base_domain>`. Without a base domain, `domain` is required and may be
+any FQDN.
+
+`extra_domains` adds further public FQDNs routed to the same production —
+typically the client's own domain alongside the team-zone name:
+
+```text
+create_production(name="erp", domain="demo.example.com",
+                  extra_domains=["myodoo.pl"], ...)
+```
+
+All domains land in one Traefik router (`Host(a) || Host(b)`), each with its
+own Let's Encrypt certificate; every DNS record must point at this server.
+Extra domains may be arbitrary FQDNs but must not fall inside another team's
+zone, and every domain — primary or extra — must be unused anywhere else in
+the deployment (other productions, team hostnames, static routes).
+
 `template_name` is the migration path for an existing production: import it
 first (e.g. [from Odoo.sh](templates.md)), then create the production from
 that template — the database is copied into the production cluster and the
@@ -127,16 +151,21 @@ production starts with that sanitized data (the result warns about this).
 The dashboard offers the same via **More → Promote to Production** on an
 environment card, which opens the create-production form pre-filled.
 
+To promote into a production that **already exists**, use
+`restore_production(from_environment=…)` instead — see
+[Backups](#backups) for the restore mechanics.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
-`reconfigure_production` changes any of the domain, Odoo image, deployed
-branch, repository URL, git user, or the extra addon repos, then **recreates
-the container** to match — the database and filestore live outside the
+`reconfigure_production` changes any of the domain, extra domains, Odoo
+image, deployed branch, repository URL, git user, or the extra addon repos,
+then **recreates the container** to match — the database and filestore live outside the
 container and are preserved; expect a brief downtime:
 
 ```text
 reconfigure_production(name="erp", domain="erp.newcustomer.com")
+reconfigure_production(name="erp", extra_domains=["myodoo.pl"])  # [] removes all
 reconfigure_production(name="erp", branch="18.0-stable")
 reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
 ```
@@ -236,6 +265,24 @@ swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
 `rollback_production` to the matching commit.
+
+**Restoring from a dev environment.** The same tool also promotes a dev
+environment's data into an *existing* production — the counterpart of
+`create_production(from_environment=…)` for productions that already live:
+
+```text
+restore_production(name="erp", from_environment="feature-x", confirm="erp")
+```
+
+The environment's database and filestore are copied while its Odoo is
+briefly stopped (the environment is **not reset**), staged, and swapped in
+with the same all-or-nothing mechanics as a snapshot restore. No
+sanitization happens — the data goes *into* production — and no `[backup]`
+configuration is required. The production's code checkout is not touched;
+the result warns when the environment's commit differs from the deployed
+one. Take a `snapshot_production` first if the current production data may
+still be needed. `snapshot_id` and `from_environment` are mutually
+exclusive.
 
 The filestore engine (a clean-room, duplicacy-inspired content-defined
 chunking store) deduplicates across daily revisions *and* across a team's
@@ -347,7 +394,7 @@ presumed alive and is never touched (`oduflow cleanup` skips the whole
 | `reconfigure_production` | Change domain/image/branch/repo/extra addons; recreates the container |
 | `set_production_odoo_conf` | Per-production odoo.conf overrides on top of auto-tuning |
 | `snapshot_production` / `list_production_snapshots` | Snapshots to S3 |
-| `restore_production` | Restore DB + filestore from a snapshot |
+| `restore_production` | Restore DB + filestore from a snapshot or a dev environment |
 | `set_production_backup_schedule` | Per-production snapshot time / off |
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
 | `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |

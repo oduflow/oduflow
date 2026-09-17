@@ -242,6 +242,8 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 [team.1]
 hostname = "localhost"               # required and unique; OAuth issuer host for this team
                                      # port mode: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
+# base_domain = "demo.example.com"   # team DNS zone (traefik mode): envs/services live at {name}.{base_domain},
+                                     # hostname defaults to oduflow.{base_domain}, productions default into the zone
 environment_slots = 20               # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                   # maximum managed auxiliary services; 0 = unlimited
@@ -357,6 +359,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | Key | Default | Description |
 |---|---|---|
 | `hostname` | *(required)* | Unique team hostname and host-relative OAuth identity. In port mode environment URLs use `http://{hostname}:{port}`; in traefik mode they use `https://{slug}.{hostname}`. Behind Cloudflare Tunnel, publish this same hostname and use split DNS for direct LAN access when needed |
+| `base_domain` | *(empty — legacy layout)* | The team's DNS zone (traefik mode only), e.g. `demo.example.com`. When set, environments and services get hostnames directly under it (`feature.demo.example.com`), `hostname` defaults to `oduflow.{base_domain}` (the dashboard), and production domains must be the zone apex or a subdomain of it (the apex is the default for the team's first production; client-owned domains go in a production's `extra_domains`). The zone is exclusive: another team's hostname or base_domain may not live inside it. Requires `*.{base_domain}` DNS pointing at this server. Existing environments move into the zone on their next update |
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |

@@ -57,6 +57,13 @@ from oduflow.docker_ops.system_ops import (
     ensure_team_network,
     reassign_db_ownership,
 )
+from oduflow.domains import (
+    NameIndex,
+    assert_public_hostname_free,
+    build_name_index,
+    default_production_domain,
+    validate_production_domain,
+)
 from oduflow.env_credentials import create_credentials, load_credentials
 from oduflow.errors import (
     ConflictError,
@@ -78,7 +85,6 @@ from oduflow.naming import (
     normalize_env_vars,
     prod_env_name,
     sanitize_repo_url,
-    validate_domain,
     validate_prod_name,
 )
 from oduflow.resource_plan import ResourcePlan
@@ -370,20 +376,71 @@ def wait_production_healthy(
 # ---------------------------------------------------------------------------
 
 
+def prod_host_rule(record: dict[str, Any]) -> str:
+    """The production router's Traefik rule: one router matches the primary
+    domain and every extra domain; with TLS the letsencrypt resolver issues
+    certificates covering all of them. Shared with the Stack drift check so
+    intent and container always compare the same expression."""
+    names = [record.get("domain", ""), *(record.get("extra_domains") or [])]
+    return " || ".join(f"Host(`{d}`)" for d in names if d)
+
+
 def _assert_domain_free(
-    settings: Settings, domain: str, *, own_team: str, own_name: str
+    settings: Settings,
+    domain: str,
+    *,
+    own_team: str,
+    own_name: str,
+    index: NameIndex | None = None,
 ) -> None:
     """A domain maps to one global Traefik Host() rule — enforce uniqueness
-    across ALL teams' productions, not just the caller's."""
-    from oduflow import production_registry
+    across the whole namespace (all teams' productions incl. extra domains,
+    team hostnames and zones, static routes, live environment and service
+    containers), not just the caller's. Pass ``index`` to reuse one namespace
+    snapshot across a batch of related claims."""
+    assert_public_hostname_free(
+        settings,
+        domain,
+        own_team=own_team,
+        exclude_production=own_name,
+        index=index,
+        purpose="a production domain",
+    )
 
-    for team in settings.teams.values():
-        for prod_name, record in production_registry.list_productions(team).items():
-            if record.get("domain") != domain:
-                continue
-            if team.team_id == own_team and prod_name == own_name:
-                continue
-            raise ConflictError(f"Domain '{domain}' is already used by a production.")
+
+def _normalize_extra_domains(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    primary_domain: str,
+    extra_domains: list[str] | None,
+) -> list[str]:
+    """Validate extra production domains: syntactically valid, deduplicated,
+    distinct from the primary domain, outside other teams' zones and globally
+    unused. Order is preserved.
+
+    One namespace snapshot is shared by every domain in the list: built per
+    call, this re-read each team's productions.json (and re-listed containers)
+    once per extra domain.
+    """
+    result: list[str] = []
+    index = build_name_index(settings) if extra_domains else None
+    for raw in extra_domains or []:
+        extra = validate_production_domain(
+            settings, team, name, str(raw), is_primary=False
+        )
+        if extra == primary_domain or extra in result:
+            continue
+        assert_public_hostname_free(
+            settings,
+            extra,
+            own_team=team.team_id,
+            exclude_production=name,
+            index=index,
+            purpose=f"an extra domain of production '{name}'",
+        )
+        result.append(extra)
+    return result
 
 
 def _copy_db_into_prod_cluster(
@@ -545,10 +602,13 @@ def _copy_env_data_into_production(
     source: str,
     name: str,
     env_db: str,
+    filestore_dest: str | None = None,
 ) -> list[str]:
-    """Copy the source environment's database and filestore into the new
+    """Copy the source environment's database and filestore into a
     production, with the environment's Odoo stopped over both copies for a
     consistent pair. The environment itself is left as it was (not reset).
+    ``filestore_dest`` overrides the filestore target — a restore stages
+    into a scratch sibling directory instead of the live filestore.
     Returns user-facing notes (e.g. when the env could not be restarted)."""
     container = source_env["container"]
     # The cached SDK object may be minutes old (fetched before infra checks
@@ -571,7 +631,7 @@ def _copy_env_data_into_production(
                 f"Source environment filestore is not accessible at "
                 f"{src_filestore}; restart the environment and retry."
             )
-        filestore_path = prod_filestore_dir(team, name)
+        filestore_path = filestore_dest or prod_filestore_dir(team, name)
         os.makedirs(filestore_path, mode=0o777, exist_ok=True)
         shutil.copytree(src_filestore, filestore_path, dirs_exist_ok=True)
     finally:
@@ -672,6 +732,7 @@ def _container_spec(
     # Deliberately NO branch label (keeps dev listings/reaper blind) and
     # NO scoped-MCP token (productions are not agent playgrounds).
     domain = record["domain"]
+    host_rule = prod_host_rule(record)
     traefik_router = f"oduflow-{team.team_id}-{env_name}"
     labels = {
         settings.managed_label: "true",
@@ -684,7 +745,7 @@ def _container_spec(
         "oduflow.git_branch": record["branch"],
         "oduflow.created_at": record["created_at"],
         "traefik.enable": "true",
-        f"traefik.http.routers.{traefik_router}.rule": f"Host(`{domain}`)",
+        f"traefik.http.routers.{traefik_router}.rule": host_rule,
         f"traefik.http.services.{traefik_router}.loadbalancer.server.port": "8069",
         "traefik.docker.network": get_team_network_name(team.team_id, settings.prefix),
     }
@@ -765,6 +826,7 @@ def create_production(
     domain: str,
     odoo_image: str,
     *,
+    extra_domains: list[str] | None = None,
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
     auto_update: bool = False,
@@ -794,12 +856,19 @@ def create_production(
     from oduflow.docker_ops.env_ops import _clone_repo, _init_empty_database
 
     validate_prod_name(name)
-    domain = validate_domain(domain)
     if settings.routing_mode != "traefik":
         raise PrerequisiteNotMetError(
             'Production hosting requires routing_mode = "traefik" (custom '
             "domains are routed via Traefik Host rules)."
         )
+    if not domain:
+        # In a base-domain team the first production defaults to the zone
+        # apex, later ones to <name>.<base_domain>.
+        domain = default_production_domain(settings, team, name)
+    domain = validate_production_domain(settings, team, name, domain, is_primary=True)
+    extra_domains = _normalize_extra_domains(
+        settings, team, name, domain, extra_domains
+    )
     if template_name is not None and from_environment:
         raise ConflictError("Pass either template_name or from_environment, not both.")
     if not from_environment and not (repo_url and branch and odoo_image):
@@ -867,6 +936,7 @@ def create_production(
         name,
         {
             "domain": domain,
+            "extra_domains": extra_domains,
             "repo_url": sanitize_repo_url(repo_url),
             "branch": branch,
             "odoo_image": odoo_image,
@@ -1181,6 +1251,7 @@ def reconfigure_production(
     name: str,
     *,
     domain: str | None = None,
+    extra_domains: list[str] | None = None,
     odoo_image: str | None = None,
     branch: str | None = None,
     repo_url: str | None = None,
@@ -1218,12 +1289,28 @@ def reconfigure_production(
 
     updates: dict[str, Any] = {}
     if domain is not None:
-        new_domain = validate_domain(domain)
+        new_domain = validate_production_domain(
+            settings, team, name, domain, is_primary=True
+        )
         if new_domain != record.get("domain"):
             _assert_domain_free(
                 settings, new_domain, own_team=team.team_id, own_name=name
             )
             updates["domain"] = new_domain
+    effective_domain = updates.get("domain", record.get("domain", ""))
+    if extra_domains is not None:
+        new_extra = _normalize_extra_domains(
+            settings, team, name, effective_domain, extra_domains
+        )
+        if new_extra != (record.get("extra_domains") or []):
+            updates["extra_domains"] = new_extra
+    elif "domain" in updates:
+        # Promoting one of the record's own extra domains to primary: the
+        # exclude_production=name check above lets it through, so drop it from
+        # the extras or prod_host_rule emits Host(`x`) || Host(`x`).
+        kept = [d for d in (record.get("extra_domains") or []) if d != effective_domain]
+        if kept != (record.get("extra_domains") or []):
+            updates["extra_domains"] = kept
     if odoo_image is not None and odoo_image != record.get("odoo_image"):
         updates["odoo_image"] = odoo_image
     if repo_url is not None:
@@ -2137,6 +2224,7 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
             {
                 "name": name,
                 "domain": record.get("domain", ""),
+                "extra_domains": record.get("extra_domains") or [],
                 "url": prod_url(settings, team, record),
                 "status": _runtime_status(container, record),
                 "repo_url": record.get("repo_url", ""),
@@ -2188,6 +2276,7 @@ def get_production_info(
     return {
         "name": name,
         "domain": record.get("domain", ""),
+        "extra_domains": record.get("extra_domains") or [],
         "url": prod_url(settings, team, record),
         "status": _runtime_status(container, record),
         "healthy": healthy,

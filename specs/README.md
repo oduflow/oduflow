@@ -83,6 +83,7 @@ precursors).
 | [0062](0062-dev-to-production-promotion.md) | 2026-09-16 | Dev → production promotion: `create_production(from_environment=...)` copies a dev environment's data directly, no intermediate template |
 
 | [0063](0063-production-stack-targets.md) | 2026-09-16 | Production Stack targets, explicit adoption, registry ownership and retryable reconciliation |
+| [0064](0064-team-base-domain.md) | 2026-09-16 | Team base domain (flat env/service/production naming zone) and multi-domain productions |
 
 ## Design docs
 

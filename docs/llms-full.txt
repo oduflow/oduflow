@@ -801,6 +801,8 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 [team.1]
 hostname = "localhost"               # required and unique; OAuth issuer host for this team
                                      # port mode: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
+# base_domain = "demo.example.com"   # team DNS zone (traefik mode): envs/services live at {name}.{base_domain},
+                                     # hostname defaults to oduflow.{base_domain}, productions default into the zone
 environment_slots = 20               # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                   # maximum managed auxiliary services; 0 = unlimited
@@ -916,6 +918,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | Key | Default | Description |
 |---|---|---|
 | `hostname` | *(required)* | Unique team hostname and host-relative OAuth identity. In port mode environment URLs use `http://{hostname}:{port}`; in traefik mode they use `https://{slug}.{hostname}`. Behind Cloudflare Tunnel, publish this same hostname and use split DNS for direct LAN access when needed |
+| `base_domain` | *(empty — legacy layout)* | The team's DNS zone (traefik mode only), e.g. `demo.example.com`. When set, environments and services get hostnames directly under it (`feature.demo.example.com`), `hostname` defaults to `oduflow.{base_domain}` (the dashboard), and production domains must be the zone apex or a subdomain of it (the apex is the default for the team's first production; client-owned domains go in a production's `extra_domains`). The zone is exclusive: another team's hostname or base_domain may not live inside it. Requires `*.{base_domain}` DNS pointing at this server. Existing environments move into the zone on their next update |
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
@@ -2283,7 +2286,8 @@ environments it was built for. Productions get special treatment:
 - a **dedicated PostgreSQL cluster** (`oduflow-prod-db`) — physically
   separate from the dev one, auto-tuned for production workloads;
 - a **custom domain** per production (`erp.customer.com`), routed by Traefik
-  with a Let's Encrypt certificate;
+  with a Let's Encrypt certificate — plus optional **extra domains** routed to
+  the same production (e.g. the client's own public domain);
 - an **auto-tuned production `odoo.conf`** (workers from host CPU/RAM, cron
   enabled, proxy mode) — never the dev profile;
 - **no sanitization/neutralization**, no idle reaper, no `--dev=xml`;
@@ -2362,6 +2366,29 @@ create_production(
 )
 ```
 
+### Domains
+
+In a team with [`base_domain`](traefik.md#team-base-domain) configured, the
+primary `domain` must lie in the team zone — the zone apex
+(`demo.example.com`) or a subdomain (`erp.demo.example.com`) — and may be
+omitted: the team's **first** production defaults to the apex, later ones to
+`<name>.<base_domain>`. Without a base domain, `domain` is required and may be
+any FQDN.
+
+`extra_domains` adds further public FQDNs routed to the same production —
+typically the client's own domain alongside the team-zone name:
+
+```text
+create_production(name="erp", domain="demo.example.com",
+                  extra_domains=["myodoo.pl"], ...)
+```
+
+All domains land in one Traefik router (`Host(a) || Host(b)`), each with its
+own Let's Encrypt certificate; every DNS record must point at this server.
+Extra domains may be arbitrary FQDNs but must not fall inside another team's
+zone, and every domain — primary or extra — must be unused anywhere else in
+the deployment (other productions, team hostnames, static routes).
+
 `template_name` is the migration path for an existing production: import it
 first (e.g. [from Odoo.sh](templates.md)), then create the production from
 that template — the database is copied into the production cluster and the
@@ -2404,16 +2431,21 @@ production starts with that sanitized data (the result warns about this).
 The dashboard offers the same via **More → Promote to Production** on an
 environment card, which opens the create-production form pre-filled.
 
+To promote into a production that **already exists**, use
+`restore_production(from_environment=…)` instead — see
+[Backups](#backups) for the restore mechanics.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
-`reconfigure_production` changes any of the domain, Odoo image, deployed
-branch, repository URL, git user, or the extra addon repos, then **recreates
-the container** to match — the database and filestore live outside the
+`reconfigure_production` changes any of the domain, extra domains, Odoo
+image, deployed branch, repository URL, git user, or the extra addon repos,
+then **recreates the container** to match — the database and filestore live outside the
 container and are preserved; expect a brief downtime:
 
 ```text
 reconfigure_production(name="erp", domain="erp.newcustomer.com")
+reconfigure_production(name="erp", extra_domains=["myodoo.pl"])  # [] removes all
 reconfigure_production(name="erp", branch="18.0-stable")
 reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
 ```
@@ -2513,6 +2545,24 @@ swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
 `rollback_production` to the matching commit.
+
+**Restoring from a dev environment.** The same tool also promotes a dev
+environment's data into an *existing* production — the counterpart of
+`create_production(from_environment=…)` for productions that already live:
+
+```text
+restore_production(name="erp", from_environment="feature-x", confirm="erp")
+```
+
+The environment's database and filestore are copied while its Odoo is
+briefly stopped (the environment is **not reset**), staged, and swapped in
+with the same all-or-nothing mechanics as a snapshot restore. No
+sanitization happens — the data goes *into* production — and no `[backup]`
+configuration is required. The production's code checkout is not touched;
+the result warns when the environment's commit differs from the deployed
+one. Take a `snapshot_production` first if the current production data may
+still be needed. `snapshot_id` and `from_environment` are mutually
+exclusive.
 
 The filestore engine (a clean-room, duplicacy-inspired content-defined
 chunking store) deduplicates across daily revisions *and* across a team's
@@ -2624,7 +2674,7 @@ presumed alive and is never touched (`oduflow cleanup` skips the whole
 | `reconfigure_production` | Change domain/image/branch/repo/extra addons; recreates the container |
 | `set_production_odoo_conf` | Per-production odoo.conf overrides on top of auto-tuning |
 | `snapshot_production` / `list_production_snapshots` | Snapshots to S3 |
-| `restore_production` | Restore DB + filestore from a snapshot |
+| `restore_production` | Restore DB + filestore from a snapshot or a dev environment |
 | `set_production_backup_schedule` | Per-production snapshot time / off |
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
 | `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |
@@ -3209,7 +3259,9 @@ oduflow stack status oduflow.yaml --team 1
 live state without changing it. `apply` validates and plans again under the
 team lock, refuses all conflicts before creating anything, and then converges
 resources in dependency order. `status` emits JSON containing the current plan
-and last successful apply record.
+and last successful apply record. `plan`, `apply`, and `status` also accept
+`--env-file` to supply `fromEnv` values from a dotenv file; see
+[Secrets from a `.env` file](#secrets-from-a-env-file).
 
 To reconcile before the MCP server accepts clients:
 
@@ -3313,6 +3365,31 @@ It can be read from the process starting Oduflow:
 ESL_PASSWORD:
   fromEnv: FS_ESL_PASSWORD
 ```
+
+### Secrets from a `.env` file
+
+`fromEnv` values do not have to come from exported shell variables. If a
+`.env` file sits next to the manifest, `stack plan`, `stack apply`,
+`stack status`, and the `--stack` startup reconciliation parse it and use it
+for `fromEnv` lookups. Pass `--env-file path/to/file` to read a different
+file instead; an explicitly named file must exist.
+
+```dotenv
+# .env — keep this file out of version control
+FS_ESL_PASSWORD=s3cret
+export ACME_PRIVATE_API_KEY="matching surrounding quotes are stripped"
+```
+
+The format is deliberately dumb: `KEY=VALUE` lines, blank lines and `#`
+comments, an optional `export ` prefix. There is no `${VAR}` interpolation,
+no escape processing, and no multi-line values; malformed lines and duplicate
+keys are rejected. Real process environment variables override file values,
+so CI can override a checked-in default without editing the file.
+
+The file only feeds `fromEnv:` references. It never defines container
+variables by itself, is never persisted anywhere, and never enters the
+manifest hash. Add `.env` to `.gitignore`: it is the one file in a stack
+directory meant to hold secrets.
 
 Or a service can consume a value generated for the Stack's Odoo environment:
 
@@ -3731,7 +3808,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
 | `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
 | `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
-| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`; recreates the container (database and filestore preserved). A present-but-empty `git_user` clears it; an absent key leaves it unchanged |
+| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`; recreates the container (database and filestore preserved). A present-but-empty `git_user` or `extra_domains` clears it; an absent key leaves it unchanged |
 | `POST` | `/api/productions/{name}/odoo-conf` | Set body `options` and remove body `unset` per-production `odoo.conf` overrides; optional `restart` (default true) and `replace` (body `options` become the complete override set) |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
@@ -3854,14 +3931,14 @@ also available via the [REST API](web-api.md).
 | `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
-| `create_production` | ✓ | Provision a long-lived production with its own domain and the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (`from_environment` copies its DB + filestore and inherits repo/branch/image); `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
+| `create_production` | ✓ | Provision a long-lived production with its own domain (defaults into the team `base_domain` zone when configured) plus optional `extra_domains`, on the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (`from_environment` copies its DB + filestore and inherits repo/branch/image); `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
 | `list_productions` | | List productions with status, domain, deployed commit, and auto-update state |
 | `get_production_info` | | Detailed status, configuration, deployed commit, deploy history, and backup information |
 | `start_production` | ✓ | Start a stopped production |
 | `stop_production` | ✓ | Stop a production, taking it offline |
 | `restart_production` | ✓ | Restart a production's Odoo container |
 | `set_production_auto_update` | ✓ | Enable or disable GitHub push webhook deployments |
-| `reconfigure_production` | ✓ | Change domain, Odoo image, branch, repository, git user, or extra addon repos; recreates the container (database and filestore preserved, brief downtime) |
+| `reconfigure_production` | ✓ | Change domain, extra domains, Odoo image, branch, repository, git user, or extra addon repos; recreates the container (database and filestore preserved, brief downtime) |
 | `set_production_odoo_conf` | ✓ | Set or remove per-production `odoo.conf` overrides that win over the auto-tuned worker settings and survive deploys; managed keys (`addons_path`, `data_dir`, `db_*`) are refused |
 | `update_production` | ✓ | Deploy pulled commits with explicit/automatic actions, health verification, and automatic code rollback on failure |
 | `rollback_production` | ✓ | Roll production code back to a selected commit and restart it; does not roll back the database |
@@ -3869,7 +3946,7 @@ also available via the [REST API](web-api.md).
 | `production_logs` | | Read production Odoo logs with line, substring, and level filtering |
 | `snapshot_production` | ✓ | Create an S3 snapshot containing the database, deduplicated filestore, and deployed commit |
 | `list_production_snapshots` | | List S3 snapshots; `refresh=True` bypasses the cached index |
-| `restore_production` | ✓ | Restore one production's database and filestore; requires its name in `confirm` |
+| `restore_production` | ✓ | Restore one production's database and filestore from a snapshot or a dev environment; requires its name in `confirm` |
 | `production_backup_status` | | Inspect snapshot schedules, WAL archiving, base backups, and S3 reachability |
 | `set_production_backup_schedule` | ✓ | Set a production's daily snapshot time (`HH:MM`) or disable it with `off` |
 | `prune_production_backups` | ✓ | Apply configured snapshot and chunk-store retention immediately |
@@ -4282,13 +4359,45 @@ does not cover `dev1.example.com`.
 The configured team hostname must include a distinct prefix
 (`dev.example.com`, not bare `example.com`) for pooled or explicit short names.
 
+## Team base domain
+
+Setting `base_domain` gives the team one flat DNS zone instead of nesting
+everything under the dashboard hostname:
+
+```toml
+[team.1]
+base_domain = "demo.example.com"
+# hostname defaults to "oduflow.demo.example.com" (the dashboard)
+```
+
+With a base domain, environments and services live **directly under the
+zone** — `feature-login.demo.example.com`, `meilisearch.demo.example.com` —
+instead of `feature-login.oduflow.demo.example.com`, and production domains
+default into the zone too (the apex `demo.example.com` for the team's first
+production, `<name>.demo.example.com` afterwards; see
+[Production Hosting](production.md#domains)). One `*.demo.example.com` DNS
+record (plus the apex, if a production uses it) covers everything.
+
+The zone is exclusive to the team, and every name handed out is checked
+against the whole routed namespace — the dashboard hostname, production
+domains of all teams, static `[route.*]` hosts, other teams' zones and the
+names live environment and service containers currently serve — so two
+resources can never claim the same FQDN. Existing environments keep their old
+nested hostname until their next `update_environment`, which moves them into
+the zone; until then that is the name they are reported at and checked
+against, because a container's Traefik rule is fixed when it is created.
+
+A service with `routes` is the one deliberate exception: it publishes only
+`Host() && PathPrefix()` routers and no catch-all, so it may share the team's
+dashboard hostname to expose a URL prefix beside the dashboard.
+
 ## OAuth on each team's hostname
 
 The self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled automatically whenever a team has an `auth_token` and runs on **each team's own hostname** in every routing mode. With Traefik, the incoming host already has a Let's Encrypt certificate; with `tls = false`, the upstream tunnel provides it. There is no separate OAuth section: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
 
 ## Service routing with Traefik
 
-Auxiliary services also get Traefik routing. A service named `meilisearch` with base domain `dev.example.com` becomes accessible at `https://meilisearch.dev.example.com`. Custom hostnames are also supported.
+Auxiliary services also get Traefik routing. A service named `meilisearch` under team hostname `dev.example.com` becomes accessible at `https://meilisearch.dev.example.com`; with a team `base_domain` it attaches to the zone instead (`meilisearch.demo.example.com`). Custom hostnames are also supported.
 
 ## Routing extra domains to external services
 

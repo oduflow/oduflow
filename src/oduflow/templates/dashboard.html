@@ -1333,7 +1333,7 @@
   }
 </style>
 </head>
-<body data-scoped-env="__SCOPED_ENV__">
+<body data-scoped-env="__SCOPED_ENV__" data-team-base-domain="__TEAM_BASE_DOMAIN__">
 
 <header>
   <div class="brand-lockup">
@@ -2465,6 +2465,9 @@
 // server enforces the scope in oduflow/ui_scope.py; everything this flag does
 // on the page is presentation — hiding controls whose endpoints are denied.
 var SCOPED_ENV = document.body.getAttribute('data-scoped-env') || '';
+// Ships with the page so the create-production modal knows the team zone
+// no matter which tab opened it; loadProductions refreshes it later.
+window._teamBaseDomain = document.body.getAttribute('data-team-base-domain') || '';
 
 // Whether the Promote-to-Production feature is enabled for this page. The
 // server substitutes the production-tab placeholder (see
@@ -7562,6 +7565,7 @@ async function loadProductions() {
     if (!data.ok) { showToast(data.error || 'Failed to load productions', true); return; }
     cachedProds = data.productions || [];
     window._prodBackupConfigured = !!data.backup_configured;
+    window._teamBaseDomain = data.base_domain || window._teamBaseDomain || '';
     _prodWebhookSecret = (data.webhook && data.webhook.secret) || '';
     var box = document.getElementById('prod-webhook-box');
     if (box) {
@@ -7607,6 +7611,10 @@ function renderProductions() {
         '<div class="left">' +
           '<span class="branch-name">' + esc(p.name) + '</span>' +
           '<a class="prod-domain prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
+          (p.extra_domains || []).map(function(d) {
+            var scheme = (p.url || '').indexOf('http://') === 0 ? 'http' : 'https';
+            return '<a class="prod-domain prod-mono" href="' + escAttr(scheme + '://' + d) + '" target="_blank" rel="noopener">' + esc(d) + '</a>';
+          }).join('') +
           '<span class="badge ' + prodBadgeClass(p.status) + '">' + esc(p.status) + '</span>' +
           (p.auto_update ? '<span class="badge badge-neutral" title="Deploys automatically on GitHub push">auto</span>' : '') +
           (allowCopy ? '' : '<span class="badge badge-neutral" title="Agents cannot publish new copies of this production into dev over MCP; the dashboard still can">copy off</span>') +
@@ -7724,7 +7732,11 @@ function _prodSettingsHtml(p) {
   return '<div class="prod-settings" oninput="_prodSettingsDirty[\'' + n + '\']=true">' +
     '<div class="form-group"><label for="ps-domain-' + n + '">Domain</label>' +
       '<input type="text" id="ps-domain-' + n + '" value="' + escHtmlAttr(p.domain || '') + '">' +
-      '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
+      '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt' +
+      (window._teamBaseDomain ? '. Must be ' + esc(window._teamBaseDomain) + ' or a subdomain of it' : '') + '</div></div>' +
+    '<div class="form-group"><label for="ps-xdomains-' + n + '">Extra domains (optional, comma-separated)</label>' +
+      '<input type="text" id="ps-xdomains-' + n + '" value="' + escHtmlAttr((p.extra_domains || []).join(', ')) + '">' +
+      '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
     '<div class="form-group"><label for="ps-image-' + n + '">Odoo image</label>' +
       '<input type="text" id="ps-image-' + n + '" value="' + escHtmlAttr(p.odoo_image || '') + '">' +
       '<div class="hint">Changing the image does not migrate the database</div></div>' +
@@ -7774,6 +7786,7 @@ async function prodApplySettings(name) {
   if (extras === null) return;
   var body = {
     domain: v('ps-domain'),
+    extra_domains: v('ps-xdomains'),
     odoo_image: v('ps-image'),
     repo_url: v('ps-repo'),
     branch: v('ps-branch'),
@@ -8042,7 +8055,13 @@ function openCreateProductionModal(fromEnv) {
           '<div class="hint">Copies the environment\'s database and filestore (its Odoo briefly stops for a consistent copy); repository, branch and image default to the environment\'s</div></div>' +
         '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/org/repo.git"></div>' +
         '<div class="form-group"><label for="cp-branch">Branch</label><input type="text" id="cp-branch" placeholder="production"></div>' +
-        '<div class="form-group"><label for="cp-domain">Domain</label><input type="text" id="cp-domain" placeholder="erp.customer.com"><div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
+        '<div class="form-group"><label for="cp-domain">Domain' + (window._teamBaseDomain ? ' (optional)' : '') + '</label>' +
+          '<input type="text" id="cp-domain" placeholder="' + escHtmlAttr(window._teamBaseDomain ? 'empty = default under ' + window._teamBaseDomain : 'erp.customer.com') + '">' +
+          '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt' +
+          (window._teamBaseDomain ? '. Empty = ' + esc(window._teamBaseDomain) + ' for the first production, name.' + esc(window._teamBaseDomain) + ' after that' : '') + '</div></div>' +
+        '<div class="form-group"><label for="cp-xdomains">Extra domains (optional, comma-separated)</label>' +
+          '<input type="text" id="cp-xdomains" placeholder="erp.customer.com">' +
+          '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
         '<div class="form-group"><label for="cp-image">Odoo image</label><input type="text" id="cp-image" placeholder="odoo:18.0"></div>' +
         '<div class="form-group"><label for="cp-template">Template (optional)</label><input type="text" id="cp-template" placeholder="empty = fresh database"></div>' +
         '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-auto"> Deploy automatically on GitHub push</label></div>' +
@@ -8063,13 +8082,14 @@ async function submitCreateProduction() {
     repo_url: v('cp-repo'),
     branch: v('cp-branch'),
     domain: v('cp-domain'),
+    extra_domains: v('cp-xdomains'),
     odoo_image: v('cp-image'),
     template_name: v('cp-template'),
     from_environment: v('cp-fromenv'),
     auto_update: document.getElementById('cp-auto').checked
   };
-  if (!body.name || !body.domain) {
-    showToast('Name and domain are required', true);
+  if (!body.name || (!body.domain && !window._teamBaseDomain)) {
+    showToast(window._teamBaseDomain ? 'Name is required' : 'Name and domain are required', true);
     return;
   }
   if (!body.from_environment && (!body.repo_url || !body.branch || !body.odoo_image)) {

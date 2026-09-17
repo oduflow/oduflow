@@ -63,6 +63,55 @@ spec:
         server._run_cli()
 
 
+def test_stack_plan_cli_overlays_adjacent_env_file(tmp_path, capsys):
+    manifest = tmp_path / "oduflow.yaml"
+    manifest.write_text(
+        """\
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata: {name: demo}
+spec:
+  environment:
+    name: demo
+    branch: main
+    repoUrl: https://github.com/acme/demo.git
+    odooImage: odoo:18.0
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("FROM_DOTENV=s3cret\n", encoding="utf-8")
+
+    from oduflow import server
+
+    team = TeamSettings(
+        team_id="1",
+        data_dir=str(tmp_path / "team"),
+        port_registry_path=str(tmp_path / "ports.json"),
+    )
+    settings = Settings(
+        base_data_dir=str(tmp_path),
+        db_password="password",
+        teams={"1": team},
+    )
+    captured = {}
+
+    def fake_build_plan(*args, **kwargs):
+        captured["environ"] = kwargs["environ"]
+        return StackPlan("demo", ())
+
+    with (
+        patch.object(sys, "argv", ["oduflow", "stack", "plan", str(manifest)]),
+        patch.object(server, "find_toml"),
+        patch.object(server, "_get_settings", return_value=settings),
+        patch("oduflow.stack_ops.build_plan", side_effect=fake_build_plan),
+    ):
+        server._run_cli()
+
+    assert captured["environ"]["FROM_DOTENV"] == "s3cret"
+    # The live process environment is overlaid on top of the file values.
+    assert "PATH" in captured["environ"]
+
+
 def test_startup_stack_is_applied_before_server(tmp_path):
     from oduflow import server
 

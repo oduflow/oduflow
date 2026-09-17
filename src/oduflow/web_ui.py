@@ -531,6 +531,16 @@ def _normalize_extra_addons(raw_addons: object) -> dict[str, str]:
     return {}
 
 
+def _normalize_domain_list(raw: object) -> list[str]:
+    """Read an extra-domains field as a JSON list or a comma/whitespace
+    separated string (the dashboard sends a plain text input)."""
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, str):
+        return [part for part in re.split(r"[,\s]+", raw) if part]
+    return []
+
+
 def _env_vars_from_body(raw: object) -> dict[str, str]:
     """Read an "env_vars" request field in either supported shape.
 
@@ -898,7 +908,9 @@ def _build_routes(
             path="/",
         )
 
-    def _render_dashboard(settings: Settings, scoped_env: str = "") -> str:
+    def _render_dashboard(
+        settings: Settings, scoped_env: str = "", team: TeamSettings | None = None
+    ) -> str:
         """Render the dashboard page. With ``scoped_env`` set it renders in
         shared single-environment mode (see oduflow.ui_scope): the client-side
         surface collapses to that one environment's card. The server-side
@@ -921,13 +933,20 @@ def _build_routes(
             # literal: environment names are git branch names and may carry
             # quotes. Attribute escaping is exactly the right encoding there.
             .replace("__SCOPED_ENV__", html.escape(scoped_env, quote=True))
+            # The create-production modal needs the team zone whichever tab it
+            # is opened from, so it ships with the page instead of arriving as
+            # a side effect of loading the productions list.
+            .replace(
+                "__TEAM_BASE_DOMAIN__",
+                html.escape(team.base_domain if team else "", quote=True),
+            )
         )
 
     def dashboard(request: Request) -> HTMLResponse:
         settings = get_settings()
-        page = _render_dashboard(settings)
-        response = HTMLResponse(page)
         team = getattr(request.state, "team", None)
+        page = _render_dashboard(settings, team=team)
+        response = HTMLResponse(page)
         if team is not None and team.ui_password:
             _set_session_cookie(response, team, request)
         return response
@@ -5274,6 +5293,7 @@ def _build_routes(
                 {
                     "ok": True,
                     "productions": prods,
+                    "base_domain": team.base_domain,
                     "backup_configured": settings.backup is not None,
                     "webhook": {
                         "path": "/api/webhooks/github",
@@ -5329,6 +5349,7 @@ def _build_routes(
                 str(data.get("branch", "")).strip(),
                 str(data.get("domain", "")).strip(),
                 str(data.get("odoo_image", "")).strip(),
+                extra_domains=_normalize_domain_list(data.get("extra_domains")),
                 git_user=str(data.get("git_user", "")).strip(),
                 extra_addons=(
                     _normalize_extra_addons(raw_extra)
@@ -5572,6 +5593,12 @@ def _build_routes(
             team,
             name,
             domain=str(data.get("domain", "")).strip() or None,
+            # Present-but-empty means "remove all extras"; absent = unchanged.
+            extra_domains=(
+                _normalize_domain_list(data["extra_domains"])
+                if "extra_domains" in data
+                else None
+            ),
             odoo_image=str(data.get("odoo_image", "")).strip() or None,
             branch=str(data.get("branch", "")).strip() or None,
             repo_url=repo_url or None,

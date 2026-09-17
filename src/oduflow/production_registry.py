@@ -158,6 +158,9 @@ def create_production(
         full = {
             "name": name,
             "domain": "",
+            # Additional public FQDNs (e.g. the client's own domain) routed to
+            # the same container alongside the primary domain.
+            "extra_domains": [],
             "repo_url": "",
             "branch": "",
             "odoo_image": "",
