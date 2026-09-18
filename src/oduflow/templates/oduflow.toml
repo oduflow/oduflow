@@ -98,6 +98,7 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # basebackup_time = "03:30"       # daily WAL-G base backup
 # keep = ["30:180", "7:30", "1:7"]  # snapshot retention: "interval_days:age_days"
 # walg_keep_full = 7              # WAL-G base backups retained
+# upload_threads = 16             # parallel filestore chunk uploads (1 = sequential)
 
 # ── Teams ─────────────────────────────────────────────
 # Each team gets isolated workspaces, templates, credentials and services.

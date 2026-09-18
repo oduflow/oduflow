@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from typing import Protocol
 
 
@@ -95,10 +96,12 @@ class LocalStorage:
 
 class CountingStorage:
     """Wrapper counting operations — used by dedup tests ("how many PUTs did
-    this incremental backup actually do?")."""
+    this incremental backup actually do?"). Thread-safe: backup uploads
+    chunks from a thread pool."""
 
     def __init__(self, inner: Storage) -> None:
         self.inner = inner
+        self._lock = threading.Lock()
         self.counts: dict[str, int] = {
             "exists": 0,
             "get": 0,
@@ -108,26 +111,30 @@ class CountingStorage:
             "delete": 0,
         }
 
+    def _count(self, op: str) -> None:
+        with self._lock:
+            self.counts[op] += 1
+
     def exists(self, key: str) -> bool:
-        self.counts["exists"] += 1
+        self._count("exists")
         return self.inner.exists(key)
 
     def get(self, key: str) -> bytes:
-        self.counts["get"] += 1
+        self._count("get")
         return self.inner.get(key)
 
     def put(self, key: str, data: bytes) -> None:
-        self.counts["put"] += 1
+        self._count("put")
         self.inner.put(key, data)
 
     def list(self, prefix: str) -> list[str]:
-        self.counts["list"] += 1
+        self._count("list")
         return self.inner.list(prefix)
 
     def rename(self, src: str, dst: str) -> None:
-        self.counts["rename"] += 1
+        self._count("rename")
         self.inner.rename(src, dst)
 
     def delete(self, key: str) -> None:
-        self.counts["delete"] += 1
+        self._count("delete")
         self.inner.delete(key)

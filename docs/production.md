@@ -50,6 +50,7 @@ region = "eu-central-1"
 # basebackup_time = "03:30"    (daily WAL-G base backup)
 # keep = ["30:180", "7:30", "1:7"]  (snapshot retention: interval:age days)
 # walg_keep_full = 7           (base backups retained)
+# upload_threads = 16          (parallel filestore chunk uploads)
 ```
 
 While disabled, the dashboard tab and production HTTP/webhook routes are not

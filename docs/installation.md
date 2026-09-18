@@ -234,6 +234,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # basebackup_time = "03:30"
 # keep = ["30:180", "7:30", "1:7"]
 # walg_keep_full = 7
+# upload_threads = 16
 
 # ── Teams ─────────────────────────────────────────────
 # Each team gets isolated workspaces, templates, credentials, and services.
@@ -351,6 +352,7 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | `[backup].basebackup_time` | `03:30` | Daily WAL-G base-backup time in server-local `HH:MM` |
 | `[backup].keep` | `["30:180", "7:30", "1:7"]` | Snapshot retention tiers as `interval_days:age_days` pairs |
 | `[backup].walg_keep_full` | `7` | Number of WAL-G full base backups to retain; must be at least `1` |
+| `[backup].upload_threads` | `16` | Concurrent filestore chunk uploads per snapshot; `1` uploads sequentially |
 
 ### Per-team settings
 

@@ -3,6 +3,8 @@
 import datetime
 import os
 import random
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -151,6 +153,131 @@ def small_config_storage(tmp_path, monkeypatch):
     raw.update({"min_size": 1024, "avg_size": 4096, "max_size": 16384})
     storage.put("config", json.dumps(raw).encode())
     return storage
+
+
+class _SlowStorage:
+    """Delegating storage that sleeps in exists/put and records the peak
+    number of concurrent chunk operations."""
+
+    def __init__(self, inner, delay: float = 0.02) -> None:
+        self.inner = inner
+        self.delay = delay
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_concurrent = 0
+
+    def _enter(self):
+        with self._lock:
+            self._active += 1
+            self.max_concurrent = max(self.max_concurrent, self._active)
+
+    def _exit(self):
+        with self._lock:
+            self._active -= 1
+
+    def exists(self, key):
+        self._enter()
+        try:
+            time.sleep(self.delay)
+            return self.inner.exists(key)
+        finally:
+            self._exit()
+
+    def put(self, key, data):
+        self._enter()
+        try:
+            time.sleep(self.delay)
+            self.inner.put(key, data)
+        finally:
+            self._exit()
+
+    def get(self, key):
+        return self.inner.get(key)
+
+    def list(self, prefix):
+        return self.inner.list(prefix)
+
+    def rename(self, src, dst):
+        self.inner.rename(src, dst)
+
+    def delete(self, key):
+        self.inner.delete(key)
+
+
+class _FailingChunkPuts:
+    """Delegating storage whose chunk PUTs fail (config/revision pass)."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    def put(self, key, data):
+        if key.startswith("chunks/"):
+            raise RuntimeError("chunk upload boom")
+        self.inner.put(key, data)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+class TestParallelUploads:
+    def test_parallel_roundtrip_uses_concurrency(self, small_config_storage, tmp_path):
+        rng = random.Random(11)
+        spec = {f"f{i}.bin": rng.randbytes(20_000) for i in range(12)}
+        src = tmp_path / "src"
+        _make_tree(str(src), spec)
+
+        slow = _SlowStorage(small_config_storage)
+        result = chunkstore.backup(str(src), slow, "erp", upload_threads=8)
+        assert result.new_chunks > 4
+        assert result.upload_seconds > 0
+        assert result.elapsed_seconds > 0
+        assert slow.max_concurrent >= 2
+
+        dst = tmp_path / "dst"
+        chunkstore.restore(small_config_storage, "erp", None, str(dst))
+        assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    def test_sequential_mode_unchanged(self, small_config_storage, tmp_path):
+        rng = random.Random(12)
+        src = tmp_path / "src"
+        _make_tree(str(src), {f"f{i}.bin": rng.randbytes(10_000) for i in range(4)})
+
+        slow = _SlowStorage(small_config_storage, delay=0.001)
+        result = chunkstore.backup(str(src), slow, "erp", upload_threads=1)
+        assert result.revision == 1
+        assert slow.max_concurrent == 1
+
+        dst = tmp_path / "dst"
+        chunkstore.restore(small_config_storage, "erp", None, str(dst))
+        assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    def test_dedup_counts_deterministic_with_threads(
+        self, small_config_storage, tmp_path
+    ):
+        # Same content twice in one tree: known_ids dedup happens on the
+        # producer thread, so exists/put counts stay exact under threading.
+        blob = random.Random(13).randbytes(30_000)
+        src = tmp_path / "src"
+        _make_tree(str(src), {"a.bin": blob, "b.bin": blob})
+
+        counting = CountingStorage(small_config_storage)
+        result = chunkstore.backup(str(src), counting, "erp", upload_threads=8)
+        assert counting.counts["put"] == result.new_chunks + 1  # + revision file
+        dst = tmp_path / "dst"
+        chunkstore.restore(small_config_storage, "erp", None, str(dst))
+        assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    @pytest.mark.parametrize("threads", [1, 8])
+    def test_failed_upload_aborts_revision(
+        self, small_config_storage, tmp_path, threads
+    ):
+        src = tmp_path / "src"
+        _make_tree(str(src), {"f.bin": random.Random(14).randbytes(50_000)})
+        failing = _FailingChunkPuts(small_config_storage)
+        with pytest.raises(RuntimeError, match="chunk upload boom"):
+            chunkstore.backup(str(src), failing, "erp", upload_threads=threads)
+        # No revision file was committed: the snapshot does not exist.
+        assert list_revisions(small_config_storage, "erp") == []
 
 
 class TestBackupRestore:

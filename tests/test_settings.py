@@ -1002,7 +1002,15 @@ class TestBackupSettings:
         assert s.backup.prefix == "oduflow"
         assert s.backup.snapshot_time == "02:00"
         assert s.backup.walg_keep_full == 7
+        assert s.backup.upload_threads == 16
         s.validate()
+
+    def test_upload_threads_parsed_and_clamped(self, tmp_path):
+        base = '[backup]\nbucket = "b"\naccess_key = "ak"\nsecret_key = "sk"\n'
+        s = Settings.from_toml(self._toml(tmp_path, base + "upload_threads = 4\n"))
+        assert s.backup is not None and s.backup.upload_threads == 4
+        s = Settings.from_toml(self._toml(tmp_path, base + "upload_threads = 0\n"))
+        assert s.backup is not None and s.backup.upload_threads == 1
 
     def test_partial_section_raises(self, tmp_path):
         with pytest.raises(ValueError, match="requires all of"):
