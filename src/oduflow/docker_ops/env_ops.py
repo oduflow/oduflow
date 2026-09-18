@@ -1486,9 +1486,29 @@ def _configure_serving_environment(
     apt_log = _install_apt_packages(container, repo_path)
     if apt_log:
         setup_logs.append(apt_log)
-    _, pip_log = _install_pip_requirements(container, repo_path)
+    _, pip_log = _install_pip_requirements(container, repo_path, restart=False)
     if pip_log:
         setup_logs.append(pip_log)
+
+    # Odoo is PID1 and has already booted — with the image's stock conf and
+    # without the repo's pip packages. One restart here picks up both, in the
+    # same order as production's _run_odoo_container. Unconditional on purpose:
+    # restarting only when pip installed something left a repo that ships an
+    # .oduflow/odoo.conf but no requirements.txt serving on the stock
+    # addons_path and worker settings until some later restart.
+    container.restart()
+    logger.info(
+        "Waiting for serving Odoo after the setup restart",
+        extra={"env_name": env_name},
+    )
+    readiness = _wait_for_container_odoo_ready(container, env_db)
+    if not readiness.ready:
+        raise _readiness_error(
+            container,
+            env_db,
+            readiness,
+            action="Environment setup did not complete",
+        )
 
     # Install first so neutralization includes SQL shipped by the new modules.
     if auto_install_modules:
@@ -5244,19 +5264,31 @@ def update_environment(
     repo_path = labels.get("oduflow.local_path") or get_repo_path(
         env_name, team.workspaces_dir
     )
-    _reapply_odoo_conf(settings, team, env_name, new_container)
+    conf_applied = _reapply_odoo_conf(settings, team, env_name, new_container)
 
     # ------------------------------------------------------------------
     # 5. Re-install apt packages and pip requirements
     # ------------------------------------------------------------------
     setup_logs: list[str] = []
+    deps_installed = False
     if install_dependencies:
         apt_log = _install_apt_packages(new_container, repo_path)
         if apt_log:
             setup_logs.append(apt_log)
-        _, pip_log = _install_pip_requirements(new_container, repo_path)
+            deps_installed = True
+        pip_installed, pip_log = _install_pip_requirements(
+            new_container, repo_path, restart=False
+        )
         if pip_log:
             setup_logs.append(pip_log)
+        deps_installed = deps_installed or pip_installed
+
+    # The recreated container booted Odoo before the conf was reapplied and the
+    # dependencies reinstalled; one restart picks up both (same order as create).
+    # Skipped when neither landed — nothing inside the fresh container changed
+    # since it started, so a restart would only cost a registry reload.
+    if conf_applied or deps_installed:
+        new_container.restart()
 
     # ------------------------------------------------------------------
     # 5b. Point the agent checkout at the renamed environment
