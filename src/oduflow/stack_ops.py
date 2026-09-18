@@ -477,7 +477,7 @@ def build_plan(
                 )
             )
             continue
-        if settings.uses_acme:
+        if settings.acme_enabled:
             reserved_mount = next(
                 (
                     mount.target

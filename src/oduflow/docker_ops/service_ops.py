@@ -253,14 +253,17 @@ def _resolve_service_volume_binds(
     """Resolve user mounts and add the implicit Traefik ACME mount.
 
     The ACME store is platform-owned rather than part of the user-supplied
-    service configuration. Every service created while Traefik uses ACME sees
-    the exact store at ``/etc/traefik`` read-only.
+    service configuration. Every service created while the ACME resolver is
+    declared (acme_enabled) sees the exact store at ``/etc/traefik``
+    read-only. The store may not contain ``acme.json`` yet — it appears only
+    after the first certificate issuance — so services must tolerate its
+    absence.
     """
     volume_binds: dict[str, dict[str, str]] = volume_ops.resolve_volume_binds(
         team, volumes or []
     )
 
-    if not settings.uses_acme:
+    if not settings.acme_enabled:
         return volume_binds
 
     for mount in volumes or []:
@@ -292,7 +295,7 @@ def _resolve_service_volume_binds(
 
 def _needs_traefik_acme_mount(settings: Settings, container: Any) -> bool:
     """Whether a Traefik TLS service is missing the implicit ACME mount."""
-    if not settings.uses_acme:
+    if not settings.acme_enabled:
         return False
 
     for mount in container.attrs.get("Mounts", []):

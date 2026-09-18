@@ -268,14 +268,18 @@ class Settings:
     routing_mode: str = "port"
     acme_email: str = ""
     # Whether Traefik terminates TLS itself. True (default): Traefik listens on
-    # :443 and redirects HTTP->HTTPS; routing_acme selects certificate issuance. False:
+    # :443 and redirects HTTP->HTTPS; routing_tls_auto selects certificate issuance. False:
     # Traefik listens on plain HTTP :80 only, no redirect and no ACME — for
     # running behind a TLS-terminating upstream (e.g. a Cloudflare tunnel) that
     # already serves HTTPS. Public URLs stay https:// (the upstream provides the
     # certificate) unless ``public_scheme`` says otherwise. Ignored in port mode.
     routing_tls: bool = True
-    # False for tls = {}: HTTPS uses Traefik's default certificate.
-    routing_acme: bool = True
+    # True only for ``tls = true``: every Oduflow-managed route automatically
+    # gets the Let's Encrypt resolver. False for ``tls = {}``: the resolver is
+    # still declared when ``acme_email`` is set (see :attr:`acme_enabled`), but
+    # only routes that reference it explicitly (operator drop-in dynamic
+    # config) use it; managed routes serve Traefik's default certificate.
+    routing_tls_auto: bool = True
     # Raw ``[routing] public_scheme`` value; read the resolved
     # :attr:`public_scheme` property instead of this field. Empty (default)
     # derives the scheme from the routing mode: ``https`` in traefik mode
@@ -402,24 +406,45 @@ class Settings:
         return None
 
     @property
+    def acme_enabled(self) -> bool:
+        """Whether the Let's Encrypt resolver is declared in Traefik at all.
+
+        This only says the resolver (and its certificate store) exists — with
+        ``tls = {}`` nothing assigns it to managed routes, so a declared
+        resolver does not mean any particular domain got a trusted
+        certificate. Route auto-assignment is :attr:`uses_acme`.
+        """
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and bool(self.acme_email.strip())
+        )
+
+    @property
     def uses_acme(self) -> bool:
-        """Whether this deployment requests certificates from Let's Encrypt."""
-        return self.routing_mode == "traefik" and self.routing_tls and self.routing_acme
+        """Whether managed routes automatically request Let's Encrypt certs."""
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and self.routing_tls_auto
+        )
 
     @property
     def uses_default_tls_cert(self) -> bool:
         """Whether Traefik serves HTTPS with its built-in default certificate.
 
-        True only for ``tls = {}``: TLS is on but no resolver issues a
-        certificate, so unless the operator supplies one through Traefik's own
-        dynamic config the served certificate is Traefik's self-signed default.
-        Oduflow's internal probes of its own public URLs consult this to decide
-        whether certificate verification can succeed at all.
+        True for ``tls = {}``: TLS is on but managed routes never reference a
+        resolver — even when one is declared (:attr:`acme_enabled`) it only
+        serves routes the operator wired up explicitly — so unless the
+        operator supplies a certificate through Traefik's own dynamic config
+        the served certificate is Traefik's self-signed default. Oduflow's
+        internal probes of its own public URLs consult this to decide whether
+        certificate verification can succeed at all.
         """
         return (
             self.routing_mode == "traefik"
             and self.routing_tls
-            and not self.routing_acme
+            and not self.routing_tls_auto
         )
 
     @property
@@ -910,7 +935,7 @@ class Settings:
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
             routing_tls=tls is not False,
-            routing_acme=tls is True,
+            routing_tls_auto=tls is True,
             public_scheme_setting=str(routing.get("public_scheme", "")).strip().lower(),
             extra_routes=tuple(extra_routes),
             db_user=str(database.get("user", "odoo")),
