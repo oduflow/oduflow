@@ -196,6 +196,87 @@ class TestDestroySystem:
         vol.remove.assert_called_once()
         net.remove.assert_called_once()
 
+    def test_destroy_blocked_by_production(self, mock_docker_client):
+        # Productions carry no branch/service label, so they are invisible to the
+        # container scan; destroy must still refuse while any exist (P-H4).
+        mock_docker_client.containers.list.return_value = []
+        with (
+            patch(
+                "oduflow.production_registry.list_productions",
+                return_value={"erp": {"name": "erp"}},
+            ),
+            pytest.raises(ConflictError, match="Active productions"),
+        ):
+            system_ops.destroy_system(TEST_SETTINGS)
+
+    def test_destroy_blocked_by_unregistered_production_container(
+        self, mock_docker_client
+    ):
+        # A failed delete_production can remove the registry record while the
+        # container survives. The registry guard misses it, so destroy must
+        # also refuse on live containers in the reserved prod- name namespace
+        # (which dev environments cannot enter) — or the prod PG teardown
+        # below would remove the database out from under it.
+        stray = MagicMock()
+        stray.labels = {"oduflow.managed": "true"}
+        stray.name = "oduflow-1-prod-erp-odoo"
+        mock_docker_client.containers.list.return_value = [stray]
+        with (
+            patch("oduflow.production_registry.list_productions", return_value={}),
+            pytest.raises(ConflictError, match="oduflow-1-prod-erp-odoo"),
+        ):
+            system_ops.destroy_system(TEST_SETTINGS)
+
+    def test_destroy_removes_production_pg(self, mock_docker_client):
+        # The prod PG container + volume persist past the last production and
+        # must be torn down (P-H4), or they leak and keep the shared network busy.
+        mock_docker_client.containers.list.return_value = []
+        prod_db = MagicMock()
+
+        def _get_container(name):
+            if name == TEST_SETTINGS.prod_db_container:
+                return prod_db
+            raise docker.errors.NotFound("not found")
+
+        mock_docker_client.containers.get.side_effect = _get_container
+        prod_vol = MagicMock()
+
+        def _get_volume(name):
+            if name == TEST_SETTINGS.prod_db_volume:
+                return prod_vol
+            raise docker.errors.NotFound("not found")
+
+        mock_docker_client.volumes.get.side_effect = _get_volume
+        mock_docker_client.networks.list.return_value = []
+        mock_docker_client.networks.get.return_value = MagicMock()
+
+        with patch("oduflow.production_registry.list_productions", return_value={}):
+            result = system_ops.destroy_system(TEST_SETTINGS)
+
+        prod_db.stop.assert_called_once()
+        prod_db.remove.assert_called_once_with(v=True)
+        prod_vol.remove.assert_called_once()
+        assert TEST_SETTINGS.prod_db_container in result["removed"]
+        assert TEST_SETTINGS.prod_db_volume in result["removed"]
+
+    def test_destroy_survives_network_active_endpoints(self, mock_docker_client):
+        # If an endpoint we do not manage still holds the shared network,
+        # net.remove() raises APIError; destroy must log and finish, not crash
+        # after tearing down half the system (P-H4).
+        mock_docker_client.containers.list.return_value = []
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("x")
+        mock_docker_client.volumes.get.side_effect = docker.errors.NotFound("x")
+        mock_docker_client.networks.list.return_value = []
+        net = MagicMock()
+        net.remove.side_effect = docker.errors.APIError("has active endpoints")
+        mock_docker_client.networks.get.return_value = net
+
+        with patch("oduflow.production_registry.list_productions", return_value={}):
+            result = system_ops.destroy_system(TEST_SETTINGS)
+
+        assert result["status"] == "destroyed"
+        assert TEST_SETTINGS.shared_network not in result["removed"]
+
 
 class TestAdoptExistingEnvironment:
     """create_environment answers with the existing environment instead of an

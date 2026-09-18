@@ -5849,28 +5849,53 @@ def restore_cluster_pitr(
     # taken behind our back).
     _locks.acquire_system(operation="restore_cluster_pitr")
     try:
+        # Fail before stopping anything: walg re-checks this, but by then every
+        # team's productions would already be down with nothing restored.
+        if settings.backup is None:
+            raise PrerequisiteNotMetError(
+                "Cluster PITR requires a configured [backup] section."
+            )
         from oduflow.docker_ops.client import get_client
 
         client = get_client()
         # Stop every production Odoo container (all teams share the cluster).
         stopped: list[str] = []
-        for team_cfg in settings.teams.values():
-            for prod_name in production_registry.list_productions(team_cfg):
-                container = production_ops._get_container(
-                    client, settings, team_cfg, prod_name
-                )
-                if container is not None and container.status == "running":
-                    container.stop()
-                    stopped.append(f"{team_cfg.team_id}/{prod_name}")
-        result = walg.pitr_restore_cluster(settings, target_time=target_time)
-        for entry in stopped:
-            team_id, prod_name = entry.split("/", 1)
-            try:
-                production_ops.start_production(
-                    settings, settings.teams[team_id], prod_name
-                )
-            except Exception as exc:
-                logger.warning("Could not restart production %s: %s", entry, exc)
+
+        def _restart_stopped(suffix: str = "") -> None:
+            for entry in stopped:
+                team_id, prod_name = entry.split("/", 1)
+                try:
+                    production_ops.start_production(
+                        settings, settings.teams[team_id], prod_name
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not restart production %s%s: %s", entry, suffix, exc
+                    )
+
+        try:
+            # The stop loop is inside the guarded block: a failure on the Nth
+            # production (container stop, registry read) must restart the ones
+            # already stopped, not leave them offline with nothing restored.
+            for team_cfg in settings.teams.values():
+                for prod_name in production_registry.list_productions(team_cfg):
+                    container = production_ops._get_container(
+                        client, settings, team_cfg, prod_name
+                    )
+                    if container is not None and container.status == "running":
+                        container.stop()
+                        stopped.append(f"{team_cfg.team_id}/{prod_name}")
+            result = walg.pitr_restore_cluster(settings, target_time=target_time)
+        except BaseException:
+            # The restore failed. walg raises before touching PGDATA for
+            # config/S3/base-backup-selection problems, so in those cases the
+            # cluster is untouched; bring the productions we stopped back up
+            # best-effort instead of leaving every team offline. (After a
+            # mid-restore failure the restart is still best-effort: containers
+            # that cannot serve just log a warning.)
+            _restart_stopped(" after failed PITR")
+            raise
+        _restart_stopped()
     finally:
         _locks.release_system()
     return (
@@ -7026,10 +7051,44 @@ def _print_tools(verbose: bool = False) -> None:
                 print(f"    {desc}")
 
 
+def _coerce_cli_value(value: str, hint: Any, default: Any) -> Any:
+    """Coerce a positional CLI string to a tool parameter's declared type.
+
+    ``server.py`` uses ``from __future__ import annotations``, so a raw
+    ``inspect.Parameter.annotation`` is the *string* ``'bool'``/``'int'`` rather
+    than the class — identity checks like ``annotation is bool`` never match, and
+    every value was silently passed through as a string (so ``false`` reached a
+    ``bool`` parameter as the truthy string ``'false'``). ``hint`` is the
+    already-resolved type from ``typing.get_type_hints``; ``Optional[...]`` /
+    ``X | None`` is unwrapped to the inner type. When no hint is available the
+    default's type is used as a fallback.
+    """
+    import types
+    import typing
+
+    origin = typing.get_origin(hint)
+    if origin is typing.Union or origin is getattr(types, "UnionType", object()):
+        non_none = [a for a in typing.get_args(hint) if a is not type(None)]
+        if len(non_none) == 1:
+            hint = non_none[0]
+
+    # bool must be checked before int (bool is a subclass of int).
+    if hint is bool or (hint is None and isinstance(default, bool)):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    if hint is int or (
+        hint is None and isinstance(default, int) and not isinstance(default, bool)
+    ):
+        return int(value)
+    if hint is float or (hint is None and isinstance(default, float)):
+        return float(value)
+    return value
+
+
 def _run_call(argv: list[str]) -> None:
     """Execute an MCP tool from the CLI: oduflow call <tool> [args...]"""
     import inspect
     import json
+    import typing
 
     if not argv:
         _print_tools(verbose=False)
@@ -7051,26 +7110,33 @@ def _run_call(argv: list[str]) -> None:
     else:
         # Filter out ctx parameter for positional arg mapping
         params = [p for p in sig.parameters.values() if p.name != "ctx"]
+        # Resolve string annotations (PEP 563) to real types so bool/int/float
+        # coercion works. If resolution fails, _coerce_cli_value still falls back
+        # to each parameter's default type.
+        try:
+            hints = typing.get_type_hints(tool_fn)
+        except Exception:
+            hints = {}
         kwargs = {}
         for i, value in enumerate(tool_argv):
             if i >= len(params):
                 print(f"Warning: extra argument '{value}' ignored", file=sys.stderr)
                 continue
             param = params[i]
-            annotation = param.annotation
-            if annotation is bool or (
-                annotation is inspect.Parameter.empty
-                and isinstance(param.default, bool)
-            ):
-                kwargs[param.name] = value.lower() in ("true", "1", "yes")
-            elif annotation is int or (
-                annotation is inspect.Parameter.empty and isinstance(param.default, int)
-            ):
-                kwargs[param.name] = int(value)
-            elif annotation is float:
-                kwargs[param.name] = float(value)
-            else:
-                kwargs[param.name] = value
+            hint = hints.get(param.name)
+            default = (
+                param.default if param.default is not inspect.Parameter.empty else None
+            )
+            try:
+                kwargs[param.name] = _coerce_cli_value(value, hint, default)
+            except (ValueError, TypeError):
+                expected = getattr(hint, "__name__", None) or hint or "value"
+                print(
+                    f"ERROR: invalid value '{value}' for argument "
+                    f"'{param.name}' (expected {expected})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     if not kwargs:
         required = [

@@ -6,7 +6,7 @@ import re
 import docker
 from docker import DockerClient
 from oduflow.docker_ops.system_ops import _exec_sql
-from oduflow.env_credentials import load_credentials
+from oduflow.env_credentials import MissingCredentialsError, load_credentials
 from oduflow.naming import get_db_name, get_repo_path, get_resource_name
 from oduflow.settings import Settings, TeamSettings
 
@@ -61,8 +61,37 @@ def _run_scripts_from_dir(
     if not os.path.isdir(sanitize_dir):
         return logs
 
-    # .sql scripts
     sql_files = sorted(glob_mod.glob(os.path.join(sanitize_dir, "*.sql")))
+    py_files = sorted(glob_mod.glob(os.path.join(sanitize_dir, "*.py")))
+    if not sql_files and not py_files:
+        return logs
+
+    # Both .sql and .py scripts are repo-controlled, so they run as the
+    # environment's scoped, non-superuser PostgreSQL role — never the shared
+    # cluster superuser. The superuser could COPY ... TO PROGRAM (host RCE) and
+    # reach every team's database; the scoped role is confined to this
+    # environment's own database. If the environment predates scoped
+    # credentials, skip sanitization entirely rather than fall back to the
+    # superuser (recreate/update the environment to provision a role).
+    try:
+        creds = load_credentials(
+            env_name,
+            team.workspaces_dir,
+            settings.db_user,
+            settings.db_password,
+            allow_fallback=False,
+        )
+    except MissingCredentialsError:
+        warning = (
+            f"[SANITIZE:{label}] WARNING: no scoped database credentials; "
+            "skipping sanitize scripts (recreate or update the environment to "
+            "provision a per-environment PostgreSQL role)"
+        )
+        logger.warning(warning)
+        logs.append(warning)
+        return logs
+
+    # .sql scripts (run against the env database as the scoped role)
     for sql_file in sql_files:
         name = os.path.basename(sql_file)
         try:
@@ -70,7 +99,21 @@ def _run_scripts_from_dir(
                 sql = f.read().strip()
             if not sql:
                 continue
-            _exec_sql(client, settings, sql, db=env_db)
+            # The scoped role confines SQL, but psql itself interprets
+            # backslash metacommands client-side: `\! cmd` runs a shell inside
+            # the shared PostgreSQL container no matter which role executes the
+            # script. Reject any script with a line that starts with a
+            # backslash — sanitize scripts are plain SQL and never need psql
+            # metacommands.
+            if re.search(r"^\s*\\", sql, re.MULTILINE):
+                warning = (
+                    f"[SANITIZE:{label}] WARNING: {name} skipped: psql "
+                    "backslash metacommands are not allowed in sanitize scripts"
+                )
+                logger.warning(warning)
+                logs.append(warning)
+                continue
+            _exec_sql(client, settings, sql, db=env_db, user=creds["pg_user"])
             logger.info("[%s] Executed sanitize script %s", label, name)
             logs.append(f"[SANITIZE:{label}] Executed {name}")
         except Exception as exc:
@@ -78,7 +121,6 @@ def _run_scripts_from_dir(
             logs.append(f"[SANITIZE:{label}] WARNING: {name} failed: {exc}")
 
     # .py scripts (executed inside the Odoo container)
-    py_files = sorted(glob_mod.glob(os.path.join(sanitize_dir, "*.py")))
     if not py_files:
         return logs
 
@@ -94,10 +136,6 @@ def _run_scripts_from_dir(
             f"[SANITIZE:{label}] WARNING: container not found, skipping .py scripts"
         )
         return logs
-
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
 
     for py_file in py_files:
         name = os.path.basename(py_file)

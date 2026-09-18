@@ -210,6 +210,69 @@ class TestCreateProduction:
         # No registry record left behind.
         assert "erp" not in production_registry.list_productions(team)
 
+    def test_failed_create_preserves_preexisting_workspace(self, settings, team):
+        """P-H6: a workspace kept by delete_production(drop_database=False)
+        holds the old production's filestore and deploy history; a failed
+        re-create must not rmtree it during rollback."""
+        import os
+
+        client = _mock_client()
+        workspace = production_ops._workspace(team, "erp")
+        os.makedirs(workspace)
+        sentinel = os.path.join(workspace, "filestore-sentinel")
+        with open(sentinel, "w") as fh:
+            fh.write("precious")
+
+        patches = _patch_create_stack(client)
+        patches["_clone_repo"] = patch(
+            "oduflow.docker_ops.env_ops._clone_repo",
+            side_effect=RuntimeError("clone failed"),
+        )
+        with _PatchAll(patches):
+            with pytest.raises(RuntimeError, match="clone failed"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:18.0",
+                )
+
+        # The kept workspace survived the rollback...
+        assert os.path.exists(sentinel)
+        # ...while the failed attempt still released its registry reservation.
+        assert "erp" not in production_registry.list_productions(team)
+
+    def test_failed_create_removes_fresh_workspace(self, settings, team):
+        """The rollback still removes a workspace this attempt itself created."""
+        import os
+
+        client = _mock_client()
+        workspace = production_ops._workspace(team, "erp")
+        assert not os.path.isdir(workspace)
+
+        patches = _patch_create_stack(client)
+        patches["_clone_repo"] = patch(
+            "oduflow.docker_ops.env_ops._clone_repo",
+            side_effect=RuntimeError("clone failed"),
+        )
+        with _PatchAll(patches):
+            with pytest.raises(RuntimeError, match="clone failed"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:18.0",
+                )
+
+        assert not os.path.isdir(workspace)
+        assert "erp" not in production_registry.list_productions(team)
+
     def test_create_labels_and_registry(self, settings, team):
         client = _mock_client()
         with _PatchAll(_patch_create_stack(client)):

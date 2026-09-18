@@ -824,10 +824,16 @@ def _exec_sql(
     db: str = "postgres",
     *,
     container_name: str | None = None,
+    user: str | None = None,
 ) -> str:
+    # ``user`` runs the statement as a specific PostgreSQL role instead of the
+    # shared-cluster superuser (settings.db_user). Repo-controlled sanitize SQL
+    # must run as the environment's scoped, non-superuser role so it cannot
+    # ``COPY ... TO PROGRAM`` (RCE) or reach another team's database — same local
+    # -socket, scoped-role transport that run_db_query already relies on.
     container = client.containers.get(container_name or settings.shared_db_container)
     exit_code, output = container.exec_run(
-        ["psql", "-U", settings.db_user, "-d", db, "-tAc", sql]
+        ["psql", "-U", user or settings.db_user, "-d", db, "-tAc", sql]
     )
     result = output.decode("utf-8") if isinstance(output, bytes) else str(output)
     if exit_code != 0:
@@ -3880,6 +3886,37 @@ def destroy_system(settings: Settings) -> dict[str, str]:
                 f"Active environments/services exist: {', '.join(names)}. Delete them first."
             )
 
+    # Productions carry neither a branch label nor oduflow.service, so they are
+    # not among the containers enumerated above. Their data is precious, so
+    # refuse to destroy while any exist — deletion must be explicit.
+    from oduflow import production_registry
+
+    active_prods = [
+        f"{team.team_id}:{name}"
+        for team in settings.teams.values()
+        for name in production_registry.list_productions(team)
+    ]
+    # The registry is not authoritative for survivors: a failed
+    # delete_production removes the record even when the container could not
+    # be stopped/removed, so a live production may have no registry entry.
+    # Its container name is still in the reserved prod- namespace
+    # ({prefix}{team_id}-prod-{name}-...), which dev environments cannot
+    # enter, so scan the managed containers independently.
+    prod_prefixes = tuple(
+        f"{settings.prefix}{team.team_id}-prod-" for team in settings.teams.values()
+    )
+    stray_prods = [
+        c.name for c in containers if prod_prefixes and c.name.startswith(prod_prefixes)
+    ]
+    if active_prods or stray_prods:
+        from oduflow.errors import ConflictError
+
+        raise ConflictError(
+            "Active productions exist: "
+            f"{', '.join(active_prods + stray_prods)}. "
+            "Delete them first (delete_production)."
+        )
+
     removed: list[str] = []
 
     # Per-team agent containers and their volumes. They must go before the
@@ -3927,6 +3964,26 @@ def destroy_system(settings: Settings) -> dict[str, str]:
     except docker.errors.NotFound:
         pass
 
+    # Production PostgreSQL container + volume. The prod tier persists even after
+    # the last production is deleted (_prod_infra_required), and it is attached
+    # to the shared network, so it must be removed here — both to free its data
+    # volume and to release the network endpoint that would otherwise make the
+    # shared-network removal below fail with an APIError.
+    try:
+        pdb = client.containers.get(settings.prod_db_container)
+        pdb.stop()
+        pdb.remove(v=True)
+        removed.append(settings.prod_db_container)
+    except docker.errors.NotFound:
+        pass
+
+    try:
+        pvol = client.volumes.get(settings.prod_db_volume)
+        pvol.remove()
+        removed.append(settings.prod_db_volume)
+    except docker.errors.NotFound:
+        pass
+
     try:
         for extra_net in client.networks.list(
             filters={"label": f"{settings.managed_label}=true"}
@@ -3943,6 +4000,13 @@ def destroy_system(settings: Settings) -> dict[str, str]:
         removed.append(settings.shared_network)
     except docker.errors.NotFound:
         pass
+    except docker.errors.APIError:
+        # An endpoint still holds the network (e.g. an aux container we do not
+        # manage). Log and finish rather than aborting a half-done teardown.
+        logger.warning(
+            "Could not remove shared network %s (active endpoints remain)",
+            settings.shared_network,
+        )
 
     logger.info("System destroyed, removed=%s", removed)
     return {"status": "destroyed", "removed": ", ".join(removed)}
@@ -4611,6 +4675,14 @@ def cleanup_orphans(
     An orphan is a resource whose branch has no corresponding Docker container.
     Template databases (oduflow_template_*) are always excluded.
 
+    Productions are excluded unconditionally: their containers deliberately carry
+    no branch label (production_ops), so they never appear in ``live_branches``
+    and would otherwise be misclassified as orphans and destroyed. Every
+    production resource lives in the reserved ``prod-`` namespace
+    (``prod_env_name``), which dev environments can never enter, so skipping that
+    namespace protects live productions even when productions.json is stale or
+    unreadable.
+
     Returns a dict with keys: orphan_databases, orphan_workspaces, orphan_ports,
     and orphan_roles, each a list of removed (or would-be-removed) names.
     """
@@ -4634,6 +4706,10 @@ def cleanup_orphans(
             live_branches.add(branch)
 
     db_prefix = f"oduflow_{team.team_id}_"
+    # Reserved production namespace, per resource type. Anything under these
+    # prefixes belongs to a production and must never be treated as an orphan.
+    prod_db_prefix = f"{db_prefix}{PROD_ENV_PREFIX}"
+    prod_role_prefix = f"u_{team.team_id}_{PROD_ENV_PREFIX}"
 
     # 2. Orphan databases
     rows = _exec_sql(
@@ -4647,6 +4723,8 @@ def cleanup_orphans(
     for db_name in all_dbs:
         if not db_name.startswith(db_prefix):
             continue
+        if db_name.startswith(prod_db_prefix):
+            continue  # production database — never an orphan
         # Reverse-map: strip prefix to get the slug, then check if any live branch produces this db name
         matched = any(get_db_name(b, team.team_id) == db_name for b in live_branches)
         if not matched:
@@ -4677,6 +4755,8 @@ def cleanup_orphans(
     orphan_ports: list[str] = []
     registry = _load_registry(team.port_registry_path)
     for branch in list(registry.keys()):
+        if branch.startswith(PROD_ENV_PREFIX):
+            continue  # production port reservation — never an orphan
         if branch not in live_branches:
             orphan_ports.append(branch)
 
@@ -4699,7 +4779,14 @@ def cleanup_orphans(
             settings.db_password,
         )
         live_roles.add(credentials["pg_user"])
-    orphan_roles = [role for role in all_roles if role not in live_roles]
+    orphan_roles = [
+        role
+        for role in all_roles
+        # Production PG roles never appear in live_branches (prod containers
+        # carry no branch label) — skip the reserved prod- namespace so cleanup
+        # cannot drop a live production's role.
+        if not role.startswith(prod_role_prefix) and role not in live_roles
+    ]
 
     if dry_run:
         logger.info(

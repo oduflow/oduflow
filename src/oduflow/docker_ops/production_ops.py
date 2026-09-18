@@ -650,9 +650,21 @@ def _copy_env_data_into_production(
 
 
 def _cleanup_partial_production(
-    client: DockerClient, settings: Settings, team: TeamSettings, name: str
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    *,
+    remove_workspace: bool = True,
 ) -> None:
-    """Best-effort teardown of a half-created production (rollback path)."""
+    """Best-effort teardown of a half-created production (rollback path).
+
+    ``remove_workspace=False`` preserves a workspace that existed BEFORE this
+    create attempt — e.g. one kept by ``delete_production(drop_database=False)``
+    ("productions are precious"): its filestore and deploy history must survive
+    a failed re-create, which only borrowed the directory via
+    ``makedirs(exist_ok=True)``.
+    """
     env_name = prod_env_name(name)
     try:
         container = _get_container(client, settings, team, name)
@@ -686,7 +698,12 @@ def _cleanup_partial_production(
     except Exception:
         pass
     workspace = _workspace(team, name)
-    if os.path.isdir(workspace):
+    if not remove_workspace:
+        logger.warning(
+            "Leaving pre-existing production workspace intact after failed create: %s",
+            workspace,
+        )
+    elif os.path.isdir(workspace):
         shutil.rmtree(workspace, ignore_errors=True)
 
 
@@ -950,6 +967,11 @@ def create_production(
         },
     )
 
+    # A workspace kept by delete_production(drop_database=False) holds the old
+    # production's filestore and deploy history; the rollback below must not
+    # destroy what this attempt did not create.
+    workspace_preexisted = os.path.isdir(workspace)
+
     promo_notes: list[str] = []
     try:
         ensure_team_network(client, settings, team)
@@ -1129,7 +1151,13 @@ def create_production(
         logger.error(
             "create_production('%s') failed; rolling back partial resources", name
         )
-        _cleanup_partial_production(client, settings, team, name)
+        _cleanup_partial_production(
+            client,
+            settings,
+            team,
+            name,
+            remove_workspace=not workspace_preexisted,
+        )
         production_registry.delete_production(team, name)
         raise
 

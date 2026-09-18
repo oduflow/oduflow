@@ -3507,6 +3507,59 @@ def stop_environment(
     return {"odoo_container": odoo_container_name, "stopped": [odoo_container_name]}
 
 
+def _container_image(container: Any, settings: Settings) -> str:
+    """Best-effort image reference for a container (label first, then tag)."""
+    image = container.labels.get(settings.image_label, "")
+    if image:
+        return str(image)
+    try:
+        if container.image.tags:
+            return str(container.image.tags[0])
+    except Exception:
+        pass
+    return str(container.attrs.get("Config", {}).get("Image", ""))
+
+
+def ensure_overlay_mounted(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    labels: dict[str, str],
+    odoo_image: str,
+) -> bool:
+    """Re-mount an overlay-mode env's filestore if the mount is missing or stale.
+
+    fuse-overlayfs mounts do not survive a host reboot, so a container started
+    (or auto-restarted) afterwards would serve an *empty* filestore directory —
+    attachments 404 and Odoo scribbles assets into the raw merged dir that a
+    later remount then shadows. Returns True if a remount was performed. Only
+    overlay-mode envs (an existing ``upper`` dir) are touched; copy-mode and
+    already-alive mounts are left alone.
+    """
+    paths = get_filestore_paths(env_name, team.workspaces_dir)
+    if not os.path.isdir(paths["upper"]):
+        return False  # copy-mode env: nothing to overlay-mount
+    if overlay_mount_state(paths["merged"]) == MOUNT_ALIVE:
+        return False
+    template_name = labels.get("oduflow.template", "none")
+    if not template_name or template_name == "none":
+        return False
+    _mount_filestore(
+        client,
+        settings,
+        team,
+        env_name,
+        get_db_name(env_name, team.team_id),
+        odoo_image,
+        {},
+        template_name=template_name,
+        force_overlay=True,
+    )
+    logger.info("Re-mounted filestore overlay", extra={"env_name": env_name})
+    return True
+
+
 def start_environment(
     settings: Settings, env_name: str, team: TeamSettings
 ) -> dict[str, Any]:
@@ -3533,6 +3586,28 @@ def start_environment(
             f"Environment '{env_name}' does not exist. Use create_environment first."
         )
     _assert_team_owns(odoo_container, settings, team, env_name)
+
+    # A stopped env's overlay may be gone (host reboot) — remount before start,
+    # or the container comes up on an empty filestore. A failed remount must
+    # abort the start: running on the raw merged directory loses attachments,
+    # and writes made there are hidden by a later successful remount
+    # (reconcile_overlay_mounts likewise leaves such containers stopped).
+    try:
+        ensure_overlay_mounted(
+            client,
+            settings,
+            team,
+            env_name,
+            odoo_container.labels,
+            _container_image(odoo_container, settings),
+        )
+    except Exception as exc:
+        raise PrerequisiteNotMetError(
+            f"Cannot start '{env_name}': its filestore overlay could not be "
+            f"re-mounted ({exc}). Starting without it would run Odoo on an "
+            "empty filestore and hide any files written there."
+        ) from exc
+
     odoo_container.start()
     started.append(odoo_container_name)
 

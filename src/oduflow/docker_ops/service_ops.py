@@ -27,7 +27,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
 )
 from oduflow.locking import keyed_mutex, service_registry_key
-from oduflow.naming import get_service_container_name
+from oduflow.naming import get_service_container_name, validate_domain
 from oduflow.service_runtime import (
     RUNTIME_LABEL,
     inspect_runtime,
@@ -448,6 +448,13 @@ def create_service(
         # FQDN used as-is. Either way the final name must be free in the
         # global Host() namespace.
         hostname = service_hostname(team, name, hostname)
+        # The hostname lands verbatim in a Traefik `Host(...)` router rule.
+        # Without this a tenant value like `foo`) || Host(`victim.example.com`
+        # would inject a second rule and hijack another team's hostname. Reject
+        # anything that is not a plain FQDN (same policy as production domains).
+        # update_service recreates via create_service, so this also guards
+        # hostname_override.
+        hostname = validate_domain(hostname)
         assert_public_hostname_free(
             settings,
             hostname,
@@ -1181,6 +1188,13 @@ def update_service(
         )
 
     _validate_service_exposure(settings, port, routes)
+
+    # Validate the candidate hostname before any destructive action.
+    # create_service re-validates, but it only runs after the old container is
+    # stopped and removed below — a rejected hostname there would leave the
+    # service deleted instead of unchanged. Same resolution as create_service.
+    if settings.routing_mode == "traefik":
+        validate_domain(service_hostname(team, name, hostname))
 
     # Determine the image to pull (override or current)
     target_image = image_override if image_override else old_image

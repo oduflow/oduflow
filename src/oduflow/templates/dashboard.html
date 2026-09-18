@@ -7200,9 +7200,13 @@ function ensureChatAssets() {
   // chat.js and acp-client.js are an interdependent pair of our own code; bump
   // this shared CHAT_V whenever either one changes (see AGENTS.md). One version
   // busts both at once, preventing a stale chat.js/acp-client.js mismatch.
-  var CHAT_V = '6';
+  var CHAT_V = '7';
+  // marked.min.js and purify.min.js are vendored third-party assets (not part
+  // of the CHAT_V pair — bump their filename if upgraded). DOMPurify must load
+  // before chat.js: renderMarkdown sanitizes marked's raw-HTML output with it.
   _chatAssets = Promise.all([
     loadScript('/static/marked.min.js'),
+    loadScript('/static/purify.min.js'),
     loadScript('/static/acp-client.js?v=' + CHAT_V)
   ]).then(function() { return loadScript('/static/chat.js?v=' + CHAT_V); });
   return _chatAssets;
@@ -7457,6 +7461,12 @@ window.addEventListener('resize', function() {
 });
 
 var MODAL_CLOSERS = {
+  // Created dynamically by openCreateProductionModal; promptDialog overlays
+  // handle Escape themselves via their own overlay keydown listener.
+  'create-prod-modal': function() {
+    var m = document.getElementById('create-prod-modal');
+    if (m) m.remove();
+  },
   'sync-result-modal': closeSyncResult,
   'create-modal': closeCreateModal,
   'feedback-modal': closeFeedbackModal,
@@ -8088,7 +8098,9 @@ async function prodRestore(name, snapshotId) {
 function promptDialog(opts) {
   return new Promise(function(resolve) {
     var overlay = document.createElement('div');
-    overlay.className = 'modal-overlay active';
+    // Only .modal-overlay.show has display:flex — any other modifier renders
+    // an invisible dialog whose promise never settles.
+    overlay.className = 'modal-overlay show';
     overlay.innerHTML =
       '<div class="modal modal-sm" role="dialog" aria-modal="true">' +
         '<div class="modal-header"><h3>' + esc(opts.title || 'Confirm') + '</h3></div>' +
@@ -8109,7 +8121,12 @@ function promptDialog(opts) {
     overlay.addEventListener('click', function(e) { if (e.target === overlay) close(null); });
     input.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') close(input.value.trim());
-      if (e.key === 'Escape') close(null);
+    });
+    // Escape on the overlay, not the input: it must also dismiss when a
+    // button has focus, and the id-less overlay is invisible to the global
+    // MODAL_CLOSERS Escape handler.
+    overlay.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { e.stopPropagation(); close(null); }
     });
   });
 }
@@ -8120,7 +8137,7 @@ function _prodEnabled() {
 
 function openCreateProductionModal(fromEnv) {
   var overlay = document.createElement('div');
-  overlay.className = 'modal-overlay active';
+  overlay.className = 'modal-overlay show';
   overlay.id = 'create-prod-modal';
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true">' +

@@ -393,6 +393,46 @@ class TestCreateService:
             "oduflow-traefik-acme": {"bind": "/etc/traefik", "mode": "ro"}
         }
 
+    def test_traefik_hostname_injection_is_rejected(self, mock_docker_client):
+        # P-H10: a tenant hostname lands in a Traefik `Host(...)` rule; a value
+        # that closes the backtick and opens a second Host() would hijack another
+        # team's hostname. It must be rejected before the container is created.
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        with pytest.raises(ValueError):
+            service_ops.create_service(
+                TRAEFIK_SETTINGS,
+                TRAEFIK_TEAM,
+                "evil",
+                "redis:7",
+                6379,
+                hostname="foo`) || Host(`victim.example.com",
+            )
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_traefik_short_hostname_becomes_team_fqdn(self, mock_docker_client):
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        result = service_ops.create_service(
+            TRAEFIK_SETTINGS,
+            TRAEFIK_TEAM,
+            "kibana",
+            "kibana:8",
+            5601,
+            hostname="qa",
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        assert (
+            labels["traefik.http.routers.oduflow-1-svc-kibana.rule"]
+            == "Host(`qa.example.com`)"
+        )
+        assert result["url"] == "https://qa.example.com"
+
     def test_create_traefik_bridge_with_restricted_routes(self, mock_docker_client):
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
@@ -1657,6 +1697,42 @@ class TestUpdateService:
                             "mode": "rw",
                         }
                     ],
+                )
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+        mock_docker_client.images.pull.assert_not_called()
+
+    def test_update_invalid_hostname_preflight_does_not_remove_running_service(
+        self, mock_docker_client
+    ):
+        # create_service validates the Traefik hostname, but by the time it
+        # runs the old container is already removed — a rejected hostname
+        # override must fail up front and leave the running service untouched.
+        container = self._make_container(
+            image_tags=["redis:7"],
+            labels={"oduflow.managed": "true", "oduflow.service": "redis"},
+            attrs={"Config": {"Env": []}},
+        )
+        mock_docker_client.containers.get.return_value = container
+        preset = {
+            "name": "redis",
+            "image": "redis:7",
+            "port": 6379,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            with pytest.raises(ValueError, match="omain"):
+                service_ops.update_service(
+                    TRAEFIK_SETTINGS,
+                    TRAEFIK_TEAM,
+                    "redis",
+                    hostname_override="https://qa.example.com",
                 )
 
         container.stop.assert_not_called()

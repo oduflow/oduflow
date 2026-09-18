@@ -148,3 +148,73 @@ class TestApplyArchiveCommand:
         assert any("ALTER SYSTEM SET archive_command" in s for s in issued)
         assert any("wal-push %p" in s for s in issued)
         assert any("pg_reload_conf" in s for s in issued)
+
+
+class TestParseWalgTime:
+    def test_rfc3339_z(self):
+        dt = walg._parse_walg_time("2026-08-29T03:30:00Z")
+        assert dt is not None
+        assert dt.year == 2026 and dt.month == 8 and dt.day == 29 and dt.hour == 3
+        assert dt.utcoffset().total_seconds() == 0
+
+    def test_postgres_space_and_short_offset(self):
+        dt = walg._parse_walg_time("2026-08-01 00:00:00+00")
+        assert dt is not None and dt.utcoffset().total_seconds() == 0
+
+    def test_naive_is_assumed_utc(self):
+        dt = walg._parse_walg_time("2026-08-01T12:00:00")
+        assert dt is not None and dt.utcoffset().total_seconds() == 0
+
+    def test_empty_or_garbage_is_none(self):
+        assert walg._parse_walg_time("") is None
+        assert walg._parse_walg_time("not-a-time") is None
+
+
+class TestSelectPitrBaseBackup:
+    _BACKUPS = [
+        {"backup_name": "base_001", "finish_time": "2026-08-27T03:30:00Z"},
+        {"backup_name": "base_002", "finish_time": "2026-08-28T03:30:00Z"},
+        {"backup_name": "base_003", "finish_time": "2026-08-29T03:30:00Z"},
+    ]
+
+    def test_no_target_uses_latest(self):
+        assert walg._select_pitr_base_backup(MagicMock(), MagicMock(), "") == "LATEST"
+
+    def test_picks_newest_base_at_or_before_target(self):
+        with patch.object(walg, "backup_list", return_value=list(self._BACKUPS)):
+            # 28th afternoon: newest base at or before it is base_002 (28th 03:30),
+            # never the LATEST base_003 (29th) that the old code always fetched.
+            name = walg._select_pitr_base_backup(
+                MagicMock(), MagicMock(), "2026-08-28 14:00:00+00"
+            )
+        assert name == "base_002"
+
+    def test_target_before_all_bases_raises_before_destruction(self):
+        with patch.object(walg, "backup_list", return_value=list(self._BACKUPS)):
+            with pytest.raises(PrerequisiteNotMetError, match="No base backup"):
+                walg._select_pitr_base_backup(
+                    MagicMock(), MagicMock(), "2026-08-01 00:00:00+00"
+                )
+
+    def test_unparseable_target_raises_before_destruction(self):
+        # Falling back to LATEST here restores to the wrong point (or FATALs
+        # recovery) after PGDATA is already displaced — refuse up front.
+        with patch.object(walg, "backup_list", return_value=list(self._BACKUPS)):
+            with pytest.raises(PrerequisiteNotMetError, match="target_time"):
+                walg._select_pitr_base_backup(MagicMock(), MagicMock(), "whenever")
+
+    def test_unreadable_backup_times_raise_before_destruction(self):
+        with patch.object(walg, "backup_list", return_value=[{"foo": "bar"}]):
+            with pytest.raises(
+                PrerequisiteNotMetError, match="no base backup can be matched"
+            ):
+                walg._select_pitr_base_backup(
+                    MagicMock(), MagicMock(), "2026-08-28 14:00:00+00"
+                )
+
+    def test_empty_backup_inventory_raises_before_destruction(self):
+        with patch.object(walg, "backup_list", return_value=[]):
+            with pytest.raises(PrerequisiteNotMetError):
+                walg._select_pitr_base_backup(
+                    MagicMock(), MagicMock(), "2026-08-28 14:00:00+00"
+                )
