@@ -1,31 +1,163 @@
 # Changelog
 
-## Unreleased
+## v1.78.0
 
-- Apply the generated `odoo.conf` and the repository's apt/pip dependencies with a
-  single restart when creating or updating an environment. The serving container
-  boots before Oduflow can install anything into it, and the restart used to be
-  skipped whenever pip had nothing to install — a repository shipping
-  `.oduflow/odoo.conf` without a `requirements.txt` was left serving on the image's
-  stock `addons_path` and worker settings. Development now follows the same
-  order as production.
-- Wait for the serving registry after that restart before continuing setup.
-  `create_environment` previously returned as soon as the restart was issued, so
-  database neutralization could exec a second Odoo process into a container whose
-  registry was still reloading — and a collision there was only logged, handing
+### Features
+
+- **Per-team SSH deploy keys** — each team gets an Oduflow-managed ed25519 deploy
+  key as an alternative to HTTPS tokens, generated automatically at server start
+  and copyable/regenerable from the dashboard **Credentials** tab,
+  `GET /api/ssh-key` / `POST /api/ssh-key/generate`, or the `get_ssh_public_key`
+  MCP tool. SSH repository URLs (`git@host:path`, `ssh://…`) are accepted
+  everywhere a repo URL is taken — environments, extra addon repos, productions,
+  webhooks — under the same SSRF host checks as HTTPS. Every managed git
+  subprocess runs with `GIT_SSH_COMMAND` pinned to the team key (`BatchMode=yes`,
+  `IdentitiesOnly=yes`, per-team `known_hosts`), so a keyless team fails fast
+  instead of borrowing the host operator's identities, and the key is provisioned
+  into the team's coding-agent container. Decision record:
+  `specs/0065-team-ssh-deploy-keys.md`. (#247)
+
+- **Team base domain and multi-domain productions** — a team's DNS zone is now an
+  explicit `base_domain` setting (Traefik mode). With it set, environments and
+  services are named directly under the zone (`feature.demo.example.com`) as
+  siblings of the dashboard instead of nesting two levels deep, the dashboard
+  hostname defaults to `oduflow.<base_domain>`, and production primary domains
+  must be the apex or a subdomain of it. Productions also gain `extra_domains`:
+  arbitrary client-owned FQDNs routed to the same container through one
+  multi-`Host()` rule. One wildcard record plus the apex now covers the dashboard,
+  every environment, every service and default production names. Leaving
+  `base_domain` unset preserves the legacy nested layout exactly, and existing
+  environments keep their hostname until their next `update_environment`. A new
+  `domains.py` is the single authority for the global Traefik `Host()` namespace.
+  Decision record: `specs/0064-team-base-domain.md`. (#246)
+
+- **Production targets in declarative Stacks** — `spec.production` is a mutually
+  exclusive alternative to `spec.environment`, so a platform promoted to
+  production can be reconciled without reviving its retired dev container. Stacks
+  create productions or explicitly adopt matching existing ones without copying
+  data or restarting their containers; ownership is stored in the production
+  registry and survives container replacement. Domain, image, environment
+  variables, policies and Odoo configuration are reconciled with secret
+  references preserved, effective runtime drift detected, and an incomplete-apply
+  marker so a retry repairs a failed replacement. Supporting services can resolve
+  `productionField: url|containerName|database`. Dev manifests remain
+  compatible. (#244)
+
+- **Mutable production configuration and dev-to-production promotion** —
+  `reconfigure_production` (MCP, `POST /api/productions/{name}/reconfigure`, and
+  dashboard **More → Settings**) changes domain, Odoo image, branch, repository
+  URL, git user, extra addon repos and environment variables on a live
+  production; the container is recreated while database and filestore are
+  preserved, and a mid-way failure is resumable rather than reported as "no
+  settings changed". `set_production_odoo_conf` stores per-production odoo.conf
+  overrides in the registry, surviving deploys and retunes. And
+  `create_production(from_environment=...)` promotes a development environment:
+  its database and filestore are copied as a consistent pair (Odoo briefly
+  stopped) and repo, branch, image, git user, extra addons and env vars —
+  including `secret:<name>` references — are inherited from its container labels.
+  Decision records: `specs/0061`, `specs/0062`. (#243)
+
+### Security
+
+- **Sanitize scripts no longer run as the cluster superuser** — repo-controlled
+  `.sql`/`.py` sanitize scripts executed as the shared development cluster's
+  PostgreSQL superuser, which made `COPY … TO PROGRAM` host RCE and allowed
+  cross-tenant SQL. They now run as the environment's scoped role; an
+  environment without scoped credentials skips sanitization instead of
+  escalating. (#237)
+
+- **Service hostnames can no longer hijack another team's routes** — a
+  tenant-supplied service hostname was written verbatim into the Traefik
+  `Host(...)` rule, so a crafted value could claim another team's hostname. The
+  resolved hostname now passes the same FQDN validation as production
+  domains. (#237)
+
+- **Agent Chat markdown is sanitized with DOMPurify** — the hand-rolled
+  sanitizer was bypassable (`java&Tab;script:` scheme, SVG `xlink:href`),
+  giving clickable XSS in the dashboard origin. Marked's output now goes
+  through vendored DOMPurify 3.2.4, shipped in `/static` like every other asset
+  — no CDN. (#237)
+
+### Bug Fixes
+
+- **`oduflow cleanup --force` destroyed live productions** — production
+  containers deliberately carry no branch label, so orphan classification saw a
+  running production's database, workspace and PG role as reclaimable. The
+  reserved `prod-` namespace is excluded from every orphan category. (#237)
+
+- **CLI boolean and integer arguments were ignored** — PEP 563 string
+  annotations made positional-argument coercion dead code, so
+  `oduflow call delete_production erp erp false` dropped the database despite
+  the explicit `false`. Types are resolved via `get_type_hints` now. (#237)
+
+- **Failed `create_production` no longer deletes preserved data** — the rollback
+  rmtree'd a workspace kept by an earlier `delete_production(drop_database=False)`,
+  destroying its filestore and deploy history. It now removes only what the
+  attempt itself created. (#237)
+
+- **Backup prune kept manifests but dropped revisions** — the weekly prune
+  collapsed a deleted-but-kept production's backups to the newest revision while
+  its manifests survived, so restoring any older snapshot failed. Untracked
+  snapshot ids are kept whole. (#237)
+
+- **Cluster PITR to a past timestamp** — recovery always fetched the `LATEST`
+  base backup, so any past `target_time` FATAL'd and left the cluster down with
+  PGDATA displaced; the newest base at or before the target is now selected
+  before any destructive step. `restore_cluster_pitr` also validates `[backup]`
+  prerequisites *before* stopping every team's productions, and restarts them
+  best-effort if the restore fails. (#237)
+
+- **`destroy_system` ignored the production tier** — it proceeded with live
+  productions, never removed the production PostgreSQL container and volume, and
+  crashed half-way through teardown on the shared-network `APIError`. (#237)
+
+- **Stale overlay filestores on start** — `start_environment` remounts a
+  missing or stale fuse-overlayfs filestore before starting the container,
+  complementing the startup-wide `reconcile_overlay_mounts`. (#237)
+
+- **Published templates lost their metadata** — `publish_env_as_template` looked
+  the source container up by a non-team-scoped name and silently dropped
+  `odoo_image`, `repo_url` and friends from every published template. (#237)
+
+- **`search_in_volume` always failed** — it used GNU-only `grep --include`
+  inside the busybox helper image, exiting 2 on every real search. (#237)
+
+- **Apply `odoo.conf` and dependencies with one gated restart** — the serving
+  container boots before Oduflow can install anything into it, and the restart
+  that picked up the repository's config and pip packages was skipped whenever
+  pip had nothing to install, so a repository shipping `.oduflow/odoo.conf`
+  without a `requirements.txt` kept serving on the image's stock `addons_path`
+  and worker settings. The restart is now unconditional and gated on the Odoo
+  registry coming back: `create_environment` previously returned as soon as the
+  restart was issued, so database neutralization could exec a second Odoo
+  process into a reloading container — a collision that was only logged, handing
   back an environment with live mail servers, crons and payment providers. The
-  returned URL is also live now instead of answering 502 for the first minute.
-- Use `without_demo = True` instead of the legacy `without_demo = all` in the
-  bundled `odoo.conf` / `odoo-prod.conf`. Odoo 19 parses the option as a boolean
-  and logged `invalid boolean value: 'all'` on every start; the two spellings are
-  equivalent on all supported versions.
-- Production updates check module state in the production PostgreSQL cluster,
-  preserving development database settings for concurrent requests. Exceptions
-  after pulling source now enter the same code rollback path as failed module
-  commands, with the failed commit and exit status recorded in deploy history.
-- Add production targets to declarative Stacks, with explicit adoption of matching
-  existing productions, registry ownership, production value references and
-  retryable configuration reconciliation. Development Stacks remain compatible.
+  returned URL is live instead of answering 502 for the first minute, and an
+  update that changed nothing inside a fresh container skips a pointless
+  reload. (#249)
+
+- **Production database routing during updates** — production module checks ran
+  against the shared development PostgreSQL container with the production role,
+  so `update_production(upgrade=...)` failed with a missing-role error even
+  though the role existed in the production cluster. The shared apply engine now
+  gets a scoped settings copy pointing at the production database, leaving
+  development settings intact for concurrent requests, and exceptions raised
+  after source synchronization go through the existing code rollback path with
+  the failed commit and exit status recorded in deploy history. (#245)
+
+- **`without_demo = True` in the bundled configs** — Odoo 19 parses the option
+  as a boolean and logged `invalid boolean value: 'all'` on every start; the two
+  spellings are equivalent on all supported versions. (#249)
+
+### Documentation
+
+- **Connecting Claude Desktop to a remote Oduflow server** — Claude Desktop can
+  only launch MCP servers as local processes, so `docs/quick-start.md` now
+  documents the `mcp-remote` stdio bridge: config file locations, Windows and
+  macOS/Linux snippets, where the team's `auth_token` goes (in `env.AUTH_HEADER`,
+  not inline in `args`), why `--transport http-only` is required, and the scoped
+  `/mcp/<env>` variant. `docs/security.md` points there from the Claude.ai OAuth
+  section. (#248)
 
 ## v1.77.0
 
