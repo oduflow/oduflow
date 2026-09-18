@@ -1200,24 +1200,30 @@ class TestDirectoryResolution:
 
 
 @pytest.mark.parametrize(
-    "value, enabled, acme",
+    "value, email, enabled, auto, resolver",
     [
-        ("true", True, True),
-        ("false", False, False),
-        ("{}", True, False),
+        # tls = true + acme_email: resolver declared and auto-assigned.
+        ("true", True, True, True, True),
+        # tls = false: TLS and ACME both off.
+        ("false", True, False, False, False),
+        # tls = {} + acme_email: resolver declared, only explicit routes use it.
+        ("{}", True, True, False, True),
+        # tls = {} without acme_email: HTTPS without ACME.
+        ("{}", False, True, False, False),
     ],
 )
-def test_tls_modes_from_toml(tmp_path, value, enabled, acme):
+def test_tls_modes_from_toml(tmp_path, value, email, enabled, auto, resolver):
     config = tmp_path / "oduflow.toml"
     config.write_text(
         f'[routing]\nmode = "traefik"\ntls = {value}\n'
-        + ('acme_email = "admin@example.com"\n' if acme else "")
+        + ('acme_email = "admin@example.com"\n' if email else "")
         + '[team.1]\nhostname = "dev.example.com"\n'
     )
     settings = Settings.from_toml(str(config))
     settings.validate()
     assert settings.routing_tls is enabled
-    assert settings.uses_acme is acme
+    assert settings.uses_acme is (enabled and auto)
+    assert settings.acme_enabled is resolver
     assert settings.public_scheme == "https"
     if enabled:
         settings = replace(settings, public_scheme_setting="http")

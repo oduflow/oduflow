@@ -4648,9 +4648,23 @@ tls = {}
 ```
 
 Traefik listens on **:443** and redirects **:80** to HTTPS. Oduflow enables TLS
-on every generated router without a certificate resolver. No ACME requests are
-made, `acme_email` is not required, and auxiliary services receive no implicit
-ACME volume mount.
+on every generated router without a certificate resolver, so no certificates
+are requested for Oduflow-managed hostnames and `acme_email` is not required.
+
+`acme_email` still matters with `tls = {}`: when it is set, the Let's Encrypt
+resolver is *declared* in Traefik (and the ACME certificate store is created and
+mounted read-only into auxiliary services), but only routes that reference it
+explicitly — your own [drop-in dynamic-config files](#2-drop-in-traefik-dynamic-files) —
+obtain certificates through it. Note that the store contains no `acme.json`
+until the first issuance. Without `acme_email` there is no resolver, no store
+and no implicit service mount at all. The four combinations:
+
+| Settings | Behavior |
+| --- | --- |
+| `tls = {}` + `acme_email` set | Resolver declared, used only by explicitly configured routes |
+| `tls = {}` + `acme_email` empty | HTTPS without ACME |
+| `tls = true` + `acme_email` set | Resolver declared and automatically assigned to every managed route |
+| `tls = false` | TLS and ACME off |
 
 Unless you provide your own certificates through Traefik's dynamic configuration,
 Traefik generates and serves its default self-signed certificate. Browsers and
@@ -4670,9 +4684,14 @@ The supported values are `true` (HTTPS with Let's Encrypt, the default),
 `{}` (HTTPS without ACME), and `false` (HTTP only). Nonempty TLS tables are
 rejected; this setting does not pass arbitrary options through to Traefik.
 
-Switching modes recreates Traefik on the next Oduflow startup. Recreate existing
-environments, productions and services too: their Docker routing labels retain
-the previous entrypoint and certificate resolver until their containers are recreated.
+Switching modes recreates Traefik on the next Oduflow startup whenever its
+command line changes (TLS on/off, or the resolver appearing/disappearing);
+`tls = true` ↔ `tls = {}` with the same `acme_email` reuses the running
+container and only rewrites the route configuration. Disabling ACME never
+deletes the certificate store: issued certificates and the Let's Encrypt
+account key survive a later re-enable. Recreate existing environments,
+productions and services too: their Docker routing labels retain the previous
+entrypoint and certificate resolver until their containers are recreated.
 
 ## Behind a Cloudflare tunnel (or other TLS-terminating upstream)
 

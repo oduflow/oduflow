@@ -275,7 +275,9 @@ class TestCreateProduction:
         assert "erp" not in production_registry.list_productions(team)
 
     def test_create_self_signed_tls(self, settings, team):
-        settings = replace(settings, routing_acme=False)
+        # tls = {} with an acme_email: the resolver is declared but managed
+        # routes must not reference it.
+        settings = replace(settings, routing_tls_auto=False)
         client = _mock_client()
         with _PatchAll(_patch_create_stack(client)):
             production_ops.create_production(

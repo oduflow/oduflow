@@ -399,7 +399,9 @@ class TestCreateService:
     def test_create_self_signed_tls(self, mock_docker_client, restricted, host_mode):
         from dataclasses import replace
 
-        settings = replace(TRAEFIK_SETTINGS, routing_acme=False)
+        # tls = {} without acme_email: HTTPS from the default certificate, no
+        # resolver declared and therefore no ACME store to mount.
+        settings = replace(TRAEFIK_SETTINGS, routing_tls_auto=False, acme_email="")
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
         mock_docker_client.volumes.get.side_effect = docker.errors.NotFound("nf")
         service_ops.create_service(
@@ -421,6 +423,32 @@ class TestCreateService:
         assert settings.traefik_acme_volume not in (kwargs.get("volumes") or {})
         assert not service_ops._needs_traefik_acme_mount(settings, MagicMock())
         mock_docker_client.volumes.get.assert_not_called()
+
+    def test_create_manual_tls_with_acme_email(self, mock_docker_client):
+        # tls = {} with an acme_email: the resolver is declared, so the ACME
+        # store is still mounted into the service (it may be empty until the
+        # first issuance), but managed routes must not reference the resolver.
+        from dataclasses import replace
+
+        settings = replace(TRAEFIK_SETTINGS, routing_tls_auto=False)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        service_ops.create_service(
+            settings,
+            TRAEFIK_TEAM,
+            "meilisearch",
+            "getmeili/meilisearch:v1.6",
+            7700,
+        )
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
+        prefix = "traefik.http.routers.oduflow-1-svc-meilisearch"
+        assert kwargs["labels"][f"{prefix}.entrypoints"] == "websecure"
+        assert kwargs["labels"][f"{prefix}.tls"] == "true"
+        assert not any("certresolver" in key for key in kwargs["labels"])
+        assert kwargs["volumes"][settings.traefik_acme_volume] == {
+            "bind": "/etc/traefik",
+            "mode": "ro",
+        }
 
     def test_traefik_hostname_injection_is_rejected(self, mock_docker_client):
         # P-H10: a tenant hostname lands in a Traefik `Host(...)` rule; a value

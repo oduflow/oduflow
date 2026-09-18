@@ -582,10 +582,12 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
 
     system_labels = {settings.managed_label: "true", settings.system_label: "true"}
 
-    # Only an ACME deployment has a certificate store to persist: `tls = {}`
-    # also serves HTTPS, but from Traefik's default certificate, so it needs no
-    # volume.
-    if settings.uses_acme:
+    # Only a deployment with a declared resolver has a certificate store to
+    # persist: without acme_email nothing can issue, so no volume is needed.
+    # An existing store is deliberately never removed here — disabling ACME
+    # just stops mounting it, keeping issued certificates and the account key
+    # for a later re-enable.
+    if settings.acme_enabled:
         try:
             client.volumes.get(settings.traefik_acme_volume)
         except docker.errors.NotFound:
@@ -614,7 +616,13 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         # Recreate on configuration drift:
         #   - routing tls: the HTTP->HTTPS redirect arg is present only in TLS
         #     mode, so its presence must match routing_tls.
-        #   - ACME: switching between tls = true and tls = {}.
+        #   - ACME: the resolver args are present only when acme_enabled
+        #     (traefik TLS with an acme_email), so toggling acme_email — or
+        #     tls = false — must recreate. tls = {} <-> tls = true with the
+        #     same email keeps the container; only route config changes.
+        #     This is a presence check, not a value check: changing acme_email
+        #     from one address to another leaves the container (and the address
+        #     Let's Encrypt has on file) alone until a manual recreate.
         #   - forwarded headers: trusted only in front of an upstream TLS
         #     terminator, so its presence must match _trusts_upstream_headers
         #     (which public_scheme can flip without touching tls).
@@ -637,7 +645,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         )
         if (
             has_redirect != settings.routing_tls
-            or has_acme != settings.uses_acme
+            or has_acme != settings.acme_enabled
             or has_forwarded != wants_forwarded
             or not on_dir_provider
         ):
@@ -652,7 +660,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
                 wants_forwarded,
                 on_dir_provider,
                 has_acme,
-                settings.uses_acme,
+                settings.acme_enabled,
             )
             t.stop()
             t.remove()
@@ -699,7 +707,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
             # exposed and anyone could forge the header, so it stays off.
             command.append("--entrypoints.web.forwardedHeaders.insecure=true")
 
-    if settings.uses_acme:
+    if settings.acme_enabled:
         volumes[settings.traefik_acme_volume] = {"bind": "/acme", "mode": "rw"}
         command += [
             "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",

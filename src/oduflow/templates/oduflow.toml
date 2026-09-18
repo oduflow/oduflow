@@ -9,12 +9,19 @@ allow_local_path = true        # trusted single-user local development; disable 
 # ── Routing ───────────────────────────────────────────
 [routing]
 mode = "port"                   # "port" | "traefik"
-# acme_email = "admin@example.com"  # required for traefik (when tls = true)
+# acme_email = "admin@example.com"  # required for traefik when tls = true; optional
+#                                  # with tls = {} (see below)
 # tls = true                       # traefik only. true: Traefik terminates TLS
-#                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt).
-#                                  # {}: same listener and redirect, but no ACME and
-#                                  # no acme_email — Traefik serves its default
-#                                  # (self-signed) certificate; for local/test setups.
+#                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt on
+#                                  # every Oduflow-managed route).
+#                                  # {}: same listener and redirect, but managed routes
+#                                  # get no certificate resolver — Traefik serves its
+#                                  # default (self-signed) certificate; for local/test
+#                                  # setups. acme_email is optional here: set it and the
+#                                  # Let's Encrypt resolver is still declared (with its
+#                                  # certificate store), for use by your own drop-in
+#                                  # Traefik dynamic-config routes only; leave it empty
+#                                  # and there is no resolver and no store at all.
 #                                  # false: plain HTTP on :80 only, no redirect/ACME —
 #                                  # for a TLS-terminating upstream (e.g. Cloudflare
 #                                  # tunnel). Public URLs stay https:// either way.
