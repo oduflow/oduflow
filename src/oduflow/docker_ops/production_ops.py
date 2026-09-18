@@ -781,11 +781,12 @@ def _container_spec(
             {
                 f"traefik.http.routers.{traefik_router}.entrypoints": "websecure",
                 f"traefik.http.routers.{traefik_router}.tls": "true",
-                f"traefik.http.routers.{traefik_router}.tls.certresolver": (
-                    "letsencrypt"
-                ),
             }
         )
+        if settings.uses_acme:
+            labels[f"traefik.http.routers.{traefik_router}.tls.certresolver"] = (
+                "letsencrypt"
+            )
     else:
         labels[f"traefik.http.routers.{traefik_router}.entrypoints"] = "web"
     return odoo_env, odoo_volumes, labels

@@ -12,6 +12,9 @@ mode = "port"                   # "port" | "traefik"
 # acme_email = "admin@example.com"  # required for traefik (when tls = true)
 # tls = true                       # traefik only. true: Traefik terminates TLS
 #                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt).
+#                                  # {}: same listener and redirect, but no ACME and
+#                                  # no acme_email — Traefik serves its default
+#                                  # (self-signed) certificate; for local/test setups.
 #                                  # false: plain HTTP on :80 only, no redirect/ACME —
 #                                  # for a TLS-terminating upstream (e.g. Cloudflare
 #                                  # tunnel). Public URLs stay https:// either way.

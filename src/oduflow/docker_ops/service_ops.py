@@ -253,14 +253,14 @@ def _resolve_service_volume_binds(
     """Resolve user mounts and add the implicit Traefik ACME mount.
 
     The ACME store is platform-owned rather than part of the user-supplied
-    service configuration. Every service created while Oduflow terminates TLS
-    through Traefik sees the exact store at ``/etc/traefik`` read-only.
+    service configuration. Every service created while Traefik uses ACME sees
+    the exact store at ``/etc/traefik`` read-only.
     """
     volume_binds: dict[str, dict[str, str]] = volume_ops.resolve_volume_binds(
         team, volumes or []
     )
 
-    if settings.routing_mode != "traefik" or not settings.routing_tls:
+    if not settings.uses_acme:
         return volume_binds
 
     for mount in volumes or []:
@@ -292,7 +292,7 @@ def _resolve_service_volume_binds(
 
 def _needs_traefik_acme_mount(settings: Settings, container: Any) -> bool:
     """Whether a Traefik TLS service is missing the implicit ACME mount."""
-    if settings.routing_mode != "traefik" or not settings.routing_tls:
+    if not settings.uses_acme:
         return False
 
     for mount in container.attrs.get("Mounts", []):
@@ -485,7 +485,9 @@ def create_service(
                 labels[f"{router_prefix}.service"] = route_name
                 if settings.routing_tls:
                     labels[f"{router_prefix}.entrypoints"] = "websecure"
-                    labels[f"{router_prefix}.tls.certresolver"] = "letsencrypt"
+                    labels[f"{router_prefix}.tls"] = "true"
+                    if settings.uses_acme:
+                        labels[f"{router_prefix}.tls.certresolver"] = "letsencrypt"
                 else:
                     labels[f"{router_prefix}.entrypoints"] = "web"
                 if host_mode:
@@ -512,9 +514,11 @@ def create_service(
                 labels[f"traefik.http.routers.{container_name}.entrypoints"] = (
                     "websecure"
                 )
-                labels[f"traefik.http.routers.{container_name}.tls.certresolver"] = (
-                    "letsencrypt"
-                )
+                labels[f"traefik.http.routers.{container_name}.tls"] = "true"
+                if settings.uses_acme:
+                    labels[
+                        f"traefik.http.routers.{container_name}.tls.certresolver"
+                    ] = "letsencrypt"
             else:
                 # Upstream terminates TLS (e.g. Cloudflare tunnel): plain HTTP on
                 # the web entrypoint. The public URL below keeps the upstream's

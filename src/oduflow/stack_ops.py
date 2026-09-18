@@ -477,7 +477,7 @@ def build_plan(
                 )
             )
             continue
-        if settings.routing_mode == "traefik" and settings.routing_tls:
+        if settings.uses_acme:
             reserved_mount = next(
                 (
                     mount.target

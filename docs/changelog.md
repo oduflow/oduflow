@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Support `[routing] tls = {}` for HTTPS on port 443 with Traefik’s default
+  self-signed certificate, without Let’s Encrypt or an ACME email. HTTP redirects
+  to HTTPS; generated routes omit the ACME resolver and services omit its volume.
+  Oduflow’s own probes of the URLs it hands out (`http_request_to_odoo`, the
+  environment readiness check) skip certificate verification in this mode only,
+  since the default certificate has no trust anchor to verify against.
+
 ## v1.78.0
 
 ### Features

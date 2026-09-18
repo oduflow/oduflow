@@ -97,7 +97,7 @@ dashboard hostname to expose a URL prefix beside the dashboard.
 
 ## OAuth on each team's hostname
 
-The self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled automatically whenever a team has an `auth_token` and runs on **each team's own hostname** in every routing mode. With Traefik, the incoming host already has a Let's Encrypt certificate; with `tls = false`, the upstream tunnel provides it. There is no separate OAuth section: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
+The self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled automatically whenever a team has an `auth_token` and runs on **each team's own hostname** in every routing mode. With `tls = true`, the incoming host has a Let's Encrypt certificate; with `tls = false`, the upstream tunnel provides it. There is no separate OAuth section: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
 
 ## Service routing with Traefik
 
@@ -127,10 +127,10 @@ url  = "http://127.0.0.1:3000"
 ```
 
 On the next start Oduflow generates a Traefik router for `api.example.com` and
-forwards it to `http://127.0.0.1:3000`. In TLS mode the route gets its own
+forwards it to `http://127.0.0.1:3000`. With `tls = true`, the route gets its own
 Let's Encrypt certificate (point the domain's DNS at this server first), exactly
-like a team hostname; behind a `tls = false` upstream it is served over plain
-HTTP on port 80.
+like a team hostname. With `tls = {}`, it uses the default certificate. Behind
+a `tls = false` upstream, it is served over plain HTTP on port 80.
 
 Notes:
 
@@ -188,6 +188,43 @@ http:
 Traefik picks it up within a second (no restart needed). This is the full
 Traefik [file-provider dynamic configuration](https://doc.traefik.io/traefik/providers/file/),
 so use it when you outgrow the declarative routes above.
+
+## HTTPS with a self-signed certificate
+
+To serve HTTPS without Let's Encrypt, set an empty TLS table in `oduflow.toml`:
+
+```toml
+[routing]
+mode = "traefik"
+tls = {}
+```
+
+Traefik listens on **:443** and redirects **:80** to HTTPS. Oduflow enables TLS
+on every generated router without a certificate resolver. No ACME requests are
+made, `acme_email` is not required, and auxiliary services receive no implicit
+ACME volume mount.
+
+Unless you provide your own certificates through Traefik's dynamic configuration,
+Traefik generates and serves its default self-signed certificate. Browsers and
+clients do not trust it automatically; this is suitable for local or test setups.
+See [Traefik's default certificate documentation](https://doc.traefik.io/traefik/reference/routing-configuration/http/tls/tls-certificates/#default-certificate).
+The generated certificate is not exported into `acme.json` for auxiliary services.
+
+Because that certificate has no trust anchor, Oduflow skips certificate
+verification when it calls its *own* public URLs — `http_request_to_odoo` and
+the environment readiness check that `start_environment` / `restart_environment`
+wait on. This applies to `tls = {}` only; `tls = true` and every outbound
+request to a third-party host keep full verification. Your own clients
+(browsers, `curl`, MCP clients) still need the certificate trusted or the check
+disabled on their side.
+
+The supported values are `true` (HTTPS with Let's Encrypt, the default),
+`{}` (HTTPS without ACME), and `false` (HTTP only). Nonempty TLS tables are
+rejected; this setting does not pass arbitrary options through to Traefik.
+
+Switching modes recreates Traefik on the next Oduflow startup. Recreate existing
+environments, productions and services too: their Docker routing labels retain
+the previous entrypoint and certificate resolver until their containers are recreated.
 
 ## Behind a Cloudflare tunnel (or other TLS-terminating upstream)
 
@@ -290,7 +327,7 @@ certificate comes from Cloudflare.
     onto separate deployments.
 
 The per-team value obeys the same rules as the global one: `https` is invalid
-in port mode, and `http` is invalid while `tls = true` (the :80→:443 redirect
+in port mode, and `http` is invalid while TLS is enabled (`true` or `{}`) (the :80→:443 redirect
 would break the links).
 
 Production URLs are reported with the **owning team's** scheme. A production's

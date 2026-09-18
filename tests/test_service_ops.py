@@ -394,6 +394,34 @@ class TestCreateService:
             "oduflow-traefik-acme": {"bind": "/etc/traefik", "mode": "ro"}
         }
 
+    @pytest.mark.parametrize("restricted", [False, True])
+    @pytest.mark.parametrize("host_mode", [False, True])
+    def test_create_self_signed_tls(self, mock_docker_client, restricted, host_mode):
+        from dataclasses import replace
+
+        settings = replace(TRAEFIK_SETTINGS, routing_acme=False)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.volumes.get.side_effect = docker.errors.NotFound("nf")
+        service_ops.create_service(
+            settings,
+            TRAEFIK_TEAM,
+            "meilisearch",
+            "getmeili/meilisearch:v1.6",
+            None if restricted else 7700,
+            host_mode=host_mode,
+            routes=[{"path": "/api", "port": 7700}] if restricted else None,
+        )
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
+        prefix = "traefik.http.routers.oduflow-1-svc-meilisearch"
+        if restricted:
+            prefix += "-route-1"
+        assert kwargs["labels"][f"{prefix}.entrypoints"] == "websecure"
+        assert kwargs["labels"][f"{prefix}.tls"] == "true"
+        assert not any("certresolver" in key for key in kwargs["labels"])
+        assert settings.traefik_acme_volume not in (kwargs.get("volumes") or {})
+        assert not service_ops._needs_traefik_acme_mount(settings, MagicMock())
+        mock_docker_client.volumes.get.assert_not_called()
+
     def test_traefik_hostname_injection_is_rejected(self, mock_docker_client):
         # P-H10: a tenant hostname lands in a Traefik `Host(...)` rule; a value
         # that closes the backtick and opens a second Host() would hijack another

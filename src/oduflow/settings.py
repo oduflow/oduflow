@@ -268,12 +268,14 @@ class Settings:
     routing_mode: str = "port"
     acme_email: str = ""
     # Whether Traefik terminates TLS itself. True (default): Traefik listens on
-    # :443, redirects HTTP->HTTPS and obtains Let's Encrypt certificates. False:
+    # :443 and redirects HTTP->HTTPS; routing_acme selects certificate issuance. False:
     # Traefik listens on plain HTTP :80 only, no redirect and no ACME — for
     # running behind a TLS-terminating upstream (e.g. a Cloudflare tunnel) that
     # already serves HTTPS. Public URLs stay https:// (the upstream provides the
     # certificate) unless ``public_scheme`` says otherwise. Ignored in port mode.
     routing_tls: bool = True
+    # False for tls = {}: HTTPS uses Traefik's default certificate.
+    routing_acme: bool = True
     # Raw ``[routing] public_scheme`` value; read the resolved
     # :attr:`public_scheme` property instead of this field. Empty (default)
     # derives the scheme from the routing mode: ``https`` in traefik mode
@@ -400,6 +402,27 @@ class Settings:
         return None
 
     @property
+    def uses_acme(self) -> bool:
+        """Whether this deployment requests certificates from Let's Encrypt."""
+        return self.routing_mode == "traefik" and self.routing_tls and self.routing_acme
+
+    @property
+    def uses_default_tls_cert(self) -> bool:
+        """Whether Traefik serves HTTPS with its built-in default certificate.
+
+        True only for ``tls = {}``: TLS is on but no resolver issues a
+        certificate, so unless the operator supplies one through Traefik's own
+        dynamic config the served certificate is Traefik's self-signed default.
+        Oduflow's internal probes of its own public URLs consult this to decide
+        whether certificate verification can succeed at all.
+        """
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and not self.routing_acme
+        )
+
+    @property
     def public_scheme(self) -> str:
         """URL scheme ("http"/"https") for the public URLs Oduflow hands out.
 
@@ -468,7 +491,7 @@ class Settings:
         if value == "http" and self.routing_mode == "traefik" and self.routing_tls:
             raise ValueError(
                 f"{prefix}public_scheme = 'http' requires tls = false: with "
-                "tls = true Traefik redirects :80 to :443, so http:// links "
+                "TLS enabled Traefik redirects :80 to :443, so http:// links "
                 "would not work"
             )
         if value == "https" and self.routing_mode == "port":
@@ -489,11 +512,11 @@ class Settings:
 
         self._validate_public_scheme(self.public_scheme_setting)
 
-        if self.routing_mode == "traefik" and self.routing_tls:
+        if self.uses_acme:
             if not self.acme_email:
                 raise ValueError(
                     "acme_email must be set when routing_mode=traefik and "
-                    "routing tls is enabled"
+                    "routing tls = true (ACME) is enabled"
                 )
 
         # A hostname is the stable routing and OAuth identity of a team in every
@@ -704,6 +727,9 @@ class Settings:
 
         server = raw.get("server", {})
         routing = raw.get("routing", {})
+        tls = routing.get("tls", True)
+        if not isinstance(tls, bool) and not (isinstance(tls, dict) and not tls):
+            raise ValueError("[routing].tls must be true, false, or {}")
         database = raw.get("database", {})
         storage = raw.get("storage", {})
         lifecycle = raw.get("lifecycle", {})
@@ -883,7 +909,8 @@ class Settings:
             allow_insecure_http=bool(server.get("allow_insecure_http", False)),
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
-            routing_tls=bool(routing.get("tls", True)),
+            routing_tls=tls is not False,
+            routing_acme=tls is True,
             public_scheme_setting=str(routing.get("public_scheme", "")).strip().lower(),
             extra_routes=tuple(extra_routes),
             db_user=str(database.get("user", "odoo")),
