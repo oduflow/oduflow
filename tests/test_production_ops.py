@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import tempfile
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -272,6 +273,25 @@ class TestCreateProduction:
 
         assert not os.path.isdir(workspace)
         assert "erp" not in production_registry.list_productions(team)
+
+    def test_create_self_signed_tls(self, settings, team):
+        settings = replace(settings, routing_acme=False)
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)):
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "production",
+                "erp.example.com",
+                "odoo:18.0",
+            )
+        labels = client.containers.run.call_args.kwargs["labels"]
+        prefix = "traefik.http.routers.oduflow-1-prod-erp"
+        assert labels[f"{prefix}.entrypoints"] == "websecure"
+        assert labels[f"{prefix}.tls"] == "true"
+        assert f"{prefix}.tls.certresolver" not in labels
 
     def test_create_labels_and_registry(self, settings, team):
         client = _mock_client()

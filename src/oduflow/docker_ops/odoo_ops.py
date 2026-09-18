@@ -1284,7 +1284,7 @@ def http_request_to_odoo(
     import urllib.error
     import urllib.request
 
-    from oduflow.docker_ops.env_ops import get_env_base_url
+    from oduflow.docker_ops.env_ops import get_env_base_url, public_url_ssl_context
 
     # SSRF guard: `path` is appended to the environment's own base URL. Require a
     # single leading slash so it cannot rewrite the host — e.g. "@evil/..." would
@@ -1317,7 +1317,9 @@ def http_request_to_odoo(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(
+            req, timeout=30, context=public_url_ssl_context(settings)
+        ) as resp:
             response_body = resp.read().decode("utf-8", errors="replace")
             return {
                 "status_code": resp.status,

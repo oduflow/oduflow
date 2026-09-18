@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -1826,7 +1827,8 @@ def build_env_traefik_labels(
     if settings.routing_tls:
         labels[f"traefik.http.routers.{router}.entrypoints"] = "websecure"
         labels[f"traefik.http.routers.{router}.tls"] = "true"
-        labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
+        if settings.uses_acme:
+            labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
     else:
         # Upstream (e.g. Cloudflare tunnel) terminates TLS; Traefik routes plain
         # HTTP on the web entrypoint. Public URLs use the team's resolved
@@ -3469,10 +3471,11 @@ def wait_for_odoo_ready(
         return False
 
     url = f"{base_url}/web/health"
+    context = public_url_ssl_context(settings)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
+            with urllib.request.urlopen(url, timeout=5, context=context) as resp:
                 if resp.status == 200:
                     return True
         except Exception:
@@ -3679,6 +3682,26 @@ def start_environment(
 
     logger.info("Environment started", extra={"env_name": env_name})
     return {"odoo_container": odoo_container_name, "started": started}
+
+
+def public_url_ssl_context(settings: Settings) -> ssl.SSLContext | None:
+    """Verification policy for Oduflow's own HTTPS calls to a URL it hands out.
+
+    ``None`` means "use the default verifying context". With ``tls = {}``
+    Traefik terminates HTTPS using its default certificate, which is
+    self-signed unless the operator supplied one — there is no trust anchor a
+    verifying client could succeed against, so every internal probe would fail
+    the handshake and report the environment as unreachable. These calls only
+    ever target Oduflow's own Traefik, and choosing that mode is already an
+    acceptance of its certificate, so verification is disabled there. Every
+    other mode keeps full verification.
+    """
+    if not settings.uses_default_tls_cert:
+        return None
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 def get_env_base_url(

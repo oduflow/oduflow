@@ -480,11 +480,15 @@ def _trusts_upstream_headers(settings: Settings) -> bool:
 def _route_entrypoint(settings: Settings) -> dict[str, Any]:
     """Entrypoint/TLS fragment shared by team and extra-route routers.
 
-    TLS mode routes on ``websecure`` with a Let's Encrypt cert; otherwise (behind
-    an upstream TLS terminator such as a Cloudflare tunnel) plain HTTP on ``web``.
+    TLS mode routes on ``websecure`` with ACME or the default certificate;
+    otherwise (behind an upstream TLS terminator such as a Cloudflare tunnel)
+    plain HTTP on ``web``.
     """
     if settings.routing_tls:
-        return {"entryPoints": ["websecure"], "tls": {"certResolver": "letsencrypt"}}
+        return {
+            "entryPoints": ["websecure"],
+            "tls": {"certResolver": "letsencrypt"} if settings.uses_acme else {},
+        }
     return {"entryPoints": ["web"]}
 
 
@@ -578,8 +582,10 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
 
     system_labels = {settings.managed_label: "true", settings.system_label: "true"}
 
-    # ACME/Let's Encrypt only when Traefik terminates TLS itself.
-    if settings.routing_tls:
+    # Only an ACME deployment has a certificate store to persist: `tls = {}`
+    # also serves HTTPS, but from Traefik's default certificate, so it needs no
+    # volume.
+    if settings.uses_acme:
         try:
             client.volumes.get(settings.traefik_acme_volume)
         except docker.errors.NotFound:
@@ -605,9 +611,10 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         # Self-correcting drift control: _ensure_traefik never rewrites an
         # existing container's args, so config that changed since the container
         # was created would otherwise be ignored until a manual recreate.
-        # Recreate on either drift:
+        # Recreate on configuration drift:
         #   - routing tls: the HTTP->HTTPS redirect arg is present only in TLS
         #     mode, so its presence must match routing_tls.
+        #   - ACME: switching between tls = true and tls = {}.
         #   - forwarded headers: trusted only in front of an upstream TLS
         #     terminator, so its presence must match _trusts_upstream_headers
         #     (which public_scheme can flip without touching tls).
@@ -619,6 +626,9 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         #     when the container was left over from a prior traefik-mode setup
         #     while the server ran in port mode.
         cmd = t.attrs.get("Config", {}).get("Cmd") or []
+        has_acme = any(
+            "certificatesresolvers.letsencrypt.acme." in str(arg) for arg in cmd
+        )
         has_redirect = any("redirections" in str(arg) for arg in cmd)
         has_forwarded = any("forwardedHeaders.insecure" in str(arg) for arg in cmd)
         wants_forwarded = _trusts_upstream_headers(settings)
@@ -627,18 +637,22 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         )
         if (
             has_redirect != settings.routing_tls
+            or has_acme != settings.uses_acme
             or has_forwarded != wants_forwarded
             or not on_dir_provider
         ):
             logger.info(
                 "Recreating %s: config drift (tls container=%s wanted=%s, "
-                "forwarded_headers container=%s wanted=%s, on_dir_provider=%s)",
+                "forwarded_headers container=%s wanted=%s, on_dir_provider=%s, "
+                "acme container=%s wanted=%s)",
                 settings.traefik_container,
                 has_redirect,
                 settings.routing_tls,
                 has_forwarded,
                 wants_forwarded,
                 on_dir_provider,
+                has_acme,
+                settings.uses_acme,
             )
             t.stop()
             t.remove()
@@ -663,14 +677,10 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
     ]
     if settings.routing_tls:
         ports = {"80/tcp": 80, "443/tcp": 443}
-        volumes[settings.traefik_acme_volume] = {"bind": "/acme", "mode": "rw"}
         command += [
             "--entrypoints.websecure.address=:443",
             "--entrypoints.web.http.redirections.entryPoint.to=websecure",
             "--entrypoints.web.http.redirections.entryPoint.scheme=https",
-            "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",
-            f"--certificatesresolvers.letsencrypt.acme.email={settings.acme_email}",
-            "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json",
         ]
     else:
         # Plain HTTP on :80 only — either an upstream (e.g. Cloudflare tunnel)
@@ -688,6 +698,14 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
             # intended. Without such a terminator the entrypoint is directly
             # exposed and anyone could forge the header, so it stays off.
             command.append("--entrypoints.web.forwardedHeaders.insecure=true")
+
+    if settings.uses_acme:
+        volumes[settings.traefik_acme_volume] = {"bind": "/acme", "mode": "rw"}
+        command += [
+            "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",
+            f"--certificatesresolvers.letsencrypt.acme.email={settings.acme_email}",
+            "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json",
+        ]
 
     client.containers.run(
         "traefik:v3",

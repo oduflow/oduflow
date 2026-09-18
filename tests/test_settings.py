@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1196,3 +1197,37 @@ class TestDirectoryResolution:
         assert first == second == "/etc/oduflow"
         assert probes_after_first > 0
         assert len(calls) == probes_after_first  # no re-probing
+
+
+@pytest.mark.parametrize(
+    "value, enabled, acme",
+    [
+        ("true", True, True),
+        ("false", False, False),
+        ("{}", True, False),
+    ],
+)
+def test_tls_modes_from_toml(tmp_path, value, enabled, acme):
+    config = tmp_path / "oduflow.toml"
+    config.write_text(
+        f'[routing]\nmode = "traefik"\ntls = {value}\n'
+        + ('acme_email = "admin@example.com"\n' if acme else "")
+        + '[team.1]\nhostname = "dev.example.com"\n'
+    )
+    settings = Settings.from_toml(str(config))
+    settings.validate()
+    assert settings.routing_tls is enabled
+    assert settings.uses_acme is acme
+    assert settings.public_scheme == "https"
+    if enabled:
+        settings = replace(settings, public_scheme_setting="http")
+        with pytest.raises(ValueError, match="tls = false"):
+            settings.validate()
+
+
+@pytest.mark.parametrize("value", ['"false"', "0", "[]", '{ certResolver = "other" }'])
+def test_invalid_tls_value_rejected(tmp_path, value):
+    config = tmp_path / "oduflow.toml"
+    config.write_text(f"[routing]\ntls = {value}\n")
+    with pytest.raises(ValueError, match="must be true, false, or"):
+        Settings.from_toml(str(config))
