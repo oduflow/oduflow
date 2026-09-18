@@ -2,11 +2,27 @@
 
 ## Unreleased
 
+- Apply the generated `odoo.conf` and the repository's apt/pip dependencies with a
+  single restart when creating or updating an environment. The serving container
+  boots before Oduflow can install anything into it, and the restart used to be
+  skipped whenever pip had nothing to install — a repository shipping
+  `.oduflow/odoo.conf` without a `requirements.txt` was left serving on the image's
+  stock `addons_path` and worker settings. Development now follows the same
+  order as production.
+- Wait for the serving registry after that restart before continuing setup.
+  `create_environment` previously returned as soon as the restart was issued, so
+  database neutralization could exec a second Odoo process into a container whose
+  registry was still reloading — and a collision there was only logged, handing
+  back an environment with live mail servers, crons and payment providers. The
+  returned URL is also live now instead of answering 502 for the first minute.
+- Use `without_demo = True` instead of the legacy `without_demo = all` in the
+  bundled `odoo.conf` / `odoo-prod.conf`. Odoo 19 parses the option as a boolean
+  and logged `invalid boolean value: 'all'` on every start; the two spellings are
+  equivalent on all supported versions.
 - Production updates check module state in the production PostgreSQL cluster,
   preserving development database settings for concurrent requests. Exceptions
   after pulling source now enter the same code rollback path as failed module
   commands, with the failed commit and exit status recorded in deploy history.
-
 - Add production targets to declarative Stacks, with explicit adoption of matching
   existing productions, registry ownership, production value references and
   retryable configuration reconciliation. Development Stacks remain compatible.

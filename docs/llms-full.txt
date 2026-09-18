@@ -5248,7 +5248,7 @@ On startup, an `iptables ACCEPT` rule is automatically added for the `oduflow-ne
 The bundled `odoo.conf` template includes these security settings:
 
 - `list_db = False` (hides database selector)
-- `without_demo = all` (no demo data)
+- `without_demo = True` (no demo data)
 - `max_cron_threads = 0` (disables cron in dev environments)
 
 A repository that ships its own `.oduflow/odoo.conf` replaces the template

@@ -2121,6 +2121,83 @@ class TestUpdateEnvironment:
         apt.assert_not_called()
         pip.assert_not_called()
 
+    # The recreated container boots Odoo before Oduflow can copy the conf in or
+    # install anything, so whatever lands afterwards needs a restart to take
+    # effect — and only then.
+
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
+    @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
+    @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
+    @patch("oduflow.docker_ops.env_ops._create_pg_role")
+    @patch(
+        "oduflow.docker_ops.env_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "pw"},
+    )
+    def test_reapplied_conf_is_picked_up_by_a_restart(
+        self,
+        mock_creds,
+        mock_role,
+        mock_isdir,
+        mock_isfile,
+        mock_conf,
+        mock_apt,
+        mock_pip,
+        mock_docker_client,
+    ):
+        # install_dependencies=False (the pull mount migration and the branch
+        # switch): the conf is still reapplied, so the restart must happen or
+        # the environment serves on the image's stock addons_path.
+        mock_docker_client.containers.get.return_value = self._make_container()
+        new_container = MagicMock()
+        mock_docker_client.containers.run.return_value = new_container
+
+        env_ops.update_environment(
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "main",
+            pull_image=False,
+            install_dependencies=False,
+        )
+
+        new_container.restart.assert_called_once()
+
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=False)
+    @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
+    @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
+    @patch("oduflow.docker_ops.env_ops._create_pg_role")
+    @patch(
+        "oduflow.docker_ops.env_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "pw"},
+    )
+    def test_no_restart_when_neither_conf_nor_dependencies_landed(
+        self,
+        mock_creds,
+        mock_role,
+        mock_isdir,
+        mock_isfile,
+        mock_conf,
+        mock_apt,
+        mock_pip,
+        mock_docker_client,
+    ):
+        # No base conf anywhere and nothing to install: the fresh container is
+        # already running exactly what a restart would give it.
+        mock_docker_client.containers.get.return_value = self._make_container()
+        new_container = MagicMock()
+        mock_docker_client.containers.run.return_value = new_container
+
+        env_ops.update_environment(TEST_SETTINGS, TEST_TEAM, "main", pull_image=False)
+
+        new_container.restart.assert_not_called()
+
     @patch(
         "oduflow.docker_ops.env_ops.load_credentials",
         return_value={"pg_user": "u_1_xyz", "pg_password": "pw"},
@@ -2288,6 +2365,10 @@ class TestProvisioningSetup:
         side_effect=PrerequisiteNotMetError("registry not ready"),
     )
     @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 1.0, 1, 120),
+    )
+    @patch(
         "oduflow.docker_ops.env_ops._install_pip_requirements",
         return_value=(False, ""),
     )
@@ -2296,6 +2377,7 @@ class TestProvisioningSetup:
         self,
         mock_apt,
         mock_pip,
+        mock_wait,
         mock_install,
         mock_neutralize,
         mock_sanitize,
@@ -2319,7 +2401,9 @@ class TestProvisioningSetup:
 
         mock_neutralize.assert_not_called()
         mock_sanitize.assert_not_called()
-        container.restart.assert_not_called()
+        # Only the setup restart (conf + dependencies) ran; the post-sanitize
+        # one is never reached when the auto-install fails.
+        container.restart.assert_called_once()
 
     @patch("oduflow.sanitizer.sanitize_environment", return_value=["sanitize"])
     @patch("oduflow.sanitizer.neutralize_environment", return_value=["neutralize"])
@@ -2368,6 +2452,11 @@ class TestProvisioningSetup:
         )
 
         assert [entry[0] for entry in calls.mock_calls] == [
+            # Setup restart first: Odoo booted before the generated odoo.conf
+            # and the pip packages were in place. Its readiness gate is what
+            # keeps neutralization from racing the reloading registry.
+            "restart",
+            "wait",
             "install",
             "neutralize",
             "sanitize",
@@ -2380,9 +2469,11 @@ class TestProvisioningSetup:
     @patch("oduflow.sanitizer.neutralize_environment", return_value=[])
     @patch(
         "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
-        return_value=env_ops._OdooReadinessResult(
-            False, 120.0, 60, 120, "HTTPError: HTTP 500"
-        ),
+        # The setup restart clears its gate; the post-sanitize one does not.
+        side_effect=[
+            env_ops._OdooReadinessResult(True, 1.0, 1, 120),
+            env_ops._OdooReadinessResult(False, 120.0, 60, 120, "HTTPError: HTTP 500"),
+        ],
     )
     @patch(
         "oduflow.docker_ops.env_ops._auto_install_modules",
@@ -2423,6 +2514,8 @@ class TestProvisioningSetup:
         assert "Environment setup did not complete" in str(exc_info.value)
         assert "HTTPError: HTTP 500" in str(exc_info.value)
         assert "registry traceback" in str(exc_info.value)
+        # Sanitization ran: this is the final gate failing, not the setup one.
+        mock_sanitize.assert_called_once()
 
     @patch("oduflow.docker_ops.env_ops._cleanup_old_environment")
     @patch("oduflow.docker_ops.env_ops.release_port")
