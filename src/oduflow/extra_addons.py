@@ -20,7 +20,7 @@ from oduflow.errors import (
     ProtectedError,
 )
 from oduflow.git_ops import RepoAuthError, git_env_for_team
-from oduflow.naming import sanitize_repo_url
+from oduflow.naming import odoo_major_from_image, sanitize_repo_url
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -934,12 +934,18 @@ def resolve_main_addons_path(repo_path: str) -> str:
     return "/mnt/extra-addons"
 
 
+# Values Odoo 19's boolean parser accepts for without_demo; anything else in
+# the conf is the pre-19 module-list form and must be normalized for 19+.
+_BOOL_LITERALS = frozenset(("true", "false", "1", "0", "yes", "no", "on", "off"))
+
+
 def generate_odoo_conf(
     base_conf_path: str,
     output_path: str,
     extra_paths: list[str],
     main_addons_path: str = "/mnt/extra-addons",
     overrides: dict[str, str] | None = None,
+    odoo_image: str = "",
 ) -> str:
     parser = configparser.RawConfigParser()
     # Preserve option case (Odoo config keys are case-sensitive); the default
@@ -963,6 +969,18 @@ def generate_odoo_conf(
     # worker/limit settings that must win over whatever the base conf says.
     for key, value in (overrides or {}).items():
         parser.set("options", key, value)
+
+    # Odoo 19 turned without_demo into a boolean (config-file key kept as a
+    # deprecated alias for with_demo): the pre-19 module-list form ("all",
+    # "sale,crm") still disables demo there but logs a deprecation warning on
+    # every start. Rewrite it when the target image is known to be 19+; older
+    # or unrecognized versions keep the base conf's value untouched.
+    major = odoo_major_from_image(odoo_image)
+    demo_value = parser.get("options", "without_demo", fallback=None)
+    if major is not None and major >= 19 and demo_value is not None:
+        stripped = demo_value.strip()
+        if stripped.lower() not in _BOOL_LITERALS:
+            parser.set("options", "without_demo", "True" if stripped else "False")
 
     # Strip DB connection keys — these are managed via container env vars
     # (HOST, USER, PASSWORD).  If left in the conf file the Odoo entrypoint

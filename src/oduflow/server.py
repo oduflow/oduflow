@@ -6413,6 +6413,7 @@ def _run_retune_postgres(
                             [f"/mnt/extra-addons-{repo}" for repo in extra_names],
                             plan=plan,
                             output_path=str(candidate_path),
+                            odoo_image=record.get("odoo_image", ""),
                         )
                     except Exception as exc:  # noqa: BLE001 - report each production
                         odoo_errors.append(f"team {team.team_id}/{name}: {exc}")

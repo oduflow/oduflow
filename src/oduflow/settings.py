@@ -18,7 +18,7 @@ logger = logging.getLogger("oduflow")
 
 TRACE: bool = False
 
-DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.0"
+DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.1"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 
 # Active MCP transport for the running server ("stdio" | "http").
