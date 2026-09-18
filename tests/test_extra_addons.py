@@ -1,7 +1,11 @@
 import configparser
 import os
 
-from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
+from oduflow.extra_addons import (
+    generate_odoo_conf,
+    resolve_extra_addons_path,
+    resolve_main_addons_path,
+)
 
 
 def _read_addons_path(conf_path):
@@ -27,6 +31,23 @@ class TestResolveMainAddonsPath:
     def test_addons_is_a_file_not_dir(self, tmp_path):
         (tmp_path / "addons").write_text("not a directory")
         assert resolve_main_addons_path(str(tmp_path)) == "/mnt/extra-addons"
+
+
+class TestResolveExtraAddonsPath:
+    def test_with_addons_subdir(self, tmp_path):
+        os.makedirs(tmp_path / "addons")
+        assert (
+            resolve_extra_addons_path(str(tmp_path), "acme")
+            == "/mnt/extra-addons-acme/addons"
+        )
+
+    def test_without_addons_subdir(self, tmp_path):
+        assert (
+            resolve_extra_addons_path(str(tmp_path), "acme") == "/mnt/extra-addons-acme"
+        )
+
+    def test_unknown_host_path_falls_back_to_mount_root(self):
+        assert resolve_extra_addons_path("", "acme") == "/mnt/extra-addons-acme"
 
 
 class TestGenerateOdooConf:

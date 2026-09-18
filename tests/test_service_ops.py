@@ -10,6 +10,7 @@ from oduflow.errors import (
     FlowError,
     NotFoundError,
     PrerequisiteNotMetError,
+    ProtectedError,
 )
 from oduflow.settings import Settings, TeamSettings
 
@@ -2737,3 +2738,76 @@ class TestServiceHostnameCollisions:
         assert "PathPrefix(`/grafana/`)" in rule
         # No catch-all router that would swallow the dashboard.
         assert "traefik.http.routers.oduflow-1-svc-grafana.rule" not in labels
+
+
+class TestServiceProtection:
+    def _team(self, tmp_path):
+        return TeamSettings(team_id="1", data_dir=str(tmp_path / "team"))
+
+    def _live_container(self):
+        container = MagicMock()
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        return container
+
+    def test_protect_requires_an_existing_service(self, mock_docker_client, tmp_path):
+        team = self._team(tmp_path)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(NotFoundError, match="Service 'redis' not found"):
+            service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+        assert not service_ops.is_service_protected(team, "redis")
+
+    def test_unprotect_clears_a_stale_flag_without_a_container(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        mock_docker_client.containers.get.return_value = self._live_container()
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        result = service_ops.set_service_protected(TEST_SETTINGS, team, "redis", False)
+
+        assert result == {"name": "redis", "protected": False}
+        assert not service_ops.is_service_protected(team, "redis")
+
+    def test_protected_service_blocks_delete_update_and_restore(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        container = self._live_container()
+        mock_docker_client.containers.get.return_value = container
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+        assert service_ops.is_service_protected(team, "redis")
+
+        with pytest.raises(ProtectedError, match="deleting"):
+            service_ops.delete_service(TEST_SETTINGS, team, "redis")
+        with pytest.raises(ProtectedError, match="updating"):
+            service_ops.update_service(TEST_SETTINGS, team, "redis")
+        with pytest.raises(ProtectedError, match="restoring"):
+            service_ops.assert_service_not_protected(team, "redis", "restoring")
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", False)
+        result = service_ops.delete_service(TEST_SETTINGS, team, "redis")
+        assert result["name"] == "redis"
+        container.stop.assert_called_once()
+
+    def test_list_services_reports_the_protected_flag(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        container = self._live_container()
+        container.name = "oduflow-1-svc-redis"
+        container.status = "running"
+        container.image.tags = ["redis:7"]
+        container.image.attrs = {"Config": {"Env": []}}
+        container.attrs = {"NetworkSettings": {"Ports": {}}, "Config": {"Env": []}}
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.containers.list.return_value = [container]
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+
+        rows = service_ops.list_services(TEST_SETTINGS, team)
+
+        assert rows[0]["name"] == "redis"
+        assert rows[0]["protected"] is True

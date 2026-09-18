@@ -1861,6 +1861,13 @@ libxrender1
 xfonts-75dpi
 ```
 
+Both files are also read from every mounted [extra addons](extra-addons.md)
+repository, with the same lookup rules — declare an extra module's
+dependencies in its own repo and they are installed alongside the main
+repo's. A change to any of these files (main repo or extra repo) picked up
+by `pull_and_apply` / `update_production` reinstalls the dependencies and
+restarts the container.
+
 ## Database Sanitization
 
 When an environment is created from a template, Oduflow **automatically sanitizes** the database to prevent the test instance from sending real emails or polling mailboxes. This is enabled by default (`sanitize=True`).
@@ -2612,7 +2619,11 @@ preflight SQL failure, triggers code rollback just like a failed module command.
 `update_production(name)` pulls the branch (and extra-addon worktrees),
 classifies the changes (or takes explicit `install=` / `upgrade=` /
 `restart=true`), applies them, and **verifies** the deploy — module exit
-codes plus an in-container health check. In production a "refresh"-class
+codes plus an in-container health check. A changed `.oduflow/requirements.txt`
+or `.oduflow/apt_packages.txt` — in the main repo or an extra-addon repo —
+reinstalls the pip/apt dependencies into the container before the restart
+(they are also installed from scratch whenever the container is recreated:
+create, reconfigure). In production a "refresh"-class
 change (XML/JS only) still restarts the container: there is no `--dev=xml`.
 
 If verification fails, the checkout is reset to the pre-deploy commit, the
@@ -2691,7 +2702,8 @@ down" path:
 restore_cluster_pitr(target_time="", confirm="RESTORE-CLUSTER")
 ```
 
-restores the **entire cluster** (every production database at once) from the
+restores the **entire cluster** (every production database at once — including
+auxiliary service databases created with `cluster="prod"`) from the
 latest base backup + WAL replay — optionally to a point in time
 (`target_time="2026-07-10 12:00:00+00"`). The displaced data directory is
 kept inside the Docker volume for manual cleanup. Because the state lives in
@@ -3160,6 +3172,15 @@ In the dashboard, **Update** on a service card opens a dialog prefilled with the
 
 If you do recreate a service manually (e.g. to rename it), call `get_service_info` first and reuse its fields in the new `create_service` call. The returned dict carries the full configuration (`image`, `port` or `routes`, `hostname`, `env_vars`, `host_mode`, `command`, `volumes`, `cap_add`, `privileged`) so you do not lose anything that `list_services` truncates or that lived only inside the preset.
 
+### Protecting a Service
+
+A service can be **protected** from the dashboard (the **Protect** button on its
+card). While protected, `delete_service`, `update_service`, and
+`restore_service` are refused — over MCP, the CLI, and the dashboard alike —
+so an agent cannot recreate or remove a service that backs something
+important. Restart and logs remain available. Protection can only be toggled
+in the dashboard; there is no MCP tool for it, so an agent cannot lift it.
+
 ## Service Update Flow
 
 The `update_service` operation:
@@ -3285,6 +3306,12 @@ For each development environment Oduflow automatically:
 2. Creates or reuses the team's immutable checkout for that SHA
 3. Mounts the checkout **read-only** as `/mnt/extra-addons-{name}`
 4. Generates a merged `odoo.conf` with all extra paths added to `addons_path`
+   — modules may live either at the repository root or in a top-level
+   `addons/` directory (the same convention as the main repo); in the latter
+   case `addons_path` points at that subdirectory automatically
+5. Installs the repo's `.oduflow/requirements.txt` / `.oduflow/apt_packages.txt`
+   (with the same lookup rules as the [main repo's](environments.md#auto-dependency-installation)),
+   so an extra repo declares its own Python/apt dependencies
 
 ## Managing Extra Repos
 
@@ -3604,7 +3631,9 @@ Stack planning detects changes to it and replacement preserves the declared sett
 Use `spec.production` instead of `spec.environment` for a long-lived production.
 Exactly one target is required. The host must have `[production] enabled = true`
 and Traefik routing. Production databases use the dedicated production cluster;
-auxiliary `spec.databases` still use the shared service database cluster.
+auxiliary `spec.databases` still use the shared development service database
+cluster (the `cluster` option of `create_service_database` is not yet available
+in Stack specs).
 
 ```yaml
 apiVersion: oduflow.dev/v1alpha1
@@ -3837,13 +3866,17 @@ Odoo.sh ingest endpoints accept the import token only in
 | `GET` | `/api/services/{name}/env-vars` | Return the environment variables an update keeps — the saved preset, or the container's own environment for a service created before presets |
 | `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
 | `POST` | `/api/services/{name}/restart` | Restart a service |
-| `POST` | `/api/services/{name}/delete` | Delete a service |
+| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected) |
+| `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
+| `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
-| `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name` |
+| `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |
 | `POST` | `/api/service-databases/{name}/rotate` | Rotate the database role password |
-| `POST` | `/api/service-databases/{name}/delete` | Permanently drop the database and role, terminating connections |
+| `POST` | `/api/service-databases/{name}/protect` | Protect a database: deletion is refused until unprotected |
+| `POST` | `/api/service-databases/{name}/unprotect` | Remove database protection |
+| `POST` | `/api/service-databases/{name}/delete` | Permanently drop the database and role, terminating connections (refused while protected) |
 | `GET` | `/api/service-presets` | List saved presets |
 | `POST` | `/api/service-presets/restore` | Restore a preset; body: `name` plus optional runtime overrides |
 | `POST` | `/api/service-presets/{name}/delete` | Delete a preset |
@@ -4006,19 +4039,19 @@ also available via the [REST API](web-api.md).
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
 | `create_service` | ✓ | Create a managed service with exactly one exposure model: catch-all `port`, or restricted Traefik `routes` (`path`, backend `port`, optional `strip_prefix`). The two parameters are mutually exclusive; `port` remains required outside Traefik. Optional `command` (shell-quoted string) replaces the image `CMD` |
-| `delete_service` | ✓ | Stop and remove a service container |
+| `delete_service` | ✓ | Stop and remove a service container. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
 | `restart_service` | ✓ | Restart a service container |
-| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD` |
+| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD`. Protected services refuse updates |
 | `list_services` | | List all managed service containers |
 | `get_service_info` | | Full live state of a single service (image+digest, port/routes, hostname, host_mode, command, volumes, env, capabilities, restart count, preset). Call before recreating it |
 | `get_service_logs` | | Retrieve service container logs |
 | `run_service_command` | ✓ | Execute a shell command inside a service container (through `sh -c`; `shell=False` for exact argv) |
 | **Service PostgreSQL Databases** | | |
-| `create_service_database` | ✓ | Create a persistent team-scoped PostgreSQL database with a dedicated non-superuser owner; returns `DATABASE_URL` and `PG*` credentials |
+| `create_service_database` | ✓ | Create a persistent team-scoped PostgreSQL database with a dedicated non-superuser owner; returns `DATABASE_URL` and `PG*` credentials. `cluster="dev"` (default) targets the shared development cluster; `cluster="prod"` targets the dedicated production cluster (requires production hosting; covered by cluster-wide WAL-G backups, exempt from the dev disk quota) |
 | `list_service_databases` | | List database names, live status, size, and connections without passwords |
 | `get_service_database` | | Explicitly reveal connection credentials for one managed database |
 | `rotate_service_database_password` | ✓ | Rotate the owner password and return replacement credentials; containers must be reconfigured |
-| `delete_service_database` | ✓ | ⚠️ Permanently drop the database and role after terminating active connections; service containers are unchanged |
+| `delete_service_database` | ✓ | ⚠️ Permanently drop the database and role after terminating active connections; service containers are unchanged. Protected databases refuse deletion until unprotected in the dashboard |
 | **Volumes** | | |
 | `create_volume` | ✓ | Create a named Docker volume for use with services |
 | `list_volumes` | | List all managed Docker volumes and their usage by services |
@@ -4251,6 +4284,8 @@ with `oduflow call`, for example:
 
 ```bash
 oduflow call create_service_database '{"name":"events"}'
+# Or on the dedicated production PostgreSQL cluster (requires production hosting)
+oduflow call create_service_database '{"name":"events","cluster":"prod"}'
 oduflow call get_service_database '{"name":"events"}'
 oduflow call rotate_service_database_password '{"name":"events"}'
 oduflow call delete_service_database '{"name":"events"}'

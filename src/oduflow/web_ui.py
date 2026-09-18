@@ -2913,6 +2913,7 @@ def _build_routes(
         try:
             body = await request.json()
             name = (body.get("name") or "").strip()
+            cluster = (body.get("cluster") or "dev").strip()
             if not name:
                 return JSONResponse(
                     {"ok": False, "error": "name is required."}, status_code=400
@@ -2921,6 +2922,11 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "A JSON body is required."}, status_code=400
             )
+        if cluster not in service_database_ops.CLUSTERS:
+            return JSONResponse(
+                {"ok": False, "error": "cluster must be 'dev' or 'prod'."},
+                status_code=400,
+            )
         key = service_database_lock_key(team.team_id, name)
         try:
             locks.acquire_env(key, operation="create_service_database")
@@ -2928,7 +2934,11 @@ def _build_routes(
             return _error_response(e)
         try:
             result = await _offload(
-                service_database_ops.create_database, get_settings(), team, name
+                service_database_ops.create_database,
+                get_settings(),
+                team,
+                name,
+                cluster=cluster,
             )
             return JSONResponse(
                 {"ok": True, "result": result},
@@ -3029,6 +3039,44 @@ def _build_routes(
             )
         finally:
             locks.release_env(key)
+
+    def _set_service_database_protection(
+        request: Request, protected: bool
+    ) -> JSONResponse:
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        key = service_database_lock_key(team.team_id, name)
+        try:
+            locks.acquire_env(
+                key,
+                operation=(
+                    "protect_service_database"
+                    if protected
+                    else "unprotect_service_database"
+                ),
+            )
+        except BusyError as e:
+            return _error_response(e)
+        try:
+            result = service_database_ops.set_protected(team, name, protected)
+            return JSONResponse({"ok": True, "result": result})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error while setting database protection")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+        finally:
+            locks.release_env(key)
+
+    def api_service_database_protect(request: Request) -> JSONResponse:
+        return _set_service_database_protection(request, True)
+
+    def api_service_database_unprotect(request: Request) -> JSONResponse:
+        return _set_service_database_protection(request, False)
 
     def api_services(request: Request) -> JSONResponse:
         try:
@@ -3257,6 +3305,38 @@ def _build_routes(
         finally:
             locks.release_env(key)
 
+    def _set_service_protection(request: Request, protected: bool) -> JSONResponse:
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        key = service_lock_key(team.team_id, name)
+        try:
+            locks.acquire_env(
+                key,
+                operation="protect_service" if protected else "unprotect_service",
+            )
+        except BusyError as e:
+            return _error_response(e)
+        try:
+            result = service_ops.set_service_protected(
+                get_settings(), team, name, protected
+            )
+            return JSONResponse({"ok": True, "result": result})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error while setting service protection")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+        finally:
+            locks.release_env(key)
+
+    def api_service_protect(request: Request) -> JSONResponse:
+        return _set_service_protection(request, True)
+
+    def api_service_unprotect(request: Request) -> JSONResponse:
+        return _set_service_protection(request, False)
+
     def api_service_logs(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         try:
@@ -3337,6 +3417,7 @@ def _build_routes(
         except BusyError as e:
             return _error_response(e)
         try:
+            service_ops.assert_service_not_protected(team, name, "restoring")
             result = await _offload(
                 service_ops.create_service,
                 get_settings(),
@@ -6273,6 +6354,16 @@ def _build_routes(
             methods=["POST"],
         ),
         Route(
+            "/api/service-databases/{name}/protect",
+            api_service_database_protect,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/service-databases/{name}/unprotect",
+            api_service_database_unprotect,
+            methods=["POST"],
+        ),
+        Route(
             "/api/service-databases/{name}/delete",
             api_service_database_delete,
             methods=["POST"],
@@ -6283,6 +6374,10 @@ def _build_routes(
         Route("/api/services/{name}/env-vars", api_service_env_vars, methods=["GET"]),
         Route("/api/services/{name}/restart", api_service_restart, methods=["POST"]),
         Route("/api/services/{name}/delete", api_service_delete, methods=["POST"]),
+        Route("/api/services/{name}/protect", api_service_protect, methods=["POST"]),
+        Route(
+            "/api/services/{name}/unprotect", api_service_unprotect, methods=["POST"]
+        ),
         Route("/api/services/{name}/logs", api_service_logs, methods=["GET"]),
         Route("/api/service-presets", api_service_presets, methods=["GET"]),
         Route("/api/service-presets/restore", api_service_restore, methods=["POST"]),

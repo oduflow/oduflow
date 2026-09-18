@@ -1243,7 +1243,11 @@ def _ensure_user_site_packages(container: Any) -> None:
 
 
 def _install_pip_requirements(
-    container: Any, repo_path: str, *, restart: bool = True
+    container: Any,
+    repo_path: str,
+    *,
+    restart: bool = True,
+    container_base: str = "/mnt/extra-addons",
 ) -> tuple[bool, str]:
     """Install pip requirements from repo.
 
@@ -1252,15 +1256,19 @@ def _install_pip_requirements(
 
     When *restart* is False the caller is responsible for restarting the
     container after all setup steps are done.
+
+    ``container_base`` is where *repo_path* is mounted inside the container:
+    ``/mnt/extra-addons`` for the main repo, ``/mnt/extra-addons-{name}`` for
+    an extra-addons checkout.
     """
     # Prefer .oduflow/requirements.txt; fall back to the repo root for
     # compatibility with conventions used elsewhere (e.g. odoo.sh).
     oduflow_req = os.path.join(repo_path, ".oduflow", "requirements.txt")
     root_req = os.path.join(repo_path, "requirements.txt")
     if os.path.isfile(oduflow_req):
-        container_req = "/mnt/extra-addons/.oduflow/requirements.txt"
+        container_req = f"{container_base}/.oduflow/requirements.txt"
     elif os.path.isfile(root_req):
-        container_req = "/mnt/extra-addons/requirements.txt"
+        container_req = f"{container_base}/requirements.txt"
     else:
         logger.debug("No requirements.txt in repo, skipping pip install")
         return False, ""
@@ -1288,6 +1296,38 @@ def _install_pip_requirements(
             container.restart()
             logger.info("Container restarted after pip install")
         return True, f"[PIP] Requirements installed successfully:\n{output_str}"
+
+
+def _install_repo_dependencies(
+    container: Any, dep_paths: list[tuple[str, str]]
+) -> tuple[int, bool, list[str]]:
+    """Install apt + pip dependencies for each ``(host_path, container_base)``.
+
+    The main repo comes first, then extra-addons checkouts, apt before pip
+    within each repo (same order as before extra-repo deps existed). Never
+    restarts — callers restart once after all setup steps.
+
+    Returns ``(exit_code, pip_installed_any, logs)`` where *exit_code* is 1 if
+    any apt or pip step failed.
+    """
+    exit_code = 0
+    pip_installed_any = False
+    logs: list[str] = []
+    for host_path, container_base in dep_paths:
+        apt_log = _install_apt_packages(container, host_path)
+        if apt_log:
+            logs.append(apt_log)
+            if "FAILED" in apt_log:
+                exit_code = 1
+        installed, pip_log = _install_pip_requirements(
+            container, host_path, restart=False, container_base=container_base
+        )
+        pip_installed_any = pip_installed_any or installed
+        if pip_log:
+            logs.append(pip_log)
+            if not installed:  # log present but not installed => FAILED
+                exit_code = 1
+    return exit_code, pip_installed_any, logs
 
 
 def _odoo_registry_probe(env_db: str) -> list[str]:
@@ -1477,18 +1517,18 @@ def _configure_serving_environment(
     sanitize: bool,
     auto_install_modules: list[str] | None,
     odoo_conf_to_copy: str | None,
+    extra_mount_paths: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Run required post-start setup before the environment is declared ready."""
     setup_logs: list[str] = []
     if odoo_conf_to_copy:
         _copy_file_to_container(container, odoo_conf_to_copy, "/etc/odoo")
 
-    apt_log = _install_apt_packages(container, repo_path)
-    if apt_log:
-        setup_logs.append(apt_log)
-    _, pip_log = _install_pip_requirements(container, repo_path, restart=False)
-    if pip_log:
-        setup_logs.append(pip_log)
+    # No restart here: the unconditional one below is the single gated restart
+    # that picks up both the conf and the freshly installed packages.
+    dep_paths = [(repo_path, "/mnt/extra-addons")] + list(extra_mount_paths or [])
+    _, _, dep_logs = _install_repo_dependencies(container, dep_paths)
+    setup_logs.extend(dep_logs)
 
     # Odoo is PID1 and has already booted — with the image's stock conf and
     # without the repo's pip packages. One restart here picks up both, in the
@@ -2231,14 +2271,21 @@ def _create_environment_impl(
 
     # --- Shared immutable extra-addons checkouts ---
     extra_mount_paths: list[tuple[str, str]] = []
+    extra_conf_paths: list[str] = []
     extra_revisions: dict[str, str] = {}
     if extra_addons:
-        from oduflow.extra_addons import ensure_shared_checkout
+        from oduflow.extra_addons import (
+            ensure_shared_checkout,
+            resolve_extra_addons_path,
+        )
 
         for repo_name, addon_branch in extra_addons.items():
             checkout = ensure_shared_checkout(team, repo_name, addon_branch)
             container_path = f"/mnt/extra-addons-{repo_name}"
             extra_mount_paths.append((checkout["path"], container_path))
+            extra_conf_paths.append(
+                resolve_extra_addons_path(str(checkout["path"]), repo_name)
+            )
             extra_revisions[repo_name] = checkout["revision"]
         labels["oduflow.extra_addons_revisions"] = json.dumps(extra_revisions)
 
@@ -2307,9 +2354,7 @@ def _create_environment_impl(
         from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
 
         generated_conf = os.path.join(workspace_path, "odoo.conf")
-        extra_container_paths = (
-            [cp for _, cp in extra_mount_paths] if extra_mount_paths else []
-        )
+        extra_container_paths = extra_conf_paths
         main_addons_path = resolve_main_addons_path(repo_path)
         generate_odoo_conf(
             base_conf_path, generated_conf, extra_container_paths, main_addons_path
@@ -2436,6 +2481,7 @@ def _create_environment_impl(
                 sanitize,
                 auto_install_modules,
                 odoo_conf_to_copy,
+                extra_mount_paths,
             )
         )
     except Exception:
@@ -3939,13 +3985,20 @@ def _reapply_odoo_conf(
     else:
         return False
 
-    from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
+    from oduflow.extra_addons import (
+        generate_odoo_conf,
+        resolve_extra_addons_path,
+        resolve_main_addons_path,
+    )
 
     extra_addons_json = (container.labels or {}).get("oduflow.extra_addons", "")
     extra_container_paths: list[str] = []
     if extra_addons_json:
         extra_dict = _normalize_extra_addons(json.loads(extra_addons_json))
-        extra_container_paths = [f"/mnt/extra-addons-{rn}" for rn in extra_dict]
+        sources = _extra_checkout_sources(container, iter(extra_dict))
+        extra_container_paths = [
+            resolve_extra_addons_path(sources.get(rn, ""), rn) for rn in extra_dict
+        ]
     generated_conf = os.path.join(workspace_path, "odoo.conf")
     main_addons_path = resolve_main_addons_path(repo_path)
     generate_odoo_conf(
@@ -3968,35 +4021,27 @@ def _apply_actions(
     changed_files: list[str],
     do_refresh: bool = False,
     config_changed: bool = False,
-    deps_changed: bool = False,
-    repo_path: str = "",
+    dep_units: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Run install/upgrade/restart and build the result dict (shared by the
-    explicit and auto paths of :func:`pull_environment`)."""
+    explicit and auto paths of :func:`pull_environment`).
+
+    ``dep_units`` lists the ``(host_path, container_base)`` repos whose
+    dependency descriptors changed and need an apt/pip reinstall."""
     from oduflow.docker_ops.odoo_ops import (
         install_odoo_modules,
         upgrade_odoo_modules,
     )
 
+    deps_changed = bool(dep_units)
     # Reinstall apt/pip deps up front so a subsequent module install/upgrade can
     # import newly-added libs (same apt-then-pip order as create/update). Never
     # restart here — a single restart happens in the branches below.
     dep_logs: list[str] = []
     dep_exit = 0
-    if deps_changed and repo_path:
+    if dep_units:
         dep_container = client.containers.get(odoo_container_name)
-        apt_log = _install_apt_packages(dep_container, repo_path)
-        if apt_log:
-            dep_logs.append(apt_log)
-            if "FAILED" in apt_log:
-                dep_exit = 1
-        pip_installed, pip_log = _install_pip_requirements(
-            dep_container, repo_path, restart=False
-        )
-        if pip_log:
-            dep_logs.append(pip_log)
-        if (not pip_installed) and pip_log:  # log present but not installed => FAILED
-            dep_exit = 1
+        dep_exit, _, dep_logs = _install_repo_dependencies(dep_container, dep_units)
 
     if to_install or to_upgrade:
         messages: list[str] = []
@@ -4178,8 +4223,8 @@ def pull_environment(
         classify_units.append((repo_path, old_head, changed_files))
 
         all_changed = changed_files
-        # Dependency reinstall keys off the MAIN repo only: the pip/apt install
-        # helpers read only the main repo_path, never extra-addons checkouts.
+        # Main-repo files for the per-repo dependency check below (extra-addons
+        # checkouts contribute their own units via extra_dep_candidates).
         main_changed_files = changed_files
 
     try:
@@ -4190,6 +4235,9 @@ def pull_environment(
         extra_addons = {}
 
     extra_changed_files: list[str] = []
+    # (host_path, container_base, changed_files) per extra repo, for the
+    # per-repo dependency-descriptor check below.
+    extra_dep_candidates: list[tuple[str, str, list[str]]] = []
     if extra_addons:
         is_production = container_obj.labels.get("oduflow.prod") == "true"
         if is_production:
@@ -4210,6 +4258,9 @@ def pull_environment(
                 extra_changed_files.extend(extra_files)
                 if extra_files:
                     classify_units.append((wt_path, extra_old, extra_files))
+                    extra_dep_candidates.append(
+                        (wt_path, f"/mnt/extra-addons-{repo_name}", extra_files)
+                    )
         else:
             from oduflow.extra_addons import checkout_revision, ensure_shared_checkout
 
@@ -4246,6 +4297,9 @@ def pull_environment(
                     classify_units.append(
                         (checkout_path, current_revision or None, extra_files)
                     )
+                    extra_dep_candidates.append(
+                        (checkout_path, f"/mnt/extra-addons-{repo_name}", extra_files)
+                    )
 
     all_changed = all_changed + extra_changed_files
 
@@ -4269,11 +4323,17 @@ def pull_environment(
     # container before any restart (a plain restart reuses the stale copy).
     details = recommended.get("details")
     config_changed = isinstance(details, dict) and bool(details.get("restart_required"))
-    # A changed dependency descriptor (requirements.txt / apt_packages.txt) in the
-    # MAIN repo must reinstall apt/pip deps into the running container and restart.
-    # Scoped to the main repo because the install helpers only read its repo_path;
+    # A changed dependency descriptor (requirements.txt / apt_packages.txt) in
+    # the main repo or an extra-addons repo must reinstall apt/pip deps into
+    # the running container and restart. Checked per repo — the "active" rule
+    # (.oduflow/ shadows the repo root) applies within each repo separately;
     # applies to both explicit and auto modes (a prerequisite, not an agent action).
-    deps_changed = any(_is_active_dep_file(f, repo_path) for f in main_changed_files)
+    dep_units: list[tuple[str, str]] = []
+    if any(_is_active_dep_file(f, repo_path) for f in main_changed_files):
+        dep_units.append((repo_path, "/mnt/extra-addons"))
+    for dep_host, dep_base, dep_files in extra_dep_candidates:
+        if any(_is_active_dep_file(f, dep_host) for f in dep_files):
+            dep_units.append((dep_host, dep_base))
 
     warnings: list[str] = []
     do_refresh = False
@@ -4299,6 +4359,12 @@ def pull_environment(
     else:
         if not all_changed:
             if extra_mount_switch_needed:
+                # install_dependencies is on because this recreates the
+                # container, and pip --user packages live in the container
+                # filesystem (/var/lib/odoo/.local/lib), not in a volume — a
+                # recreate destroys them. update_environment reinstalls apt +
+                # pip for the main repo and every extra checkout from the new
+                # mount sources, which is exactly the recovery needed here.
                 update_environment(
                     settings,
                     team,
@@ -4306,7 +4372,7 @@ def pull_environment(
                     extra_checkout_overrides=pending_extra_checkouts,
                     extra_revision_overrides=pending_extra_revisions,
                     pull_image=False,
-                    install_dependencies=False,
+                    install_dependencies=True,
                 )
                 _cleanup_legacy_extra_worktrees(
                     team, env_name, iter(pending_extra_checkouts)
@@ -4335,6 +4401,10 @@ def pull_environment(
     # The checkout itself was prepared off to the side and is safe to cache even
     # when strict mode blocks without touching the running container.
     if extra_mount_switch_needed:
+        # See the note on the early-return recreate above: the container is
+        # replaced, so its pip --user packages go with it and have to be
+        # reinstalled unconditionally, not just for the repos whose dependency
+        # descriptor happens to be in this diff.
         update_environment(
             settings,
             team,
@@ -4342,7 +4412,7 @@ def pull_environment(
             extra_checkout_overrides=pending_extra_checkouts,
             extra_revision_overrides=pending_extra_revisions,
             pull_image=False,
-            install_dependencies=False,
+            install_dependencies=True,
         )
         _cleanup_legacy_extra_worktrees(team, env_name, iter(pending_extra_checkouts))
 
@@ -4358,8 +4428,7 @@ def pull_environment(
         do_refresh=do_refresh,
         changed_files=all_changed,
         config_changed=config_changed,
-        deps_changed=deps_changed,
-        repo_path=repo_path,
+        dep_units=dep_units,
     )
     if warnings:
         result["warnings"] = warnings
@@ -5272,16 +5341,28 @@ def update_environment(
     setup_logs: list[str] = []
     deps_installed = False
     if install_dependencies:
-        apt_log = _install_apt_packages(new_container, repo_path)
-        if apt_log:
-            setup_logs.append(apt_log)
-            deps_installed = True
-        pip_installed, pip_log = _install_pip_requirements(
-            new_container, repo_path, restart=False
+        dep_paths = [(repo_path, "/mnt/extra-addons")]
+        try:
+            extra_dict = _normalize_extra_addons(
+                json.loads(labels.get("oduflow.extra_addons", "{}"))
+            )
+        except (json.JSONDecodeError, TypeError):
+            extra_dict = {}
+        if extra_dict:
+            sources = _extra_checkout_sources(new_container, iter(extra_dict))
+            dep_paths.extend(
+                (sources[rn], f"/mnt/extra-addons-{rn}")
+                for rn in extra_dict
+                if sources.get(rn)
+            )
+        _, pip_installed, dep_logs = _install_repo_dependencies(
+            new_container, dep_paths
         )
-        if pip_log:
-            setup_logs.append(pip_log)
-        deps_installed = deps_installed or pip_installed
+        setup_logs.extend(dep_logs)
+        # A log from any repo means apt or pip did something worth restarting
+        # for. This over-approximates only when a pip step failed outright, and
+        # an extra restart is the harmless side of that trade.
+        deps_installed = pip_installed or bool(dep_logs)
 
     # The recreated container booted Odoo before the conf was reapplied and the
     # dependencies reinstalled; one restart picks up both (same order as create).

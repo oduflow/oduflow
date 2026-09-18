@@ -7,8 +7,9 @@ from unittest.mock import patch
 import pytest
 
 from oduflow.docker_ops import service_database_ops
-from oduflow.errors import ConflictError, PrerequisiteNotMetError
+from oduflow.errors import ConflictError, PrerequisiteNotMetError, ProtectedError
 from oduflow.service_database_credentials import load
+from oduflow.service_database_credentials import save as save_record
 from oduflow.settings import Settings, TeamSettings
 
 
@@ -250,3 +251,194 @@ def test_drifted_database_cannot_rotate(database_fixture):
     ):
         with pytest.raises(PrerequisiteNotMetError, match="drifted"):
             service_database_ops.rotate_password(settings, team, "events")
+
+
+@pytest.fixture
+def prod_fixture(tmp_path):
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team"))
+    settings = Settings(
+        base_data_dir=str(tmp_path),
+        db_user="admin",
+        db_password="secret",
+        shared_db_container="oduflow-db",
+        prod_enabled=True,
+        prod_db_container="oduflow-prod-db",
+        teams={"1": team},
+    )
+    return settings, team
+
+
+def test_create_on_prod_cluster_targets_prod_pg_without_quota_or_tablespace(
+    prod_fixture,
+):
+    settings, team = prod_fixture
+    with (
+        patch("oduflow.docker_ops.service_database_ops.get_client"),
+        patch("oduflow.docker_ops.service_database_ops.ensure_prod_infra") as infra,
+        patch("oduflow.docker_ops.service_database_ops._wait_pg_ready") as wait_pg,
+        patch("oduflow.docker_ops.service_database_ops.ensure_team_network"),
+        patch(
+            "oduflow.docker_ops.service_database_ops._catalog_exists",
+            return_value=False,
+        ) as catalog,
+        patch("oduflow.docker_ops.service_database_ops.check_db_quota") as quota,
+        patch(
+            "oduflow.docker_ops.service_database_ops.ensure_team_tablespace"
+        ) as tablespace,
+        patch("oduflow.docker_ops.service_database_ops._exec_sql") as exec_sql,
+        patch(
+            "oduflow.docker_ops.service_database_ops.generate_pg_password",
+            return_value="generated-password",
+        ),
+    ):
+        result = service_database_ops.create_database(
+            settings, team, "events", cluster="prod"
+        )
+
+    infra.assert_called_once()
+    quota.assert_not_called()
+    tablespace.assert_not_called()
+    assert wait_pg.call_args.kwargs["container_name"] == "oduflow-prod-db"
+    assert all(
+        call.kwargs["container_name"] == "oduflow-prod-db"
+        for call in catalog.call_args_list
+    )
+    sql_calls = exec_sql.call_args_list
+    assert all(call.kwargs["container_name"] == "oduflow-prod-db" for call in sql_calls)
+    sql = "\n".join(call.args[2] for call in sql_calls)
+    assert "TABLESPACE" not in sql
+    assert result["cluster"] == "prod"
+    assert result["host"] == "oduflow-prod-db"
+    assert result["url"].startswith("postgresql://")
+    assert "@oduflow-prod-db:5432/" in result["url"]
+    assert load(team, "events")["cluster"] == "prod"
+
+
+def test_create_on_prod_cluster_requires_production_hosting(database_fixture):
+    settings, team = database_fixture  # prod_enabled defaults to False
+    with pytest.raises(PrerequisiteNotMetError, match="Production hosting is disabled"):
+        service_database_ops.create_database(settings, team, "events", cluster="prod")
+
+
+def test_create_rejects_unknown_cluster(database_fixture):
+    settings, team = database_fixture
+    with pytest.raises(ValueError, match="Unknown cluster"):
+        service_database_ops.create_database(settings, team, "events", cluster="qa")
+
+
+def test_get_reports_prod_database_unavailable_when_prod_pg_is_down(prod_fixture):
+    settings, team = prod_fixture
+    save_record(
+        team,
+        "events",
+        {
+            "name": "events",
+            "database": "oduflow_service_1_events",
+            "username": "svc_1_events",
+            "password": "generated-password",
+            "created_at": "2026-09-18T00:00:00+00:00",
+            "cluster": "prod",
+        },
+    )
+    with (
+        patch("oduflow.docker_ops.service_database_ops.get_client"),
+        patch(
+            "oduflow.docker_ops.service_database_ops._prod_pg_running",
+            return_value=False,
+        ),
+        patch("oduflow.docker_ops.service_database_ops._wait_pg_ready") as wait_pg,
+    ):
+        result = service_database_ops.get_database(settings, team, "events")
+
+    wait_pg.assert_not_called()
+    assert result["status"] == "unavailable"
+    assert result["cluster"] == "prod"
+    assert result["host"] == "oduflow-prod-db"
+    assert "password" not in result
+
+
+def test_delete_targets_the_record_cluster(prod_fixture):
+    settings, team = prod_fixture
+    save_record(
+        team,
+        "events",
+        {
+            "name": "events",
+            "database": "oduflow_service_1_events",
+            "username": "svc_1_events",
+            "password": "generated-password",
+            "created_at": "2026-09-18T00:00:00+00:00",
+            "cluster": "prod",
+        },
+    )
+    with (
+        patch("oduflow.docker_ops.service_database_ops.get_client"),
+        patch(
+            "oduflow.docker_ops.service_database_ops._prod_pg_running",
+            return_value=True,
+        ),
+        patch("oduflow.docker_ops.service_database_ops._wait_pg_ready"),
+        patch("oduflow.docker_ops.service_database_ops._exec_sql") as exec_sql,
+        patch("oduflow.docker_ops.service_database_ops._drop_pg_role") as drop_role,
+    ):
+        service_database_ops.delete_database(settings, team, "events")
+
+    assert exec_sql.call_args.kwargs["container_name"] == "oduflow-prod-db"
+    assert drop_role.call_args.kwargs["container_name"] == "oduflow-prod-db"
+
+
+def test_delete_refuses_prod_database_when_prod_pg_is_down(prod_fixture):
+    settings, team = prod_fixture
+    save_record(
+        team,
+        "events",
+        {
+            "name": "events",
+            "database": "oduflow_service_1_events",
+            "username": "svc_1_events",
+            "password": "generated-password",
+            "created_at": "2026-09-18T00:00:00+00:00",
+            "cluster": "prod",
+        },
+    )
+    with (
+        patch("oduflow.docker_ops.service_database_ops.get_client"),
+        patch(
+            "oduflow.docker_ops.service_database_ops._prod_pg_running",
+            return_value=False,
+        ),
+    ):
+        with pytest.raises(PrerequisiteNotMetError, match="not running"):
+            service_database_ops.delete_database(settings, team, "events")
+
+
+def test_protected_database_cannot_be_deleted_until_unprotected(database_fixture):
+    settings, team = database_fixture
+    save_record(
+        team,
+        "events",
+        {
+            "name": "events",
+            "database": "oduflow_service_1_events",
+            "username": "svc_1_events",
+            "password": "generated-password",
+            "created_at": "2026-09-18T00:00:00+00:00",
+        },
+    )
+    assert service_database_ops.set_protected(team, "events", True) == {
+        "name": "events",
+        "protected": True,
+    }
+
+    with pytest.raises(ProtectedError, match="protected"):
+        service_database_ops.delete_database(settings, team, "events")
+
+    service_database_ops.set_protected(team, "events", False)
+    with (
+        patch("oduflow.docker_ops.service_database_ops.get_client"),
+        patch("oduflow.docker_ops.service_database_ops._wait_pg_ready"),
+        patch("oduflow.docker_ops.service_database_ops._exec_sql"),
+        patch("oduflow.docker_ops.service_database_ops._drop_pg_role"),
+    ):
+        result = service_database_ops.delete_database(settings, team, "events")
+    assert result["name"] == "events"

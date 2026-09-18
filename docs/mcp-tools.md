@@ -54,19 +54,19 @@ also available via the [REST API](web-api.md).
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
 | `create_service` | ✓ | Create a managed service with exactly one exposure model: catch-all `port`, or restricted Traefik `routes` (`path`, backend `port`, optional `strip_prefix`). The two parameters are mutually exclusive; `port` remains required outside Traefik. Optional `command` (shell-quoted string) replaces the image `CMD` |
-| `delete_service` | ✓ | Stop and remove a service container |
+| `delete_service` | ✓ | Stop and remove a service container. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
 | `restart_service` | ✓ | Restart a service container |
-| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD` |
+| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD`. Protected services refuse updates |
 | `list_services` | | List all managed service containers |
 | `get_service_info` | | Full live state of a single service (image+digest, port/routes, hostname, host_mode, command, volumes, env, capabilities, restart count, preset). Call before recreating it |
 | `get_service_logs` | | Retrieve service container logs |
 | `run_service_command` | ✓ | Execute a shell command inside a service container (through `sh -c`; `shell=False` for exact argv) |
 | **Service PostgreSQL Databases** | | |
-| `create_service_database` | ✓ | Create a persistent team-scoped PostgreSQL database with a dedicated non-superuser owner; returns `DATABASE_URL` and `PG*` credentials |
+| `create_service_database` | ✓ | Create a persistent team-scoped PostgreSQL database with a dedicated non-superuser owner; returns `DATABASE_URL` and `PG*` credentials. `cluster="dev"` (default) targets the shared development cluster; `cluster="prod"` targets the dedicated production cluster (requires production hosting; covered by cluster-wide WAL-G backups, exempt from the dev disk quota) |
 | `list_service_databases` | | List database names, live status, size, and connections without passwords |
 | `get_service_database` | | Explicitly reveal connection credentials for one managed database |
 | `rotate_service_database_password` | ✓ | Rotate the owner password and return replacement credentials; containers must be reconfigured |
-| `delete_service_database` | ✓ | ⚠️ Permanently drop the database and role after terminating active connections; service containers are unchanged |
+| `delete_service_database` | ✓ | ⚠️ Permanently drop the database and role after terminating active connections; service containers are unchanged. Protected databases refuse deletion until unprotected in the dashboard |
 | **Volumes** | | |
 | `create_volume` | ✓ | Create a named Docker volume for use with services |
 | `list_volumes` | | List all managed Docker volumes and their usage by services |

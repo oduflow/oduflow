@@ -250,7 +250,9 @@ Stack planning detects changes to it and replacement preserves the declared sett
 Use `spec.production` instead of `spec.environment` for a long-lived production.
 Exactly one target is required. The host must have `[production] enabled = true`
 and Traefik routing. Production databases use the dedicated production cluster;
-auxiliary `spec.databases` still use the shared service database cluster.
+auxiliary `spec.databases` still use the shared development service database
+cluster (the `cluster` option of `create_service_database` is not yet available
+in Stack specs).
 
 ```yaml
 apiVersion: oduflow.dev/v1alpha1

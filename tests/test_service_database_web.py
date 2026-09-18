@@ -101,3 +101,50 @@ def test_delete_uses_resource_scoped_endpoint(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"ok": True, "result": result}
     assert delete.call_args.args[2] == "events"
+
+
+def test_create_passes_cluster_through(tmp_path):
+    client = _client(tmp_path)
+    with patch(
+        "oduflow.web_ui.service_database_ops.create_database", return_value={}
+    ) as create:
+        response = client.post(
+            "/api/service-databases/create",
+            json={"name": "events", "cluster": "prod"},
+        )
+
+    assert response.status_code == 200
+    assert create.call_args.kwargs["cluster"] == "prod"
+
+
+def test_create_rejects_unknown_cluster(tmp_path):
+    client = _client(tmp_path)
+    with patch("oduflow.web_ui.service_database_ops.create_database") as create:
+        response = client.post(
+            "/api/service-databases/create",
+            json={"name": "events", "cluster": "qa"},
+        )
+
+    assert response.status_code == 400
+    create.assert_not_called()
+
+
+def test_protect_and_unprotect_endpoints_toggle_the_flag(tmp_path):
+    client = _client(tmp_path)
+    with patch(
+        "oduflow.web_ui.service_database_ops.set_protected",
+        return_value={"name": "events", "protected": True},
+    ) as set_protected:
+        response = client.post("/api/service-databases/events/protect")
+
+    assert response.status_code == 200
+    assert set_protected.call_args.args[1:] == ("events", True)
+
+    with patch(
+        "oduflow.web_ui.service_database_ops.set_protected",
+        return_value={"name": "events", "protected": False},
+    ) as set_protected:
+        response = client.post("/api/service-databases/events/unprotect")
+
+    assert response.status_code == 200
+    assert set_protected.call_args.args[1:] == ("events", False)

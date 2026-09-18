@@ -272,6 +272,7 @@
   .badge-stopped { background: color-mix(in oklab, var(--yellow) 15%, transparent); color: var(--yellow); }
   .badge-exited  { background: color-mix(in oklab, var(--red) 15%, transparent); color: var(--red); }
   .badge-protected { background: color-mix(in oklab, var(--yellow) 15%, transparent); color: var(--yellow); }
+  .badge-cluster-prod { background: color-mix(in oklab, var(--cyan) 15%, transparent); color: var(--cyan); }
   .bulk-bar {
     position: sticky;
     top: 8px;
@@ -348,17 +349,6 @@
     font-size: var(--text-xs);
   }
   .prod-section th { color: var(--text-dim); font-weight: 600; }
-  .prod-logs-pre {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 10px;
-    max-height: 320px;
-    overflow: auto;
-    white-space: pre-wrap;
-  }
   /* Health chips (system bar) — status is always textual, never color-only */
   .health-chip {
     display: inline-flex;
@@ -1220,6 +1210,12 @@
   /* Long repo URLs truncate instead of scrolling the row sideways. */
   .form-group .check-item > .hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .section-subtitle { font-size: var(--text-md); font-weight: 600; margin-bottom: 10px; color: var(--text-dim); }
+  .section-toggle {
+    background: none; border: none; padding: 0; cursor: pointer;
+    font: inherit; color: inherit; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .section-toggle:hover, .section-toggle:focus-visible { color: var(--text); }
+  .section-chevron { font-size: var(--text-xs); }
   .modal-note { font-size: var(--text-sm); color: var(--text-dim); margin-bottom: 16px; }
   .modal-note a { color: var(--accent); }
   .mono-input { font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -1410,8 +1406,12 @@
   </div>
   <div id="svc-list"></div>
   <div id="svc-presets-section" style="display:none;margin-top:24px;">
-    <h2 class="section-subtitle">Saved Presets</h2>
-    <div id="svc-presets-list"></div>
+    <h2 class="section-subtitle">
+      <button type="button" class="section-toggle" id="svc-presets-toggle" aria-expanded="false" aria-controls="svc-presets-list" onclick="togglePresetsList()">
+        <span class="section-chevron" aria-hidden="true">&#9656;</span> Saved Presets <span id="svc-presets-count"></span>
+      </button>
+    </h2>
+    <div id="svc-presets-list" style="display:none;"></div>
   </div>
 </div>
 
@@ -1659,6 +1659,13 @@
       <div class="form-group">
         <label for="database-name">Database resource name</label>
         <input type="text" id="database-name" placeholder="e.g. worker-data" maxlength="31" autocomplete="off">
+      </div>
+      <div class="form-group" id="database-cluster-group">
+        <label for="database-cluster">PostgreSQL cluster</label>
+        <select id="database-cluster">
+          <option value="dev" selected>Development (shared dev cluster)</option>
+          <option value="prod">Production (dedicated cluster, WAL-G backups)</option>
+        </select>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeCreateDatabaseModal()">Cancel</button>
@@ -4154,7 +4161,7 @@ async function doProtect(branch, isProtected) {
   await loadEnvironments(true);
 }
 
-var _logsState = { branch: '', lines: [], type: 'env', serviceName: '' };
+var _logsState = { branch: '', lines: [], type: 'env', serviceName: '', prodName: '' };
 
 async function showLogs(branch) {
   _dropChip('logs-modal');   // reopening replaces any minimized logs window
@@ -4190,6 +4197,8 @@ async function fetchLogs() {
     var url;
     if (_logsState.type === 'service') {
       url = API_SERVICES + '/' + encodeURIComponent(_logsState.serviceName) + '/logs?n=' + n;
+    } else if (_logsState.type === 'prod') {
+      url = API_PRODUCTIONS + '/' + encodeURIComponent(_logsState.prodName) + '/logs?lines=' + n;
     } else {
       url = API + '/' + encodeURIComponent(_logsState.branch) + '/logs?n=' + n;
       var cont = document.getElementById('logs-container').value;
@@ -5513,10 +5522,16 @@ function renderServiceDatabases(databases) {
       '<div class="svc-header"><div class="left">' +
         '<span class="svc-name">' + esc(db.name) + '</span>' +
         '<span class="badge ' + (ready ? 'badge-running' : 'badge-partial') + '">' + esc(db.status) + '</span>' +
+        (db.cluster === 'prod' ? '<span class="badge badge-cluster-prod" title="Lives on the dedicated production PostgreSQL cluster">production</span>' : '') +
+        (db.protected ? '<span class="badge badge-protected" title="Deletion is disabled">protected</span>' : '') +
       '</div><div class="svc-actions">' +
         '<button class="btn" onclick="showDatabaseCredentials(\'' + escAttr(db.name) + '\')">Credentials</button>' +
         '<button class="btn btn-update" onclick="rotateDatabasePassword(\'' + escAttr(db.name) + '\')">Rotate Password</button>' +
-        '<button class="btn btn-delete" onclick="deleteServiceDatabase(\'' + escAttr(db.name) + '\')">Delete</button>' +
+        '<button class="btn btn-protect" title="' + (db.protected ? 'Allow deleting this database again' : 'Disable deleting this database') + '" ' +
+          'onclick="doProtectServiceDatabase(\'' + escAttr(db.name) + '\',' + (db.protected ? 'true' : 'false') + ')">' +
+          (db.protected ? 'Unprotect' : 'Protect') + '</button>' +
+        '<button class="btn btn-delete" onclick="deleteServiceDatabase(\'' + escAttr(db.name) + '\')" ' +
+          (db.protected ? 'disabled title="Database is protected"' : '') + '>Delete</button>' +
       '</div></div>' +
       '<div class="svc-meta">' +
         '<span>Database: <strong>' + esc(db.database || 'metadata unavailable') + '</strong></span>' +
@@ -5530,6 +5545,8 @@ function renderServiceDatabases(databases) {
 
 function openCreateDatabaseModal() {
   document.getElementById('database-name').value = '';
+  document.getElementById('database-cluster').value = 'dev';
+  document.getElementById('database-cluster-group').style.display = PROD_ENABLED ? '' : 'none';
   document.getElementById('create-database-error').textContent = '';
   showModal('create-database-modal');
   document.getElementById('database-name').focus();
@@ -5549,8 +5566,9 @@ async function submitCreateDatabase() {
   button.disabled = true;
   button.textContent = 'Creating…';
   try {
+    var cluster = PROD_ENABLED ? document.getElementById('database-cluster').value : 'dev';
     var r = await fetch(API_SERVICE_DATABASES + '/create', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name})
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name, cluster: cluster})
     });
     var data = await readResult(r);
     if (!data.ok) throw new Error(data.error || 'Database creation failed');
@@ -5609,6 +5627,27 @@ async function rotateDatabasePassword(name) {
   } catch (e) {
     showToast(e.message, true);
   }
+}
+
+async function doProtectServiceDatabase(name, isProtected) {
+  var action = isProtected ? 'unprotect' : 'protect';
+  if (isProtected && !(await confirmDialog({
+    title: 'Remove protection',
+    message: 'Allow deleting the service database "' + name + '" again?',
+    confirmLabel: 'Remove protection'
+  }))) return;
+  try {
+    var r = await fetch(API_SERVICE_DATABASES + '/' + encodeURIComponent(name) + '/' + action, { method: 'POST' });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(name + ': ' + (isProtected ? 'unprotected' : 'protected'));
+    } else {
+      showToast(data.error || action + ' failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+  await loadServiceDatabases();
 }
 
 async function deleteServiceDatabase(name) {
@@ -5740,14 +5779,20 @@ function renderServices(services) {
         '<div class="left">' +
           '<span class="svc-name">' + esc(svc.name) + '</span>' +
           '<span class="badge ' + badgeClass(svc.status) + '">' + esc(svc.status) + '</span>' +
+          (svc.protected ? '<span class="badge badge-protected" title="Update, Restore and Delete are disabled">protected</span>' : '') +
           capBadges +
         '</div>' +
         '<div class="svc-actions">' +
           '<button class="btn" onclick="showServiceInfo(\'' + escAttr(svc.name) + '\')">Info</button>' +
-          '<button class="btn btn-update" onclick="doUpdateService(\'' + escAttr(svc.name) + '\')">Update</button>' +
+          '<button class="btn btn-update" onclick="doUpdateService(\'' + escAttr(svc.name) + '\')" ' +
+            (svc.protected ? 'disabled title="Service is protected"' : '') + '>Update</button>' +
           '<button class="btn btn-restart" onclick="doRestartService(\'' + escAttr(svc.name) + '\')">Restart</button>' +
           '<button class="btn btn-logs" onclick="showServiceLogs(\'' + escAttr(svc.name) + '\')">Logs</button>' +
-          '<button class="btn btn-delete" onclick="doDeleteService(\'' + escAttr(svc.name) + '\')">Delete</button>' +
+          '<button class="btn btn-protect" title="' + (svc.protected ? 'Allow Update, Restore and Delete again' : 'Disable Update, Restore and Delete') + '" ' +
+            'onclick="doProtectService(\'' + escAttr(svc.name) + '\',' + (svc.protected ? 'true' : 'false') + ')">' +
+            (svc.protected ? 'Unprotect' : 'Protect') + '</button>' +
+          '<button class="btn btn-delete" onclick="doDeleteService(\'' + escAttr(svc.name) + '\')" ' +
+            (svc.protected ? 'disabled title="Service is protected"' : '') + '>Delete</button>' +
         '</div>' +
       '</div>' +
       '<div class="svc-meta">' +
@@ -5922,6 +5967,27 @@ async function doRestartService(name) {
   await loadServices();
 }
 
+async function doProtectService(name, isProtected) {
+  var action = isProtected ? 'unprotect' : 'protect';
+  if (isProtected && !(await confirmDialog({
+    title: 'Remove protection',
+    message: 'Allow Update, Restore and Delete for the service "' + name + '" again?',
+    confirmLabel: 'Remove protection'
+  }))) return;
+  try {
+    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/' + action, { method: 'POST' });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(name + ': ' + (isProtected ? 'unprotected' : 'protected'));
+    } else {
+      showToast(data.error || action + ' failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+  await loadServices();
+}
+
 async function doDeleteService(name) {
   if (!(await confirmDialog({
     title: 'Delete service',
@@ -6059,6 +6125,15 @@ async function loadServicePresets() {
   } catch (e) { /* silent */ }
 }
 
+var _presetsOpen = false;  // Saved Presets is collapsed by default
+
+function togglePresetsList() {
+  _presetsOpen = !_presetsOpen;
+  document.getElementById('svc-presets-list').style.display = _presetsOpen ? '' : 'none';
+  document.getElementById('svc-presets-toggle').setAttribute('aria-expanded', _presetsOpen ? 'true' : 'false');
+  document.querySelector('#svc-presets-toggle .section-chevron').innerHTML = _presetsOpen ? '&#9662;' : '&#9656;';
+}
+
 function renderPresetsList(presets) {
   var section = document.getElementById('svc-presets-section');
   var el = document.getElementById('svc-presets-list');
@@ -6067,6 +6142,7 @@ function renderPresetsList(presets) {
     return;
   }
   section.style.display = 'block';
+  document.getElementById('svc-presets-count').textContent = '(' + presets.length + ')';
   el.innerHTML = presets.map(function(p) {
     var envStr = '';
     if (p.env_vars && Object.keys(p.env_vars).length > 0) {
@@ -7626,7 +7702,7 @@ console.log(
 const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
 var _prodWebhookSecret = '';
-var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | 'settings' | undefined
+var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'settings' | undefined
 // name -> true while the Settings form holds unsaved edits (set by the form's
 // oninput). The auto-refresh timer skips re-rendering the productions list
 // while any form is dirty or focused, so in-progress edits are not wiped.
@@ -7712,7 +7788,7 @@ function renderProductions() {
           (window._prodBackupConfigured
             ? '<button class="btn" title="Snapshot the database and filestore to S3 now" onclick="prodSnapshot(\'' + escAttr(p.name) + '\')">Snapshot</button>'
             : '') +
-          '<button class="btn btn-logs" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'logs\')">Logs</button>' +
+          '<button class="btn btn-logs" onclick="showProdLogs(\'' + escAttr(p.name) + '\')">Logs</button>' +
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
@@ -7749,6 +7825,23 @@ function renderProductions() {
   });
 }
 
+async function showProdLogs(name) {
+  _dropChip('logs-modal');   // reopening replaces any minimized logs window
+  _logsState.branch = '';
+  _logsState.lines = [];
+  _logsState.type = 'prod';
+  _logsState.serviceName = '';
+  _logsState.prodName = name;
+  document.getElementById('logs-container').style.display = 'none';
+  document.getElementById('logs-search').value = '';
+  document.getElementById('logs-match-count').textContent = '';
+  document.getElementById('logs-title').textContent = 'Production Logs — ' + name;
+  document.getElementById('logs-content').textContent = 'Loading...';
+  showModal('logs-modal');
+  document.getElementById('logs-search').focus();
+  await fetchLogs();
+}
+
 function prodToggle(name, section) {
   _prodOpen[name] = _prodOpen[name] === section ? undefined : section;
   renderProductions();
@@ -7758,13 +7851,7 @@ async function _loadProdSection(name, section) {
   var el = document.getElementById('prod-section-' + name);
   if (!el) return;
   try {
-    if (section === 'logs') {
-      var r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/logs?lines=200');
-      var data = await readResult(r);
-      el.innerHTML = data.ok
-        ? '<div class="prod-logs-pre">' + esc(data.logs || '(no output)') + '</div>'
-        : esc(data.error || 'Failed to load logs');
-    } else if (section === 'deploys') {
+    if (section === 'deploys') {
       var r2 = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/deploys');
       var d2 = await readResult(r2);
       if (!d2.ok) { el.textContent = d2.error || 'Failed to load deploys'; return; }

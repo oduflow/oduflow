@@ -261,14 +261,18 @@ def reapply_prod_odoo_conf(
     delegates here based on the ``oduflow.prod`` label). Always returns
     True: the bundled odoo-prod.conf guarantees a base conf exists.
     """
+    from oduflow.extra_addons import resolve_extra_addons_path
+
     env_name = prod_env_name(name)
     repo_path = get_repo_path(env_name, team.workspaces_dir)
     extra_addons_json = (container.labels or {}).get("oduflow.extra_addons", "")
     extra_paths: list[str] = []
     if extra_addons_json:
+        extra_dir = os.path.join(_workspace(team, name), "extra")
         try:
             extra_paths = [
-                f"/mnt/extra-addons-{rn}" for rn in json.loads(extra_addons_json)
+                resolve_extra_addons_path(os.path.join(extra_dir, rn), rn)
+                for rn in json.loads(extra_addons_json)
             ]
         except (json.JSONDecodeError, TypeError):
             extra_paths = []
@@ -798,13 +802,12 @@ def _run_odoo_container(
     labels: dict[str, str],
     generated_conf: str,
     repo_path: str,
+    extra_mount_paths: list[tuple[str, str]] | None = None,
 ) -> tuple[Any, list[str]]:
     """Run the production Odoo container and finish its in-container setup
-    (odoo.conf copy, apt/pip requirements, one restart picking both up)."""
-    from oduflow.docker_ops.env_ops import (
-        _install_apt_packages,
-        _install_pip_requirements,
-    )
+    (odoo.conf copy, apt/pip requirements from the main repo and every
+    extra-addons worktree, one restart picking everything up)."""
+    from oduflow.docker_ops.env_ops import _install_repo_dependencies
 
     container = client.containers.run(
         image=odoo_image,
@@ -821,14 +824,9 @@ def _run_odoo_container(
         # auto-reloads assets; any change requires at least a restart.
         command=f"odoo -d {prod_db_name(team, name)}",
     )
-    setup_logs: list[str] = []
     _copy_file_to_container(container, generated_conf, "/etc/odoo")
-    apt_log = _install_apt_packages(container, repo_path)
-    if apt_log:
-        setup_logs.append(apt_log)
-    _, pip_log = _install_pip_requirements(container, repo_path, restart=False)
-    if pip_log:
-        setup_logs.append(pip_log)
+    dep_paths = [(repo_path, "/mnt/extra-addons")] + list(extra_mount_paths or [])
+    _, _, setup_logs = _install_repo_dependencies(container, dep_paths)
     # One restart picks up both the copied odoo.conf and pip packages.
     container.restart()
     return container, setup_logs
@@ -1003,8 +1001,9 @@ def create_production(
                 )
 
         extra_mount_paths: list[tuple[str, str]] = []
+        extra_conf_paths: list[str] = []
         if extra_addons:
-            from oduflow.extra_addons import create_worktree
+            from oduflow.extra_addons import create_worktree, resolve_extra_addons_path
 
             extra_dir = os.path.join(workspace, "extra")
             os.makedirs(extra_dir, exist_ok=True)
@@ -1012,6 +1011,7 @@ def create_production(
                 wt_path = os.path.join(extra_dir, repo_name)
                 create_worktree(team, repo_name, addon_branch, wt_path)
                 extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
+                extra_conf_paths.append(resolve_extra_addons_path(wt_path, repo_name))
 
         _exec_sql(
             client,
@@ -1088,7 +1088,7 @@ def create_production(
             team,
             name,
             repo_path,
-            [cp for _, cp in extra_mount_paths],
+            extra_conf_paths,
         )
 
         try:
@@ -1125,6 +1125,7 @@ def create_production(
             labels,
             generated_conf,
             repo_path,
+            extra_mount_paths,
         )
         setup_logs.extend(run_logs)
 
@@ -1305,7 +1306,11 @@ def reconfigure_production(
     """
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import _clone_repo
-    from oduflow.extra_addons import create_worktree, remove_worktree
+    from oduflow.extra_addons import (
+        create_worktree,
+        remove_worktree,
+        resolve_extra_addons_path,
+    )
     from oduflow.git_ops import checkout_branch, fetch_branch, rev_parse
 
     record = production_registry.get_production(team, name)
@@ -1427,6 +1432,7 @@ def reconfigure_production(
             if entry not in new_extras:
                 _remove_extra_worktree(entry, os.path.join(extra_dir, entry))
     extra_mount_paths: list[tuple[str, str]] = []
+    extra_conf_paths: list[str] = []
     for repo_name, addon_branch in new_extras.items():
         wt_path = os.path.join(extra_dir, repo_name)
         os.makedirs(extra_dir, exist_ok=True)
@@ -1437,13 +1443,14 @@ def reconfigure_production(
         if not os.path.isdir(wt_path):
             create_worktree(team, repo_name, addon_branch, wt_path)
         extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
+        extra_conf_paths.append(resolve_extra_addons_path(wt_path, repo_name))
 
     # --- Prepare everything, then swap the container (minimal downtime). ---
     env_creds = load_credentials(
         env_name, team.workspaces_dir, settings.db_user, settings.db_password
     )
     generated_conf = _build_prod_odoo_conf(
-        settings, team, name, repo_path, [cp for _, cp in extra_mount_paths]
+        settings, team, name, repo_path, extra_conf_paths
     )
     odoo_env, odoo_volumes, labels = _container_spec(
         settings, team, name, record, env_creds, extra_mount_paths
@@ -1507,6 +1514,7 @@ def reconfigure_production(
         labels,
         generated_conf,
         repo_path,
+        extra_mount_paths,
     )
     healthy = wait_production_healthy(client, settings, team, name, timeout=180)
     production_registry.update_production(team, name, {"unhealthy": not healthy})

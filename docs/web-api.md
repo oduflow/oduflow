@@ -157,13 +157,17 @@ Odoo.sh ingest endpoints accept the import token only in
 | `GET` | `/api/services/{name}/env-vars` | Return the environment variables an update keeps — the saved preset, or the container's own environment for a service created before presets |
 | `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
 | `POST` | `/api/services/{name}/restart` | Restart a service |
-| `POST` | `/api/services/{name}/delete` | Delete a service |
+| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected) |
+| `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
+| `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
-| `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name` |
+| `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |
 | `POST` | `/api/service-databases/{name}/rotate` | Rotate the database role password |
-| `POST` | `/api/service-databases/{name}/delete` | Permanently drop the database and role, terminating connections |
+| `POST` | `/api/service-databases/{name}/protect` | Protect a database: deletion is refused until unprotected |
+| `POST` | `/api/service-databases/{name}/unprotect` | Remove database protection |
+| `POST` | `/api/service-databases/{name}/delete` | Permanently drop the database and role, terminating connections (refused while protected) |
 | `GET` | `/api/service-presets` | List saved presets |
 | `POST` | `/api/service-presets/restore` | Restore a preset; body: `name` plus optional runtime overrides |
 | `POST` | `/api/service-presets/{name}/delete` | Delete a preset |

@@ -109,6 +109,68 @@ class TestInstallPipRequirements:
         assert log == ""
         assert _pip_cmd(container) is None
 
+    def test_container_base_points_into_extra_mount(self, tmp_path):
+        # An extra-addons checkout is mounted at /mnt/extra-addons-{name}; its
+        # requirements must be read from inside that mount, not the main repo's.
+        repo = str(tmp_path)
+        _write(os.path.join(repo, ".oduflow", "requirements.txt"), "paramiko\n")
+        container = _mock_container()
+
+        installed, _ = env_ops._install_pip_requirements(
+            container, repo, restart=False, container_base="/mnt/extra-addons-acme"
+        )
+
+        assert installed is True
+        assert "/mnt/extra-addons-acme/.oduflow/requirements.txt" in _pip_cmd(container)
+
+
+class TestInstallRepoDependencies:
+    def test_installs_main_then_extra_repos(self, tmp_path):
+        main = tmp_path / "main"
+        extra = tmp_path / "extra"
+        _write(str(main / ".oduflow" / "apt_packages.txt"), "git\n")
+        _write(str(main / ".oduflow" / "requirements.txt"), "phonenumbers\n")
+        _write(str(extra / ".oduflow" / "apt_packages.txt"), "aapt\n")
+        _write(str(extra / ".oduflow" / "requirements.txt"), "paramiko\n")
+        container = _mock_container()
+
+        exit_code, pip_installed, logs = env_ops._install_repo_dependencies(
+            container,
+            [
+                (str(main), "/mnt/extra-addons"),
+                (str(extra), "/mnt/extra-addons-acme"),
+            ],
+        )
+
+        assert exit_code == 0
+        assert pip_installed is True
+        joined = "\n".join(logs)
+        assert "git" in joined and "aapt" in joined
+        pip_cmds = [
+            call.args[0]
+            for call in container.exec_run.call_args_list
+            if call.args and "pip3 install" in call.args[0]
+        ]
+        assert any("/mnt/extra-addons/.oduflow/requirements.txt" in c for c in pip_cmds)
+        assert any(
+            "/mnt/extra-addons-acme/.oduflow/requirements.txt" in c for c in pip_cmds
+        )
+        container.restart.assert_not_called()
+
+    def test_extra_repo_failure_sets_exit_code(self, tmp_path):
+        extra = tmp_path / "extra"
+        _write(str(extra / ".oduflow" / "requirements.txt"), "broken\n")
+        container = _mock_container()
+        container.exec_run.return_value = (1, b"boom")
+
+        exit_code, pip_installed, logs = env_ops._install_repo_dependencies(
+            container, [(str(extra), "/mnt/extra-addons-acme")]
+        )
+
+        assert exit_code == 1
+        assert pip_installed is False
+        assert any("FAILED" in log for log in logs)
+
 
 def _chown_cmds(container) -> list[str]:
     """All ``chown`` commands passed to exec_run."""
@@ -191,7 +253,7 @@ class TestConfigureServingEnvironment:
 
         if stub_pip:
 
-            def _pip(_container, _repo, *, restart=True):
+            def _pip(_container, _repo, *, restart=True, container_base=None):
                 events.append(f"pip(restart={restart})")
                 return False, ""
 

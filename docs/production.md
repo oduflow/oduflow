@@ -218,7 +218,11 @@ preflight SQL failure, triggers code rollback just like a failed module command.
 `update_production(name)` pulls the branch (and extra-addon worktrees),
 classifies the changes (or takes explicit `install=` / `upgrade=` /
 `restart=true`), applies them, and **verifies** the deploy — module exit
-codes plus an in-container health check. In production a "refresh"-class
+codes plus an in-container health check. A changed `.oduflow/requirements.txt`
+or `.oduflow/apt_packages.txt` — in the main repo or an extra-addon repo —
+reinstalls the pip/apt dependencies into the container before the restart
+(they are also installed from scratch whenever the container is recreated:
+create, reconfigure). In production a "refresh"-class
 change (XML/JS only) still restarts the container: there is no `--dev=xml`.
 
 If verification fails, the checkout is reset to the pre-deploy commit, the
@@ -297,7 +301,8 @@ down" path:
 restore_cluster_pitr(target_time="", confirm="RESTORE-CLUSTER")
 ```
 
-restores the **entire cluster** (every production database at once) from the
+restores the **entire cluster** (every production database at once — including
+auxiliary service databases created with `cluster="prod"`) from the
 latest base backup + WAL replay — optionally to a point in time
 (`target_time="2026-07-10 12:00:00+00"`). The displaced data directory is
 kept inside the Docker volume for manual cleanup. Because the state lives in
