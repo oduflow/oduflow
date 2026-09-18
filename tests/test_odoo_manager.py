@@ -97,10 +97,7 @@ def mock_docker_client():
 class TestInitSystem:
     @patch("oduflow.docker_ops.system_ops._reconcile_pg_hba")
     @patch("oduflow.docker_ops.system_ops._copy_file_to_container")
-    @patch("oduflow.docker_ops.system_ops.os.path.isfile", return_value=True)
-    def test_init_system_fresh(
-        self, mock_isfile, mock_copy, mock_hba, mock_docker_client
-    ):
+    def test_init_system_fresh(self, mock_copy, mock_hba, mock_docker_client):
         mock_docker_client.networks.get.side_effect = docker.errors.NotFound("nf")
         mock_docker_client.volumes.get.side_effect = docker.errors.NotFound("nf")
 
@@ -1153,6 +1150,9 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
             result = env_ops.pull_environment(settings, team, "env")
 
         assert result["extra_addons_cache_migrated"] is True
+        # install_dependencies is on: the recreate throws away the container's
+        # pip --user packages, so they have to be reinstalled from the new
+        # mount sources or the environment loses libraries it was running with.
         update.assert_called_once_with(
             settings,
             team,
@@ -1160,8 +1160,60 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
             extra_checkout_overrides={"enterprise": str(shared)},
             extra_revision_overrides={"enterprise": "a" * 40},
             pull_image=False,
-            install_dependencies=False,
+            install_dependencies=True,
         )
+
+    def test_revision_bump_reinstalls_dependencies_after_recreate(
+        self, mock_docker_client, tmp_path
+    ):
+        """A pull that only advances an extra repo still recreates the
+        container, so deps must be reinstalled even though no dependency
+        descriptor is in the diff (dep_units is empty here)."""
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team"))
+        settings = Settings(teams={"1": team})
+        repo = tmp_path / "team" / "workspaces" / "env" / "repo"
+        repo.mkdir(parents=True)
+        old_checkout = tmp_path / "team" / "shared_extra_checkouts" / "enterprise" / "a"
+        old_checkout.mkdir(parents=True)
+        new_checkout = tmp_path / "team" / "shared_extra_checkouts" / "enterprise" / "b"
+        new_checkout.mkdir(parents=True)
+
+        container = MagicMock()
+        container.labels = {
+            "oduflow.git_branch": "main",
+            "oduflow.extra_addons": json.dumps({"enterprise": "18.0"}),
+            "oduflow.extra_addons_revisions": json.dumps({"enterprise": "a" * 40}),
+        }
+        container.attrs = {
+            "HostConfig": {
+                "Binds": [
+                    f"{repo}:/mnt/extra-addons:rw",
+                    f"{old_checkout}:/mnt/extra-addons-enterprise:ro",
+                ]
+            }
+        }
+        mock_docker_client.containers.get.return_value = container
+
+        with (
+            patch("oduflow.git_ops.pull_repo", return_value=("main-old", [])),
+            patch(
+                "oduflow.extra_addons.ensure_shared_checkout",
+                return_value={
+                    "path": str(new_checkout),
+                    "revision": "b" * 40,
+                    # Only a Python module changed: no requirements.txt, so
+                    # _apply_actions gets an empty dep_units.
+                    "changed_files": ["sale/models/sale.py"],
+                },
+            ),
+            patch("oduflow.docker_ops.env_ops.update_environment") as update,
+            patch("oduflow.docker_ops.env_ops._cleanup_legacy_extra_worktrees"),
+            patch("oduflow.docker_ops.env_ops._apply_actions") as apply_actions,
+        ):
+            env_ops.pull_environment(settings, team, "env")
+
+        assert update.call_args.kwargs["install_dependencies"] is True
+        assert apply_actions.call_args.kwargs["dep_units"] == []
 
     def test_strict_guardrail_does_not_switch_running_mount(
         self, mock_docker_client, tmp_path
@@ -1301,8 +1353,9 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
 
         env_ops.pull_environment(TEST_SETTINGS, team, "env")
 
-        assert mock_apply.call_args.kwargs["deps_changed"] is True
-        assert mock_apply.call_args.kwargs["repo_path"] == str(repo)
+        assert mock_apply.call_args.kwargs["dep_units"] == [
+            (str(repo), "/mnt/extra-addons")
+        ]
 
     @patch("oduflow.docker_ops.env_ops._apply_actions")
     def test_shadowed_root_requirements_change_does_not_reinstall(
@@ -1331,7 +1384,7 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
 
         env_ops.pull_environment(TEST_SETTINGS, team, "env")
 
-        assert mock_apply.call_args.kwargs["deps_changed"] is False
+        assert mock_apply.call_args.kwargs["dep_units"] == []
         assert mock_apply.call_args.kwargs["do_restart"] is False
 
     @patch("oduflow.docker_ops.env_ops._apply_actions")
@@ -3597,8 +3650,7 @@ class TestApplyActionsDeps:
             to_upgrade=[],
             do_restart=False,
             changed_files=["requirements.txt"],
-            deps_changed=True,
-            repo_path="/repo",
+            dep_units=[("/repo", "/mnt/extra-addons")],
         )
         # pip must run without restarting itself; the single restart is below.
         mock_pip.assert_called_once()
@@ -3640,8 +3692,7 @@ class TestApplyActionsDeps:
             to_upgrade=[],
             do_restart=False,
             changed_files=["requirements.txt", "sale/__manifest__.py"],
-            deps_changed=True,
-            repo_path="/repo",
+            dep_units=[("/repo", "/mnt/extra-addons")],
         )
         order = [name for name, _, _ in parent.mock_calls]
         assert order.index("pip") < order.index("install")
@@ -3671,8 +3722,7 @@ class TestApplyActionsDeps:
             to_upgrade=[],
             do_restart=False,
             changed_files=["requirements.txt"],
-            deps_changed=True,
-            repo_path="/repo",
+            dep_units=[("/repo", "/mnt/extra-addons")],
         )
         assert result["action"] == "restart"
         assert "FAILED" in result["output"]
@@ -3694,8 +3744,7 @@ class TestApplyActionsDeps:
             do_restart=False,
             changed_files=["sale/views/sale_order.xml"],
             do_refresh=True,
-            deps_changed=False,
-            repo_path="/repo",
+            dep_units=[],
         )
         mock_apt.assert_not_called()
         mock_pip.assert_not_called()

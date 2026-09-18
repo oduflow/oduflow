@@ -137,6 +137,13 @@ libxrender1
 xfonts-75dpi
 ```
 
+Both files are also read from every mounted [extra addons](extra-addons.md)
+repository, with the same lookup rules — declare an extra module's
+dependencies in its own repo and they are installed alongside the main
+repo's. A change to any of these files (main repo or extra repo) picked up
+by `pull_and_apply` / `update_production` reinstalls the dependencies and
+restarts the container.
+
 ## Database Sanitization
 
 When an environment is created from a template, Oduflow **automatically sanitizes** the database to prevent the test instance from sending real emails or polling mailboxes. This is enabled by default (`sanitize=True`).

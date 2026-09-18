@@ -63,6 +63,12 @@ For each development environment Oduflow automatically:
 2. Creates or reuses the team's immutable checkout for that SHA
 3. Mounts the checkout **read-only** as `/mnt/extra-addons-{name}`
 4. Generates a merged `odoo.conf` with all extra paths added to `addons_path`
+   — modules may live either at the repository root or in a top-level
+   `addons/` directory (the same convention as the main repo); in the latter
+   case `addons_path` points at that subdirectory automatically
+5. Installs the repo's `.oduflow/requirements.txt` / `.oduflow/apt_packages.txt`
+   (with the same lookup rules as the [main repo's](environments.md#auto-dependency-installation)),
+   so an extra repo declares its own Python/apt dependencies
 
 ## Managing Extra Repos
 

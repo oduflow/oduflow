@@ -195,6 +195,15 @@ In the dashboard, **Update** on a service card opens a dialog prefilled with the
 
 If you do recreate a service manually (e.g. to rename it), call `get_service_info` first and reuse its fields in the new `create_service` call. The returned dict carries the full configuration (`image`, `port` or `routes`, `hostname`, `env_vars`, `host_mode`, `command`, `volumes`, `cap_add`, `privileged`) so you do not lose anything that `list_services` truncates or that lived only inside the preset.
 
+### Protecting a Service
+
+A service can be **protected** from the dashboard (the **Protect** button on its
+card). While protected, `delete_service`, `update_service`, and
+`restore_service` are refused — over MCP, the CLI, and the dashboard alike —
+so an agent cannot recreate or remove a service that backs something
+important. Restart and logs remain available. Protection can only be toggled
+in the dashboard; there is no MCP tool for it, so an agent cannot lift it.
+
 ## Service Update Flow
 
 The `update_service` operation:

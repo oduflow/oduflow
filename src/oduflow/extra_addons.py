@@ -934,6 +934,21 @@ def resolve_main_addons_path(repo_path: str) -> str:
     return "/mnt/extra-addons"
 
 
+def resolve_extra_addons_path(checkout_path: str, repo_name: str) -> str:
+    """Container addons path for an extra-addons checkout.
+
+    The extra-repo counterpart of :func:`resolve_main_addons_path`: the
+    checkout is always mounted at ``/mnt/extra-addons-{name}``, but when the
+    repo keeps its modules in a top-level ``addons/`` directory the addons_path
+    entry must point at that subdirectory of the mount, not the mount root.
+    An unknown/missing host path falls back to the mount root.
+    """
+    base = f"/mnt/extra-addons-{repo_name}"
+    if checkout_path and os.path.isdir(os.path.join(checkout_path, "addons")):
+        return f"{base}/addons"
+    return base
+
+
 def generate_odoo_conf(
     base_conf_path: str,
     output_path: str,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import posixpath
 import re
 from typing import Any
@@ -25,7 +26,9 @@ from oduflow.errors import (
     FlowError,
     NotFoundError,
     PrerequisiteNotMetError,
+    ProtectedError,
 )
+from oduflow.fsutil import atomic_write_private_text
 from oduflow.locking import keyed_mutex, service_registry_key
 from oduflow.naming import get_service_container_name, validate_domain
 from oduflow.service_runtime import (
@@ -634,6 +637,75 @@ def _remove_stale_service_container(client: Any, container_name: str) -> None:
         )
 
 
+def _protection_path(team: TeamSettings) -> str:
+    return os.path.join(team.data_dir, "protected_services.json")
+
+
+def _load_protected_services(team: TeamSettings) -> set[str]:
+    path = _protection_path(team)
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Corrupt protected-services file at %s", path)
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {entry for entry in data if isinstance(entry, str)}
+
+
+def is_service_protected(team: TeamSettings, name: str) -> bool:
+    return name in _load_protected_services(team)
+
+
+def assert_service_not_protected(team: TeamSettings, name: str, action: str) -> None:
+    if is_service_protected(team, name):
+        raise ProtectedError(
+            f"Service '{name}' is protected. Unprotect it in the Oduflow "
+            f"dashboard before {action}."
+        )
+
+
+def set_service_protected(
+    settings: Settings, team: TeamSettings, name: str, protected: bool
+) -> dict[str, Any]:
+    """Toggle protection for a service. Protecting requires a live container.
+
+    The flag lives outside the container (a per-team JSON registry) so it
+    survives Docker-level drift; it blocks delete, update and restore.
+    """
+    if protected:
+        # Only existing services can be protected; unprotect always works so
+        # a stale entry can be cleared even after the container is gone.
+        client = get_client()
+        container_name = get_service_container_name(name, settings.prefix, team.team_id)
+        try:
+            container = client.containers.get(container_name)
+        except docker.errors.NotFound:
+            raise NotFoundError(f"Service '{name}' not found")
+        if not container.labels.get("oduflow.service"):
+            raise NotFoundError(f"Service '{name}' not found")
+    with keyed_mutex(service_registry_key(team.team_id)):
+        names = _load_protected_services(team)
+        if protected:
+            names.add(name)
+        else:
+            names.discard(name)
+        os.makedirs(team.data_dir, exist_ok=True)
+        atomic_write_private_text(
+            _protection_path(team), json.dumps(sorted(names), indent=2) + "\n"
+        )
+    logger.info(
+        "Service '%s' for team '%s' %s",
+        name,
+        team.team_id,
+        "protected" if protected else "unprotected",
+    )
+    return {"name": name, "protected": protected}
+
+
 def restart_service(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, str]:
@@ -666,6 +738,7 @@ def restart_service(
 
 
 def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[str, str]:
+    assert_service_not_protected(team, name, "deleting")
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
 
@@ -890,11 +963,14 @@ def list_services(settings: Settings, team: TeamSettings) -> list[dict[str, Any]
         },
     )
 
+    protected_names = _load_protected_services(team)
     result = []
     for container in containers:
         if not container.labels.get("oduflow.service"):
             continue
-        result.append(_describe_service_container(settings, team, container))
+        info = _describe_service_container(settings, team, container)
+        info["protected"] = info["name"] in protected_names
+        result.append(info)
 
     return result
 
@@ -921,6 +997,7 @@ def get_service_info(
 
     info = _describe_service_container(settings, team, container)
 
+    info["protected"] = is_service_protected(team, name)
     info["image_digest"] = container.image.id
 
     state = container.attrs.get("State", {}) or {}
@@ -1000,6 +1077,8 @@ def update_service(
     is compared against what the container actually runs with, so the
     documented rotation flow (replace the value, then update) takes effect.
     """
+    # An update recreates the container, so protection covers it like delete.
+    assert_service_not_protected(team, name, "updating")
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
 

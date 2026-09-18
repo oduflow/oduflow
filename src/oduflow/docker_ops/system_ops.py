@@ -1984,7 +1984,7 @@ def ensure_prod_infra(
     is a no-op until a production exists or the container is already there.
     Returns True when the production infra is up.
     """
-    from oduflow import production_registry, walg
+    from oduflow import walg
 
     if not force and not _prod_infra_required(client, settings):
         return False
@@ -2029,10 +2029,6 @@ def ensure_prod_infra(
         )
     except Exception as exc:
         logger.warning("Could not set production archive_command: %s", exc)
-
-    # A server that died mid-deploy leaves deploy_in_progress flags behind.
-    for team in settings.teams.values():
-        production_registry.clear_stale_deploy_flags(team)
 
     return True
 
@@ -2468,6 +2464,16 @@ def init_system(
         reconcile_prod_workloads(client, settings)
     except Exception:
         logger.exception("Production workload reconciliation failed")
+
+    # A server that died mid-deploy leaves deploy_in_progress flags behind.
+    # This belongs to startup and only to startup: ensure_prod_infra is also
+    # reached at runtime (create_production, start_production, creating a
+    # prod-cluster service database) without the team lock that would make
+    # clearing another operation's live flag safe.
+    from oduflow import production_registry
+
+    for team in settings.teams.values():
+        production_registry.clear_stale_deploy_flags(team)
 
     # Per-team coding-agent containers. init_system runs on every server
     # start, so oduflow.toml is applied here: enabled teams get their container

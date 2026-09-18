@@ -4221,6 +4221,8 @@ def _service_database_connection_text(result: dict[str, Any]) -> str:
     lines = [
         f"Name: {result['name']}",
         f"Status: {result['status']}",
+        f"Cluster: {'production' if result.get('cluster') == 'prod' else 'dev'}",
+        f"Protected: {'yes' if result.get('protected') else 'no'}",
         f"Host: {result['host']}",
         f"Port: {result['port']}",
         f"Database: {result['database']}",
@@ -4245,7 +4247,9 @@ def _service_database_connection_text(result: dict[str, Any]) -> str:
 @mcp.tool()
 @handle_errors
 @with_key_lock(service_database_lock_key)
-def create_service_database(name: str, ctx: Context | None = None) -> str:
+def create_service_database(
+    name: str, cluster: str = "dev", ctx: Context | None = None
+) -> str:
     """Create a persistent PostgreSQL database for auxiliary services.
 
     The database belongs to the current team, uses a dedicated non-superuser
@@ -4254,9 +4258,17 @@ def create_service_database(name: str, ctx: Context | None = None) -> str:
 
     Args:
         name: Stable lowercase resource name using letters, digits, '-' or '_'.
+        cluster: PostgreSQL cluster to create the database on: "dev" (default,
+            shared development cluster) or "prod" (dedicated production
+            cluster; requires production hosting to be enabled). Databases on
+            "prod" are covered by the cluster-wide WAL-G backups and are not
+            counted against the development disk quota.
     """
+    settings = _get_settings()
+    if cluster == "prod" and not settings.prod_enabled:
+        raise PrerequisiteNotMetError(_PRODUCTION_DISABLED_MESSAGE)
     result = service_database_ops.create_database(
-        _get_settings(), _resolve_team(ctx), name
+        settings, _resolve_team(ctx), name, cluster=cluster
     )
     return (
         "Service database created successfully!\n"
@@ -4274,9 +4286,13 @@ def list_service_databases(ctx: Context | None = None) -> str:
     lines = ["Service databases:"]
     for row in rows:
         size_mb = int(row.get("size_bytes", 0)) / 1024**2
+        cluster = "production" if row.get("cluster") == "prod" else "dev"
+        protected = ", protected" if row.get("protected") else ""
         lines.append(
-            f"- {row['name']}: {row['status']}, database={row.get('database', 'unknown')}, "
+            f"- {row['name']}: {row['status']}, cluster={cluster}, "
+            f"database={row.get('database', 'unknown')}, "
             f"size={size_mb:.1f} MB, connections={row.get('connections', 0)}"
+            f"{protected}"
         )
     return "\n".join(lines)
 
@@ -4320,7 +4336,9 @@ def delete_service_database(name: str, ctx: Context | None = None) -> str:
     """Permanently delete an auxiliary-service database and its login role.
 
     Active PostgreSQL connections are terminated. Service containers are not
-    modified and will fail to reconnect until reconfigured.
+    modified and will fail to reconnect until reconfigured. A protected
+    database cannot be deleted until an administrator unprotects it in the
+    dashboard.
     """
     result = service_database_ops.delete_database(
         _get_settings(), _resolve_team(ctx), name
@@ -4464,7 +4482,8 @@ def update_service(
     volumes, privileged, net_admin, routes, command). The container is recreated when the image or
     any setting changes; settings that are not overridden are preserved. This is
     the preferred way to change a service — you do not need to delete and
-    recreate it manually.
+    recreate it manually. A protected service cannot be updated until an
+    administrator unprotects it in the dashboard.
 
     Args:
         name: The name of the service to update (e.g. "redis", "meilisearch").
@@ -4546,6 +4565,9 @@ def delete_service(name: str, ctx: Context | None = None) -> str:
     """
     Stop and remove a managed auxiliary service container.
 
+    A protected service cannot be deleted until an administrator unprotects
+    it in the dashboard.
+
     Args:
         name: The name of the service to delete.
     """
@@ -4590,6 +4612,8 @@ def get_service_info(name: str, ctx: Context | None = None) -> str:
     digest_short = digest[:19] if digest else ""
 
     lines = [f"Service '{info['name']}': {info['status']}"]
+    if info.get("protected"):
+        lines.append("Protected: yes (delete/update/restore are disabled)")
     lines.append(f"Container: {info['container_name']}")
     lines.append(
         _service_internal_host_line(info["container_name"], bool(info.get("host_mode")))
@@ -4741,6 +4765,7 @@ def restore_service(name: str, ctx: Context | None = None) -> str:
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
+    service_ops.assert_service_not_protected(team, name, "restoring")
     preset = service_presets.get_preset(team, name)
     preset_volumes = preset.get("volumes") or None
     preset_cap_add = preset.get("cap_add") or None
@@ -4815,7 +4840,10 @@ def list_services(ctx: Context | None = None) -> str:
         return "No active services found."
     output = "Active Services:\n"
     for svc in services:
-        output += f"- {svc['name']} ({svc['container_name']}): {svc['status']}\n"
+        protected = ", protected" if svc.get("protected") else ""
+        output += (
+            f"- {svc['name']} ({svc['container_name']}): {svc['status']}{protected}\n"
+        )
         output += f"  Image: {svc['image']}\n"
         if svc.get("port"):
             output += f"  Port: {svc['port']}\n"
@@ -6333,6 +6361,7 @@ def _run_retune_postgres(
 
     from oduflow import pg_tune, prod_tune
     from oduflow.docker_ops.client import get_client
+    from oduflow.extra_addons import resolve_extra_addons_path
     from oduflow.naming import get_repo_path, get_workspace_path, prod_env_name
     from oduflow.resource_plan import (
         ProfileName,
@@ -6400,6 +6429,9 @@ def _run_retune_postgres(
                     extra_names = (
                         list(extra_addons) if isinstance(extra_addons, dict) else []
                     )
+                    extra_dir = pathlib.Path(
+                        get_workspace_path(env_name, team.workspaces_dir), "extra"
+                    )
                     candidate_path = (
                         pathlib.Path(tmp_dir) / team.team_id / f"{name}.conf"
                     )
@@ -6410,7 +6442,10 @@ def _run_retune_postgres(
                             team,
                             name,
                             repo_path,
-                            [f"/mnt/extra-addons-{repo}" for repo in extra_names],
+                            [
+                                resolve_extra_addons_path(str(extra_dir / repo), repo)
+                                for repo in extra_names
+                            ],
                             plan=plan,
                             output_path=str(candidate_path),
                         )

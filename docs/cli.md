@@ -164,6 +164,8 @@ with `oduflow call`, for example:
 
 ```bash
 oduflow call create_service_database '{"name":"events"}'
+# Or on the dedicated production PostgreSQL cluster (requires production hosting)
+oduflow call create_service_database '{"name":"events","cluster":"prod"}'
 oduflow call get_service_database '{"name":"events"}'
 oduflow call rotate_service_database_password '{"name":"events"}'
 oduflow call delete_service_database '{"name":"events"}'
