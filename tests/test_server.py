@@ -486,6 +486,7 @@ class TestUpdateEnvironmentTool:
             "env_override": None,
             "image_override": None,
             "rename_to": None,
+            "hostname_override": None,
         }
         assert "Environment updated successfully!" in result
         assert "Image: odoo:17.0" in result
@@ -512,9 +513,17 @@ class TestUpdateEnvironmentTool:
             "env_override": {"FOO": "new"},
             "image_override": "odoo:17.0",
             "rename_to": None,
+            "hostname_override": None,
         }
         assert "Image: odoo:17.0 (updated)" in result
         assert "Env vars: FOO=new" in result
+
+    @patch("oduflow.docker_ops.env_ops.update_environment")
+    def test_update_hostname(self, mock_update):
+        mock_update.return_value = dict(self._renamed_result(), hostname="qa")
+        result = _call_tool("update_environment", env_name="main", hostname="qa")
+        assert mock_update.call_args.kwargs["hostname_override"] == "qa"
+        assert "Hostname: qa" in result
 
     @staticmethod
     def _renamed_result():
@@ -1040,6 +1049,44 @@ class TestProductionFeatureGate:
             "No productions found. Use create_production to provision one."
         )
         mock_list.assert_called_once()
+
+
+class TestRestoreProductionSource:
+    @pytest.fixture(autouse=True)
+    def _enable_production(self):
+        import oduflow.server
+
+        oduflow.server._settings = Settings(prod_enabled=True, teams={"1": TEST_TEAM})
+        yield
+
+    def test_requires_exactly_one_source(self):
+        restore_tool = _get_tool_fn("restore_production")
+        with pytest.raises(ToolError, match="exactly one"):
+            restore_tool(name="erp", confirm="erp")
+        with pytest.raises(ToolError, match="exactly one"):
+            restore_tool(
+                name="erp",
+                snapshot_id="snap",
+                from_environment="feature",
+                confirm="erp",
+            )
+
+    def test_environment_source_dispatches_to_environment_restore(self):
+        with patch(
+            "oduflow.backup_ops.restore_production_from_environment",
+            return_value={"healthy": True, "warning": "", "notes": ["a note"]},
+        ) as restore:
+            result = _get_tool_fn("restore_production")(
+                name="erp",
+                from_environment="feature",
+                confirm="erp",
+            )
+
+        assert "restored from environment 'feature'" in result
+        assert "NOTE: a note" in result
+        args = restore.call_args
+        assert args.args[2:] == ("erp", "feature")
+        assert callable(args.kwargs["env_lock"])
 
 
 def _get_tool_fn(tool_name: str):

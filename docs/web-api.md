@@ -42,7 +42,7 @@ than a JSON API. Production routes are registered only when
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
-| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user` |
+| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
@@ -188,9 +188,11 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
 | `POST` | `/api/extra-repos/{name}/delete` | Delete the repository and unused cached revisions |
 | `GET` | `/api/credentials` | List stored credential identities (not secrets) |
-| `POST` | `/api/credentials/add` | Store credentials embedded in body `repo_url` |
+| `POST` | `/api/credentials/add` | Store an access token for a git host: body `token`, `host` (default `github.com`), optional `username`, optional `repo_url` to verify with `git ls-remote`; legacy body `repo_url` with inline `user:PAT@` |
 | `POST` | `/api/credentials/delete` | Delete by body `host` and `username` |
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
+| `GET` | `/api/ssh-key` | The team's SSH public key and fingerprint (only the public key is returned) |
+| `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
 | `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
 | `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
@@ -231,7 +233,7 @@ and delete operations require explicit confirmation in their JSON body.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/productions` | List productions and return webhook/backup state |
-| `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally a template |
+| `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image) |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
 | `GET` | `/api/productions/{name}` | Detailed production information |
 | `POST` | `/api/productions/{name}/start` | Start |
@@ -240,6 +242,10 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/update` | Start an asynchronous deploy; returns `202` |
 | `POST` | `/api/productions/{name}/rollback?to_commit=` | Roll code back to a commit |
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
+| `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
+| `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
+| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`; recreates the container (database and filestore preserved). A present-but-empty `git_user` or `extra_domains` clears it; an absent key leaves it unchanged |
+| `POST` | `/api/productions/{name}/odoo-conf` | Set body `options` and remove body `unset` per-production `odoo.conf` overrides; optional `restart` (default true) and `replace` (body `options` become the complete override set) |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
 | `POST` | `/api/productions/{name}/delete` | Delete; body `confirm` must equal name, optional `drop_database` |

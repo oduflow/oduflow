@@ -53,12 +53,18 @@ from oduflow.docker_ops import (
     volume_file_ops,
     volume_ops,
 )
-from oduflow.errors import FlowError, NotFoundError, PrerequisiteNotMetError
+from oduflow.errors import (
+    ConflictError,
+    FlowError,
+    NotFoundError,
+    PrerequisiteNotMetError,
+    ProtectedError,
+)
 from oduflow.locking import (
-    PROD_KEY_PREFIX,
     LockManager,
     credentials_lock_key,
     prod_backups_lock_key,
+    prod_lock_key,
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
@@ -68,6 +74,7 @@ from oduflow.naming import (
     normalize_env_vars,
     parse_env_vars,
     parse_service_command,
+    production_template_name,
     redact_url_credentials,
 )
 from oduflow.output_cache import CachedOutput, OutputCache
@@ -272,7 +279,7 @@ def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | N
     if _web_bind is None:
         return None
     if settings.routing_mode == "traefik":
-        base = f"{settings.public_scheme}://{team.hostname}"
+        base = f"{settings.public_scheme_for(team)}://{team.hostname}"
     else:
         bind_host, port = _web_bind
         # The bind address controls where the listener accepts connections; it
@@ -281,7 +288,7 @@ def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | N
         host = team.hostname or (
             "localhost" if bind_host in ("0.0.0.0", "::") else bind_host
         )
-        base = f"{settings.public_scheme}://{host}:{port}"
+        base = f"{settings.public_scheme_for(team)}://{host}:{port}"
     return f"{base}/oduflow-artifact?token={token}"
 
 
@@ -442,12 +449,6 @@ def with_key_lock(
     return decorator
 
 
-def prod_lock_key(team_id: str, name: str) -> str:
-    """Lock key for a production — team-scoped so two teams' same-named
-    productions never contend (unlike raw env keys)."""
-    return f"{PROD_KEY_PREFIX}{team_id}:{name}"
-
-
 _PRODUCTION_DISABLED_MESSAGE = (
     "Production hosting is disabled. Set enabled = true in the [production] "
     "section of oduflow.toml and restart Oduflow."
@@ -495,18 +496,61 @@ def with_prod_lock(fn: Callable[P, R]) -> Callable[P, R]:
 @mcp.tool()
 @handle_errors
 @with_key_lock(credentials_lock_key, require_name=False)
-def setup_repo_auth(repo_url: str, ctx: Context | None = None) -> str:
+def setup_repo_auth(
+    repo_url: str = "",
+    token: str = "",
+    username: str = "",
+    host: str = "",
+    ctx: Context | None = None,
+) -> str:
     """
-    Cache git credentials for a private repository.
+    Cache git credentials for a private git host.
 
-    Accepts a URL with embedded credentials, stores them in git credential store,
-    and verifies access with a test clone. After this, create_environment can clone
-    the repo without authentication prompts.
+    Stores a personal access token in the team's git credential store and
+    verifies it. Git matches credentials by host (and username), so one entry
+    covers every repository on that host; after this, create_environment and
+    add_extra_repo can clone with a plain https:// URL.
+
+    Preferred form: pass the token itself, e.g.
+    setup_repo_auth(repo_url="https://github.com/owner/repo.git", token="ghp_...").
+    The host is taken from repo_url (or from `host`), and access is verified with
+    `git ls-remote` against repo_url when one is given, otherwise against the
+    provider's API (GitHub, GitLab, Bitbucket).
+
+    Legacy form: a repo_url with inline credentials
+    (https://user:PAT@github.com/owner/repo.git) and no `token`.
 
     Args:
-        repo_url: Repository URL with credentials, e.g. https://user:PAT@github.com/owner/repo.git
+        repo_url: Repository HTTPS URL (used to derive the host and to verify access).
+        token: Personal access token / app password.
+        username: Account name to store with the token. Optional for GitHub,
+            GitLab and Azure DevOps (defaults to "x-access-token"); required for
+            Bitbucket app passwords. Use distinct usernames to keep several
+            tokens for the same host.
+        host: Git host such as github.com or git.example.com:8443. Only needed
+            when repo_url is omitted.
     """
     team = _resolve_team(ctx)
+    if token:
+        result = git_ops.store_credential(
+            host=host or repo_url,
+            token=token,
+            username=username,
+            verify_repo_url=repo_url,
+            cred_file=team.git_credentials_file(),
+        )
+        return (
+            f"Repository authentication configured.\n"
+            f"Host: {result['host']}\n"
+            f"Username: {result['username']}\n"
+            f"Status: {result['status']}\n\n"
+            f"You can now use create_environment with a plain https:// URL "
+            f"on this host."
+        )
+    if not repo_url:
+        raise ValueError(
+            "Pass token (and repo_url or host), or a repo_url with inline credentials."
+        )
     result = git_ops.setup_repo_auth(repo_url, cred_file=team.git_credentials_file())
     return (
         f"Repository authentication configured.\n"
@@ -514,6 +558,36 @@ def setup_repo_auth(repo_url: str, ctx: Context | None = None) -> str:
         f"Repo URL (clean): {result['repo_url']}\n"
         f"Status: {result['status']}\n\n"
         f"You can now use create_environment with the clean URL (without credentials)."
+    )
+
+
+@mcp.tool()
+@handle_errors
+@with_key_lock(credentials_lock_key, require_name=False)
+def get_ssh_public_key(ctx: Context | None = None) -> str:
+    """
+    Get the team's SSH public key for git access over SSH.
+
+    Oduflow maintains one SSH deploy key per team (generated automatically at
+    server start). Register this public key with your git hosting — as a
+    repository deploy key (read access is enough) or on a machine-user
+    account — and SSH repository URLs (git@github.com:owner/repo.git) work in
+    create_environment, add_extra_repo and productions without a token.
+
+    Note: GitHub allows a given deploy key on only one repository; to reach
+    several repositories with the same key, attach it to a (machine) user
+    account instead.
+    """
+    team = _resolve_team(ctx)
+    git_ops.ensure_ssh_key(
+        team.ssh_dir(), comment=git_ops.ssh_key_comment(team.team_id)
+    )
+    public_key, fingerprint = git_ops.ssh_key_info(team.ssh_dir())
+    return (
+        f"Team SSH public key ({fingerprint}):\n\n"
+        f"{public_key}\n\n"
+        "Add it to your git hosting (deploy key or machine-user key), then use "
+        "SSH repository URLs such as git@github.com:owner/repo.git."
     )
 
 
@@ -540,7 +614,9 @@ def add_extra_repo(name: str, repo_url: str, ctx: Context | None = None) -> str:
 
     Args:
         name: Short name for the repo (e.g. "enterprise", "custom-themes").
-        repo_url: HTTPS URL of the repository (e.g. https://github.com/owner/repo.git).
+        repo_url: Repository URL — HTTPS (https://github.com/owner/repo.git)
+            or SSH (git@github.com:owner/repo.git, needs the team deploy key,
+            see get_ssh_public_key).
     """
     from oduflow.extra_addons import clone_extra_repo
 
@@ -702,6 +778,158 @@ def _existing_environment_message(
 
 
 # =============================================================================
+# Production → dev copies (MCP gate)
+# =============================================================================
+
+
+def _production_record_for_dev_copy(
+    team: TeamSettings, prod_name: str
+) -> dict[str, Any]:
+    """Registry record of a production an MCP caller wants to copy into dev.
+
+    The single place ``allow_copy_to_dev_mcp`` is enforced for *new* copies. It
+    is an MCP-layer gate only: the dashboard calls docker_ops directly, so an
+    administrator can always copy production data to dev from the UI. A
+    template already published from the production stays usable like any other
+    template; see _check_unsanitized_production_copy for the one exception.
+    """
+    record = production_registry.get_production(team, prod_name)
+    if not record.get("allow_copy_to_dev_mcp", True):
+        raise ProtectedError(
+            f"Copying production '{prod_name}' into dev over MCP is disabled "
+            "for this production. An administrator can re-enable it in the "
+            "Oduflow dashboard."
+        )
+    return record
+
+
+def _check_unsanitized_production_copy(
+    team: TeamSettings, prod_name: str, template_name: str
+) -> None:
+    """Refuse ``sanitize=False`` on a production-derived template when its
+    production has MCP copies disabled.
+
+    Using such a template is allowed — its data is neutralized on the way into
+    the environment. Skipping that step hands an agent the raw production data,
+    which is exactly what the flag exists to refuse. A production that no longer
+    exists in the registry has no owner left to ask, so it is allowed.
+    """
+    try:
+        record = production_registry.get_production(team, prod_name)
+    except NotFoundError:
+        return
+    if not record.get("allow_copy_to_dev_mcp", True):
+        raise ProtectedError(
+            f"Template '{template_name}' holds a copy of production "
+            f"'{prod_name}', whose administrator disabled MCP copies to dev. "
+            "Environments from it can only be created with sanitize=True."
+        )
+
+
+def ensure_production_template(
+    settings: Settings,
+    team: TeamSettings,
+    prod_name: str,
+    *,
+    locks: LockManager,
+    operation: str,
+) -> tuple[str, bool]:
+    """Resolve a production to its managed dev template, publishing on demand.
+
+    Shared by the MCP resolver below and the dashboard (which passes its own
+    LockManager). Neither gate lives here: the MCP ``allow_copy_to_dev_mcp``
+    check is the caller's. Returns ``(template_name, published)``.
+
+    Readiness is judged by ``system_ops.template_is_ready`` — metadata plus the
+    template database — never by the directory alone: a publish that failed
+    halfway can leave a directory behind, and a stale database can outlive its
+    directory. Either way the template is (re)published here.
+    """
+    managed = production_template_name(prod_name)
+    _check_managed_template_provenance(team, managed, prod_name)
+    if system_ops.template_is_ready(settings, team, managed):
+        return managed, False
+
+    # Publishing mutates team-wide template state, but the team lock is not an
+    # option here: the caller already holds a team-scoped environment lock and
+    # the two are mutually exclusive by design. The production's own key is the
+    # meaningful one anyway — it serialises against deploys and against a
+    # second create from the same production — and an unready template has no
+    # healthy consumers to protect.
+    key = prod_lock_key(team.team_id, prod_name)
+    locks.acquire_env(key, operation=operation)
+    try:
+        # A second caller that saw the template unready and then waited for
+        # this key must not repeat a publish that has just completed.
+        if system_ops.template_is_ready(settings, team, managed):
+            return managed, False
+        # overwrite=True: prod-<name> is a namespace Oduflow owns; whatever an
+        # earlier attempt left behind is replaced, never a reason to refuse.
+        system_ops.publish_production_as_template(
+            settings, team, prod_name, managed, overwrite=True
+        )
+    finally:
+        locks.release_env(key)
+    return managed, True
+
+
+def _check_managed_template_provenance(
+    team: TeamSettings, managed: str, prod_name: str
+) -> None:
+    """Refuse to treat a template as the production's managed copy unless its
+    metadata says it was published from that production.
+
+    The ``prod-`` prefix is not reserved for templates: a template of that name
+    may have been published from an environment, or from another production
+    under a chosen name. Cloning it — or silently replacing it — would hand out
+    the wrong data.
+    """
+    metadata = env_ops._read_template_metadata(team, managed)
+    if not metadata:
+        return
+    source = metadata.get("source_production", "")
+    if source != prod_name:
+        origin = (
+            f"production '{source}'" if source else "something other than a production"
+        )
+        raise ConflictError(
+            f"Template '{managed}' exists but was published from {origin}, not "
+            f"from production '{prod_name}'. Rename or delete it first."
+        )
+
+
+def _template_from_production(
+    settings: Settings, team: TeamSettings, prod_name: str
+) -> tuple[str, list[str]]:
+    """Resolve ``from_production`` to its managed template, publishing on demand.
+
+    Returns the template name and the note lines to append to the tool output.
+    """
+    # create_environment cannot carry @production_enabled (the parameter is
+    # optional), so the disabled-hosting message is raised here instead of
+    # surfacing as a confusing registry NotFoundError.
+    if not settings.prod_enabled:
+        raise PrerequisiteNotMetError(_PRODUCTION_DISABLED_MESSAGE)
+    _production_record_for_dev_copy(team, prod_name)
+    managed, published = ensure_production_template(
+        settings, team, prod_name, locks=_locks, operation="create_environment"
+    )
+    if published:
+        return managed, [
+            f"Published production '{prod_name}' as template '{managed}' "
+            "(unsanitized production data; this environment is sanitized on "
+            "creation unless sanitize=False)."
+        ]
+    snapshot_at = env_ops._read_template_metadata(team, managed).get("snapshot_at", "")
+    taken = f" (snapshot taken {snapshot_at})" if snapshot_at else ""
+    return managed, [
+        f"Reused the existing template '{managed}'{taken}. Call "
+        f"save_production_as_template('{prod_name}', '{managed}', "
+        "overwrite=True) to refresh it from the live production."
+    ]
+
+
+# =============================================================================
 # MCP Tools — Environments
 # =============================================================================
 
@@ -720,6 +948,7 @@ def create_environment(
     env_vars: str = "",
     local_path: str = "",
     hostname: str = "",
+    from_production: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -744,6 +973,7 @@ def create_environment(
         sanitize: Sanitize the database after provisioning (default: True). Runs Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets database.is_neutralized) and then any custom scripts from the .oduflow/odoo_sanitize/ folder in the repository. Only applies to environments created from a template.
         auto_install_modules: Comma-separated list of Odoo modules to install automatically after the environment is provisioned (e.g. "sale,purchase,stock"). When a template is specified and this is empty, the value is loaded from template metadata.
         env_vars: Comma- or newline-separated KEY=VALUE pairs injected as environment variables into the Odoo container (e.g. "WORKERS=2,LIMIT_TIME_CPU=600"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. These are added on top of the database connection variables (HOST/USER/PASSWORD). When a template records env_vars, the two sets are merged per key and the values passed here win. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
+        from_production: Name of a production to build this environment from — a dev copy of real production data (database + filestore + repo/image/extra addons). Mutually exclusive with template_name and local_path. The copy goes through one managed template per production, "prod-<name>", which is published on first use and reused afterwards; refresh it with save_production_as_template(name, "prod-<name>", overwrite=True). The environment is sanitized by default (see sanitize). A production whose administrator disabled MCP copies to dev refuses to be published (an already published "prod-<name>" template stays usable, with sanitize=True only).
         local_path: LOCAL FAST-PATH. Absolute path to a checkout on THIS host. When set, Oduflow skips git clone and bind-mounts the directory live into the container — your file edits are visible instantly, no git push/pull needed. After editing, call pull_and_apply with explicit install/upgrade/restart to apply. repo_url is not required in this mode. Gated by allow_local_path (default: true).
     """
     import json
@@ -753,6 +983,13 @@ def create_environment(
     resolved_env_name = validate_env_name(env_name or branch)
     settings = _get_settings()
     team = _resolve_team(ctx)
+    if from_production and (template_name or local_path):
+        raise ValueError(
+            "from_production cannot be combined with template_name or "
+            "local_path: it supplies the database, filestore and code origin "
+            "itself."
+        )
+    production_notes: list[str] = []
     _locks.acquire_env(resolved_env_name, team.team_id, operation="create_environment")
     try:
         # Creating an environment that already exists is not a mistake worth an
@@ -765,7 +1002,21 @@ def create_environment(
         )
         if existing is not None:
             return _existing_environment_message(
-                existing, requested_image=odoo_image, requested_template=template_name
+                existing,
+                requested_image=odoo_image,
+                requested_template=(
+                    production_template_name(from_production)
+                    if from_production
+                    else template_name
+                ),
+            )
+
+        # Only now, past the adopt-existing fast path: publishing a production
+        # template dumps a live production database, far too expensive to do
+        # for a call that turns out to be a no-op.
+        if from_production:
+            template_name, production_notes = _template_from_production(
+                settings, team, from_production
             )
 
         resolved_template: str | None
@@ -786,6 +1037,10 @@ def create_environment(
             if os.path.isfile(metadata_path):
                 with open(metadata_path) as f:
                     metadata = json.load(f)
+                if not sanitize and metadata.get("source_production"):
+                    _check_unsanitized_production_copy(
+                        team, metadata["source_production"], resolved_template
+                    )
                 if not effective_repo_url:
                     effective_repo_url = metadata.get("repo_url", "")
                 if not effective_odoo_image:
@@ -906,6 +1161,9 @@ def create_environment(
         ]
         if resolved_env_name != branch:
             lines.insert(2, f"Git Branch: {branch}")
+        if from_production:
+            lines.append(f"Source production: {from_production}")
+            lines.extend(production_notes)
         if result.get("local_path"):
             lines.append(
                 f"Live-mount: {result['local_path']} "
@@ -995,6 +1253,92 @@ def save_as_template(
         f"Template DB: {result['template_db']}",
         f"Dump: {result['dump']}",
         f"Filestore: {result['filestore']}",
+    ]
+    if affected:
+        verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
+        lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    else:
+        lines.append("No other environments were affected.")
+    if failures:
+        lines.append(
+            "⚠️ Remount issues:\n"
+            + "\n".join(f"- {env}: {msg}" for env, msg in failures)
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_team_lock
+def save_production_as_template(
+    prod_name: str,
+    template_name: str,
+    reset_env_changes: bool = False,
+    overwrite: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """
+    Save a PRODUCTION's database and filestore as a dev template.
+
+    The production keeps serving throughout — the dump is a consistent snapshot,
+    nothing is stopped or modified on the production side.
+
+    The resulting template holds UNSANITIZED production data: real customer
+    records, real email addresses, real API credentials. Sanitization happens
+    later, when an environment is created from it (create_environment runs
+    Odoo's neutralization plus the repository's custom sanitize scripts by
+    default). Treat the template itself as production-confidential.
+
+    By default this creates a NEW template and REFUSES to overwrite an existing
+    one (raises an error) — pick a fresh template_name. Set overwrite=True to
+    deliberately re-baseline an existing template: its database and filestore
+    are replaced with the production's data, and environments using this
+    template with overlay-mounted filestores are remounted against the new
+    baseline. Their filestore changes (the overlay upper layer) are PRESERVED by
+    default — non-destructive; set reset_env_changes=True to discard those
+    changes and reset every affected environment to the new baseline.
+
+    Requires EXPLICIT user permission and confirmation before execution. If the
+    user has not clearly and unambiguously asked you to copy this production
+    into a template, DO NOT call this tool. Both overwrite=True (re-baselines an
+    existing template) and reset_env_changes=True (destructive for other
+    environments) require an explicit user request.
+
+    Args:
+        prod_name: The production whose database and filestore are copied.
+        template_name: Name of the template profile to publish into.
+        reset_env_changes: If True, discard other environments' filestore deltas (destructive). Default False (preserve).
+        overwrite: If True, allow re-baselining an existing template. Default False (refuse if the template already exists).
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    _production_record_for_dev_copy(team, prod_name)
+    # The team lock keeps the template's consumers still; the production's own
+    # key keeps deploys, restores and deletes of this production out of the
+    # dump (they hold only that key, which the team lock does not cover).
+    key = prod_lock_key(team.team_id, prod_name)
+    _locks.acquire_env(key, operation="save_production_as_template")
+    try:
+        result = system_ops.publish_production_as_template(
+            settings,
+            team,
+            prod_name,
+            template_name=template_name,
+            reset_env_changes=reset_env_changes,
+            overwrite=overwrite,
+        )
+    finally:
+        _locks.release_env(key)
+    affected = cast("list[str]", result.get("affected_envs", []))
+    failures = cast("list[tuple[str, str]]", result.get("remount_failures", []))
+    lines = [
+        f"Production '{result['prod_name']}' saved as template '{template_name}'.",
+        f"Template DB: {result['template_db']}",
+        f"Dump: {result['dump']}",
+        f"Filestore: {result['filestore']}",
+        "The template contains UNSANITIZED production data; environments "
+        "created from it are sanitized on creation (sanitize=True).",
     ]
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
@@ -1712,6 +2056,7 @@ def update_environment(
     env_vars: str = "",
     odoo_image: str = "",
     new_name: str = "",
+    hostname: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -1743,6 +2088,7 @@ def update_environment(
         env_name: The name of the environment to update.
         env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace the current user-supplied env vars (e.g. "WORKERS=4,LIMIT_TIME_CPU=900"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep the current env vars. The database connection variables (HOST/USER/PASSWORD) are always preserved. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         odoo_image: New Docker image with tag to pull and run (e.g. "odoo:19.0"). Leave empty to keep the current image.
+        hostname: New short Traefik hostname (e.g. "qa" produces qa.example.com for team dev.example.com). Leave empty to keep the current hostname policy. Changes the public URL.
         new_name: Optional new name for the environment. Leave empty to keep the current name.
     """
     settings = _get_settings()
@@ -1763,6 +2109,7 @@ def update_environment(
             env_override=parsed_env,
             image_override=odoo_image or None,
             rename_to=rename_to or None,
+            hostname_override=hostname or None,
         )
     finally:
         if rename_to:
@@ -4768,14 +5115,18 @@ def delete_file_in_volume(
 @with_prod_lock
 def create_production(
     name: str,
-    repo_url: str,
-    branch: str,
-    domain: str,
-    odoo_image: str,
+    repo_url: str = "",
+    branch: str = "",
+    domain: str = "",
+    extra_domains: list[str] | None = None,
+    odoo_image: str = "",
     git_user: str = "",
     extra_addons: dict[str, str] | None = None,
     auto_update: bool = False,
+    allow_copy_to_dev_mcp: bool = True,
     template_name: str = "",
+    from_environment: str = "",
+    env_vars: dict[str, str] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -4787,21 +5138,63 @@ def create_production(
 
     Args:
         name: Production name, e.g. "erp" (lowercase letters/digits/dashes).
-        repo_url: HTTPS git repository URL.
-        branch: Git branch to deploy (full history is kept).
-        domain: The production's public domain, e.g. "erp.customer.com"
-                (DNS must point at this server; TLS via Let's Encrypt).
-        odoo_image: Docker image, e.g. "odoo:18.0".
+        repo_url: HTTPS git repository URL. Required unless from_environment
+                is given (then it defaults to the environment's).
+        branch: Git branch to deploy (full history is kept). Required unless
+                from_environment is given.
+        domain: The production's public domain (DNS must point at this
+                server; TLS via Let's Encrypt). In a team with base_domain
+                configured it must be the zone apex or a subdomain of it
+                (e.g. "erp.demo.example.com"); empty defaults to the apex
+                for the team's first production and "<name>.<base_domain>"
+                afterwards. Client-owned domains go in extra_domains.
+        extra_domains: Additional public FQDNs routed to the same production
+                (e.g. the client's own domain "erp.customer.com"). Each gets
+                its own Let's Encrypt certificate; DNS must point here.
+        odoo_image: Docker image, e.g. "odoo:18.0". Required unless
+                from_environment is given.
         git_user: Optional git username for credential matching.
         extra_addons: Optional {repo_name: branch} extra addon repos.
         auto_update: Deploy automatically on GitHub push webhooks.
+        allow_copy_to_dev_mcp: Allow MCP/agent-initiated copies of this
+                production's data into dev — save_production_as_template and
+                the first create_environment(from_production=...). Default
+                True. When False those tools refuse to publish a new copy; a
+                template already published from this production stays usable
+                like any other, but only with sanitize=True. The dashboard UI
+                is never gated, and no MCP tool can change this flag afterwards
+                (an administrator toggles it in the dashboard).
         template_name: Optional template to seed the database and filestore
                 from (e.g. an import of the customer's existing production).
                 Empty = fresh database (odoo -i base).
+        env_vars: User environment variables; values may be secret:<name>
+                references. Omit to inherit the source environment's variables;
+                pass {} to inherit none. Managed HOST/PORT/USER/PASSWORD cannot
+                be overridden. References survive production reconfiguration.
+        from_environment: Optional dev environment (branch name) to PROMOTE:
+                its database and filestore are copied (Odoo briefly stopped
+                for a consistent copy, then restarted — the environment is
+                not reset), and empty repo_url/branch/odoo_image/git_user/
+                extra_addons default to the environment's own. Mutually
+                exclusive with template_name. No sanitization — the data
+                goes INTO production.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
-    git_ops.validate_repo_url(repo_url)
+    if repo_url:
+        git_ops.validate_repo_url(repo_url)
+    # The source env's lock is scoped inside create_production to the brief
+    # stop/copy/restart slice, so dev work on the branch is not blocked for
+    # the whole multi-minute provisioning.
+    env_lock = (
+        (
+            lambda: _locks.env_lock(
+                from_environment, team.team_id, operation="create_production"
+            )
+        )
+        if from_environment
+        else None
+    )
     result = production_ops.create_production(
         settings,
         team,
@@ -4810,10 +5203,19 @@ def create_production(
         branch,
         domain,
         odoo_image,
+        extra_domains=extra_domains,
         git_user=git_user,
-        extra_addons=env_ops._normalize_extra_addons(extra_addons),
+        extra_addons=(
+            env_ops._normalize_extra_addons(extra_addons)
+            if extra_addons is not None
+            else None
+        ),
         auto_update=auto_update,
+        allow_copy_to_dev_mcp=allow_copy_to_dev_mcp,
         template_name=template_name or None,
+        from_environment=from_environment or None,
+        env_vars=env_vars,
+        env_lock=env_lock,
     )
     lines = [
         f"Production '{name}' created in {result['elapsed_seconds']}s.",
@@ -4824,6 +5226,7 @@ def create_production(
     ]
     if result.get("setup_logs"):
         lines.append("\nSetup:\n" + "\n".join(result["setup_logs"]))
+    lines.extend(f"Note: {note}" for note in result.get("notes", []))
     lines.append(
         "\nNote: point the domain's DNS at this server. Use update_production "
         "to deploy new commits (failed updates roll the code back "
@@ -4974,6 +5377,137 @@ def set_production_auto_update(
     production_registry.update_production(team, name, {"auto_update": bool(enabled)})
     state = "enabled" if enabled else "disabled"
     return f"Auto-update {state} for production '{name}'."
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_prod_lock
+def reconfigure_production(
+    name: str,
+    domain: str = "",
+    extra_domains: list[str] | None = None,
+    odoo_image: str = "",
+    branch: str = "",
+    repo_url: str = "",
+    git_user: str | None = None,
+    extra_addons: dict[str, str] | None = None,
+    env_vars: dict[str, str] | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """
+    Change a production's infrastructure settings and recreate its container
+    to match. Empty/omitted arguments are left unchanged. The database and
+    filestore are preserved; expect a brief downtime while the container is
+    replaced.
+
+    Changeable: the public domain (Traefik Host rule + Let's Encrypt), the
+    Odoo Docker image, the deployed git branch or repository URL, the git
+    credential user, and the extra addon repos. Changing the image does NOT
+    migrate the database — a major Odoo version bump additionally needs an
+    explicit module upgrade plan. After a branch/repo change, run
+    update_production(install=..., upgrade=...) if the new code needs module
+    changes.
+
+    Args:
+        name: The production name.
+        domain: New public domain (DNS must point at this server; TLS via
+                Let's Encrypt). In a team with base_domain configured it
+                must be the zone apex or a subdomain of it; client-owned
+                domains go in extra_domains.
+        extra_domains: New full set of additional public FQDNs routed to
+                this production (e.g. the client's own domain); pass [] to
+                remove all. Omit to leave unchanged.
+        odoo_image: New Docker image, e.g. "odoo:19.0".
+        branch: New git branch to deploy.
+        repo_url: New git repository URL (HTTPS or SSH).
+        git_user: New git username for credential matching. Pass "" to
+                clear it; omit to leave unchanged.
+        env_vars: Full replacement user environment variables, including
+                secret:<name> references. Omit to preserve; {} clears them.
+        extra_addons: New full set of extra addon repos {repo_name: branch};
+                      pass {} to remove all. Omit to leave unchanged.
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    if repo_url:
+        git_ops.validate_repo_url(repo_url)
+    result = production_ops.reconfigure_production(
+        settings,
+        team,
+        name,
+        domain=domain or None,
+        extra_domains=extra_domains,
+        odoo_image=odoo_image or None,
+        branch=branch or None,
+        repo_url=repo_url or None,
+        git_user=git_user,
+        extra_addons=extra_addons,
+        env_vars=env_vars,
+    )
+    if result.get("message"):
+        return str(result["message"])
+    changed = ", ".join(result["changed"]) or "none; repaired drifted state"
+    lines = [
+        f"Reconfigured production '{name}' (changed: {changed}).",
+        f"URL: {result['url']}",
+        f"Healthy: {result['healthy']}",
+    ]
+    lines.extend(f"Note: {note}" for note in result.get("notes", []))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_prod_lock
+def set_production_odoo_conf(
+    name: str,
+    options: dict[str, str] | None = None,
+    unset: str = "",
+    restart: bool = True,
+    ctx: Context | None = None,
+) -> str:
+    """
+    Set or remove odoo.conf [options] overrides for a production and re-apply
+    the config. Overrides are stored per production, win over the auto-tuned
+    worker settings, and survive deploys and retunes. Keys managed by Oduflow
+    (addons_path, data_dir, db_*) cannot be overridden. Current overrides are
+    shown by get_production_info.
+
+    Args:
+        name: The production name.
+        options: Options to set, e.g. {"limit_time_real": "300"}.
+        unset: Comma-separated option names to remove (reverting them to the
+               managed/base value).
+        restart: Restart the container so Odoo picks the change up
+                 (default True; brief downtime).
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    unset_list = [k.strip() for k in unset.split(",") if k.strip()]
+    result = production_ops.set_production_odoo_conf(
+        settings,
+        team,
+        name,
+        set_options=options,
+        unset_options=unset_list,
+        restart=restart,
+    )
+    conf = result["odoo_conf"]
+    conf_desc = "\n".join(f"  {k} = {v}" for k, v in sorted(conf.items())) or "  (none)"
+    if result.get("message"):
+        return f"{result['message']}\nCurrent overrides:\n{conf_desc}"
+    status = (
+        "applied to the running container"
+        if result["applied"]
+        else "recorded (no container to apply to)"
+    )
+    if result["restarted"]:
+        status += ", container restarted"
+    return (
+        f"odoo.conf overrides for '{name}' {status}.\nCurrent overrides:\n{conf_desc}"
+    )
 
 
 @mcp.tool()
@@ -5152,32 +5686,62 @@ def list_production_snapshots(
 # Same lock order as snapshot_production: production first, then backup store.
 @with_key_lock(prod_backups_lock_key, require_name=False)
 def restore_production(
-    name: str, snapshot_id: str, confirm: str = "", ctx: Context | None = None
+    name: str,
+    snapshot_id: str = "",
+    from_environment: str = "",
+    confirm: str = "",
+    ctx: Context | None = None,
 ) -> str:
     """
-    Restore a production's DATABASE and FILESTORE from a snapshot.
-    DESTRUCTIVE for current data (swap-based: a failed restore leaves the
-    previous state in place). The code checkout is NOT touched — a warning
-    is returned if it does not match the snapshot's commit.
+    Restore a production's DATABASE and FILESTORE from a snapshot, or replace
+    them with a dev environment's data (promotion into an EXISTING
+    production). DESTRUCTIVE for current data (swap-based: a failed restore
+    leaves the previous state in place) — take snapshot_production first if
+    the current data may still be needed. The code checkout is NOT touched —
+    a warning is returned if it does not match the source's commit.
 
     Args:
         name: The production name.
         snapshot_id: Snapshot to restore (see list_production_snapshots).
+                Mutually exclusive with from_environment.
+        from_environment: Dev environment (branch name) whose database and
+                filestore replace this production's. The environment's Odoo
+                is briefly stopped for a consistent copy, then restarted —
+                the environment itself is not reset. No sanitization — the
+                data goes INTO production.
         confirm: Must equal the production name (safety check).
     """
     if confirm != name:
         raise ToolError(
             f'Confirmation failed: pass confirm="{name}" to restore this production.'
         )
+    if bool(snapshot_id) == bool(from_environment):
+        raise ToolError("Pass exactly one of snapshot_id or from_environment.")
     from oduflow import backup_ops
 
     settings = _get_settings()
     team = _resolve_team(ctx)
-    result = backup_ops.restore_production(settings, team, name, snapshot_id)
-    lines = [
-        f"Production '{name}' restored from snapshot {snapshot_id}.",
-        f"Healthy: {result['healthy']}",
-    ]
+    if from_environment:
+        # Same scoping as create_production: the source env's lock covers
+        # only the brief stop/copy/restart slice inside the restore.
+        env_lock = lambda: _locks.env_lock(  # noqa: E731
+            from_environment, team.team_id, operation="restore_production"
+        )
+        result = backup_ops.restore_production_from_environment(
+            settings, team, name, from_environment, env_lock=env_lock
+        )
+        lines = [
+            f"Production '{name}' restored from environment '{from_environment}'.",
+            f"Healthy: {result['healthy']}",
+        ]
+        for note in result.get("notes", []):
+            lines.append(f"NOTE: {note}")
+    else:
+        result = backup_ops.restore_production(settings, team, name, snapshot_id)
+        lines = [
+            f"Production '{name}' restored from snapshot {snapshot_id}.",
+            f"Healthy: {result['healthy']}",
+        ]
     if result.get("warning"):
         lines.append(f"WARNING: {result['warning']}")
     return "\n".join(lines)
@@ -5355,7 +5919,13 @@ def delete_production(
     """
     Delete a production environment. The container and registry record are
     removed; the DATABASE and workspace (filestore, repo, deploy history)
-    are KEPT unless drop_database=true.
+    are KEPT unless drop_database=true. Kept leftovers are tombstoned: the
+    reaper purges them [lifecycle] prod_purge_hours after the deletion
+    (0 = keep forever, the default), and `oduflow cleanup
+    --purge-deleted-productions --force` purges them immediately.
+    Re-creating a production with the same name revives the leftovers'
+    tombstone-free state (the kept database itself must still be dealt with
+    explicitly, see create_production).
 
     Args:
         name: The production name.
@@ -5468,6 +6038,19 @@ def _ensure_initialized(settings: Settings) -> None:
 
         os.makedirs(os.path.join(team.data_dir, "odoo_sanitize"), exist_ok=True)
         os.makedirs(os.path.join(team.data_dir, "agent_guides"), exist_ok=True)
+
+        # Team SSH deploy key, so SSH remotes work out of the box once the
+        # public key is registered with the git host. Never fatal: HTTPS+PAT
+        # remains fully functional without ssh-keygen on the server.
+        try:
+            if git_ops.ensure_ssh_key(
+                team.ssh_dir(), comment=git_ops.ssh_key_comment(team_id)
+            ):
+                logger.info("[team.%s] SSH deploy key generated", team_id)
+        except Exception:
+            logger.warning(
+                "[team.%s] SSH deploy key generation failed", team_id, exc_info=True
+            )
         for managed in _managed_bundled_files(bundled_dir, team_id, team):
             if bundled_upgrade.seed_managed_file(managed):
                 logger.info("[team.%s] Bundled file: %s", team_id, managed.destination)
@@ -6381,9 +6964,32 @@ def _run_list_service_databases(settings: Settings, team: TeamSettings) -> None:
         )
 
 
-def _run_cleanup(settings: Settings, team: TeamSettings, dry_run: bool = True) -> None:
+def _run_cleanup(
+    settings: Settings,
+    team: TeamSettings,
+    dry_run: bool = True,
+    purge_deleted_productions: bool = False,
+) -> None:
     result = system_ops.cleanup_orphans(settings, team, dry_run=dry_run)
     mode = "DRY RUN" if result["dry_run"] else "CLEANUP"
+
+    if purge_deleted_productions:
+        prod_result = production_ops.purge_deleted_productions(
+            settings, team, dry_run=dry_run
+        )
+        for warning in prod_result["warnings"]:
+            print(f"[{mode}] Warning: {warning}")
+        names = prod_result["purged"]
+        if names:
+            print(f"[{mode}] Deleted-production leftovers ({len(names)}):")
+            for name in names:
+                print(f"    - {name} (database + workspace)")
+            if prod_result["dry_run"]:
+                print("  Run with --force to purge them permanently.")
+            else:
+                print(f"  {len(names)} production leftover(s) purged.")
+        else:
+            print(f"[{mode}] No deleted-production leftovers found.")
     dbs = result["orphan_databases"]
     workspaces = result["orphan_workspaces"]
     ports = result["orphan_ports"]
@@ -6801,6 +7407,15 @@ def _run_cli() -> None:
         default=False,
         help="Actually remove orphaned resources",
     )
+    p_cleanup.add_argument(
+        "--purge-deleted-productions",
+        action="store_true",
+        default=False,
+        help=(
+            "Also purge the database and workspace kept by deleted "
+            "productions (tombstoned leftovers), regardless of their age"
+        ),
+    )
     p_cleanup.add_argument("--team", default="1", help="Team ID (default: 1)")
 
     # --- Tool introspection ---
@@ -6840,6 +7455,14 @@ def _run_cli() -> None:
         if stack_command != "validate":
             p_stack_command.add_argument(
                 "--team", default="1", help="Team ID (default: 1)"
+            )
+            p_stack_command.add_argument(
+                "--env-file",
+                default=None,
+                help=(
+                    "dotenv file supplying fromEnv values "
+                    "(default: .env next to the manifest, if present)"
+                ),
             )
 
     # --- Systemd ---
@@ -6968,7 +7591,7 @@ def _run_cli() -> None:
             _ensure_initialized(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
-                from oduflow.stack_loader import load_stack
+                from oduflow.stack_loader import load_stack, stack_environ
                 from oduflow.stack_ops import apply_stack, format_plan
 
                 stack_team = _settings.get_team(args.stack_team)
@@ -6978,6 +7601,7 @@ def _run_cli() -> None:
                     stack_team,
                     stack_manifest,
                     args.stack_manifest,
+                    environ=stack_environ(args.stack_manifest),
                     lock_manager=_locks,
                 )
                 logger.info("Startup stack reconciliation:\n%s", format_plan(applied))
@@ -7108,20 +7732,32 @@ def _run_cli() -> None:
         return
 
     if args.command == "cleanup":
-        _run_cleanup(_settings, _cli_team(), dry_run=not args.force)
+        _run_cleanup(
+            _settings,
+            _cli_team(),
+            dry_run=not args.force,
+            purge_deleted_productions=args.purge_deleted_productions,
+        )
         return
 
     if args.command == "stack":
         if args.stack_command is None:
             p_stack.print_help()
             return
-        from oduflow.stack_loader import load_stack
+        from oduflow.stack_loader import load_stack, stack_environ
         from oduflow.stack_ops import apply_stack, build_plan, format_plan, stack_status
 
         manifest = load_stack(args.manifest)
+        environ = stack_environ(args.manifest, args.env_file)
         team = _cli_team()
         if args.stack_command == "plan":
-            print(format_plan(build_plan(_settings, team, manifest, args.manifest)))
+            print(
+                format_plan(
+                    build_plan(
+                        _settings, team, manifest, args.manifest, environ=environ
+                    )
+                )
+            )
             return
         if args.stack_command == "apply":
             migrations.run_pending(_settings)
@@ -7132,6 +7768,7 @@ def _run_cli() -> None:
                 team,
                 manifest,
                 args.manifest,
+                environ=environ,
                 lock_manager=_locks,
             )
             print(format_plan(stack_result))
@@ -7139,7 +7776,10 @@ def _run_cli() -> None:
         if args.stack_command == "status":
             print(
                 json.dumps(
-                    stack_status(_settings, team, manifest, args.manifest), indent=2
+                    stack_status(
+                        _settings, team, manifest, args.manifest, environ=environ
+                    ),
+                    indent=2,
                 )
             )
             return
@@ -7307,9 +7947,9 @@ def _start_http() -> None:
 
     for tid, team in settings.teams.items():
         if settings.routing_mode == "traefik":
-            url = f"{settings.public_scheme}://{team.hostname}/"
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}/"
         else:
-            url = f"{settings.public_scheme}://{host}:{port}/"
+            url = f"{settings.public_scheme_for(team)}://{host}:{port}/"
         mcp_status = "MCP token ON" if team.auth_token else "MCP token OFF"
         oauth_status = (
             "OAuth ON (self-hosted)" if settings.oauth_enabled else "OAuth OFF"

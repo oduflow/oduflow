@@ -207,3 +207,26 @@ def test_run_cleanup_prints_orphan_roles(tmp_path, capsys):
     assert "u_1_unused" in output
     assert "1 resource(s) would be removed" in output
     assert "No orphaned resources found" not in output
+
+
+def test_cleanup_orphans_skips_production_namespace(tmp_path):
+    """Production containers carry no branch label, so without the prod-*
+    exclusion a LIVE production's workspace looked orphaned and --force
+    destroyed it. Deleted-production leftovers have their own tombstone-gated
+    purge path and must not be double-handled here either."""
+    team, settings = _team_and_settings(tmp_path)
+
+    os.makedirs(team.workspaces_dir, exist_ok=True)
+    prod_dir = os.path.join(team.workspaces_dir, "prod-erp")
+    os.makedirs(prod_dir)
+
+    with (
+        patch.object(system_ops, "get_client", return_value=_FakeClient()),
+        patch.object(system_ops, "_exec_sql", return_value=""),
+        patch("oduflow.port_registry._load_registry", return_value={}),
+        patch("oduflow.port_registry._save_registry"),
+    ):
+        result = system_ops.cleanup_orphans(settings, team, dry_run=False)
+
+    assert "prod-erp" not in result["orphan_workspaces"]
+    assert os.path.isdir(prod_dir)

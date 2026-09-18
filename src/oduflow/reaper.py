@@ -6,18 +6,22 @@ A background daemon thread sweeps every team on an interval:
   (any env-scoped MCP tool call or dashboard lifecycle action counts as
   work; listing does not) is stopped;
 - a stopped environment that nobody started for ``auto_delete_hours``
-  after it stopped is deleted.
+  after it stopped is deleted;
+- the tombstoned leftovers (database, workspace) of a production removed by
+  delete_production(drop_database=False) are purged ``prod_purge_hours``
+  after the deletion (see production_ops.purge_deleted_productions).
 
 Protected environments are exempt from both. Environments busy with another
 operation (per-environment lock held) are skipped until the next sweep, so
-the reaper never races agents. Both actions are idempotent, so a second
+the reaper never races agents. All actions are idempotent, so a second
 oduflow process sweeping the same data dir is harmless.
 
-Disable either behavior with ``0`` in ``oduflow.toml``::
+Disable any behavior with ``0`` in ``oduflow.toml``::
 
     [lifecycle]
     auto_stop_hours = 48
     auto_delete_hours = 0
+    prod_purge_hours = 0
 """
 
 from __future__ import annotations
@@ -88,6 +92,29 @@ def _auto_delete(
         locks.release_env(env_name)
 
 
+def _purge_deleted_productions(
+    settings: Settings, team: TeamSettings, locks: LockManager
+) -> None:
+    from oduflow.docker_ops import production_ops
+
+    try:
+        result = production_ops.purge_deleted_productions(
+            settings,
+            team,
+            older_than_hours=settings.prod_purge_hours,
+            locks=locks,
+        )
+    except Exception:
+        logger.warning(
+            "Purge of deleted productions failed for team %s",
+            team.team_id,
+            exc_info=True,
+        )
+        return
+    for warning in result["warnings"]:
+        logger.warning("Production purge (team %s): %s", team.team_id, warning)
+
+
 def sweep(settings: Settings, locks: LockManager) -> None:
     """One pass over all teams. Safe to call concurrently with tool traffic."""
     now = time.time()
@@ -95,6 +122,8 @@ def sweep(settings: Settings, locks: LockManager) -> None:
     delete_after = settings.auto_delete_hours * 3600
 
     for team in settings.teams.values():
+        if settings.prod_purge_hours > 0:
+            _purge_deleted_productions(settings, team, locks)
         try:
             envs = env_ops.list_environments(settings, team)
         except Exception:
@@ -151,7 +180,11 @@ def start_reaper(
     """Start the background sweep thread. Returns None when both behaviors
     are disabled in the config at startup."""
     settings = get_settings()
-    if settings.auto_stop_hours <= 0 and settings.auto_delete_hours <= 0:
+    if (
+        settings.auto_stop_hours <= 0
+        and settings.auto_delete_hours <= 0
+        and settings.prod_purge_hours <= 0
+    ):
         logger.info("Environment auto-stop/auto-delete disabled by config")
         return None
 
@@ -179,5 +212,14 @@ def start_reaper(
             "workspace). Set [lifecycle] auto_delete_hours = 0 to disable.",
             settings.auto_delete_hours,
             settings.auto_delete_hours,
+        )
+    if settings.prod_purge_hours > 0:
+        logger.warning(
+            "prod_purge_hours=%d is ENABLED: the database and workspace kept "
+            "by a production deletion will be PERMANENTLY PURGED %dh after "
+            "the deletion unless the production is re-created. Set "
+            "[lifecycle] prod_purge_hours = 0 to disable.",
+            settings.prod_purge_hours,
+            settings.prod_purge_hours,
         )
     return thread

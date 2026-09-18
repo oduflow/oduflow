@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Environment detail</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .sect { margin-top: 1.125rem; }
+  .sect .sh {
+    display: flex; align-items: center; gap: 0.625rem; margin-bottom: 0.625rem;
+    font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  .sect .sh::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .sect .sh .act { font-family: var(--font-mono); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .kvline { display: flex; align-items: center; gap: 0.5rem; }
+  .mcp {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 0.4rem 1rem; align-items: center;
+  }
+  .mcp .k { font-size: var(--text-2xs); font-weight: 600; letter-spacing: 0.02em; color: var(--muted-foreground); text-transform: uppercase; }
+  .mcp .v { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--foreground); display: flex; align-items: center; gap: 0.5rem; }
+  .mcp .ops { display: flex; gap: 0.375rem; }
+  .mcp svg { width: 13px; height: 13px; stroke: var(--muted-foreground); cursor: pointer; }
+  .scope-note { margin-top: 0.5rem; font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .scope-note .mono-inline { font-family: var(--font-mono); }
+  .kebab-wrap { position: relative; }
+  .kebab-menu { position: absolute; top: 34px; right: 0; }
+  .access-row { display: flex; align-items: center; gap: 0.5rem; }
+  .access-row .select { width: 260px; }
+  .sync-head { display: flex; align-items: center; gap: 0.625rem; font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .sync-head b { color: var(--foreground); font-weight: 400; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-external"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></g>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-refresh"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>
+    <g id="i-chevron"><path d="m6 9 6 6 6-6"/></g>
+    <g id="i-kebab"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></g>
+    <g id="i-terminal"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></g>
+    <g id="i-chat"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></g>
+    <g id="i-logs"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></g>
+    <g id="i-book"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></g>
+    <g id="i-logout"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></g>
+    <g id="i-monitor"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></g>
+    <g id="i-eye"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></g>
+    <g id="i-lock"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></g>
+    <g id="i-rotate"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></g>
+    <g id="i-box"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></g>
+    <g id="i-save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></g>
+    <g id="i-trash"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></g>
+    <g id="i-note"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+    <g id="i-user"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats">
+      <span>cpu <b>34%</b></span>
+      <span>ram <b>21/64G</b></span>
+      <span>load <b>1.84</b></span>
+    </div>
+    <div class="hdr-sep"></div>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+    <button class="icon-btn"><span class="mono-sm">auto 30s</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></button>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-monitor"/></svg></button>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-book"/></svg></button>
+    <button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-logout"/></svg></button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Environments</h1>
+    <span class="count">5 environments · 3 running</span>
+  </div>
+
+  <div class="cards">
+    <!-- expanded card -->
+    <article class="card">
+      <div class="row1">
+        <span class="cbx"></span>
+        <h2 class="title">feature/pos-loyalty</h2>
+        <span class="badge running">running</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions kebab-wrap">
+          <button class="btn">Stop</button>
+          <button class="btn">Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn hover-blue"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+          <div class="menu kebab-menu">
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-rotate"/></svg>Restart</div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-box"/></svg>Recreate container</div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg>Rebuild from template</div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-save"/></svg>Save as template</div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-lock"/></svg>Protect</div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-note"/></svg>Edit note</div>
+            <div class="sep"></div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chat"/></svg>Agent Chat</div>
+            <div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-terminal"/></svg>Agent CLI</div>
+            <div class="sep"></div>
+            <div class="mi danger"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>Delete environment</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_feature_pos_loyalty</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">template</span><span class="v">odoo18-base</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+        <div class="kv"><span class="k">created</span><span class="v dim">2026-08-09 14:02 · 2d ago</span></div>
+        <div class="kv"><span class="k">active</span><span class="v dim">5m ago</span></div>
+        <div class="kv"><span class="k">size</span><span class="v dim">db 1.2G · disk 3.4G</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></div>
+        <div class="kv"><span class="k">modules</span><span class="v dim">pos_loyalty, pos_discount</span></div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Containers</div>
+        <div class="chips" style="margin-top:0">
+          <span class="chip"><span class="h-dot"></span>odoo-feature-pos-loyalty<span class="dim">cpu 4.2% · 812M</span><svg class="copy" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="oklch(0.7 0.01 260)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></span>
+          <span class="chip"><span class="h-dot"></span>odoo-feature-pos-loyalty-queue<span class="dim">cpu 0.3% · 214M</span><svg class="copy" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="oklch(0.7 0.01 260)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></span>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Last sync <span class="act">· 12m ago</span></div>
+        <div class="panel">
+          <div class="panel-toolbar">
+            <span class="sync-head">action <b>upgrade</b> · files <b>4</b> · upgraded <b>pos_loyalty</b> · exit <b class="ok" style="color:var(--emerald)">0</b></span>
+            <span class="spacer"></span>
+            <button class="btn">Collapse</button>
+          </div>
+          <div class="termbox"><span class="dim">changed:</span> addons/pos_loyalty/models/loyalty_program.py
+<span class="dim">changed:</span> addons/pos_loyalty/views/loyalty_views.xml
+<span class="dim">changed:</span> addons/pos_loyalty/i18n/uk.po
+<span class="dim">changed:</span> addons/pos_discount/__manifest__.py
+<span class="vio">→ upgrading modules: pos_loyalty, pos_discount</span>
+<span class="dim">2026-08-11 10:41:03,112 INFO o_feature_pos_loyalty odoo.modules.loading:</span> loading 142 modules...
+<span class="dim">2026-08-11 10:41:09,481 INFO o_feature_pos_loyalty odoo.modules.registry:</span> module pos_loyalty: creating or updating database tables
+<span class="ok">Modules loaded. Registry rebuilt in 8.2s</span></div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">MCP access</div>
+        <div class="mcp">
+          <span class="k">endpoint</span>
+          <span class="v">https://velesagro.oduflow.dev/mcp/env/feature-pos-loyalty</span>
+          <span class="ops"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></span>
+          <span class="k">secret</span>
+          <span class="v">sk-odf-••••••••••••••••3f2a</span>
+          <span class="ops"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-eye"/></svg><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></span>
+        </div>
+        <div class="scope-note">Scoped to this environment: <span class="mono-inline">sync · install · upgrade · tests · shell · sql · logs</span>. Cannot create, delete, or stop environments.</div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Access</div>
+        <div class="access-row">
+          <div class="select"><span>Mitchell Admin — internal</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-user"/></svg>Connect as</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-terminal"/></svg>Odoo shell</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-terminal"/></svg>psql</button>
+        </div>
+        <div class="scope-note">Connect as opens Odoo with a temporary session for the selected user — no password required.</div>
+      </div>
+
+      <div class="sect">
+        <div class="sh">Extra addons</div>
+        <div class="chips" style="margin-top:0">
+          <span class="chip addon">velesagro-extra <span class="dim">: main</span></span>
+          <span class="chip addon">oca-web <span class="dim">: 18.0</span></span>
+        </div>
+      </div>
+
+      <div class="note-ghost">Add a note…</div>
+    </article>
+
+    <!-- collapsed neighbor below -->
+    <article class="card">
+      <div class="row1">
+        <span class="cbx"></span>
+        <h2 class="title">fix/invoice-rounding</h2>
+        <span class="badge running">running</span>
+        <a class="linkicon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></a>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Stop</button>
+          <button class="btn">Sync</button>
+          <button class="btn">Logs</button>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-kebab"/></svg></button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">db</span><span class="v">o_fix_invoice_rounding</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">image</span><span class="v">odoo:18.0</span></div>
+        <div class="kv"><span class="k">template</span><span class="v">odoo18-base</span></div>
+        <div class="kv"><span class="k">repo</span><span class="v">github.com/velesagro/odoo-addons</span></div>
+      </div>
+    </article>
+  </div>
+</main>
+
+</body>
+</html>

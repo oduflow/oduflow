@@ -38,6 +38,7 @@ from oduflow.docker_ops.system_ops import (
     pg_clone_strategy_clause,
     reassign_db_ownership,
 )
+from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
 from oduflow.env_tokens import MCP_TOKEN_LABEL, generate_token, invalidate_cache
 from oduflow.errors import (
@@ -66,7 +67,6 @@ from oduflow.naming import (
     get_agent_upload_dir,
     get_agent_workspace_volume_name,
     get_db_name,
-    get_env_hostname,
     get_env_short_hostname,
     get_filestore_paths,
     get_repo_path,
@@ -254,6 +254,58 @@ def _active_environment_names(
     return active_envs
 
 
+def _team_parent_domain(team: TeamSettings) -> str:
+    """The domain environment/service hostnames are allocated under: the
+    team's base_domain when set, else the parent of the team hostname
+    (slots/custom-hostname legacy layout)."""
+    if team.base_domain:
+        return team.base_domain
+    _prefix, parent_domain = split_team_hostname(team.hostname)
+    return parent_domain
+
+
+def _assert_env_hostname_available(
+    settings: Settings, team: TeamSettings, env_name: str, route_hostname: str
+) -> None:
+    """Refuse an environment hostname already claimed elsewhere in the global
+    Host() namespace (dashboard hostnames, production domains, static routes,
+    other teams' zones, live environment and service containers)."""
+    if settings.routing_mode != "traefik":
+        return
+    from oduflow.domains import assert_public_hostname_free
+
+    fqdn = env_hostname(team, env_name, route_hostname)
+    assert_public_hostname_free(
+        settings,
+        fqdn,
+        own_team=team.team_id,
+        # update_environment re-runs this while the environment's own
+        # container still carries its Host() rule; it must not collide
+        # with itself.
+        exclude_env=env_name,
+        purpose=f"the hostname of environment '{env_name}'",
+    )
+
+
+def container_route_host(container: Any) -> str:
+    """The FQDN a container's Traefik router rule actually matches, or ''.
+
+    Traefik labels are frozen at container creation, so this — not a recompute
+    from current settings — is what an existing environment really answers on.
+    It matters after ``base_domain`` is turned on for a team that already has
+    environments: ADR 0064 deliberately performs no migration, so those keep
+    their old nested hostname until their next ``update_environment``.
+    """
+    from oduflow.domains import _HOST_RULE_RE
+
+    for key, value in (container.labels or {}).items():
+        if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
+            found = _HOST_RULE_RE.findall(value)
+            if found:
+                return str(found[0]).lower()
+    return ""
+
+
 def _environment_hostname_usage(
     client: DockerClient,
     settings: Settings,
@@ -269,8 +321,7 @@ def _environment_hostname_usage(
     """
     active_envs: set[str] = set()
     used_hostnames: set[str] = set()
-    _hostname_prefix, parent_domain = split_team_hostname(team.hostname)
-    suffix = f".{parent_domain}"
+    suffix = f".{_team_parent_domain(team)}"
     for configured_team in settings.teams.values():
         if configured_team.hostname.endswith(suffix):
             used_hostnames.add(configured_team.hostname[: -len(suffix)])
@@ -1629,7 +1680,7 @@ def _clone_repo(
     passes ``depth=0`` for a full clone — commit history is the point there
     (rollback targets, deploy history display).
     """
-    git_env = git_env_for_team(team.git_credentials_file())
+    git_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     from oduflow.git_ops import inject_credential_user
 
@@ -1661,6 +1712,17 @@ def _clone_repo(
             e.stderr.decode("utf-8") if e.stderr else str(e)
         )
         if any(kw.lower() in error_msg.lower() for kw in auth_keywords):
+            from oduflow.git_ops import is_ssh_url
+
+            # SSH and HTTPS remotes have different remedies: pointing an SSH
+            # failure at setup_repo_auth (the PAT flow) is a dead end.
+            if is_ssh_url(repo_url):
+                raise RepoAuthError(
+                    f"Git authentication failed for {sanitize_repo_url(repo_url)}. "
+                    "The remote uses SSH: register the team deploy key "
+                    "(get_ssh_public_key) with the git host, or use an "
+                    "HTTPS URL with setup_repo_auth."
+                )
             raise RepoAuthError(
                 f"Git authentication failed for {sanitize_repo_url(repo_url)}. "
                 f"Call 'setup_repo_auth' first to cache credentials."
@@ -1694,7 +1756,7 @@ def build_env_traefik_labels(
         return {}
     slug = slugify_branch(env_name)
     router = f"oduflow-{team.team_id}-{slug}"
-    host = get_env_hostname(env_name, team.hostname, route_hostname)
+    host = env_hostname(team, env_name, route_hostname)
     labels: dict[str, str] = {
         "traefik.enable": "true",
         f"traefik.http.routers.{router}.rule": f"Host(`{host}`)",
@@ -1707,9 +1769,9 @@ def build_env_traefik_labels(
         labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
     else:
         # Upstream (e.g. Cloudflare tunnel) terminates TLS; Traefik routes plain
-        # HTTP on the web entrypoint. Public URLs use settings.public_scheme
-        # (the upstream's scheme, https unless overridden), not this
-        # entrypoint's.
+        # HTTP on the web entrypoint. Public URLs use the team's resolved
+        # public scheme (the upstream's scheme, https unless overridden), not
+        # this entrypoint's.
         labels[f"traefik.http.routers.{router}.entrypoints"] = "web"
     return labels
 
@@ -1764,15 +1826,11 @@ def adopt_existing_environment(
         start_environment(settings, env_name, team)
         container.reload()
 
-    if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}"
-    else:
-        ports = container.ports.get("8069/tcp")
-        url = (
-            f"{settings.public_scheme}://{team.hostname}:{ports[0]['HostPort']}"
-            if ports
-            else ""
-        )
+    try:
+        url = get_env_base_url(settings, team, env_name, container)[0]
+    except NotFoundError:
+        # Port mode with no published port (container stopped mid-start).
+        url = ""
 
     return {
         "env_name": env_name,
@@ -1983,14 +2041,13 @@ def _create_environment_impl(
         existing = client.containers.get(odoo_container_name)
         if existing.status == "running":
             existing.reload()
-            if settings.routing_mode == "traefik":
-                url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, existing.labels.get(ENV_HOSTNAME_LABEL, ''))}"
-            else:
-                ports = existing.ports.get("8069/tcp")
-                existing_port = ports[0]["HostPort"] if ports else "?"
-                url = f"{settings.public_scheme}://{team.hostname}:{existing_port}"
+            try:
+                url = get_env_base_url(settings, team, env_name, existing)[0]
+            except NotFoundError:
+                url = ""
             raise ConflictError(
-                f"Environment '{env_name}' already exists and is running at {url}."
+                f"Environment '{env_name}' already exists and is running"
+                + (f" at {url}." if url else ".")
             )
         raise ConflictError(
             f"Environment '{env_name}' already exists (status: {existing.status})."
@@ -2021,6 +2078,12 @@ def _create_environment_impl(
                 f"is already used by environment '{other_branch}'. Choose a name "
                 "that does not normalise to the same database."
             )
+
+    # Claim the public name before anything is provisioned or destroyed: the
+    # cleanup below drops a leftover database, role and workspace, and the
+    # credential move writes to the team store, so a name rejected further
+    # down would still have had side effects.
+    _assert_env_hostname_available(settings, team, env_name, hostname)
 
     est_db_bytes = estimate_new_db_bytes(client, settings, team, template_name)
     check_db_quota(client, settings, team, estimated_new_db_bytes=est_db_bytes)
@@ -2364,9 +2427,9 @@ def _create_environment_impl(
         raise
 
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{env_hostname(team, env_name, hostname)}"
     else:
-        url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
     logger.info(
         "Environment created",
         extra={"env_name": env_name, "url": url, "container": odoo_container_name},
@@ -2480,7 +2543,7 @@ def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> 
     from urllib.parse import quote
 
     if settings.routing_mode == "traefik":
-        base = f"{settings.public_scheme}://{team.hostname}"
+        base = f"{settings.public_scheme_for(team)}://{team.hostname}"
     else:
         base = f"http://host.docker.internal:{settings.port}"
     return f"{base}/mcp/{quote(env_name, safe='/')}"
@@ -2570,23 +2633,28 @@ def _agent_container_config(
 
 
 def _agent_config_hash(
-    container_config: dict[str, Any], has_git_credentials: bool
+    container_config: dict[str, Any],
+    has_git_credentials: bool,
+    ssh_key_fingerprint: str = "",
 ) -> str:
     """Fingerprint of the config the agent container was created with.
 
     Stored as a container label; a mismatch on ensure means the image, injected
     config, or Docker run specification changed, so the container is recreated.
-    HOME and /workspace are volumes — nothing is lost. Git credentials are
-    copied into HOME by the volume init step at container creation, so their
-    presence is also part of the fingerprint: a container created before
-    setup_repo_auth would otherwise keep matching forever and never pick up the
-    file."""
+    HOME and /workspace are volumes — nothing is lost. Git credentials and the
+    team SSH key are copied into HOME by the volume init step at container
+    creation, so their presence is also part of the fingerprint: a container
+    created before setup_repo_auth (or before the key existed) would otherwise
+    keep matching forever and never pick up the file. The SSH part is the key's
+    fingerprint, not a boolean, so a regenerated key also recreates the
+    container."""
     import hashlib
 
     payload = json.dumps(
         {
             "container": container_config,
             "has_git_credentials": has_git_credentials,
+            "ssh_key_fingerprint": ssh_key_fingerprint,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -2600,14 +2668,16 @@ def _prepare_agent_volumes(
     home_volume: str,
     workspace_volume: str,
     cred_file: str | None,
+    ssh_key_file: str | None = None,
 ) -> None:
     """Make persistent agent data usable by the unprivileged image user.
 
     Older coder images mounted HOME at ``/root`` and consequently left both
     named volumes root-owned. A short-lived, networkless init container runs
     as root only to migrate that existing data and copy the host credential
-    store; the long-lived container and every agent exec run as ``agent``.
-    Marker files avoid recursively walking large checkouts after migration.
+    store and team SSH deploy key; the long-lived container and every agent
+    exec run as ``agent``. Marker files avoid recursively walking large
+    checkouts after migration.
     """
     volumes: dict[str, dict[str, str]] = {
         home_volume: {"bind": AGENT_HOME, "mode": "rw"},
@@ -2616,6 +2686,11 @@ def _prepare_agent_volumes(
     if cred_file:
         volumes[cred_file] = {
             "bind": "/run/oduflow/git-credentials",
+            "mode": "ro",
+        }
+    if ssh_key_file:
+        volumes[ssh_key_file] = {
+            "bind": "/run/oduflow/ssh-key",
             "mode": "ro",
         }
 
@@ -2638,6 +2713,28 @@ fi
 if [ -f /run/oduflow/git-credentials ]; then
     install -m 600 -o agent -g agent \
         /run/oduflow/git-credentials /home/agent/.git-credentials
+fi
+if [ -f /run/oduflow/ssh-key ]; then
+    install -d -m 700 -o agent -g agent /home/agent/.ssh
+    install -m 600 -o agent -g agent \
+        /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
+    # Oduflow's SSH policy lives in its own file, rewritten on every
+    # container creation so policy changes reach existing (persistent) homes;
+    # the user-editable config only carries the Include. Mirrors the
+    # server-side team_ssh_command options.
+    printf '%s\\n' 'Host *' '  IdentitiesOnly yes' '  BatchMode yes' \
+        '  StrictHostKeyChecking accept-new' > /home/agent/.ssh/oduflow_config
+    chown agent:agent /home/agent/.ssh/oduflow_config
+    chmod 600 /home/agent/.ssh/oduflow_config
+    if [ ! -f /home/agent/.ssh/config ]; then
+        printf 'Include oduflow_config\\n' > /home/agent/.ssh/config
+    elif ! grep -q 'Include oduflow_config' /home/agent/.ssh/config; then
+        { printf 'Include oduflow_config\\n'; \
+          cat /home/agent/.ssh/config; } > /home/agent/.ssh/config.tmp
+        mv /home/agent/.ssh/config.tmp /home/agent/.ssh/config
+    fi
+    chown agent:agent /home/agent/.ssh/config
+    chmod 600 /home/agent/.ssh/config
 fi
 """
     client.containers.run(
@@ -2695,8 +2792,14 @@ def _ensure_agent_container(
         agent_env = dict(_agent_env_vars(settings, team))
         cred_file = team.git_credentials_file()
         has_git_credentials = os.path.isfile(cred_file)
+        from oduflow import git_ops
+
+        ssh_key_file = git_ops.ssh_key_path(team.ssh_dir())
+        ssh_fingerprint = git_ops.ssh_key_fingerprint(team.ssh_dir())
         container_config = _agent_container_config(settings, team, agent_env)
-        config_hash = _agent_config_hash(container_config, has_git_credentials)
+        config_hash = _agent_config_hash(
+            container_config, has_git_credentials, ssh_fingerprint
+        )
 
         container_name = get_agent_container_name(team.team_id, settings.prefix)
         existing_container = None
@@ -2760,6 +2863,9 @@ def _ensure_agent_container(
             home_volume,
             workspace_volume,
             cred_file if has_git_credentials else None,
+            # Gate the mount on the key file itself; the fingerprint only
+            # feeds the config hash and may be "" while the key is usable.
+            ssh_key_file if os.path.isfile(ssh_key_file) else None,
         )
         client.containers.run(
             name=container_name,
@@ -3250,21 +3356,14 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
         }
 
         if "-odoo" in container.name:
-            if settings.routing_mode == "traefik":
+            try:
                 envs[env_name]["url"] = (
-                    f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                    get_env_base_url(settings, team, env_name, container)[0]
+                    + "/web?debug=1"
                 )
-            else:
-                ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-                if ports:
-                    mappings = ports.get("8069/tcp")
-                    if mappings:
-                        host_port = mappings[0].get("HostPort")
-                        if host_port:
-                            envs[env_name]["url"] = (
-                                f"{settings.public_scheme}://{team.hostname}"
-                                f":{host_port}/web?debug=1"
-                            )
+            except NotFoundError:
+                # Port mode with no published port: leave the URL unset.
+                pass
 
         envs[env_name]["containers"].append(container_info)
 
@@ -3525,11 +3624,14 @@ def get_env_base_url(
     """Return ``(base_url, cookie_domain)`` for an environment's Odoo web UI.
 
     ``base_url`` is scheme + host (+ published port) with no path; ``cookie_domain``
-    is the bare host an Odoo ``session_id`` cookie must be scoped to. Mirrors the
-    URL logic in :func:`get_environment_info` (traefik subdomain vs. published
-    host port) so a single source computes both the browsable URL and the cookie
-    domain — used by ``connect_as_user`` to hand back a cookie a browser will
-    actually send.
+    is the bare host an Odoo ``session_id`` cookie must be scoped to. This is
+    the single source of the URL rule (traefik subdomain vs. published host
+    port): ``adopt_existing_environment``, ``create_environment``,
+    ``list_environments``, ``get_environment_info`` and ``connect_as_user`` all
+    build their URLs from it. Pass ``container`` when it is already in hand to
+    skip the Docker lookup. ``update_environment`` is the one deliberate
+    exception: right after recreating the container it builds the URL from its
+    own authoritative locals instead of re-reading fresh container attrs.
     """
     if settings.routing_mode == "traefik":
         if container is None:
@@ -3542,10 +3644,14 @@ def get_env_base_url(
                 raise NotFoundError(
                     f"Environment '{env_name}' does not exist. Use create_environment first."
                 )
-        host = get_env_hostname(
-            env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, "")
+        # The container's own router rule wins over a recompute from current
+        # settings: an environment created before the team gained a
+        # base_domain still routes on its old nested name, and reporting the
+        # zone name would hand out a URL Traefik does not serve.
+        host = container_route_host(container) or env_hostname(
+            team, env_name, container.labels.get(ENV_HOSTNAME_LABEL, "")
         )
-        return f"{settings.public_scheme}://{host}", host
+        return f"{settings.public_scheme_for(team)}://{host}", host
 
     # Port routing: read the container's published 8069 port. Cookies are not
     # port-scoped, so the domain is just the host.
@@ -3567,7 +3673,10 @@ def get_env_base_url(
             f"Environment '{env_name}' has no published HTTP port; "
             "is the environment running?"
         )
-    return f"{settings.public_scheme}://{team.hostname}:{host_port}", team.hostname
+    return (
+        f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}",
+        team.hostname,
+    )
 
 
 def get_environment_info(
@@ -3625,21 +3734,14 @@ def get_environment_info(
             env_name, labels.get(ENV_HOSTNAME_LABEL, "")
         )
 
-        if settings.routing_mode == "traefik":
+        try:
             result["url"] = (
-                f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                get_env_base_url(settings, team, env_name, odoo_container)[0]
+                + "/web?debug=1"
             )
-        else:
-            ports = odoo_container.attrs.get("NetworkSettings", {}).get("Ports", {})
-            if ports:
-                mappings = ports.get("8069/tcp")
-                if mappings:
-                    host_port = mappings[0].get("HostPort")
-                    if host_port:
-                        result["url"] = (
-                            f"{settings.public_scheme}://{team.hostname}"
-                            f":{host_port}/web?debug=1"
-                        )
+        except NotFoundError:
+            # Port mode with no published port: leave the URL unset.
+            pass
 
         stats = _get_one_container_stats(odoo_container)
         if stats:
@@ -4731,6 +4833,7 @@ def update_environment(
     *,
     env_override: dict[str, str] | None = None,
     image_override: str | None = None,
+    hostname_override: str | None = None,
     extra_checkout_overrides: dict[str, str] | None = None,
     extra_revision_overrides: dict[str, str] | None = None,
     pull_image: bool = True,
@@ -4751,6 +4854,10 @@ def update_environment(
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
     and image-baked env comes from the image itself.
 
+    ``hostname_override`` changes the short public hostname in Traefik mode.
+    Empty or omitted values keep the current hostname policy. Conflicts are
+    rejected before stopping the current container.
+
     ``rename_to`` additionally moves the environment onto another name. The
     container has to be re-created for that anyway — it carries the name in its
     own name, its labels and its bind mounts — so the rename rides on the same
@@ -4762,6 +4869,14 @@ def update_environment(
     switch_branch refreshes that checkout itself once it is on the target
     branch, and clone-env.sh is too expensive to run twice.
     """
+    requested_hostname = (hostname_override or "").strip()
+    if requested_hostname:
+        requested_hostname = validate_env_hostname(requested_hostname)
+        if settings.routing_mode != "traefik":
+            raise ValueError(
+                "hostname is supported only when routing.mode = 'traefik'."
+            )
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -4888,9 +5003,28 @@ def update_environment(
                     "locally; leaving the existing environment untouched."
                 ) from exc
 
-    clear_hostname_after_update = _reconcile_environment_hostname_for_update(
-        client, settings, team, env_name, labels
-    )
+    if requested_hostname:
+        hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
+        active_envs, used_hostnames = _environment_hostname_usage(
+            client, settings, team, exclude_env=env_name
+        )
+        # Reserve before stopping: conflicts leave the current container intact.
+        # A simultaneous rename moves this reservation with the environment.
+        labels[ENV_HOSTNAME_LABEL] = allocate_hostname(
+            _hostname_registry_path(team),
+            env_name,
+            0,  # An update does not consume a new environment slot.
+            requested_hostname=requested_hostname,
+            hostname_prefix=hostname_prefix,
+            active_envs=active_envs,
+            used_hostnames=used_hostnames,
+        )
+        labels[ENV_HOSTNAME_SOURCE_LABEL] = HOSTNAME_SOURCE_CUSTOM
+        clear_hostname_after_update = False
+    else:
+        clear_hostname_after_update = _reconcile_environment_hostname_for_update(
+            client, settings, team, env_name, labels
+        )
 
     logger.info(
         "Updating environment – stopping old container",
@@ -5018,6 +5152,7 @@ def update_environment(
     # traefik→port switch drops them and a renamed router does not linger.
     labels = {k: v for k, v in labels.items() if not k.startswith("traefik.")}
     route_hostname = labels.get(ENV_HOSTNAME_LABEL, "")
+    _assert_env_hostname_available(settings, team, env_name, route_hostname)
     labels.update(build_env_traefik_labels(settings, team, env_name, route_hostname))
     if settings.routing_mode == "traefik":
         # No published port in traefik mode; drop any stale reservation left from
@@ -5147,9 +5282,9 @@ def update_environment(
     # 6. Build URL and return result
     # ------------------------------------------------------------------
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, route_hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{env_hostname(team, env_name, route_hostname)}"
     else:
-        url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
 
     env_db = get_db_name(env_name, team.team_id)
     workspace = get_workspace_path(env_name, team.workspaces_dir)

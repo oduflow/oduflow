@@ -40,8 +40,8 @@ Clone an extra repository once (it will be available for all environments):
 # Via CLI
 oduflow call add_extra_repo enterprise https://github.com/odoo/enterprise.git
 
-# Private repos — configure auth first
-oduflow call setup_repo_auth https://user:PAT@github.com/odoo/enterprise.git
+# Private repos — store an access token first
+oduflow call setup_repo_auth '{"repo_url": "https://github.com/odoo/enterprise.git", "token": "ghp_..."}'
 oduflow call add_extra_repo enterprise https://github.com/odoo/enterprise.git
 ```
 

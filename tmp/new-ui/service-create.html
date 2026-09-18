@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Create service</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1180px; overflow: hidden; }
+  .scrim { align-items: flex-start; padding-top: 36px; }
+  .route-row { display: grid; grid-template-columns: 1fr 120px 110px 32px; gap: 0.5rem; align-items: center; }
+  .route-row .rm { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 34px; border: 1px solid var(--border); border-radius: var(--r-md); color: var(--muted-foreground); }
+  .route-row .rm svg { width: 14px; height: 14px; stroke: currentColor; }
+  .vol-row { display: grid; grid-template-columns: 180px 1fr 90px 32px; gap: 0.5rem; align-items: center; }
+  .vol-row .rm { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 34px; border: 1px solid var(--border); border-radius: var(--r-md); color: var(--muted-foreground); }
+  .vol-row .rm svg { width: 14px; height: 14px; stroke: currentColor; }
+  .preset-note { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; background: oklch(0.6 0.2 260 / 0.08); border: 1px solid oklch(0.6 0.2 260 / 0.25); border-radius: var(--r-md); font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .preset-note b { color: var(--primary); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-chevron"><path d="m6 9 6 6 6-6"/></g>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab active">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head"><h1>Services</h1><span class="count">3 services</span></div>
+</main>
+
+<div class="scrim">
+  <div class="modal" style="width:720px">
+    <div class="modal-h">
+      <span class="t">Restore service from preset</span>
+      <span class="spacer"></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+    </div>
+    <div class="modal-b">
+      <div class="preset-note"><b>Preset “pgadmin”.</b> All fields editable before the container is created — including the service name.</div>
+
+      <div class="form-row">
+        <div class="field">
+          <span class="lbl">Name</span>
+          <input class="input mono" value="pgadmin">
+        </div>
+        <div class="field">
+          <span class="lbl">Hostname</span>
+          <input class="input mono" value="pgadmin">
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Docker image</span>
+        <input class="input mono" value="dpage/pgadmin4:8">
+      </div>
+
+      <div class="field">
+        <span class="lbl">Routing</span>
+        <label class="check-row"><span class="cbx"></span>Single public port</label>
+        <label class="check-row"><span class="cbx checked"></span>Restricted routes</label>
+        <div class="route-row" style="margin-top:0.375rem">
+          <input class="input mono" value="/pgadmin">
+          <input class="input mono" value="5050">
+          <label class="check-row" style="font-size:var(--text-2xs)"><span class="cbx checked"></span>strip prefix</label>
+          <span class="rm"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+        </div>
+        <button class="btn" style="align-self:flex-start;margin-top:0.375rem"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>Add route</button>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Volumes</span>
+        <div class="vol-row">
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-2xs)">pgadmin-data</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <input class="input mono" value="/var/lib/pgadmin">
+          <div class="select"><span style="font-family:var(--font-mono);font-size:var(--text-2xs)">rw</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chevron"/></svg></div>
+          <span class="rm"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+        </div>
+        <span class="hint">/etc/traefik is reserved — the ACME volume is mounted automatically in TLS mode.</span>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Env vars</span>
+        <textarea class="input mono" rows="3">PGADMIN_DEFAULT_EMAIL=ops@velesagro.pl
+PGADMIN_DEFAULT_PASSWORD=••••••••
+PGADMIN_DISABLE_POSTFIX=true</textarea>
+      </div>
+
+      <div class="form-row">
+        <div class="field">
+          <span class="lbl">Flags</span>
+          <label class="check-row"><span class="cbx"></span>Host network mode</label>
+          <label class="check-row"><span class="cbx"></span>Privileged</label>
+          <label class="check-row"><span class="cbx"></span>NET_ADMIN capability</label>
+        </div>
+        <div class="field">
+          <span class="lbl">On create</span>
+          <label class="check-row"><span class="cbx checked"></span>Save config as preset</label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">Cancel</button>
+      <button class="btn primary">Create service</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -63,13 +63,45 @@ does not cover `dev1.example.com`.
 The configured team hostname must include a distinct prefix
 (`dev.example.com`, not bare `example.com`) for pooled or explicit short names.
 
+## Team base domain
+
+Setting `base_domain` gives the team one flat DNS zone instead of nesting
+everything under the dashboard hostname:
+
+```toml
+[team.1]
+base_domain = "demo.example.com"
+# hostname defaults to "oduflow.demo.example.com" (the dashboard)
+```
+
+With a base domain, environments and services live **directly under the
+zone** — `feature-login.demo.example.com`, `meilisearch.demo.example.com` —
+instead of `feature-login.oduflow.demo.example.com`, and production domains
+default into the zone too (the apex `demo.example.com` for the team's first
+production, `<name>.demo.example.com` afterwards; see
+[Production Hosting](production.md#domains)). One `*.demo.example.com` DNS
+record (plus the apex, if a production uses it) covers everything.
+
+The zone is exclusive to the team, and every name handed out is checked
+against the whole routed namespace — the dashboard hostname, production
+domains of all teams, static `[route.*]` hosts, other teams' zones and the
+names live environment and service containers currently serve — so two
+resources can never claim the same FQDN. Existing environments keep their old
+nested hostname until their next `update_environment`, which moves them into
+the zone; until then that is the name they are reported at and checked
+against, because a container's Traefik rule is fixed when it is created.
+
+A service with `routes` is the one deliberate exception: it publishes only
+`Host() && PathPrefix()` routers and no catch-all, so it may share the team's
+dashboard hostname to expose a URL prefix beside the dashboard.
+
 ## OAuth on each team's hostname
 
 The self-hosted [OAuth Authorization Server](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) is enabled automatically whenever a team has an `auth_token` and runs on **each team's own hostname** in every routing mode. With Traefik, the incoming host already has a Let's Encrypt certificate; with `tls = false`, the upstream tunnel provides it. There is no separate OAuth section: point Claude.ai at `https://<team-hostname>/mcp` and complete the OAuth flow there.
 
 ## Service routing with Traefik
 
-Auxiliary services also get Traefik routing. A service named `meilisearch` with base domain `dev.example.com` becomes accessible at `https://meilisearch.dev.example.com`. Custom hostnames are also supported.
+Auxiliary services also get Traefik routing. A service named `meilisearch` under team hostname `dev.example.com` becomes accessible at `https://meilisearch.dev.example.com`; with a team `base_domain` it attaches to the zone instead (`meilisearch.demo.example.com`). Custom hostnames are also supported.
 
 ## Routing extra domains to external services
 
@@ -213,3 +245,56 @@ no environment or service needs recreating.
     Odoo logins, session cookies, the dashboard password and MCP bearer tokens
     all travel in cleartext. Use this only on a trusted network, never on a
     public-facing server.
+
+## Mixing HTTP and HTTPS teams in one deployment
+
+`public_scheme` can be overridden per team. The typical shape: one team is
+reached directly over the LAN in plain HTTP, another is published through a
+**Cloudflare tunnel** that terminates TLS — same server, same Traefik on plain
+`:80`:
+
+```toml
+[routing]
+mode = "traefik"
+tls = false              # Traefik listens on plain HTTP :80 only
+public_scheme = "http"   # default for teams without an override (the LAN team)
+
+[team.1]
+hostname = "dev.internal.example.com"   # LAN, http:// links
+
+[team.2]
+hostname = "dev.example.com"            # via Cloudflare tunnel
+public_scheme = "https"                 # its links are https://
+```
+
+Point the tunnel at the server's port 80 for the second team's hostnames
+(e.g. `dev.example.com` and `*.dev.example.com → http://localhost:80`); the
+first team's clients resolve its hostname to the server directly. Every URL
+Oduflow hands out — dashboard links, MCP endpoints, environment and service
+URLs — uses each team's resolved scheme. No `acme_email` is involved: with
+`tls = false` Traefik never talks to Let's Encrypt, and the tunnel's
+certificate comes from Cloudflare.
+
+!!! warning "Forwarded-header trust is deployment-wide"
+    Because at least one team resolves to `https`, the `web` entrypoint trusts
+    inbound `X-Forwarded-*` headers (as in the tunnel setup above) — so the
+    tunnel's `X-Forwarded-Proto: https` survives. That trust is
+    **entrypoint-wide**, not per team: any client that can reach port 80
+    directly can forge `X-Forwarded-Host`, `X-Forwarded-Proto` and
+    `X-Forwarded-For` on requests to *any* hostname this Traefik serves —
+    including the other team's environments and productions. Production Odoo
+    runs in proxy mode and uses those headers to rebuild absolute URLs
+    (`web.base.url`, password-reset links) and for IP logging and login
+    throttling. Only mix schemes when every network that can reach port 80 is
+    trusted for **all** teams on the deployment; otherwise split the teams
+    onto separate deployments.
+
+The per-team value obeys the same rules as the global one: `https` is invalid
+in port mode, and `http` is invalid while `tls = true` (the :80→:443 redirect
+would break the links).
+
+Production URLs are reported with the **owning team's** scheme. A production's
+domain is free-form (it need not live under the team's hostname), so make sure
+each production domain is fronted the same way as the rest of its team — a
+plain-HTTP team's production published through the other team's tunnel would be
+reported as `http://` even though only `https://` answers.

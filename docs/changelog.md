@@ -1,5 +1,96 @@
 # Changelog
 
+## Unreleased
+
+- Production updates check module state in the production PostgreSQL cluster,
+  preserving development database settings for concurrent requests. Exceptions
+  after pulling source now enter the same code rollback path as failed module
+  commands, with the failed commit and exit status recorded in deploy history.
+
+- Add production targets to declarative Stacks, with explicit adoption of matching
+  existing productions, registry ownership, production value references and
+  retryable configuration reconciliation. Development Stacks remain compatible.
+
+## v1.77.0
+
+### Fixes
+
+- Preserve user environment variables and `secret:<name>` references when
+  promoting a development environment to production and recreating its
+  container. Validate secrets before changing the source or production.
+
+### Features
+
+- **Publish productions as dev templates and create environments from
+  production** — `save_production_as_template` publishes a production's
+  database and filestore as a dev template, and
+  `create_environment(from_production=...)` builds an environment from a copy
+  of real production data; the dashboard gets the same two actions on each
+  production card. The copy goes through one managed template per production
+  (`prod-<name>`), published on first use and reused afterwards, so the second
+  environment from the same production is an instant clone plus an overlay
+  mount. The production keeps serving throughout: a consistent `pg_dump` is
+  streamed straight from the production cluster into the dev cluster's
+  exchange dir, and a publish that fails halfway is rolled back. (#240)
+
+- **Purge deleted-production leftovers via tombstones** — a soft
+  `delete_production` (without `drop_database`) keeps the database and
+  workspace by design, but the leftovers had no lifecycle and accumulated
+  forever. Deletion now writes a `deleted.json` tombstone, and tombstoned
+  leftovers can be reclaimed either automatically — new opt-in
+  `[lifecycle] prod_purge_hours = N` (default `0` = keep forever) lets the
+  reaper purge the database, PG role and workspace N hours after deletion —
+  or immediately via `oduflow cleanup --purge-deleted-productions` (dry-run
+  by default, `--force` to apply). Only tombstoned leftovers are ever
+  purged. (#242)
+
+- **Per-team `public_scheme`** — `[team.X] public_scheme` overrides the global
+  `[routing]` value, so one `tls = false` deployment can serve a plain-HTTP
+  LAN team and a team behind a TLS-terminating upstream (e.g. a Cloudflare
+  tunnel) with `https://` links at the same time. Every URL Oduflow hands out
+  (dashboard links, MCP endpoints, environment/service/production URLs) uses
+  the owning team's resolved scheme, and Traefik trusts inbound
+  `X-Forwarded-*` on `:80` whenever any team resolves to `https`. The same
+  wire-reality validation applies per team: `https` is rejected in port mode
+  and `http` is rejected while `tls = true`. (#241)
+
+- **Change an environment's hostname** — `update_environment` and the
+  dashboard's Update dialog accept a `hostname`: for a team at
+  `dev.example.com`, setting `hostname="qa"` moves the environment to
+  `qa.example.com` while preserving its database and filestore. The requested
+  hostname is validated and atomically reserved before the container is
+  stopped; conflicts and non-Traefik deployments are rejected up front. (#239)
+
+- **Paste the token, not a `user:PAT@repo` URL** — the dashboard's *Add Git
+  Credential* dialog now takes the access token, the git host (default
+  `github.com`), an optional username and an optional repository URL to verify
+  against. Git matches stored credentials by host, not by repository, so a
+  single token covers every repository on that host; the repository path in
+  the old URL form was only ever used for the `git ls-remote` check. Without a
+  repository URL the token is verified against the provider API (GitHub,
+  GitLab, Bitbucket). `setup_repo_auth` gained matching `token`, `username`
+  and `host` arguments and `POST /api/credentials/add` accepts the same body;
+  the legacy `https://user:PAT@host/owner/repo.git` form still works. (#238)
+
+### Bug Fixes
+
+- **Platform Stack image convergence and PostgreSQL startup permissions** — a
+  fresh host initialized under systemd `UMask=0077` produced a root-only
+  PostgreSQL config and unsearchable mount parents, so PostgreSQL failed to
+  start and team tablespaces could not be created. Non-secret PostgreSQL
+  configs are now written with explicit `0644` permissions (including retune
+  and fallback paths), the `pg_tablespaces` / `pg_exchange` mount parents get
+  `0755`, and the service image reference is preserved from the container's
+  `Config.Image`, stopping repeated service image drift. Secrets and team
+  data directories keep their restrictive permissions. (#236)
+
+### Dashboard
+
+- **Copy button in the Info dialog** — environment and service Info dialogs
+  can copy the displayed environment variables as newline-separated
+  `KEY=VALUE` entries; the button is disabled when no variables are
+  available. (#235)
+
 ## v1.76.0
 
 ### Features

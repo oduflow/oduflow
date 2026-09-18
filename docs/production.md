@@ -6,7 +6,8 @@ environments it was built for. Productions get special treatment:
 - a **dedicated PostgreSQL cluster** (`oduflow-prod-db`) — physically
   separate from the dev one, auto-tuned for production workloads;
 - a **custom domain** per production (`erp.customer.com`), routed by Traefik
-  with a Let's Encrypt certificate;
+  with a Let's Encrypt certificate — plus optional **extra domains** routed to
+  the same production (e.g. the client's own public domain);
 - an **auto-tuned production `odoo.conf`** (workers from host CPU/RAM, cron
   enabled, proxy mode) — never the dev profile;
 - **no sanitization/neutralization**, no idle reaper, no `--dev=xml`;
@@ -81,8 +82,32 @@ create_production(
     odoo_image="odoo:18.0",
     template_name="acme-prod",   # optional: seed DB+filestore from a template
     auto_update=False,
+    allow_copy_to_dev_mcp=True,  # may agents copy this production into dev?
 )
 ```
+
+### Domains
+
+In a team with [`base_domain`](traefik.md#team-base-domain) configured, the
+primary `domain` must lie in the team zone — the zone apex
+(`demo.example.com`) or a subdomain (`erp.demo.example.com`) — and may be
+omitted: the team's **first** production defaults to the apex, later ones to
+`<name>.<base_domain>`. Without a base domain, `domain` is required and may be
+any FQDN.
+
+`extra_domains` adds further public FQDNs routed to the same production —
+typically the client's own domain alongside the team-zone name:
+
+```text
+create_production(name="erp", domain="demo.example.com",
+                  extra_domains=["myodoo.pl"], ...)
+```
+
+All domains land in one Traefik router (`Host(a) || Host(b)`), each with its
+own Let's Encrypt certificate; every DNS record must point at this server.
+Extra domains may be arbitrary FQDNs but must not fall inside another team's
+zone, and every domain — primary or extra — must be unused anywhere else in
+the deployment (other productions, team hostnames, static routes).
 
 `template_name` is the migration path for an existing production: import it
 first (e.g. [from Odoo.sh](templates.md)), then create the production from
@@ -92,7 +117,103 @@ filestore into the production's plain (non-overlay) directory.
 The clone is **full** (not shallow): the branch's commit history is the
 production's deploy history and the source of rollback targets.
 
+### Promoting a dev environment
+
+`from_environment` turns an existing dev environment into the seed — the
+promotion path from "it works on the branch" to "it serves customers":
+
+```text
+create_production(name="erp", domain="erp.acme.com", from_environment="feature-x")
+```
+
+The environment's database and filestore are copied (its Odoo container is
+briefly stopped so the pair is consistent, then restarted), and omitted
+`repo_url` / `branch` / `odoo_image` / `git_user` / `extra_addons` default to
+the environment's own — explicit arguments still win. Unlike the
+save-as-template detour, no intermediate template is created and the source
+environment is **not reset** — it keeps living as a dev environment.
+`from_environment` and `template_name` are mutually exclusive.
+
+Promotion also inherits the source environment's user environment variables.
+`secret:<name>` references stay in the production registry and container labels;
+values are resolved from the team's secret store only for the container runtime.
+They survive domain/image/branch reconfiguration. Missing secrets are rejected
+before the source is stopped. Pass `env_vars={...}` to replace the inherited set,
+or `{}` to inherit none. `reconfigure_production(env_vars={...})` replaces the
+stored set; omitting it preserves the existing variables. The managed database
+variables `HOST`, `PORT`, `USER`, and `PASSWORD` cannot be overridden.
+
+No sanitization happens — the data goes *into* production. One caveat: if
+the source environment was itself created from a production
+(`from_production`), its data was sanitized on that copy, and the new
+production starts with that sanitized data (the result warns about this).
+
+The dashboard offers the same via **More → Promote to Production** on an
+environment card, which opens the create-production form pre-filled.
+
+To promote into a production that **already exists**, use
+`restore_production(from_environment=…)` instead — see
+[Backups](#backups) for the restore mechanics.
+
+## Reconfiguring a production
+
+A production's settings are not frozen at creation.
+`reconfigure_production` changes any of the domain, extra domains, Odoo
+image, deployed branch, repository URL, git user, or the extra addon repos,
+then **recreates the container** to match — the database and filestore live outside the
+container and are preserved; expect a brief downtime:
+
+```text
+reconfigure_production(name="erp", domain="erp.newcustomer.com")
+reconfigure_production(name="erp", extra_domains=["myodoo.pl"])  # [] removes all
+reconfigure_production(name="erp", branch="18.0-stable")
+reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
+```
+
+Omitted arguments are left unchanged (`git_user=""` explicitly clears the
+git user). The registry record is updated first and the workspace/container
+are converged to it, so re-running the same call after a mid-way failure
+repairs a missing container or checkout instead of reporting a no-op. Two
+things reconfigure deliberately does **not** do:
+
+- Changing `odoo_image` does not migrate the database. A minor image refresh
+  is safe; a major Odoo version bump additionally needs an explicit module
+  upgrade plan.
+- Changing `branch`/`repo_url` deploys the new code as-is (restart only).
+  Run `update_production(install=..., upgrade=...)` afterwards if the new
+  code needs module changes.
+
+The dashboard offers the same settings on each production card under
+**More → Settings**, together with the *agent copy to dev* gate
+(dashboard-only, see [Copying production data to dev](#copying-production-data-to-dev)).
+
+### odoo.conf overrides
+
+The generated production `odoo.conf` merges a base conf chain
+(`.oduflow/odoo.prod.conf` in the repo > team `odoo.prod.conf` > bundled)
+with [auto-tuned](#configuration) worker/limit settings. Per-production
+overrides sit on top of both and survive deploys, retunes and reconfigures:
+
+```text
+set_production_odoo_conf(name="erp", options={"limit_time_real": "300"})
+set_production_odoo_conf(name="erp", unset="limit_time_real")
+```
+
+An explicit override beats the auto-tuned value (e.g. pin `workers`). Keys
+managed by Oduflow are refused: `addons_path` and `data_dir` are generated,
+and the `db_*` connection keys come from container env vars (option names
+are compared case-insensitively and stored lowercased, matching how Odoo
+reads them). Current overrides are shown by `get_production_info`; the
+dashboard edits them in the same **Settings** panel. Applying restarts the
+container (brief downtime) unless `restart=false`; a call that leaves the
+overrides unchanged skips the restart entirely.
+
 ## Deploys and rollback
+
+Module preflight and post-install checks use the production PostgreSQL cluster
+and the production's own database role. Development requests retain their
+separate cluster. An exception after source synchronization, including a module
+preflight SQL failure, triggers code rollback just like a failed module command.
 
 `update_production(name)` pulls the branch (and extra-addon worktrees),
 classifies the changes (or takes explicit `install=` / `upgrade=` /
@@ -145,6 +266,24 @@ swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
 `rollback_production` to the matching commit.
 
+**Restoring from a dev environment.** The same tool also promotes a dev
+environment's data into an *existing* production — the counterpart of
+`create_production(from_environment=…)` for productions that already live:
+
+```text
+restore_production(name="erp", from_environment="feature-x", confirm="erp")
+```
+
+The environment's database and filestore are copied while its Odoo is
+briefly stopped (the environment is **not reset**), staged, and swapped in
+with the same all-or-nothing mechanics as a snapshot restore. No
+sanitization happens — the data goes *into* production — and no `[backup]`
+configuration is required. The production's code checkout is not touched;
+the result warns when the environment's commit differs from the deployed
+one. Take a `snapshot_production` first if the current production data may
+still be needed. `snapshot_id` and `from_environment` are mutually
+exclusive.
+
 The filestore engine (a clean-room, duplicacy-inspired content-defined
 chunking store) deduplicates across daily revisions *and* across a team's
 productions; retention (`keep`) is applied weekly with safe two-step fossil
@@ -169,6 +308,46 @@ the cluster the same way.
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
 
+## Copying production data to dev
+
+Productions are seeded from templates; the same road runs backwards, so a
+developer can reproduce a bug on real data:
+
+```text
+save_production_as_template(prod_name="erp", template_name="erp-2026-09")
+create_environment(branch="bugfix-invoice", from_production="erp")
+```
+
+Both dump the production database out of the production cluster with a
+consistent `pg_dump` and restore it into the **dev** cluster, and snapshot the
+production filestore as the template's baseline. **The production keeps
+serving** — nothing is stopped or modified on its side.
+
+`create_environment(from_production=…)` routes through one managed template per
+production, `prod-<name>`, published on first use and reused afterwards; refresh
+it with `save_production_as_template(name, "prod-<name>", overwrite=True)`. See
+[Create a Template from Production](templates.md#create-a-template-from-production)
+and [Creating an Environment from Production](environments.md#creating-an-environment-from-production).
+
+!!! danger "The copy is unsanitized until an environment is created"
+    The template carries real customer data and credentials. Environments made
+    from it are neutralized and run the repository's sanitize scripts by
+    default; the template itself is production-confidential.
+
+**`allow_copy_to_dev_mcp`** (default `true`, set at `create_production`) gates
+**new copies**: when it is `false`, an MCP/CLI agent asking for either tool gets
+a refusal — and no MCP tool can turn the flag back on. It is a gate on *agents*,
+not on people: the dashboard's Production tab is never gated and is the only
+place the flag can be toggled, so an agent cannot re-enable its own access.
+Productions created before the flag existed behave as `true`.
+
+The flag does **not** revoke a copy that already exists. A `prod-<name>` (or
+any) template published from the production stays usable through
+`create_environment(template_name=...)` like every other template — its data is
+neutralized on the way into each environment. The one thing agents lose is the
+raw form: `sanitize=false` on a template whose `source_production` has the flag
+off is refused. To withdraw the data itself, `delete_template` the copy.
+
 ## Health
 
 `GET /healthz` (public, no auth, no secrets) returns 200 when healthy and
@@ -176,6 +355,29 @@ reachability.
 production PostgreSQL, Traefik, S3 (HeadBucket), disk usage (warn at 85%),
 and productions flagged unhealthy by a failed rollback. The dashboard's
 status bar shows the same checks as chips.
+
+## Deleting a production
+
+`delete_production` (or **Delete** in the dashboard) removes the container and
+the registry record, but **keeps the database and the workspace** (filestore,
+repo, deploy history) on disk — productions are precious, deleting bytes is
+opt-in. Pass `drop_database=true` over MCP/CLI to remove everything at once.
+
+Kept leftovers are *tombstoned* (a `deleted.json` marker in the workspace) so
+they can be reclaimed later:
+
+- **Deferred purge** — set `[lifecycle] prod_purge_hours = N` in
+  `oduflow.toml` and the background sweep permanently purges the leftovers
+  (database, PostgreSQL role, workspace) N hours after the deletion. `0`
+  (default) keeps them forever. Re-creating a production with the same name
+  clears the tombstone, so a revived production is never purged.
+- **Immediate purge** — `oduflow cleanup --purge-deleted-productions`
+  lists tombstoned leftovers; add `--force` to purge them now, regardless of
+  age.
+
+Only tombstoned leftovers are ever purged: a workspace without the marker is
+presumed alive and is never touched (`oduflow cleanup` skips the whole
+`prod-*` namespace for the same reason).
 
 ## MCP tool reference
 
@@ -189,10 +391,13 @@ status bar shows the same checks as chips.
 | `production_logs` | Container logs |
 | `start_production` / `stop_production` / `restart_production` | Lifecycle |
 | `set_production_auto_update` | Toggle webhook auto-deploy |
+| `reconfigure_production` | Change domain/image/branch/repo/extra addons; recreates the container |
+| `set_production_odoo_conf` | Per-production odoo.conf overrides on top of auto-tuning |
 | `snapshot_production` / `list_production_snapshots` | Snapshots to S3 |
-| `restore_production` | Restore DB + filestore from a snapshot |
+| `restore_production` | Restore DB + filestore from a snapshot or a dev environment |
 | `set_production_backup_schedule` | Per-production snapshot time / off |
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
+| `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |
 | `prune_production_backups` | Apply retention now |
 | `restore_cluster_pitr` | Cluster-wide disaster recovery / PITR |
 | `delete_production` | Remove (database/files kept unless `drop_database`) |

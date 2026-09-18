@@ -332,6 +332,8 @@
     font-size: var(--text-sm);
   }
   .prod-mono { font-family: var(--font-mono); color: var(--text-dim); }
+  .prod-domain { font-size: var(--text-sm); text-decoration: none; }
+  .prod-domain:hover { text-decoration: underline; color: var(--accent); }
   .prod-section {
     border-top: 1px solid var(--border);
     margin-top: 12px;
@@ -1331,7 +1333,7 @@
   }
 </style>
 </head>
-<body data-scoped-env="__SCOPED_ENV__">
+<body data-scoped-env="__SCOPED_ENV__" data-team-base-domain="__TEAM_BASE_DOMAIN__">
 
 <header>
   <div class="brand-lockup">
@@ -1440,6 +1442,11 @@
     <button class="btn-create" onclick="openSecretModal()">+ Add Secret</button>
   </div>
   <div id="credentials-list"></div>
+  <div id="ssh-key-section" style="margin-top:24px;">
+    <h2 class="section-subtitle">SSH deploy key</h2>
+    <div class="hint">The team's SSH public key, generated and kept by Oduflow (only the public key is shown here). Add it to your git hosting as a repository deploy key (read access is enough) or to a machine-user account, then use SSH repository URLs such as <code>git@github.com:owner/repo.git</code>. Note: GitHub allows a deploy key on one repository only — use a machine user to cover several.</div>
+    <div id="ssh-key-body"></div>
+  </div>
   <div id="secrets-section" style="margin-top:24px;">
     <h2 class="section-subtitle">Secrets</h2>
     <div class="hint">Named values for environment variables. Reference one as <code>KEY=secret:&lt;name&gt;</code> in any service or environment. Values are write-only: agents and the API can only see the name, never the value.</div>
@@ -1480,6 +1487,11 @@
     </div>
     <div class="modal-body">
       <div class="form-error" id="create-error"></div>
+      <div class="form-group" id="cr-from-prod-group" style="display:none">
+        <label>Source production</label>
+        <div class="prod-mono" id="cr-from-prod-name"></div>
+        <div class="hint">A copy of this production's database and filestore, through the managed template <code id="cr-from-prod-template"></code> (published on first use, reused afterwards). Repository, image and extra addons come from the production. The database is sanitized on creation. Refresh the copy with the production's <em>Save as template</em> action.</div>
+      </div>
       <div class="form-group">
         <label for="cr-branch">Branch name</label>
         <input type="text" id="cr-branch" placeholder="e.g. feature/my-branch">
@@ -1508,7 +1520,7 @@
         <label for="cr-image">Odoo image</label>
         <input type="text" id="cr-image" placeholder="e.g. odoo:19.0">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="cr-template-group">
         <label for="cr-template">Template</label>
         <select id="cr-template">
         </select>
@@ -2196,6 +2208,11 @@
         <div class="hint">Change it to rename this environment. The database and filestore move with it; a pooled or explicit hostname is kept, a hostname derived from the environment name follows the new one. Its MCP endpoint becomes /mcp/&lt;new name&gt; — re-point any MCP client configured against the old path</div>
       </div>
       <div class="form-group">
+        <label for="update-env-hostname">Hostname (Traefik mode)</label>
+        <input type="text" id="update-env-hostname" spellcheck="false" placeholder="qa">
+        <div class="hint">Short hostname, as when creating an environment. Changing it changes the public URL. Leave unchanged or empty to keep the current hostname policy.</div>
+      </div>
+      <div class="form-group">
         <label for="update-env-vars">Environment variables</label>
         <textarea id="update-env-vars" rows="5" spellcheck="false" placeholder="WORKERS=2&#10;LIMIT_TIME_CPU=600"></textarea>
         <div class="hint">Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
@@ -2397,8 +2414,23 @@
     <div class="modal-body">
       <div class="form-error" id="add-credential-error"></div>
       <div class="form-group">
-        <label for="credential-url">Repository URL with credentials</label>
-        <input type="text" id="credential-url" placeholder="https://user:PAT@github.com/owner/repo.git">
+        <label for="credential-token">Access token</label>
+        <input type="password" id="credential-token" autocomplete="off" spellcheck="false" placeholder="ghp_… / glpat-… / app password">
+        <div class="hint">Personal access token with read access to the repositories. One token covers every repository on the host.</div>
+      </div>
+      <div class="form-group">
+        <label for="credential-host">Git host</label>
+        <input type="text" id="credential-host" value="github.com" spellcheck="false" placeholder="github.com">
+      </div>
+      <div class="form-group">
+        <label for="credential-username">Username <span class="label-hint">(optional)</span></label>
+        <input type="text" id="credential-username" spellcheck="false" placeholder="x-access-token">
+        <div class="hint">GitHub, GitLab and Azure DevOps accept any name with a token. Bitbucket app passwords need the real account name. Use different names to keep several tokens for one host; the same name replaces the stored token.</div>
+      </div>
+      <div class="form-group">
+        <label for="credential-url">Repository URL to verify <span class="label-hint">(optional)</span></label>
+        <input type="text" id="credential-url" spellcheck="false" placeholder="https://github.com/owner/repo.git">
+        <div class="hint">Runs git ls-remote with the token. Without it, the token is checked against the provider API (GitHub, GitLab, Bitbucket); other hosts are saved unverified.</div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeAddCredentialModal()">Cancel</button>
@@ -2438,6 +2470,22 @@
 // server enforces the scope in oduflow/ui_scope.py; everything this flag does
 // on the page is presentation — hiding controls whose endpoints are denied.
 var SCOPED_ENV = document.body.getAttribute('data-scoped-env') || '';
+// Ships with the page so the create-production modal knows the team zone
+// no matter which tab opened it; loadProductions refreshes it later.
+window._teamBaseDomain = document.body.getAttribute('data-team-base-domain') || '';
+
+// Whether the Promote-to-Production feature is enabled for this page. The
+// server substitutes the production-tab placeholder (see
+// web_ui._render_dashboard) with '' (enabled) or 'hidden' — both in the tab
+// button's markup and in the string literal below, so this flag is the
+// authoritative client-side signal rather than sniffing the button's
+// presentation. The tab button's hidden state and _prodEnabled() both derive
+// from it.
+var PROD_ENABLED = '__PRODUCTION_TAB_HIDDEN__' !== 'hidden';
+(function () {
+  var tab = document.querySelector('.tab-btn[data-tab="production"]');
+  if (tab) tab.hidden = !PROD_ENABLED;
+})();
 
 // Path of the scoped page itself. Environment names may contain slashes
 // (feature/x), which stay separators in the URL.
@@ -3041,6 +3089,10 @@ function renderEnvironments(envs, force) {
                   (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>' +
                 '<button role="menuitem" onclick="doNewTemplate(\'' + escAttr(env.branch) + '\')" ' + dis +
                   'title="Save this environment (DB + filestore) as a new template">New Template</button>' +
+                (_prodEnabled()
+                  ? '<button role="menuitem" onclick="openCreateProductionModal(\'' + escAttr(env.branch) + '\')" ' +
+                      'title="Create a production from a copy of this environment (database + filestore); the environment itself is not changed">Promote to Production</button>'
+                  : '') +
                 '<button role="menuitem" class="danger" onclick="doDelete(\'' + escAttr(env.branch) + '\')" ' + dis +
                   (env.protected ? 'disabled title="Environment is protected"' : '') + '>Delete</button>') +
             '</div>' +
@@ -3755,6 +3807,7 @@ async function confirmSwitchBranch() {
 
 var _updateEnv = '';
 var _updateEnvInitial = '';
+var _updateEnvHostnameInitial = '';
 // Bumped on every open and every close, so a prefill response can be matched
 // against the dialog that started it — the Docker-backed lookup is slow enough
 // to outlive a cancel-and-reopen, and answering into the wrong environment
@@ -3957,6 +4010,9 @@ async function doUpdate(branch) {
   document.getElementById('update-env-title').textContent = 'Update environment — ' + branch;
   document.getElementById('update-env-name').textContent = branch;
   document.getElementById('update-env-newname').value = branch;
+  var env = cachedEnvs.find(function(e) { return e.branch === branch; });
+  _updateEnvHostnameInitial = (env && env.hostname) || '';
+  document.getElementById('update-env-hostname').value = _updateEnvHostnameInitial;
   var ta = document.getElementById('update-env-vars');
   ta.value = '';
   ta.disabled = true;
@@ -4003,6 +4059,8 @@ async function confirmUpdateEnv() {
   // Send a mapping, not the raw blob: the server must not re-split values.
   if (raw.trim() !== _updateEnvInitial.trim()) payload.env_vars = parseEnvLines(raw);
   if (newName && newName !== branch) payload.new_name = newName;
+  var hostname = document.getElementById('update-env-hostname').value.trim();
+  if (hostname && hostname !== _updateEnvHostnameInitial) payload.hostname = hostname;
   _updateEnvSeq++;
   hideModal('update-env-modal');
   setBusy(branch, payload.new_name ? 'Renaming' : 'Updating');
@@ -4263,7 +4321,7 @@ function switchTab(name) {
   if (name === 'volumes') loadVolumes();
   if (name === 'agent-guides') loadAgentGuides();
   if (name === 'extra-addons') loadExtraRepos();
-  if (name === 'credentials') { loadCredentials(); loadSecrets(); }
+  if (name === 'credentials') { loadCredentials(); loadSshKey(); loadSecrets(); }
 }
 
 async function loadTemplates() {
@@ -5103,6 +5161,7 @@ function populateTemplateSelect() {
 
 function openCreateFromTemplate(templateName) {
   var tpl = cachedTemplates.find(function(t) { return t.template_name === templateName; });
+  setCreateSourceProduction('');  // a template source clears any production source
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
@@ -5150,7 +5209,23 @@ function openCreateFromTemplate(templateName) {
   document.getElementById('cr-branch').focus();
 }
 
-function openCreateModal() {
+// Set when the create modal was opened from a production card: the environment
+// is then built from a dev copy of that production instead of a template.
+var _createFromProduction = '';
+
+function setCreateSourceProduction(name) {
+  _createFromProduction = name || '';
+  // The source is either a production or a template, never both.
+  document.getElementById('cr-from-prod-group').style.display = _createFromProduction ? '' : 'none';
+  document.getElementById('cr-template-group').style.display = _createFromProduction ? 'none' : '';
+  if (_createFromProduction) {
+    document.getElementById('cr-from-prod-name').textContent = _createFromProduction;
+    document.getElementById('cr-from-prod-template').textContent = 'prod-' + _createFromProduction;
+  }
+}
+
+function openCreateModal(fromProduction) {
+  setCreateSourceProduction(fromProduction);
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
@@ -5305,7 +5380,10 @@ async function submitCreate() {
       hostname: hostname,
       repo_url: repo,
       odoo_image: image,
-      template_name: template,
+      // A production source replaces the template: the server resolves (and
+      // publishes on first use) the managed prod-<name> template itself.
+      template_name: _createFromProduction ? '' : template,
+      from_production: _createFromProduction,
       git_user: gitUser,
       extra_addons: extraAddonsObj,
       auto_install_modules: autoInstall,
@@ -5319,8 +5397,14 @@ async function submitCreate() {
     var data = await readResult(r);
     if (r.ok && data.ok) {
       closeCreateModal();
-      showToast('Environment "' + (envName || branch) + '" created');
-      await loadEnvironments(true);
+      showToast('Environment "' + (envName || branch) + '" created' +
+        (data.from_production
+          ? ' from production "' + data.from_production + '" (template "' + data.template_name + '")'
+          : ''));
+      await Promise.all([
+        data.from_production ? loadTemplates() : Promise.resolve(),
+        loadEnvironments(true)
+      ]);
     } else {
       errEl.textContent = data.error || ('Creation failed (HTTP ' + r.status + ')');
       errEl.style.display = 'block';
@@ -5368,7 +5452,10 @@ function resetTimers() {
     loadStats();
     loadHealth();
     var prodTab = document.getElementById('tab-production');
-    if (prodTab && prodTab.classList.contains('active')) loadProductions();
+    // Skip the periodic re-render while a production Settings form has unsaved
+    // edits or focus — re-rendering would silently discard them. Manual loads
+    // (tab switch, explicit actions) still refresh normally.
+    if (prodTab && prodTab.classList.contains('active') && !_prodSettingsEditing()) loadProductions();
   }, ms);
 }
 
@@ -6753,13 +6840,88 @@ function renderCredentials(creds) {
   }).join('');
 }
 
+var cachedSshKey = '';
+
+async function loadSshKey() {
+  try {
+    var r = await fetch('/api/ssh-key');
+    var data = await readResult(r);
+    if (data.ok) {
+      renderSshKey(data);
+    } else {
+      showToast(data.error || 'Failed to load SSH key', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+function renderSshKey(data) {
+  cachedSshKey = data.public_key || '';
+  var el = document.getElementById('ssh-key-body');
+  if (!cachedSshKey) {
+    el.innerHTML = '<div class="empty">No SSH key yet. ' +
+      '<button class="btn btn-sm" onclick="generateSshKey(false)">Generate key</button></div>';
+    return;
+  }
+  el.innerHTML = '<div class="svc-card">' +
+    '<div class="svc-header">' +
+      '<div class="left">' +
+        '<span class="svc-name">id_ed25519.pub</span>' +
+        '<code style="margin-left:8px;color:var(--text-dim);">' + esc(data.fingerprint || '') + '</code>' +
+      '</div>' +
+      '<div class="svc-actions">' +
+        '<button class="btn btn-sm" onclick="copySshKey()">Copy</button>' +
+        '<button class="btn btn-delete" onclick="regenerateSshKey()">Regenerate</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="svc-meta"><code style="word-break:break-all;">' + esc(cachedSshKey) + '</code></div>' +
+  '</div>';
+}
+
+function copySshKey() {
+  if (cachedSshKey) copyToClipboard(cachedSshKey, 'Public key copied');
+}
+
+async function generateSshKey(force) {
+  try {
+    var r = await fetch('/api/ssh-key/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: !!force})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(force ? 'SSH key regenerated' : 'SSH key generated');
+      renderSshKey(data);
+    } else {
+      showToast(data.error || 'SSH key generation failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+async function regenerateSshKey() {
+  if (!(await confirmDialog({
+    title: 'Regenerate SSH key',
+    message: 'Generate a new key? The current key stops working immediately — every repository or account where it is registered will need the new public key.',
+    confirmLabel: 'Regenerate',
+    danger: true
+  }))) return;
+  await generateSshKey(true);
+}
+
 function openAddCredentialModal() {
+  document.getElementById('credential-token').value = '';
+  document.getElementById('credential-host').value = 'github.com';
+  document.getElementById('credential-username').value = '';
   document.getElementById('credential-url').value = '';
   document.getElementById('add-credential-error').style.display = 'none';
   document.getElementById('credential-submit').disabled = false;
   document.getElementById('credential-submit').innerHTML = 'Save &amp; Verify';
   showModal('add-credential-modal');
-  document.getElementById('credential-url').focus();
+  document.getElementById('credential-token').focus();
 }
 
 function closeAddCredentialModal(event) {
@@ -6768,10 +6930,18 @@ function closeAddCredentialModal(event) {
 }
 
 async function submitAddCredential() {
+  var token = document.getElementById('credential-token').value.trim();
+  var host = document.getElementById('credential-host').value.trim();
+  var username = document.getElementById('credential-username').value.trim();
   var url = document.getElementById('credential-url').value.trim();
   var errEl = document.getElementById('add-credential-error');
-  if (!url) {
-    errEl.textContent = 'Repository URL with credentials is required.';
+  if (!token) {
+    errEl.textContent = 'Access token is required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!host) {
+    errEl.textContent = 'Git host is required.';
     errEl.style.display = 'block';
     return;
   }
@@ -6783,12 +6953,15 @@ async function submitAddCredential() {
     var r = await fetch(API_CREDENTIALS + '/add', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo_url: url})
+      body: JSON.stringify({token: token, host: host, username: username, repo_url: url})
     });
     var data = await readResult(r);
     if (data.ok) {
       closeAddCredentialModal();
-      showToast('Credential saved and verified');
+      var status = data.result && data.result.status;
+      showToast(status === 'unverified'
+        ? 'Credential saved (no verification available for this host)'
+        : 'Credential saved and verified');
       await loadCredentials();
     } else {
       errEl.textContent = data.error || 'Failed to save credential';
@@ -7453,7 +7626,17 @@ console.log(
 const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
 var _prodWebhookSecret = '';
-var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | undefined
+var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | 'settings' | undefined
+// name -> true while the Settings form holds unsaved edits (set by the form's
+// oninput). The auto-refresh timer skips re-rendering the productions list
+// while any form is dirty or focused, so in-progress edits are not wiped.
+var _prodSettingsDirty = Object.create(null);
+
+function _prodSettingsEditing() {
+  var dirty = Object.keys(_prodSettingsDirty).some(function(n) { return _prodSettingsDirty[n]; });
+  var ae = document.activeElement;
+  return dirty || !!(ae && ae.closest && ae.closest('.prod-settings'));
+}
 
 function prodBadgeClass(status) {
   if (status === 'running') return 'badge-running';
@@ -7469,6 +7652,7 @@ async function loadProductions() {
     if (!data.ok) { showToast(data.error || 'Failed to load productions', true); return; }
     cachedProds = data.productions || [];
     window._prodBackupConfigured = !!data.backup_configured;
+    window._teamBaseDomain = data.base_domain || window._teamBaseDomain || '';
     _prodWebhookSecret = (data.webhook && data.webhook.secret) || '';
     var box = document.getElementById('prod-webhook-box');
     if (box) {
@@ -7507,13 +7691,20 @@ function renderProductions() {
       ? '<span>Snapshot: <strong class="prod-mono">' + esc(backup.last_snapshot_id) + '</strong></span>'
       : '<span>Snapshot: <strong>—</strong></span>';
     var open = _prodOpen[p.name];
+    // Missing key = allowed (pre-existing records, and older cached payloads).
+    var allowCopy = p.allow_copy_to_dev_mcp !== false;
     return '<div class="env-card" data-prod="' + esc(p.name) + '">' +
       '<div class="env-header">' +
         '<div class="left">' +
           '<span class="branch-name">' + esc(p.name) + '</span>' +
-          '<a class="repo-link prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
+          '<a class="prod-domain prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
+          (p.extra_domains || []).map(function(d) {
+            var scheme = (p.url || '').indexOf('http://') === 0 ? 'http' : 'https';
+            return '<a class="prod-domain prod-mono" href="' + escAttr(scheme + '://' + d) + '" target="_blank" rel="noopener">' + esc(d) + '</a>';
+          }).join('') +
           '<span class="badge ' + prodBadgeClass(p.status) + '">' + esc(p.status) + '</span>' +
           (p.auto_update ? '<span class="badge badge-neutral" title="Deploys automatically on GitHub push">auto</span>' : '') +
+          (allowCopy ? '' : '<span class="badge badge-neutral" title="Agents cannot publish new copies of this production into dev over MCP; the dashboard still can">copy off</span>') +
         '</div>' +
         '<div class="env-actions">' +
           '<button class="btn btn-sync" title="Pull the branch and deploy (failed deploys roll the code back)" onclick="prodUpdate(\'' + escAttr(p.name) + '\')">Update</button>' +
@@ -7525,12 +7716,15 @@ function renderProductions() {
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
+              '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'settings\')">Settings</button>' +
               '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'deploys\')">Deploy history</button>' +
               (window._prodBackupConfigured
                 ? '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'snapshots\')">Snapshots &amp; restore</button>'
                 : '') +
               '<button role="menuitem" onclick="prodAutoUpdate(\'' + escAttr(p.name) + '\',' + (p.auto_update ? 'false' : 'true') + ')">' +
                 (p.auto_update ? 'Disable auto-deploy' : 'Enable auto-deploy') + '</button>' +
+              '<button role="menuitem" onclick="prodSaveAsTemplate(\'' + escAttr(p.name) + '\')">Save as template</button>' +
+              '<button role="menuitem" onclick="prodCreateEnvironment(\'' + escAttr(p.name) + '\')">Create environment</button>' +
               (p.status === 'stopped'
                 ? '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'start\')">Start</button>'
                 : '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'stop\')">Stop</button>') +
@@ -7600,10 +7794,124 @@ async function _loadProdSection(name, section) {
         ? '<table><thead><tr><th>Snapshot</th><th>Created</th><th>DB size</th><th>Commit</th><th>Trigger</th><th></th></tr></thead><tbody>' + rows3 + '</tbody></table>'
         : 'No snapshots yet.') +
         '<div style="margin-top:8px"><button class="btn" onclick="prodRefreshSnapshots(\'' + escAttr(name) + '\')">Refresh from S3</button></div>';
+    } else if (section === 'settings') {
+      var r5 = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name));
+      var d5 = await readResult(r5);
+      if (!d5.ok) { el.textContent = d5.error || 'Failed to load settings'; return; }
+      _prodSettingsDirty[name] = false;  // freshly rendered from server state
+      el.innerHTML = _prodSettingsHtml(d5);
     }
   } catch (e) {
     el.textContent = 'Connection error: ' + e.message;
   }
+}
+
+// Settings panel: oduflow-level options (applied via container recreation),
+// the MCP copy gate, and per-production odoo.conf overrides.
+function _prodSettingsHtml(p) {
+  var n = escAttr(p.name);
+  var extras = formatEnvLines(p.extra_addons || {});
+  var conf = Object.keys(p.odoo_conf || {}).sort().map(function(k) {
+    return k + ' = ' + p.odoo_conf[k];
+  }).join('\n');
+  // Form values use escHtmlAttr (round-trips ' and \ unchanged); escAttr is
+  // only for the JS-string-in-attribute contexts (oninput/onclick/onchange).
+  return '<div class="prod-settings" oninput="_prodSettingsDirty[\'' + n + '\']=true">' +
+    '<div class="form-group"><label for="ps-domain-' + n + '">Domain</label>' +
+      '<input type="text" id="ps-domain-' + n + '" value="' + escHtmlAttr(p.domain || '') + '">' +
+      '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt' +
+      (window._teamBaseDomain ? '. Must be ' + esc(window._teamBaseDomain) + ' or a subdomain of it' : '') + '</div></div>' +
+    '<div class="form-group"><label for="ps-xdomains-' + n + '">Extra domains (optional, comma-separated)</label>' +
+      '<input type="text" id="ps-xdomains-' + n + '" value="' + escHtmlAttr((p.extra_domains || []).join(', ')) + '">' +
+      '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
+    '<div class="form-group"><label for="ps-image-' + n + '">Odoo image</label>' +
+      '<input type="text" id="ps-image-' + n + '" value="' + escHtmlAttr(p.odoo_image || '') + '">' +
+      '<div class="hint">Changing the image does not migrate the database</div></div>' +
+    '<div class="form-group"><label for="ps-repo-' + n + '">Repository URL</label>' +
+      '<input type="text" id="ps-repo-' + n + '" value="' + escHtmlAttr(p.repo_url || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-branch-' + n + '">Branch</label>' +
+      '<input type="text" id="ps-branch-' + n + '" value="' + escHtmlAttr(p.branch || '') + '">' +
+      '<div class="hint">Switching deploys the new branch as-is; run Update afterwards if modules need install/upgrade</div></div>' +
+    '<div class="form-group"><label for="ps-gituser-' + n + '">Git user (credential matching, optional)</label>' +
+      '<input type="text" id="ps-gituser-' + n + '" value="' + escHtmlAttr(p.git_user || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-extras-' + n + '">Extra addon repos (one per line, repo=branch)</label>' +
+      '<textarea id="ps-extras-' + n + '" rows="3">' + esc(extras) + '</textarea></div>' +
+    '<div class="form-group"><label class="select-box"><input type="checkbox" id="ps-copy-' + n + '"' +
+      (p.allow_copy_to_dev_mcp !== false ? ' checked' : '') +
+      ' onchange="prodCopyToDevMcp(\'' + n + '\', this.checked)"> ' +
+      'Agents may copy this production into dev over MCP (the dashboard is never gated)</label></div>' +
+    '<div style="margin-bottom:16px"><button class="btn btn-start" onclick="prodApplySettings(\'' + n + '\')">Apply — recreates container</button></div>' +
+    '<div class="form-group"><label for="ps-conf-' + n + '">odoo.conf overrides (one per line, key = value)</label>' +
+      '<textarea id="ps-conf-' + n + '" rows="4" placeholder="limit_time_real = 300">' + esc(conf) + '</textarea>' +
+      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*) are refused.</div></div>' +
+    '<div><button class="btn" onclick="prodSaveOdooConf(\'' + n + '\')">Save odoo.conf — restarts Odoo</button></div>' +
+  '</div>';
+}
+
+function _parseKvLines(raw, errLabel) {
+  // Null prototype, like parseEnvLines: a key literally named __proto__ must
+  // land as an own key instead of hitting the setter and vanishing.
+  var out = Object.create(null);
+  var lines = (raw || '').split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line || line.charAt(0) === '#' || line.charAt(0) === ';') continue;
+    var idx = line.indexOf('=');
+    if (idx < 1) { showToast(errLabel, true); return null; }
+    out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  }
+  return out;
+}
+
+async function prodApplySettings(name) {
+  var v = function(prefix) {
+    var e = document.getElementById(prefix + '-' + name);
+    return e ? e.value.trim() : '';
+  };
+  var extras = _parseKvLines(document.getElementById('ps-extras-' + name).value,
+    'Extra addons: each line must be repo=branch');
+  if (extras === null) return;
+  var body = {
+    domain: v('ps-domain'),
+    extra_domains: v('ps-xdomains'),
+    odoo_image: v('ps-image'),
+    repo_url: v('ps-repo'),
+    branch: v('ps-branch'),
+    git_user: v('ps-gituser'),
+    extra_addons: extras
+  };
+  if (!(await confirmDialog({
+    title: 'Reconfigure production',
+    message: 'Apply the settings to "' + name + '"? The container is recreated (brief downtime); the database and filestore are preserved.',
+    confirmLabel: 'Apply'
+  }))) return;
+  showToast('Reconfiguring "' + name + '"… this can take a minute');
+  // Clear the dirty flag before the successful save reloads the list, so the
+  // fresh form renders; restore it on failure — the unsaved edits are still
+  // in the form and must keep their auto-refresh protection.
+  _prodSettingsDirty[name] = false;
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/reconfigure', body, null);
+  if (data) {
+    showToast(data.changed && data.changed.length
+      ? 'Reconfigured "' + name + '": ' + data.changed.join(', ') +
+        (data.healthy === false ? ' — NOT healthy yet, check logs' : '')
+      : (data.message || 'No settings changed'));
+  } else {
+    _prodSettingsDirty[name] = true;
+  }
+}
+
+async function prodSaveOdooConf(name) {
+  var raw = document.getElementById('ps-conf-' + name).value;
+  var options = _parseKvLines(raw, 'odoo.conf: each line must be key = value');
+  if (options === null) return;
+  // replace: true makes the sent options the complete new override set (the
+  // server computes removals itself), so no stale client-side diffing.
+  _prodSettingsDirty[name] = false;
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/odoo-conf',
+    { options: options, replace: true },
+    'odoo.conf overrides saved for "' + name + '" (Odoo restarted)');
+  if (!data) _prodSettingsDirty[name] = true;
 }
 
 async function prodRefreshSnapshots(name) {
@@ -7613,13 +7921,16 @@ async function prodRefreshSnapshots(name) {
   } catch (e) { showToast('Connection error: ' + e.message, true); }
 }
 
-async function _prodPost(url, body, okMsg) {
+// skipReload: don't re-render the productions list on success — for controls
+// that live inside the Settings form, where a re-render would wipe the
+// surrounding unsaved edits.
+async function _prodPost(url, body, okMsg, skipReload) {
   try {
     var r = await fetch(url, body !== undefined
       ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
       : { method: 'POST' });
     var data = await readResult(r);
-    if (data.ok) { if (okMsg) showToast(okMsg); await loadProductions(); return data; }
+    if (data.ok) { if (okMsg) showToast(okMsg); if (!skipReload) await loadProductions(); return data; }
     showToast(data.error || 'Request failed', true);
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
@@ -7663,6 +7974,96 @@ function prodAutoUpdate(name, enabled) {
   _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/auto-update',
     { enabled: enabled },
     'Auto-deploy ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"');
+}
+
+async function prodCopyToDevMcp(name, enabled) {
+  // skipReload: this checkbox sits inside the Settings form; a full reload
+  // would re-render the form and wipe any other in-progress edits.
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/copy-to-dev-mcp',
+    { enabled: enabled },
+    'Agent copy to dev ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"',
+    true);
+  if (data) {
+    // Keep the cached record in sync so a later re-render shows the new state.
+    cachedProds.forEach(function(p) {
+      if (p.name === name) p.allow_copy_to_dev_mcp = enabled;
+    });
+  } else {
+    var cb = document.getElementById('ps-copy-' + name);
+    if (cb) cb.checked = !enabled;
+  }
+}
+
+// Publish a production's database + filestore as a dev template. The dashboard
+// is deliberately not gated by the production's "agent copy to dev" flag.
+async function prodSaveAsTemplate(name) {
+  var template = await promptDialog({
+    title: 'Save production as template',
+    message: 'Copy the database and filestore of "' + name + '" into a dev template. ' +
+      'The production keeps serving; the template holds UNSANITIZED production data ' +
+      '(environments created from it are sanitized). Template name:',
+    placeholder: 'prod-' + name,
+    confirmLabel: 'Save as template'
+  });
+  if (template === null) return;
+  if (!template) { showToast('Template name is required', true); return; }
+  await _prodPublishTemplate(name, template, false);
+}
+
+async function _prodPublishTemplate(name, template, overwrite) {
+  showToast('Saving production "' + name + '" as template "' + template + '"… this can take a while');
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/save-as-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_name: template, overwrite: !!overwrite })
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      var res = data.result || {};
+      var msg = 'Production "' + name + '" saved as template "' + template + '"';
+      var affected = res.affected_envs || [];
+      msg += affected.length
+        ? '. Remounted (changes preserved): ' + affected.join(', ')
+        : '. No other environments were affected.';
+      var failures = res.remount_failures || [];
+      if (failures.length) {
+        msg += ' Remount issues: ' + failures.map(function(f) {
+          return (f[0] || '') + ' — ' + (f[1] || '');
+        }).join('; ');
+      }
+      showToast(msg, failures.length > 0);
+      await loadTemplates();
+      return;
+    }
+    if (data.conflict && !overwrite) {
+      // Refreshing an existing template from the live production is the normal
+      // case for the managed prod-<name> template, so offer it instead of a
+      // dead end — but only as an explicit second choice.
+      if (await confirmDialog({
+        title: 'Template already exists',
+        message: 'Template "' + template + '" already exists. Re-baseline it from the live ' +
+          'production "' + name + '"? Environments using it are remounted onto the new ' +
+          'baseline; their own filestore changes are preserved.',
+        confirmLabel: 'Re-baseline',
+        danger: true
+      })) {
+        await _prodPublishTemplate(name, template, true);
+      }
+      return;
+    }
+    showToast(data.error || 'Save as template failed', true);
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+// Build a dev environment from a copy of this production's data. Opens the
+// normal create dialog (branch / environment name / addons) pre-wired to the
+// production; the server resolves the managed prod-<name> template.
+function prodCreateEnvironment(name) {
+  switchTab('environments');
+  openCreateModal(name);
 }
 
 async function prodDelete(name) {
@@ -7730,7 +8131,11 @@ function promptDialog(opts) {
   });
 }
 
-function openCreateProductionModal() {
+function _prodEnabled() {
+  return PROD_ENABLED;
+}
+
+function openCreateProductionModal(fromEnv) {
   var overlay = document.createElement('div');
   overlay.className = 'modal-overlay show';
   overlay.id = 'create-prod-modal';
@@ -7739,9 +8144,18 @@ function openCreateProductionModal() {
       '<div class="modal-header"><h3>Create Production</h3></div>' +
       '<div class="modal-body">' +
         '<div class="form-group"><label for="cp-name">Name</label><input type="text" id="cp-name" placeholder="erp"></div>' +
+        '<div class="form-group"><label for="cp-fromenv">Promote from environment (optional)</label>' +
+          '<input type="text" id="cp-fromenv" value="' + escHtmlAttr(fromEnv || '') + '" placeholder="empty = fresh or template seed">' +
+          '<div class="hint">Copies the environment\'s database and filestore (its Odoo briefly stops for a consistent copy); repository, branch and image default to the environment\'s</div></div>' +
         '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/org/repo.git"></div>' +
         '<div class="form-group"><label for="cp-branch">Branch</label><input type="text" id="cp-branch" placeholder="production"></div>' +
-        '<div class="form-group"><label for="cp-domain">Domain</label><input type="text" id="cp-domain" placeholder="erp.customer.com"><div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
+        '<div class="form-group"><label for="cp-domain">Domain' + (window._teamBaseDomain ? ' (optional)' : '') + '</label>' +
+          '<input type="text" id="cp-domain" placeholder="' + escHtmlAttr(window._teamBaseDomain ? 'empty = default under ' + window._teamBaseDomain : 'erp.customer.com') + '">' +
+          '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt' +
+          (window._teamBaseDomain ? '. Empty = ' + esc(window._teamBaseDomain) + ' for the first production, name.' + esc(window._teamBaseDomain) + ' after that' : '') + '</div></div>' +
+        '<div class="form-group"><label for="cp-xdomains">Extra domains (optional, comma-separated)</label>' +
+          '<input type="text" id="cp-xdomains" placeholder="erp.customer.com">' +
+          '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
         '<div class="form-group"><label for="cp-image">Odoo image</label><input type="text" id="cp-image" placeholder="odoo:18.0"></div>' +
         '<div class="form-group"><label for="cp-template">Template (optional)</label><input type="text" id="cp-template" placeholder="empty = fresh database"></div>' +
         '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-auto"> Deploy automatically on GitHub push</label></div>' +
@@ -7762,12 +8176,22 @@ async function submitCreateProduction() {
     repo_url: v('cp-repo'),
     branch: v('cp-branch'),
     domain: v('cp-domain'),
+    extra_domains: v('cp-xdomains'),
     odoo_image: v('cp-image'),
     template_name: v('cp-template'),
+    from_environment: v('cp-fromenv'),
     auto_update: document.getElementById('cp-auto').checked
   };
-  if (!body.name || !body.repo_url || !body.branch || !body.domain || !body.odoo_image) {
-    showToast('Name, repository, branch, domain and image are required', true);
+  if (!body.name || (!body.domain && !window._teamBaseDomain)) {
+    showToast(window._teamBaseDomain ? 'Name is required' : 'Name and domain are required', true);
+    return;
+  }
+  if (!body.from_environment && (!body.repo_url || !body.branch || !body.odoo_image)) {
+    showToast('Repository, branch and image are required (or promote from an environment)', true);
+    return;
+  }
+  if (body.from_environment && body.template_name) {
+    showToast('Pick either a template or an environment to seed from, not both', true);
     return;
   }
   showToast('Creating production "' + body.name + '"… this can take a few minutes');

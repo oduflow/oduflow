@@ -89,6 +89,14 @@ Dynamic Client Registration (`/register`) is **disabled** — clients must use t
 
 The issued access token is an independent, expiring token bound to that team (not the `auth_token`), so each team's claude.ai connector ends up scoped to its own workspaces, templates, and credentials while Claude never stores the master secret. Claude.ai transparently uses its refresh token to obtain a new access token when the old one expires; the connection also survives an Oduflow restart because minted tokens are persisted.
 
+### Connecting from Claude Desktop
+
+Claude Desktop does **not** use this OAuth flow — it can only start MCP servers
+as local processes. Connect it through the `mcp-remote` stdio bridge with the
+team's `auth_token` as a plain Bearer header; the full
+`claude_desktop_config.json` example is in
+[Quick Start → Claude Desktop](quick-start.md#claude-desktop-remote-server-via-mcp-remote).
+
 ### Bearer-only mode (CLI / automation)
 
 For curl, IDE clients, or anything that doesn't need OAuth, simply send the `auth_token` as a Bearer header:
@@ -259,11 +267,22 @@ Private repository credentials are stored in the git credential store at `{team_
 ### Managing credentials via MCP
 
 ```bash
-# Store credentials for a private repository
+# Store a personal access token for a git host (verified with git ls-remote against repo_url)
+oduflow call setup_repo_auth '{"repo_url": "https://github.com/owner/private-repo.git", "token": "ghp_..."}'
+
+# Host only — verified against the provider API (GitHub, GitLab, Bitbucket)
+oduflow call setup_repo_auth '{"host": "github.com", "token": "ghp_..."}'
+
+# Legacy inline form
 oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git
 ```
 
-The tool parses the URL, stores the credentials, and verifies access by running `git ls-remote`.
+Git matches stored credentials by host and username, not by repository, so a
+single token covers every repository on that host. `username` is optional (it
+defaults to `x-access-token`; GitHub, GitLab and Azure DevOps accept any name
+with a token) and only has to be the real account name for Bitbucket app
+passwords. Use different usernames to keep several tokens for one host; storing
+again with the same username replaces the token.
 
 ### Managing credentials via REST API and Web Dashboard
 
@@ -272,11 +291,36 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 | Action | REST API |
 |---|---|
 | **List** all stored credentials | `GET /api/credentials` |
-| **Add** credentials for a repository | `POST /api/credentials/add` (body: `repo_url`) |
+| **Add** a credential for a git host | `POST /api/credentials/add` (body: `token`, `host` = `github.com`, optional `username`, optional `repo_url` to verify against; legacy: `repo_url` with inline `user:PAT@`) |
 | **Delete** a stored credential | `POST /api/credentials/delete` (body: `host`, `username`) |
 | **Validate** a credential against the provider | `POST /api/credentials/validate` (body: `host`, `username`) |
 
 Validation checks the credential against the provider's API (GitHub, GitLab, Bitbucket). For other hosts, it reports `"valid"` if the credential exists. Tokens are always masked in API responses (e.g. `ghp_****`).
+
+### SSH deploy key
+
+As an alternative to tokens, each team has an SSH deploy key: an ed25519
+keypair generated automatically at server start and stored at
+`{team_data_dir}/ssh/id_ed25519` with owner-only permissions. The dashboard's
+**Credentials** tab, `GET /api/ssh-key`, and the `get_ssh_public_key` MCP tool
+expose only the public key. Register it with your git hosting (repository
+deploy key or machine-user key) and SSH repository URLs
+(`git@github.com:owner/repo.git`) work for environments, extra addon repos and
+productions.
+
+Like the team's git credential store, the private key is also provisioned
+into the team's coding-agent container so agent-side clones work over SSH.
+Anyone who can drive that agent — including a visitor holding a scoped
+environment share link, via Agent Chat — can therefore read it. Treat the
+deploy key as a team-level credential: prefer registering it read-only and
+per-repository, and regenerate it when a share should no longer grant repo
+access.
+
+Git runs SSH with `BatchMode=yes` (it can never block on a prompt) and
+`StrictHostKeyChecking=accept-new` with a per-team `known_hosts` file, so a
+host key is pinned on first contact and a later change is refused.
+`POST /api/ssh-key/generate` with `{"force": true}` regenerates the keypair;
+the old key stops working everywhere it was registered.
 
 ## Secrets for Environment Variables
 

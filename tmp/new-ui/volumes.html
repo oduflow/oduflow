@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Volumes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-plus"><path d="M5 12h14"/><path d="M12 5v14"/></g>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+    <div class="hdr-sep"></div>
+    <div class="stats"><span>cpu <b>34%</b></span><span>ram <b>21/64G</b></span><span>load <b>1.84</b></span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab active">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head">
+    <h1>Volumes</h1>
+    <span class="count">2 volumes</span>
+    <span class="spacer"></span>
+    <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plus"/></svg>Create volume</button>
+  </div>
+
+  <div class="cards">
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">fs-sounds</h2>
+        <span class="badge running">in use</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn" disabled title="Detach from fs first">Delete</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">docker name</span><span class="v">oduflow-vol-fs-sounds</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">used by</span><span class="v">fs</span></div>
+        <div class="kv" style="grid-column: span 2"><span class="k">description</span><span class="v dim">FreeSWITCH sound prompts, 8k/16k/32k/48k rates</span></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row1">
+        <h2 class="title">pgadmin-data</h2>
+        <span class="badge stopped">unused</span>
+        <span class="spacer"></span>
+        <div class="actions">
+          <button class="btn">Delete</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="kv"><span class="k">docker name</span><span class="v">oduflow-vol-pgadmin-data</span><svg class="copy" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg></div>
+        <div class="kv"><span class="k">used by</span><span class="v dim">—</span></div>
+        <div class="kv" style="grid-column: span 2"><span class="k">description</span><span class="v dim">pgAdmin config and sessions</span></div>
+      </div>
+    </article>
+  </div>
+</main>
+
+</body>
+</html>

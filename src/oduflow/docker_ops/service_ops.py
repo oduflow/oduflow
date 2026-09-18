@@ -15,6 +15,11 @@ from oduflow.docker_ops.client import (
     docker_operation_error,
     get_client,
 )
+from oduflow.domains import (
+    assert_public_hostname_free,
+    service_hostname,
+    service_parent_domain,
+)
 from oduflow.errors import (
     ConflictError,
     FlowError,
@@ -438,10 +443,11 @@ def create_service(
         run_kwargs["network"] = team_network
 
     if settings.routing_mode == "traefik":
-        if not hostname:
-            hostname = f"{name}.{team.hostname}"
-        elif "." not in hostname:
-            hostname = f"{hostname}.{team.hostname}"
+        # Short names attach to the team zone (base_domain) when configured,
+        # else legacy-nest under the team hostname; a dotted value is a full
+        # FQDN used as-is. Either way the final name must be free in the
+        # global Host() namespace.
+        hostname = service_hostname(team, name, hostname)
         # The hostname lands verbatim in a Traefik `Host(...)` router rule.
         # Without this a tenant value like `foo`) || Host(`victim.example.com`
         # would inject a second rule and hijack another team's hostname. Reject
@@ -449,6 +455,18 @@ def create_service(
         # update_service recreates via create_service, so this also guards
         # hostname_override.
         hostname = validate_domain(hostname)
+        assert_public_hostname_free(
+            settings,
+            hostname,
+            own_team=team.team_id,
+            # With `routes` no catch-all router is created, only
+            # Host() && PathPrefix() ones, so a path-routed service may share
+            # the team dashboard host — that is the documented way to publish
+            # a URL prefix next to the dashboard.
+            allow_own_team_host=bool(routes),
+            exclude_service=name,
+            purpose=f"the hostname of service '{name}'",
+        )
         labels["traefik.enable"] = "true"
         if routes:
             labels[_HTTP_ROUTES_LABEL] = json.dumps(
@@ -497,7 +515,7 @@ def create_service(
             else:
                 # Upstream terminates TLS (e.g. Cloudflare tunnel): plain HTTP on
                 # the web entrypoint. The public URL below keeps the upstream's
-                # scheme (settings.public_scheme), not this entrypoint's.
+                # scheme (settings.public_scheme_for(team)), not this entrypoint's.
                 labels[f"traefik.http.routers.{container_name}.entrypoints"] = "web"
             if host_mode:
                 labels[
@@ -508,11 +526,11 @@ def create_service(
                     f"traefik.http.services.{container_name}.loadbalancer.server.port"
                 ] = str(port)
                 labels["traefik.docker.network"] = team_network
-        url = f"{settings.public_scheme}://{hostname}"
+        url = f"{settings.public_scheme_for(team)}://{hostname}"
     else:
         if not host_mode:
             run_kwargs["ports"] = {f"{port}/tcp": port}
-        url = f"{settings.public_scheme}://{team.hostname}:{port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"
 
     if resolved_env:
         run_kwargs["environment"] = resolved_env
@@ -568,7 +586,7 @@ def create_service(
             port,
             hostname=hostname,
             env_vars=env_vars,
-            base_hostname=team.hostname,
+            base_hostname=service_parent_domain(team),
             host_mode=host_mode,
             volumes=volumes,
             cap_add=cap_add,
@@ -587,7 +605,7 @@ def create_service(
         "url": url,
         "host_mode": host_mode,
         "command": list(command or []),
-        "routes": _routes_with_urls(routes, hostname, settings.public_scheme),
+        "routes": _routes_with_urls(routes, hostname, settings.public_scheme_for(team)),
     }
 
 
@@ -766,7 +784,7 @@ def _describe_service_container(
         match = re.search(r"Host\(`([^`]+)`\)", rule_value)
         if match:
             hostname = match.group(1)
-            url = f"{settings.public_scheme}://{hostname}"
+            url = f"{settings.public_scheme_for(team)}://{hostname}"
 
         if routes:
             port_num = None
@@ -793,7 +811,7 @@ def _describe_service_container(
             except Exception:
                 pass
             if port_num:
-                url = f"{settings.public_scheme}://{team.hostname}:{port_num}"
+                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port_num}"
         else:
             ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
             if ports_dict:
@@ -805,7 +823,7 @@ def _describe_service_container(
                         for mapping in mappings:
                             host_port = mapping.get("HostPort")
                             if host_port:
-                                url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+                                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
                                 break
                     break  # only process first port entry
 
@@ -842,7 +860,7 @@ def _describe_service_container(
         "port": port_num,
         "hostname": hostname,
         "url": url,
-        "routes": _routes_with_urls(routes, hostname, settings.public_scheme),
+        "routes": _routes_with_urls(routes, hostname, settings.public_scheme_for(team)),
         "env_vars": env_vars,
         "image_env_vars": image_env_vars,
         "host_mode": is_host_mode,
@@ -1176,10 +1194,7 @@ def update_service(
     # stopped and removed below — a rejected hostname there would leave the
     # service deleted instead of unchanged. Same resolution as create_service.
     if settings.routing_mode == "traefik":
-        candidate_host = hostname or f"{name}.{team.hostname}"
-        if "." not in candidate_host:
-            candidate_host = f"{candidate_host}.{team.hostname}"
-        validate_domain(candidate_host)
+        validate_domain(service_hostname(team, name, hostname))
 
     # Determine the image to pull (override or current)
     target_image = image_override if image_override else old_image
@@ -1225,12 +1240,10 @@ def update_service(
         logger.info("No changes for service %s: %s", name, new_digest[:19])
         # Compute URL for return
         if settings.routing_mode == "traefik":
-            h = hostname or f"{name}.{team.hostname}"
-            if "." not in h:
-                h = f"{h}.{team.hostname}"
-            url = f"{settings.public_scheme}://{h}"
+            h = service_hostname(team, name, hostname)
+            url = f"{settings.public_scheme_for(team)}://{h}"
         else:
-            url = f"{settings.public_scheme}://{team.hostname}:{port}"
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"
         return {
             "name": name,
             "container_name": container_name,
@@ -1245,7 +1258,7 @@ def update_service(
             "routes": _routes_with_urls(
                 routes,
                 h if settings.routing_mode == "traefik" else None,
-                settings.public_scheme,
+                settings.public_scheme_for(team),
             ),
         }
 

@@ -276,3 +276,91 @@ class TestManualRollback:
         ):
             with pytest.raises(NotFoundError, match="not found"):
                 production_ops.rollback_production(settings, team, "erp", "0" * 40)
+
+
+class TestProductionDatabaseRouting:
+    def test_upgrade_preflight_uses_production_cluster(self, settings, team, prod_repo):
+        from oduflow.docker_ops import odoo_ops
+
+        client = MagicMock()
+        database = MagicMock()
+        database.exec_run.return_value = (0, b"name,state\noduflow,installed\n")
+        client.containers.get.return_value = database
+        container = _container()
+
+        def fake_pull(scoped, selected_team, env_name, **kwargs):
+            assert scoped is not settings
+            assert scoped.shared_db_container == settings.prod_db_container
+            assert selected_team is team
+            assert env_name == "prod-erp"
+            assert kwargs["upgrade"] == ["oduflow"]
+            odoo_ops._require_upgradeable_modules(
+                scoped, selected_team, env_name, ("oduflow",)
+            )
+            return {
+                "action": "upgrade",
+                "exit_code": 0,
+                "modules_upgraded": ["oduflow"],
+            }
+
+        with (
+            patch.object(production_ops, "get_client", return_value=client),
+            patch.object(production_ops, "_require_container", return_value=container),
+            patch.object(production_ops, "wait_production_healthy", return_value=True),
+            patch("oduflow.docker_ops.env_ops.pull_environment", side_effect=fake_pull),
+            patch.object(odoo_ops, "get_client", return_value=client),
+            patch.object(
+                odoo_ops, "load_credentials", return_value={"pg_user": "u_1_prod-erp"}
+            ),
+        ):
+            result = production_ops.update_production(
+                settings, team, "erp", upgrade=["oduflow"]
+            )
+
+        assert result["action"] == "upgrade"
+        client.containers.get.assert_called_once_with(settings.prod_db_container)
+        command = database.exec_run.call_args.args[0]
+        assert command[command.index("-U") + 1] == "u_1_prod-erp"
+        assert command[command.index("-d") + 1] == "oduflow_1_prod-erp"
+        assert settings.shared_db_container == "oduflow-db"
+
+    @pytest.mark.parametrize("healthy", [True, False])
+    def test_exception_after_pull_rolls_back_code(
+        self, settings, team, prod_repo, healthy
+    ):
+        from oduflow.errors import ExternalCommandError
+        from oduflow.git_ops import reset_hard
+
+        repo_path, old_head, new_head = prod_repo
+        reset_hard(repo_path, old_head)
+        container = _container()
+
+        def fake_pull(*args, **kwargs):
+            reset_hard(repo_path, new_head)
+            raise ExternalCommandError("psql", 2, "fixture preflight failure")
+
+        with (
+            patch.object(production_ops, "get_client", return_value=MagicMock()),
+            patch.object(production_ops, "_require_container", return_value=container),
+            patch("oduflow.docker_ops.env_ops.pull_environment", side_effect=fake_pull),
+            patch.object(
+                production_ops, "wait_production_healthy", return_value=healthy
+            ),
+            patch.object(production_ops, "reapply_prod_odoo_conf", return_value=True),
+        ):
+            result = production_ops.update_production(
+                settings, team, "erp", upgrade=["oduflow"]
+            )
+
+        assert result["action"] == ("rolled_back" if healthy else "rollback_failed")
+        assert rev_parse(repo_path) == old_head
+        assert result["failed_commit"] == new_head
+        assert result["exit_code"] == 1
+        assert "fixture preflight failure" in result["output"]
+        record = production_registry.get_production(team, "erp")
+        assert record["deploy_in_progress"] is False
+        assert record["unhealthy"] is not healthy
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["from_commit"] == old_head
+        assert deploy["to_commit"] == new_head
+        container.restart.assert_called_once()

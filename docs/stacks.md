@@ -1,8 +1,8 @@
 # Declarative Stacks
 
 An Oduflow Stack is a versioned YAML manifest describing the complete desired
-state of one development environment and its supporting resources. It keeps the
-host-level `oduflow.toml` separate from project configuration: teams, routing,
+state of one development environment or production and its supporting resources.
+It keeps the host-level `oduflow.toml` separate from project configuration: teams, routing,
 authentication, quotas, and backups remain operator settings, while the Stack
 file can live beside the project's code and move between Oduflow installations.
 
@@ -19,7 +19,9 @@ oduflow stack status oduflow.yaml --team 1
 live state without changing it. `apply` validates and plans again under the
 team lock, refuses all conflicts before creating anything, and then converges
 resources in dependency order. `status` emits JSON containing the current plan
-and last successful apply record.
+and last successful apply record. `plan`, `apply`, and `status` also accept
+`--env-file` to supply `fromEnv` values from a dotenv file; see
+[Secrets from a `.env` file](#secrets-from-a-env-file).
 
 To reconcile before the MCP server accepts clients:
 
@@ -124,6 +126,31 @@ ESL_PASSWORD:
   fromEnv: FS_ESL_PASSWORD
 ```
 
+### Secrets from a `.env` file
+
+`fromEnv` values do not have to come from exported shell variables. If a
+`.env` file sits next to the manifest, `stack plan`, `stack apply`,
+`stack status`, and the `--stack` startup reconciliation parse it and use it
+for `fromEnv` lookups. Pass `--env-file path/to/file` to read a different
+file instead; an explicitly named file must exist.
+
+```dotenv
+# .env — keep this file out of version control
+FS_ESL_PASSWORD=s3cret
+export ACME_PRIVATE_API_KEY="matching surrounding quotes are stripped"
+```
+
+The format is deliberately dumb: `KEY=VALUE` lines, blank lines and `#`
+comments, an optional `export ` prefix. There is no `${VAR}` interpolation,
+no escape processing, and no multi-line values; malformed lines and duplicate
+keys are rejected. Real process environment variables override file values,
+so CI can override a checked-in default without editing the file.
+
+The file only feeds `fromEnv:` references. It never defines container
+variables by itself, is never persisted anywhere, and never enters the
+manifest hash. Add `.env` to `.gitignore`: it is the one file in a stack
+directory meant to hold secrets.
+
 Or a service can consume a value generated for the Stack's Odoo environment:
 
 ```yaml
@@ -217,3 +244,80 @@ hooks, dashboard controls, and OCI distribution are intentionally deferred.
 
 Service definitions also accept the explicit [`runtime` lifecycle mapping](services.md#container-lifecycle-settings).
 Stack planning detects changes to it and replacement preserves the declared settings.
+
+## Production targets
+
+Use `spec.production` instead of `spec.environment` for a long-lived production.
+Exactly one target is required. The host must have `[production] enabled = true`
+and Traefik routing. Production databases use the dedicated production cluster;
+auxiliary `spec.databases` still use the shared service database cluster.
+
+```yaml
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: control
+spec:
+  production:
+    name: control
+    domain: demo.example.org
+    repoUrl: https://github.com/acme/control.git
+    branch: production
+    odooImage: odoo:19.0
+    autoUpdate: false
+    allowCopyToDevMcp: false
+    env:
+      APP_KEY: secret:control-key
+    odooConf:
+      workers: "2"
+  services:
+    gateway:
+      image: acme/gateway:1
+      port: 8080
+      env:
+        ODOO_URL:
+          productionField: url
+        ODOO_HOST:
+          productionField: containerName
+```
+
+`productionField` supports `url`, `containerName` and `database`. Productions do
+not have a development scoped MCP token; `environmentField` is rejected with a
+production target. Production variables accept literals, `fromEnv` and `secret:`
+references. Target variables cannot reference their own target or a service DB.
+Named secret references remain references in the production registry.
+
+A fresh production is created through the normal production lifecycle. Optional
+`template` seeds it once. Stack does not promote or stop an existing development
+environment. Use the production promotion API first if existing data must move.
+Modules and application revisions are delivered through `update_production`;
+Stack reconciliation does not pull branch commits or run schema migrations.
+
+### Bringing an existing production under Stack management
+
+First describe the existing production exactly, including its domain, source,
+image, environment variables, extra repositories, update policy, copy policy and
+configuration overrides. Add `adoptExisting: true`, then review `stack plan`.
+`adopt production` records ownership in `productions.json` without restarting
+Odoo or copying its database/filestore. An absent production, configuration drift,
+a stopped/missing/foreign container, another Stack owner or an active deploy
+blocks adoption. Remove `adoptExisting` after adoption if desired; doing so does
+not trigger an update. The flag never creates a missing production.
+
+Owned productions reconcile domain, image, variables, update/copy policies and
+`odooConf` overrides through production operations. Image/domain/environment/conf
+changes can restart Odoo; database and filestore persist. Major Odoo version
+changes still require a separate migration. Source repository, branch, git user,
+extra repositories and seed-template changes are conflicts: use an explicit
+production workflow for these changes instead of silently running different code.
+
+Ownership lives in registry metadata, so container replacement retains it.
+Stack holds the production lock as well as the team lock. It records an incomplete
+apply before mutation and a completed fingerprint only after success; a retry
+cannot mistake updated registry intent for a successfully replaced container.
+`plan` and `status` remain read-only. A repeated successful apply is a no-op.
+
+Service and volume ownership rules remain unchanged. Auxiliary resources managed
+outside a Stack must remain outside its manifest; production adoption does not
+implicitly adopt those resources. Removing declarations never deletes resources,
+including a retained dev environment from a previous deployment layout.

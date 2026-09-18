@@ -181,7 +181,8 @@ mode = "port"               # "port" (direct host port) | "traefik" (reverse pro
 # acme_email = "admin@example.com"  # required when mode = "traefik" and tls = true
 # tls = true                # traefik only. false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)
 # public_scheme = "https"   # scheme of the URLs Oduflow hands out. Default: https (traefik) / http (port).
-                            # Set "http" with tls = false when nothing terminates TLS in front
+                            # Set "http" with tls = false when nothing terminates TLS in front.
+                            # Overridable per team ([team.X] public_scheme) for mixed deployments
 
 # ── Extra routes (Traefik only) ───────────────────────
 # [route.legacy-api]
@@ -203,6 +204,7 @@ overlay_threshold_mb = 50            # template filestore size threshold (MB) �
 [lifecycle]
 auto_stop_hours = 48        # auto-stop environments idle for N hours (no MCP/dashboard work); 0 disables
 auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 disables (opt-in; DESTRUCTIVE, protected envs exempt)
+prod_purge_hours = 0        # purge DB/files kept by a production deletion after N hours; 0 disables (opt-in; DESTRUCTIVE)
 
 # ── Coding agent (optional) ───────────────────────────
 # One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven
@@ -240,6 +242,8 @@ auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 di
 [team.1]
 hostname = "localhost"               # required and unique; OAuth issuer host for this team
                                      # port mode: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
+# base_domain = "demo.example.com"   # team DNS zone (traefik mode): envs/services live at {name}.{base_domain},
+                                     # hostname defaults to oduflow.{base_domain}, productions default into the zone
 environment_slots = 20               # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                   # maximum managed auxiliary services; 0 = unlimited
@@ -286,7 +290,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[routing].mode` | `port` | `port` — direct host port mapping; `traefik` — reverse proxy with auto-HTTPS |
 | `[routing].acme_email` | *(empty)* | Let's Encrypt email for TLS certificates. Required when `mode = "traefik"` and `tls = true` |
 | `[routing].tls` | `true` | Traefik only. `true`: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). `false`: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay `https://` either way unless `public_scheme` says otherwise |
-| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 |
+| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 (unless a per-team override still resolves to `https`). Overridable per team with `[team.X] public_scheme` |
 
 ### Database settings
 
@@ -304,6 +308,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
+| `[lifecycle].prod_purge_hours` | `0` | Purge the database and workspace kept by `delete_production` N hours after the deletion (tombstoned leftovers only; a re-created production is never purged). Default `0` = **disabled** — leftovers are kept forever; `oduflow cleanup --purge-deleted-productions --force` purges them immediately |
 
 ### Agent settings
 
@@ -354,6 +359,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | Key | Default | Description |
 |---|---|---|
 | `hostname` | *(required)* | Unique team hostname and host-relative OAuth identity. In port mode environment URLs use `http://{hostname}:{port}`; in traefik mode they use `https://{slug}.{hostname}`. Behind Cloudflare Tunnel, publish this same hostname and use split DNS for direct LAN access when needed |
+| `base_domain` | *(empty — legacy layout)* | The team's DNS zone (traefik mode only), e.g. `demo.example.com`. When set, environments and services get hostnames directly under it (`feature.demo.example.com`), `hostname` defaults to `oduflow.{base_domain}` (the dashboard), and production domains must be the zone apex or a subdomain of it (the apex is the default for the team's first production; client-owned domains go in a production's `extra_domains`). The zone is exclusive: another team's hostname or base_domain may not live inside it. Requires `*.{base_domain}` DNS pointing at this server. Existing environments move into the zone on their next update |
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
@@ -364,6 +370,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
 | `db_quota_gb` | `50` | Combined size cap for the team's environment and template PostgreSQL databases. `0` disables the check |
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
+| `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
 | `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
 
