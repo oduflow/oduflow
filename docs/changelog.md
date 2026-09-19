@@ -10,7 +10,9 @@
   (database-only), or `refresh=true` with no source to reload the template
   from files already placed in its directory (an external rsync/scp drop).
 - **Raw-layout import from S3 or a local path** — a `dump.pgdump`/
-  `dump.sql[.gz]` plus an as-is `filestore/` copy (e.g. uploaded with
+  `dump.sql[.gz]` (the hand-made `db.dump`/`db.dump.gz` names are accepted
+  too, installed under the canonical name; canonical wins when both are
+  present) plus an as-is `filestore/` copy (e.g. uploaded with
   `aws s3 sync`), imported without a master password or archiving. S3
   downloads run in parallel and resume after interruption; local files are
   hardlinked (near-instant on the same filesystem). Nothing touches the live

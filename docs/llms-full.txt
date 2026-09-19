@@ -1655,9 +1655,12 @@ dump and a one-to-one filestore copy to any S3-compatible bucket and import
 straight from it. No Odoo master password, no ZIP packing on the source, no
 double disk space.
 
-Expected layout under the prefix — exactly one dump file (`dump.pgdump`,
-`dump.sql`, `dump.sql.gz`, or `dump.pgdump.gz`) plus an optional `filestore/`
-tree:
+Expected layout under the prefix — a dump file (`dump.pgdump`, `dump.sql`,
+`dump.sql.gz`, `dump.pgdump.gz`; the hand-made `db.dump` / `db.dump.gz` names
+are accepted too and installed under the canonical name) plus an optional
+`filestore/` tree. If several dump candidates are present, the same
+precedence as the template directory applies: canonical names win over
+`db.dump`:
 
 ```
 s3://mybucket/backups/mydb/

@@ -54,8 +54,13 @@ from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
-# Same names, same precedence as TeamSettings.get_template_sql_path.
+# The canonical dump names Oduflow itself writes (targets, stale cleanup).
 _DUMP_NAMES = ("dump.pgdump", "dump.sql", "dump.pgdump.gz", "dump.sql.gz")
+# Accepted at a source root, in resolution order — the same precedence as
+# TeamSettings.get_template_sql_path: canonical names outrank the hand-made
+# ``db.dump`` convention, so a mirrored template directory imports the dump
+# Oduflow itself persisted, not an operator leftover.
+_SOURCE_DUMP_NAMES = _DUMP_NAMES + ("db.dump", "db.dump.gz")
 _FILESTORE_PREFIX = "filestore/"
 _DOWNLOAD_WORKERS = 8
 # Free-disk reserve required on top of the planned fetch volume.
@@ -64,7 +69,7 @@ _DISK_RESERVE_BYTES = 1024**3
 
 @dataclass
 class _SourceDump:
-    name: str  # target file name (one of _DUMP_NAMES)
+    name: str  # file name at the source (one of _SOURCE_DUMP_NAMES)
     key: str  # S3 key or absolute local path
     size: int
     # Change-detection token: S3 ETag, or "local:<size>:<mtime_ns>". Stored
@@ -164,7 +169,7 @@ def _list_s3_source(client: Any, bucket: str, prefix: str) -> _SourceListing:
             if not rel or rel.endswith("/"):
                 continue  # zero-byte directory markers
             size = int(obj.get("Size", 0))
-            if rel in _DUMP_NAMES:
+            if rel in _SOURCE_DUMP_NAMES:
                 lm = obj.get("LastModified")
                 dumps[rel] = _SourceDump(
                     name=rel,
@@ -186,11 +191,13 @@ def _list_s3_source(client: Any, bucket: str, prefix: str) -> _SourceListing:
     if not dumps and not filestore:
         raise NotFoundError(
             f"No objects found under {source}. Expected layout: one of "
-            f"{', '.join(_DUMP_NAMES)} at the prefix root plus an optional "
-            "filestore/ tree next to it."
+            f"{', '.join(_SOURCE_DUMP_NAMES)} at the prefix root plus an "
+            "optional filestore/ tree next to it."
         )
-    _require_single_dump(dumps, source, sorted(root_entries))
-    return _SourceListing(dump=next(iter(dumps.values())), filestore=filestore)
+    return _SourceListing(
+        dump=_select_dump(dumps, source, sorted(root_entries)),
+        filestore=filestore,
+    )
 
 
 def _local_dump_token(path: str) -> str:
@@ -215,7 +222,7 @@ def _list_local_source(source_dir: str) -> _SourceListing:
     dumps: dict[str, _SourceDump] = {}
     root_entries: list[str] = []
     for entry in sorted(os.listdir(source_dir)):
-        if entry in _DUMP_NAMES:
+        if entry in _SOURCE_DUMP_NAMES:
             dumps[entry] = _local_source_dump(os.path.join(source_dir, entry), entry)
         elif entry != "filestore":
             root_entries.append(entry)
@@ -230,26 +237,55 @@ def _list_local_source(source_dir: str) -> _SourceListing:
     if not dumps and not filestore:
         raise NotFoundError(
             f"No importable files found in {source_dir}. Expected layout: one "
-            f"of {', '.join(_DUMP_NAMES)} plus an optional filestore/ tree."
+            f"of {', '.join(_SOURCE_DUMP_NAMES)} plus an optional filestore/ "
+            "tree."
         )
-    _require_single_dump(dumps, source_dir, root_entries)
-    return _SourceListing(dump=next(iter(dumps.values())), filestore=filestore)
+    return _SourceListing(
+        dump=_select_dump(dumps, source_dir, root_entries), filestore=filestore
+    )
 
 
-def _require_single_dump(
+def _select_dump(
     dumps: dict[str, _SourceDump], source: str, other_entries: list[str]
-) -> None:
+) -> _SourceDump:
+    """Pick the dump to import, by the template resolver's precedence.
+
+    Several candidates are legal — a mirrored template directory can carry a
+    canonical dump next to a hand-placed ``db.dump`` — and resolve exactly
+    like the template directory itself would: canonical names win.
+    """
     if not dumps:
         found = ", ".join(other_entries) or "only filestore/"
         raise PrerequisiteNotMetError(
-            f"No database dump found under {source}: expected exactly one of "
-            f"{', '.join(_DUMP_NAMES)} at the source root (found: {found})."
+            f"No database dump found under {source}: expected one of "
+            f"{', '.join(_SOURCE_DUMP_NAMES)} at the source root "
+            f"(found: {found})."
         )
-    if len(dumps) > 1:
-        raise PrerequisiteNotMetError(
-            f"Multiple database dumps found under {source}: "
-            f"{', '.join(sorted(dumps))}. Keep exactly one."
-        )
+    for name in _SOURCE_DUMP_NAMES:
+        if name in dumps:
+            ignored = sorted(set(dumps) - {name})
+            if ignored:
+                logger.warning(
+                    "Multiple dump candidates under %s: importing %s "
+                    "(template-resolver precedence), ignoring %s",
+                    source,
+                    name,
+                    ", ".join(ignored),
+                )
+            return dumps[name]
+    raise AssertionError("unreachable: dumps keyed by _SOURCE_DUMP_NAMES")
+
+
+def _canonical_dump_name(name: str) -> str:
+    """Target file name for a source dump.
+
+    ``db.dump`` names carry no format information — reload detects text vs
+    binary from the content — so they install under the canonical
+    custom-format name; only the meaningful ``.gz`` suffix is preserved.
+    """
+    if name in _DUMP_NAMES:
+        return name
+    return "dump.pgdump.gz" if name.endswith(".gz") else "dump.pgdump"
 
 
 def _sniff_dump_name(path: str) -> str:
@@ -536,15 +572,20 @@ def _promote_and_reload(
 
 
 def _stage_dump_check(staging: str, dump: _SourceDump) -> tuple[str, bool]:
-    """Return (staged dump path, whether it still needs fetching)."""
-    staged_dump = os.path.join(staging, dump.name)
+    """Return (staged dump path, whether it still needs fetching).
+
+    The dump stages under its canonical target name, so a ``db.dump``
+    source never installs a non-canonical file into the template.
+    """
+    target_name = _canonical_dump_name(dump.name)
+    staged_dump = os.path.join(staging, target_name)
     needed = not (
         os.path.isfile(staged_dump) and os.path.getsize(staged_dump) == dump.size
     )
     if needed:
         # Drop stale staged dumps under other names so exactly one survives.
         for name in _DUMP_NAMES:
-            if name == dump.name:
+            if name == target_name:
                 continue
             for stale in (
                 os.path.join(staging, name),
@@ -682,7 +723,7 @@ def import_from_s3_prefix(
         staging_fs=staging_fs,
         syncing_filestore=bool(remote_fs),
         reload_db=reload_db,
-        dump_name=dump.name,
+        dump_name=_canonical_dump_name(dump.name),
         metadata=metadata,
         overwrite=overwrite,
     )
@@ -780,7 +821,7 @@ def import_from_local_path(
         staging_fs=staging_fs,
         syncing_filestore=bool(remote_fs),
         reload_db=reload_db,
-        dump_name=dump.name,
+        dump_name=_canonical_dump_name(dump.name),
         metadata=metadata,
         overwrite=overwrite,
     )

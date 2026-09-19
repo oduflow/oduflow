@@ -305,20 +305,54 @@ def test_missing_dump_is_rejected(monkeypatch, tmp_path):
         )
 
 
-def test_multiple_dumps_are_rejected(monkeypatch, tmp_path):
+def test_canonical_dump_outranks_db_dump(monkeypatch, tmp_path):
+    # Same precedence as get_template_sql_path: a mirrored template dir may
+    # carry a hand-placed db.dump next to the canonical dump Oduflow wrote.
+    team, settings = _team_and_settings(tmp_path)
+    fake, _reload = _patch_s3_import(
+        monkeypatch,
+        {
+            "backups/acme/dump.pgdump": b"canonical",
+            "backups/acme/db.dump": b"hand-placed leftover",
+        },
+    )
+
+    result = template_import.import_from_s3_prefix(
+        settings, team, url="s3://bucket/backups/acme", template_name="acme"
+    )
+
+    assert result["source_db"] == "dump.pgdump"
+    assert "backups/acme/db.dump" not in fake.downloads
+
+
+def test_db_dump_source_installs_under_canonical_name(monkeypatch, tmp_path):
     team, settings = _team_and_settings(tmp_path)
     _patch_s3_import(
         monkeypatch,
         {
-            "backups/acme/dump.pgdump": b"one",
-            "backups/acme/dump.sql.gz": b"two",
+            "backups/acme/db.dump": b"PGDMP hand-made dump",
+            "backups/acme/filestore/ab/abcdef01": b"file-one",
         },
     )
 
-    with pytest.raises(PrerequisiteNotMetError, match="Multiple database dumps"):
-        template_import.import_from_s3_prefix(
-            settings, team, url="s3://bucket/backups/acme", template_name="acme"
-        )
+    result = template_import.import_from_s3_prefix(
+        settings, team, url="s3://bucket/backups/acme", template_name="acme"
+    )
+
+    # Recorded as it was named at the source, installed canonically.
+    assert result["source_db"] == "db.dump"
+    assert os.path.basename(team.get_template_sql_path("acme")) == "dump.pgdump"
+
+
+def test_db_dump_gz_keeps_gz_suffix(monkeypatch, tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    _patch_s3_import(monkeypatch, {"backups/acme/db.dump.gz": b"\x1f\x8bgz"})
+
+    template_import.import_from_s3_prefix(
+        settings, team, url="s3://bucket/backups/acme", template_name="acme"
+    )
+
+    assert os.path.basename(team.get_template_sql_path("acme")) == "dump.pgdump.gz"
 
 
 class TestSourceClient:

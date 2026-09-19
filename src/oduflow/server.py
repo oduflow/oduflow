@@ -1493,9 +1493,11 @@ def import_template(
       into the template directory by an external process (rsync, backup
       job); reloads the template DB from them and refreshes metadata.
 
-    Raw layout for s3/local sources: exactly one of dump.pgdump / dump.sql /
-    dump.sql.gz / dump.pgdump.gz at the root, plus an optional filestore/
-    tree (a one-to-one copy of the Odoo filestore, e.g. `aws s3 sync`).
+    Raw layout for s3/local sources: a dump at the root — dump.pgdump /
+    dump.sql / dump.sql.gz / dump.pgdump.gz (hand-made db.dump / db.dump.gz
+    also accepted; canonical names win when both are present) — plus an
+    optional filestore/ tree (a one-to-one copy of the Odoo filestore, e.g.
+    `aws s3 sync`).
 
     Args:
         source: http(s) Odoo URL, "s3://bucket/prefix", or a local path. Empty only with refresh=true.
