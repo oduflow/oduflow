@@ -231,6 +231,11 @@ class BackupSettings:
     keep: tuple[str, ...] = ("30:180", "7:30", "1:7")
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
+    # Concurrent chunk uploads (HEAD+PUT) during filestore snapshots;
+    # 1 = sequential. Also sets the snapshot's in-flight plaintext budget
+    # (max(64 MiB, threads x 4 MiB average chunk)), i.e. the extra memory a
+    # running snapshot costs the server process.
+    upload_threads: int = 16
 
 
 @dataclass(frozen=True)
@@ -1110,6 +1115,7 @@ def _parse_backup_section(backup_raw: dict[str, object]) -> BackupSettings | Non
         basebackup_time=str(backup_raw.get("basebackup_time", "03:30")).strip(),
         keep=tuple(str(p).strip() for p in keep_raw),
         walg_keep_full=int(str(backup_raw.get("walg_keep_full", 7))),
+        upload_threads=max(1, int(str(backup_raw.get("upload_threads", 16)))),
     )
 
 
