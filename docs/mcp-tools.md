@@ -54,9 +54,9 @@ also available via the [REST API](web-api.md).
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
 | `create_service` | ✓ | Create a managed service with exactly one exposure model: catch-all `port`, or restricted Traefik `routes` (`path`, backend `port`, optional `strip_prefix`). The two parameters are mutually exclusive; `port` remains required outside Traefik. Optional `command` (shell-quoted string) replaces the image `CMD` |
-| `delete_service` | ✓ | Stop and remove a service container. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
+| `delete_service` | ✓ | Stop and remove a service container, keeping its preset unless `save_preset=false`. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
 | `restart_service` | ✓ | Restart a service container |
-| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD`. Protected services refuse updates |
+| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` and `volumes` are tri-state: omitted keeps them, a value fully replaces, an empty string falls back to the image `CMD` / unmounts every volume. Protected services refuse updates |
 | `list_services` | | List all managed service containers |
 | `get_service_info` | | Full live state of a single service (image+digest, port/routes, hostname, host_mode, command, volumes, env, capabilities, restart count, preset). Call before recreating it |
 | `get_service_logs` | | Retrieve service container logs |
@@ -113,6 +113,8 @@ also available via the [REST API](web-api.md).
 | `list_production_snapshots` | | List S3 snapshots; `refresh=True` bypasses the cached index |
 | `restore_production` | ✓ | Restore one production's database and filestore from a snapshot or a dev environment; requires its name in `confirm` |
 | `production_backup_status` | | Inspect snapshot schedules, WAL archiving, base backups, and S3 reachability |
+| `production_wal_status` | | Cached shared-cluster WAL queue, upload progress, disk reserve, stale-data and protection state |
+| `control_production_wal` | ✓ | Cluster-wide `pause`, `resume`, `retry`, `recover`, or `release`; requires `confirm="ALL-PRODUCTIONS"`. Recovery starts PostgreSQL only; releasing protection leaves applications stopped |
 | `set_production_backup_schedule` | ✓ | Set a production's daily snapshot time (`HH:MM`) or disable it with `off` |
 | `prune_production_backups` | ✓ | Apply configured snapshot and chunk-store retention immediately |
 | `restore_cluster_pitr` | ✓ | ⚠️ Restore the entire production PostgreSQL cluster from WAL-G; requires `confirm="RESTORE-CLUSTER"` |

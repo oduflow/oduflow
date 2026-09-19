@@ -19,6 +19,7 @@ logger = logging.getLogger("oduflow")
 TRACE: bool = False
 
 DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.0"
+DEFAULT_PROD_POSTGRES_IMAGE = "oduist/oduflow-postgres:15-bookworm-1"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 
 # Active MCP transport for the running server ("stdio" | "http").
@@ -152,7 +153,19 @@ class TeamSettings:
 
     def get_template_sql_path(self, template_name: str) -> str:
         tpl_dir = self.get_template_dir(template_name)
-        for name in ("dump.pgdump", "dump.sql", "dump.pgdump.gz", "dump.sql.gz"):
+        # Canonical names first, then the ``db.dump`` names a hand-placed dump
+        # may carry. Oduflow only ever writes the canonical four, so a dump it
+        # persisted always wins over a leftover the operator dropped in here.
+        # Format is detected from the file's contents, not its name; only the
+        # ``.gz`` suffix has to be right.
+        for name in (
+            "dump.pgdump",
+            "dump.sql",
+            "dump.pgdump.gz",
+            "dump.sql.gz",
+            "db.dump",
+            "db.dump.gz",
+        ):
             path = os.path.join(tpl_dir, name)
             if os.path.isfile(path):
                 return path
@@ -230,6 +243,11 @@ class BackupSettings:
     keep: tuple[str, ...] = ("30:180", "7:30", "1:7")
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
+    # Concurrent chunk uploads (HEAD+PUT) during filestore snapshots;
+    # 1 = sequential. Also sets the snapshot's in-flight plaintext budget
+    # (max(64 MiB, threads x 4 MiB average chunk)), i.e. the extra memory a
+    # running snapshot costs the server process.
+    upload_threads: int = 16
 
 
 @dataclass(frozen=True)
@@ -268,14 +286,18 @@ class Settings:
     routing_mode: str = "port"
     acme_email: str = ""
     # Whether Traefik terminates TLS itself. True (default): Traefik listens on
-    # :443 and redirects HTTP->HTTPS; routing_acme selects certificate issuance. False:
+    # :443 and redirects HTTP->HTTPS; routing_tls_auto selects certificate issuance. False:
     # Traefik listens on plain HTTP :80 only, no redirect and no ACME — for
     # running behind a TLS-terminating upstream (e.g. a Cloudflare tunnel) that
     # already serves HTTPS. Public URLs stay https:// (the upstream provides the
     # certificate) unless ``public_scheme`` says otherwise. Ignored in port mode.
     routing_tls: bool = True
-    # False for tls = {}: HTTPS uses Traefik's default certificate.
-    routing_acme: bool = True
+    # True only for ``tls = true``: every Oduflow-managed route automatically
+    # gets the Let's Encrypt resolver. False for ``tls = {}``: the resolver is
+    # still declared when ``acme_email`` is set (see :attr:`acme_enabled`), but
+    # only routes that reference it explicitly (operator drop-in dynamic
+    # config) use it; managed routes serve Traefik's default certificate.
+    routing_tls_auto: bool = True
     # Raw ``[routing] public_scheme`` value; read the resolved
     # :attr:`public_scheme` property instead of this field. Empty (default)
     # derives the scheme from the routing mode: ``https`` in traefik mode
@@ -341,9 +363,18 @@ class Settings:
     prod_enabled: bool = False
     prod_db_container: str = "oduflow-prod-db"
     prod_db_volume: str = "oduflow-prod-db-data"
-    prod_postgres_image: str = ""  # empty = [database].image
+    prod_postgres_image: str = ""  # empty = managed PG15, or custom [database].image
     prod_walg_version: str = ""  # empty = version pinned in walg.py
     prod_workers_cap: int = 8  # upper bound for auto-tuned Odoo workers
+    # [production.wal]: cluster-wide disk protection, independent of backups.
+    wal_upload_timeout: int = 120
+    wal_warn_after: int = 120
+    wal_stall_after: int = 300
+    wal_stop_free_gb: float = 2.0
+    wal_resume_free_gb: float = 4.0
+    wal_stop_within: int = 300
+    wal_warn_queue_gb: float = 2.0
+    wal_stop_queue_gb: float = 8.0
 
     # Backup subsystem ([backup] TOML section); None = backups disabled.
     backup: BackupSettings | None = None
@@ -363,6 +394,15 @@ class Settings:
 
     # Teams
     teams: dict[str, TeamSettings] = field(default_factory=dict)
+
+    @property
+    def production_pg_image(self) -> str:
+        # Keep existing non-default PostgreSQL majors/custom images compatible.
+        return self.prod_postgres_image or (
+            DEFAULT_PROD_POSTGRES_IMAGE
+            if self.postgres_image == "postgres:15"
+            else self.postgres_image
+        )
 
     def get_team(self, team_id: str) -> TeamSettings:
         if team_id not in self.teams:
@@ -402,24 +442,45 @@ class Settings:
         return None
 
     @property
+    def acme_enabled(self) -> bool:
+        """Whether the Let's Encrypt resolver is declared in Traefik at all.
+
+        This only says the resolver (and its certificate store) exists — with
+        ``tls = {}`` nothing assigns it to managed routes, so a declared
+        resolver does not mean any particular domain got a trusted
+        certificate. Route auto-assignment is :attr:`uses_acme`.
+        """
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and bool(self.acme_email.strip())
+        )
+
+    @property
     def uses_acme(self) -> bool:
-        """Whether this deployment requests certificates from Let's Encrypt."""
-        return self.routing_mode == "traefik" and self.routing_tls and self.routing_acme
+        """Whether managed routes automatically request Let's Encrypt certs."""
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and self.routing_tls_auto
+        )
 
     @property
     def uses_default_tls_cert(self) -> bool:
         """Whether Traefik serves HTTPS with its built-in default certificate.
 
-        True only for ``tls = {}``: TLS is on but no resolver issues a
-        certificate, so unless the operator supplies one through Traefik's own
-        dynamic config the served certificate is Traefik's self-signed default.
-        Oduflow's internal probes of its own public URLs consult this to decide
-        whether certificate verification can succeed at all.
+        True for ``tls = {}``: TLS is on but managed routes never reference a
+        resolver — even when one is declared (:attr:`acme_enabled`) it only
+        serves routes the operator wired up explicitly — so unless the
+        operator supplies a certificate through Traefik's own dynamic config
+        the served certificate is Traefik's self-signed default. Oduflow's
+        internal probes of its own public URLs consult this to decide whether
+        certificate verification can succeed at all.
         """
         return (
             self.routing_mode == "traefik"
             and self.routing_tls
-            and not self.routing_acme
+            and not self.routing_tls_auto
         )
 
     @property
@@ -735,6 +796,25 @@ class Settings:
         lifecycle = raw.get("lifecycle", {})
         agent = raw.get("agent", {})
         production = raw.get("production", {})
+        wal = production.get("wal", {})
+        wal_values = {
+            "wal_upload_timeout": int(wal.get("upload_timeout", 120)),
+            "wal_warn_after": int(wal.get("warn_after", 120)),
+            "wal_stall_after": int(wal.get("stall_after", 300)),
+            "wal_stop_free_gb": float(wal.get("stop_free_gb", 2)),
+            "wal_resume_free_gb": float(wal.get("resume_free_gb", 4)),
+            "wal_stop_within": int(wal.get("stop_within", 300)),
+            "wal_warn_queue_gb": float(wal.get("warn_queue_gb", 2)),
+            "wal_stop_queue_gb": float(wal.get("stop_queue_gb", 8)),
+        }
+        if any(not 0 < value < 1e9 for value in wal_values.values()):
+            raise ValueError("[production.wal] thresholds must be positive and finite")
+        if wal_values["wal_stop_queue_gb"] <= wal_values["wal_warn_queue_gb"]:
+            raise ValueError("[production.wal] stop_queue_gb must exceed warn_queue_gb")
+        if wal_values["wal_resume_free_gb"] <= wal_values["wal_stop_free_gb"]:
+            raise ValueError("[production.wal] resume_free_gb must exceed stop_free_gb")
+        if wal_values["wal_stall_after"] < wal_values["wal_warn_after"]:
+            raise ValueError("[production.wal] stall_after must be >= warn_after")
         prod_enabled = production.get("enabled", False)
         if not isinstance(prod_enabled, bool):
             raise ValueError("[production] enabled must be true or false")
@@ -910,7 +990,7 @@ class Settings:
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
             routing_tls=tls is not False,
-            routing_acme=tls is True,
+            routing_tls_auto=tls is True,
             public_scheme_setting=str(routing.get("public_scheme", "")).strip().lower(),
             extra_routes=tuple(extra_routes),
             db_user=str(database.get("user", "odoo")),
@@ -929,6 +1009,14 @@ class Settings:
             prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),
             prod_workers_cap=int(production.get("workers_cap", 8)),
+            wal_upload_timeout=int(wal_values["wal_upload_timeout"]),
+            wal_warn_after=int(wal_values["wal_warn_after"]),
+            wal_stall_after=int(wal_values["wal_stall_after"]),
+            wal_stop_free_gb=wal_values["wal_stop_free_gb"],
+            wal_resume_free_gb=wal_values["wal_resume_free_gb"],
+            wal_stop_within=int(wal_values["wal_stop_within"]),
+            wal_warn_queue_gb=wal_values["wal_warn_queue_gb"],
+            wal_stop_queue_gb=wal_values["wal_stop_queue_gb"],
             backup=backup,
             etc_dir=etc_dir,
             toml_path=path,
@@ -1039,6 +1127,7 @@ def _parse_backup_section(backup_raw: dict[str, object]) -> BackupSettings | Non
         basebackup_time=str(backup_raw.get("basebackup_time", "03:30")).strip(),
         keep=tuple(str(p).strip() for p in keep_raw),
         walg_keep_full=int(str(backup_raw.get("walg_keep_full", 7))),
+        upload_threads=max(1, int(str(backup_raw.get("upload_threads", 16)))),
     )
 
 

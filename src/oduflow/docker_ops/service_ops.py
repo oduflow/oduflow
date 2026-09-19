@@ -253,14 +253,17 @@ def _resolve_service_volume_binds(
     """Resolve user mounts and add the implicit Traefik ACME mount.
 
     The ACME store is platform-owned rather than part of the user-supplied
-    service configuration. Every service created while Traefik uses ACME sees
-    the exact store at ``/etc/traefik`` read-only.
+    service configuration. Every service created while the ACME resolver is
+    declared (acme_enabled) sees the exact store at ``/etc/traefik``
+    read-only. The store may not contain ``acme.json`` yet — it appears only
+    after the first certificate issuance — so services must tolerate its
+    absence.
     """
     volume_binds: dict[str, dict[str, str]] = volume_ops.resolve_volume_binds(
         team, volumes or []
     )
 
-    if not settings.uses_acme:
+    if not settings.acme_enabled:
         return volume_binds
 
     for mount in volumes or []:
@@ -292,7 +295,7 @@ def _resolve_service_volume_binds(
 
 def _needs_traefik_acme_mount(settings: Settings, container: Any) -> bool:
     """Whether a Traefik TLS service is missing the implicit ACME mount."""
-    if not settings.uses_acme:
+    if not settings.acme_enabled:
         return False
 
     for mount in container.attrs.get("Mounts", []):
@@ -741,7 +744,75 @@ def restart_service(
     }
 
 
-def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[str, str]:
+def backfill_service_preset(
+    settings: Settings, team: TeamSettings, name: str, container: Any
+) -> bool:
+    """Write a preset for *name* if it has none; True when one exists after.
+
+    Every service created or updated through Oduflow already carries a preset
+    that is kept current; this covers the legacy ones created before presets
+    existed. Run from migration 0008 at startup, so every reader — restore,
+    the edit dialog, delete — sees the preset store as the single source of
+    truth. A service whose image or port cannot be reconstructed from the
+    container is skipped with a warning: a preset ``restore_service`` would
+    reject (image "" or port 0) is worse than none at all.
+    """
+    try:
+        service_presets.get_preset(team, name)
+        return True
+    except NotFoundError:
+        pass
+    except Exception:
+        logger.warning("Failed to read service preset for %s", name, exc_info=True)
+        return False
+
+    try:
+        config = _effective_service_config(settings, team, name, container)
+        image = _container_image_reference(container)
+        if not image:
+            logger.warning(
+                "Skipping preset backfill for %s: cannot determine its image", name
+            )
+            return False
+        if config["port"] is None and not config["routes"]:
+            logger.warning(
+                "Skipping preset backfill for %s: cannot determine its port", name
+            )
+            return False
+        service_presets.save_preset(
+            team,
+            name,
+            image,
+            config["port"],
+            hostname=config["hostname"],
+            env_vars=config["env_vars"],
+            base_hostname=service_parent_domain(team),
+            host_mode=config["host_mode"],
+            volumes=config["volumes"],
+            cap_add=config["cap_add"],
+            privileged=config["privileged"],
+            routes=config["routes"],
+            command=config["command"],
+            runtime=inspect_runtime(container),
+        )
+        return True
+    except Exception:
+        logger.warning("Failed to save service preset for %s", name, exc_info=True)
+        return False
+
+
+def delete_service(
+    settings: Settings, team: TeamSettings, name: str, save_preset: bool = True
+) -> dict[str, Any]:
+    """Remove a service container, keeping or dropping its saved preset.
+
+    With ``save_preset`` the configuration stays behind for ``restore_service``
+    (the default, and what deleting a service has always done); without it the
+    preset goes away with the container, so the service leaves nothing behind.
+    ``preset_kept`` in the result reports what is actually on disk afterwards,
+    not the intent: a legacy service migration 0008 could not backfill has no
+    preset to keep, and a failed preset delete leaves one behind.
+    """
     assert_service_not_protected(team, name, "deleting")
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
@@ -755,9 +826,32 @@ def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[st
     container.remove(v=True)
     logger.info("Deleted service container %s", container_name)
 
+    if save_preset:
+        try:
+            service_presets.get_preset(team, name)
+            preset_kept = True
+        except Exception:
+            # No preset (a legacy service migration 0008 could not backfill),
+            # or the store is unreadable: either way restore cannot be promised.
+            preset_kept = False
+    else:
+        try:
+            service_presets.delete_preset(team, name)
+            preset_kept = False
+        except NotFoundError:
+            preset_kept = False
+        except Exception:
+            # The container is already gone; a stale preset is worth a warning,
+            # not an error that makes the delete itself look failed.
+            logger.warning(
+                "Failed to delete service preset for %s", name, exc_info=True
+            )
+            preset_kept = True
+
     return {
         "name": name,
         "container_name": container_name,
+        "preset_kept": preset_kept,
     }
 
 
@@ -797,6 +891,25 @@ def _raw_container_env(container: Any) -> dict[str, str]:
     return env_vars
 
 
+def _image_env_vars(container: Any) -> dict[str, str]:
+    """Env baked into the container's image, minus the keys every image sets.
+
+    Empty when the image record is no longer available (e.g. after a prune).
+    """
+    try:
+        raw_image_env = container.image.attrs.get("Config", {}).get("Env", [])
+    except Exception:
+        raw_image_env = []
+    image_env: dict[str, str] = {}
+    if isinstance(raw_image_env, list):
+        for entry in raw_image_env:
+            if isinstance(entry, str) and "=" in entry:
+                key, value = entry.split("=", 1)
+                if key not in _SYSTEM_ENV_KEYS:
+                    image_env[key] = value
+    return image_env
+
+
 def _container_env_vars(container: Any) -> dict[str, str]:
     """Env of a service container without the keys every image sets anyway.
 
@@ -821,7 +934,12 @@ def _container_image_reference(container: Any) -> str | None:
     reference = container.attrs.get("Config", {}).get("Image")
     if isinstance(reference, str) and reference:
         return reference
-    return container.image.tags[0] if container.image.tags else None
+    try:
+        return container.image.tags[0] if container.image.tags else None
+    except Exception:
+        # The image record can be gone (docker rmi); the caller decides what
+        # an unknown image means instead of a raw SDK error surfacing.
+        return None
 
 
 def _describe_service_container(
@@ -837,18 +955,7 @@ def _describe_service_container(
     status = container.status
 
     env_vars = _container_env_vars(container)
-
-    image_env_vars: dict[str, str] = {}
-    try:
-        raw_image_env = container.image.attrs.get("Config", {}).get("Env", [])
-    except Exception:
-        raw_image_env = []
-    if isinstance(raw_image_env, list):
-        for entry in raw_image_env:
-            if isinstance(entry, str) and "=" in entry:
-                key, value = entry.split("=", 1)
-                if key not in _SYSTEM_ENV_KEYS:
-                    image_env_vars[key] = value
+    image_env_vars = _image_env_vars(container)
 
     port_num: int | None = None
     url: str | None = None
@@ -1021,95 +1128,27 @@ def get_service_info(
     return info
 
 
-def get_service_env_vars(
-    settings: Settings, team: TeamSettings, name: str
-) -> dict[str, str]:
-    """Return the env vars ``update_service`` keeps when nothing overrides them.
-
-    The saved preset is authoritative and is what an update reuses, so it is
-    also what an edit dialog must prefill; the container's own environment
-    additionally carries the image defaults, which are not part of the service
-    configuration. Only legacy services created before presets existed fall
-    back to inspecting the container — a preset that exists but cannot be read
-    raises instead, because prefilling from the container in that case would
-    offer the image defaults for editing and bake them into the preset on the
-    first save.
-    """
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
-
-    if not container.labels.get("oduflow.service"):
-        raise NotFoundError(f"Service '{name}' not found")
-
-    try:
-        preset = service_presets.get_preset(team, name)
-    except NotFoundError:
-        return _container_env_vars(container)
-
-    return dict(preset.get("env_vars") or {})
-
-
-def update_service(
-    settings: Settings,
-    team: TeamSettings,
-    name: str,
-    *,
-    env_override: dict[str, str] | None = None,
-    image_override: str | None = None,
-    port_override: int | None = None,
-    hostname_override: str | None = None,
-    host_mode_override: bool | None = None,
-    volume_override: list[dict[str, str]] | None = None,
-    cap_add_override: list[str] | None = None,
-    privileged_override: bool | None = None,
-    routes_override: list[dict[str, object]] | None = None,
-    command_override: list[str] | None = None,
-    runtime_override: dict[str, Any] | None = None,
-    stack_labels: dict[str, str] | None = None,
+def _effective_service_config(
+    settings: Settings, team: TeamSettings, name: str, container: Any
 ) -> dict[str, Any]:
-    """Pull the latest image for a service and re-create it with the same settings.
+    """The configuration ``update_service`` keeps when nothing overrides it.
 
-    Optional overrides replace the corresponding setting from the saved preset.
-    When any override differs from the current config the container is recreated
-    even if the image digest has not changed. A rotated team secret also counts
-    as a config change: the resolved value of every ``secret:<name>`` reference
-    is compared against what the container actually runs with, so the
-    documented rotation flow (replace the value, then update) takes effect.
+    The saved preset is authoritative; only legacy services created before
+    presets existed fall back to inspecting the container. ``update_service``
+    and the dashboard's edit dialog read through this one function, so the form
+    can never offer a different "current" value than the update would keep.
+
+    A preset that exists but cannot be read raises instead of falling back:
+    the container inspection is a reconstruction, and silently substituting it
+    would let the next update or dialog submit overwrite the real preset with
+    guessed values.
     """
-    # An update recreates the container, so protection covers it like delete.
-    assert_service_not_protected(team, name, "updating")
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
-
-    # Capture current image name
-    old_image = _container_image_reference(container)
-    if not old_image:
-        raise NotFoundError(
-            f"Cannot determine image for service '{name}'. "
-            "The container has no image tag or Config.Image."
-        )
-
-    runtime = inspect_runtime(container)
-    candidate_runtime = (
-        normalize_runtime(runtime_override) if runtime_override is not None else runtime
-    )
-
     # Read service options from saved preset (authoritative source).
     # Fall back to container inspection for legacy services without a preset.
     preset = None
     try:
         preset = service_presets.get_preset(team, name)
-    except Exception:
+    except NotFoundError:
         pass
 
     # Declared once so the preset and legacy-fallback branches agree on a type.
@@ -1127,8 +1166,16 @@ def update_service(
         routes = normalize_http_routes(preset.get("routes"))
         command = list(preset.get("command") or [])
     else:
-        # Legacy fallback: extract from running container
-        env_vars = _container_env_vars(container)
+        # Legacy fallback: extract from running container. Values the image
+        # itself sets are not service configuration — freezing them into a
+        # preset would override a newer image's own defaults later — so only
+        # the vars that differ from the image's are kept.
+        image_env = _image_env_vars(container)
+        env_vars = {
+            key: value
+            for key, value in _container_env_vars(container).items()
+            if image_env.get(key) != value
+        }
 
         is_host_mode = container.labels.get("oduflow.host_mode") == "true"
         routes = _routes_from_labels(container.labels)
@@ -1194,6 +1241,106 @@ def update_service(
             old_volumes = vols
 
         env_vars = env_vars or None
+
+    return {
+        "port": port,
+        "hostname": hostname,
+        "env_vars": env_vars,
+        "host_mode": is_host_mode,
+        "volumes": old_volumes,
+        "cap_add": cap_add,
+        "privileged": privileged,
+        "routes": routes,
+        "command": command,
+    }
+
+
+def get_service_config(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, Any]:
+    """Return the current settings of a service in ``update_service`` terms.
+
+    This is what an edit dialog must prefill: every value is the one an update
+    would preserve, and env values configured as team secrets come back as
+    their ``secret:<name>`` reference, never as the resolved value.
+    """
+    client = get_client()
+    container_name = get_service_container_name(name, settings.prefix, team.team_id)
+
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Service '{name}' not found")
+
+    if not container.labels.get("oduflow.service"):
+        raise NotFoundError(f"Service '{name}' not found")
+
+    config = _effective_service_config(settings, team, name, container)
+    config["name"] = name
+    config["image"] = _container_image_reference(container) or ""
+    return config
+
+
+def update_service(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    *,
+    env_override: dict[str, str] | None = None,
+    image_override: str | None = None,
+    port_override: int | None = None,
+    hostname_override: str | None = None,
+    host_mode_override: bool | None = None,
+    volume_override: list[dict[str, str]] | None = None,
+    cap_add_override: list[str] | None = None,
+    privileged_override: bool | None = None,
+    routes_override: list[dict[str, object]] | None = None,
+    command_override: list[str] | None = None,
+    runtime_override: dict[str, Any] | None = None,
+    stack_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Pull the latest image for a service and re-create it with the same settings.
+
+    Optional overrides replace the corresponding setting from the saved preset.
+    When any override differs from the current config the container is recreated
+    even if the image digest has not changed. A rotated team secret also counts
+    as a config change: the resolved value of every ``secret:<name>`` reference
+    is compared against what the container actually runs with, so the
+    documented rotation flow (replace the value, then update) takes effect.
+    """
+    # An update recreates the container, so protection covers it like delete.
+    assert_service_not_protected(team, name, "updating")
+    client = get_client()
+    container_name = get_service_container_name(name, settings.prefix, team.team_id)
+
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Service '{name}' not found")
+
+    # Capture current image name
+    old_image = _container_image_reference(container)
+    if not old_image:
+        raise NotFoundError(
+            f"Cannot determine image for service '{name}'. "
+            "The container has no image tag or Config.Image."
+        )
+
+    runtime = inspect_runtime(container)
+    candidate_runtime = (
+        normalize_runtime(runtime_override) if runtime_override is not None else runtime
+    )
+
+    current = _effective_service_config(settings, team, name, container)
+    port: int | None = current["port"]
+    hostname: str | None = current["hostname"]
+    env_vars: dict[str, str] | None = current["env_vars"]
+    is_host_mode: bool = current["host_mode"]
+    old_volumes: list[dict[str, str]] | None = current["volumes"]
+    cap_add: list[str] | None = current["cap_add"]
+    privileged: bool = current["privileged"]
+    routes: list[dict[str, object]] | None = current["routes"]
+    command: list[str] = current["command"]
 
     if (
         port is None

@@ -872,7 +872,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # ── Production hosting (optional) ─────────────────────
 # [production]
 # enabled = true            # opt in; requires routing.mode = "traefik"
-# postgres_image = ""       # empty = [database].image
+# postgres_image = ""       # managed PG15 with CA; inherits custom [database].image
 # walg_version = ""         # empty = Oduflow's pinned WAL-G version
 # workers_cap = 8           # upper bound for auto-tuned Odoo workers
 
@@ -887,6 +887,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # basebackup_time = "03:30"
 # keep = ["30:180", "7:30", "1:7"]
 # walg_keep_full = 7
+# upload_threads = 16
 
 # ── Teams ─────────────────────────────────────────────
 # Each team gets isolated workspaces, templates, credentials, and services.
@@ -983,9 +984,18 @@ are registered only when `[production].enabled = true`.
 | Key | Default | Description |
 |---|---|---|
 | `[production].enabled` | `false` | Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing |
-| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty inherits `[database].image` |
+| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty uses `oduist/oduflow-postgres:15-bookworm-1` with CA certificates when `[database].image` is the default `postgres:15`; custom database images/majors are inherited |
 | `[production].walg_version` | *(empty)* | WAL-G release override. Empty uses the version pinned by Oduflow |
 | `[production].workers_cap` | `8` | Upper bound for automatically calculated Odoo workers; must be at least `1` |
+| `[production].wal` | *(defaults below)* | Nested `[production.wal]` table for cluster-wide WAL timeouts and disk protection; active whenever production hosting is enabled |
+| `[production.wal].upload_timeout` | `120` | Seconds per WAL upload before termination; forced kill follows after 5 seconds |
+| `[production.wal].warn_after` | `120` | Seconds without archive progress while a queue exists before warning |
+| `[production.wal].stall_after` | `300` | Seconds without progress before error; must be at least `warn_after` |
+| `[production.wal].stop_free_gb` | `2` | GiB available to postgres, excluding root reserve, at which production is stopped |
+| `[production.wal].resume_free_gb` | `4` | Required GiB before recovery/release; must exceed `stop_free_gb` |
+| `[production.wal].stop_within` | `300` | Stop early if measured disk consumption predicts reaching the reserve within this many seconds |
+| `[production.wal].warn_queue_gb` | `2` | Warn when unarchived WAL reaches this size in GiB; recovery release requires a smaller queue |
+| `[production.wal].stop_queue_gb` | `8` | Stop production at this queued WAL size in GiB, even with ample free disk; must exceed `warn_queue_gb` |
 
 ### Backup settings
 
@@ -1004,6 +1014,7 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | `[backup].basebackup_time` | `03:30` | Daily WAL-G base-backup time in server-local `HH:MM` |
 | `[backup].keep` | `["30:180", "7:30", "1:7"]` | Snapshot retention tiers as `interval_days:age_days` pairs |
 | `[backup].walg_keep_full` | `7` | Number of WAL-G full base backups to retain; must be at least `1` |
+| `[backup].upload_threads` | `16` | Concurrent filestore chunk uploads per snapshot; `1` uploads sequentially. A running snapshot buffers up to `max(64 MiB, threads x 4 MiB)` of chunk data in memory, so lower it on small-RAM hosts |
 
 ### Per-team settings
 
@@ -2529,6 +2540,8 @@ region = "eu-central-1"
 # basebackup_time = "03:30"    (daily WAL-G base backup)
 # keep = ["30:180", "7:30", "1:7"]  (snapshot retention: interval:age days)
 # walg_keep_full = 7           (base backups retained)
+# upload_threads = 16          (parallel filestore chunk uploads; buffers
+#                               up to max(64 MiB, threads x 4 MiB) in RAM)
 ```
 
 While disabled, the dashboard tab and production HTTP/webhook routes are not
@@ -2791,6 +2804,193 @@ the cluster the same way.
 `production_backup_status()` shows per-production snapshot state, WAL
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
+
+### WAL-G certificates and storage health
+
+Oduflow writes a CA bundle alongside `walg.json` in
+`<base_data_dir>/walg/` and configures WAL-G to read it through the existing
+read-only `/etc/walg` directory mount. This works even when the PostgreSQL
+image has no system CA bundle, and covers WAL uploads, base backups, and PITR
+helpers. Restarting Oduflow refreshes these files for existing containers;
+PostgreSQL does not need to be recreated for this fix.
+
+The CA source is `AWS_CA_BUNDLE`, then `SSL_CERT_FILE`, then the server's
+default CA file, with the boto3/botocore bundle as a fallback when there is no
+default file. Set an explicit override in the Oduflow service environment for
+a private certificate authority. Invalid overrides fail rather than disabling
+TLS verification or replacing a working bundle.
+
+The background WAL monitor checks storage list access using WAL-G **inside
+production PostgreSQL, as the postgres user**. The dashboard's **WAL-G** health
+chip and `/healthz` use its cached result. The
+diagnostic command has a five-second timeout, with forced termination after
+another two seconds. A TLS/access error degrades `/healthz` even when the
+separate S3 check from the Oduflow server succeeds. List access does not prove
+upload permissions, successful archiving, or a complete PITR chain. The backup
+status API retains local archiver statistics when the remote inventory query
+fails; inventory commands have a 30-second timeout.
+
+### Production readiness at deployment
+
+New installations using the default PostgreSQL 15 use
+`oduist/oduflow-postgres:15-bookworm-1`. This image includes `ca-certificates`
+and pins the upstream Debian Bookworm image by digest. A custom
+`[production].postgres_image` takes precedence; a non-default
+`[database].image` is still inherited for compatibility with other PostgreSQL
+majors. Existing containers are reused, never automatically replaced or
+upgraded across majors. Their WAL-G trust is repaired through the persistent
+mounted CA bundle described above.
+
+With `[backup]` configured, provisioning and production start/restart/deploy
+require a successful check **inside PostgreSQL as the postgres user**:
+
+1. Check the actual disk and queue safety thresholds.
+2. Check the mounted CA bundle, executable and credentials file, then use
+   WAL-G to list storage, upload a unique probe, read it back, compare its
+   content and delete the probe. The storage phase is limited to 30 seconds,
+   with bounded cleanup/forced termination. The credentials need read, list,
+   write and delete permissions for the probe under
+   `<backup.prefix>/walg/oduflow-preflight/`; backup objects are not modified.
+3. Enable the managed archive command and confirm PostgreSQL applied it.
+4. Generate a restore point and switch WAL, then wait up to
+   `upload_timeout + 75` seconds for that segment to be archived. Only then
+   allow the production application to start. This confirms current archive
+   delivery; a recoverable PITR chain additionally requires a base backup.
+
+Step 4 is skipped for an already admitted production — `restart_production`,
+a deploy or a rollback — when the sample from step 1 already proves archiving
+is healthy: the managed archive command is active, archiving is not stalled,
+and the storage listing in that same sample succeeded. A hung production stays
+restartable during a brief storage outage instead of waiting minutes for a new
+segment. Admitting a new production, or starting a stopped one, always runs
+the full check.
+
+An error blocks the operation and appears as **Last startup check** in the
+WAL panel. It stops driving the overall status once a newer healthy sample
+supersedes it; live sampling then reports the current state. It does not convert an existing archive command to `/bin/true` or
+delete retained WAL. An old no-op command is changed to an empty, retaining
+command before preflight; fresh generated configurations also retain WAL
+until provisioning decides. Existing working archiving continues during a
+preflight failure; the disk/queue guard remains responsible for emergency
+shutdown. Development environments can still start if production is unready.
+
+The PostgreSQL image is published for amd64 and arm64 by
+`.github/workflows/publish-postgres.yml` only from `main`, with an immutable
+version tag. Publish it successfully before releasing the Oduflow package;
+both the PyPI and application Docker release workflows verify its availability.
+For an image update, change the base digest, bump `POSTGRES_IMAGE_VERSION`
+and `DEFAULT_PROD_POSTGRES_IMAGE` together, merge, and wait for publication.
+No package installation is performed inside PostgreSQL during deployment or
+emergency recovery.
+
+### WAL monitoring and automatic disk protection
+
+The **PostgreSQL WAL** panel in Production is shared by every production and
+team. It shows the queue's segment count and bytes, age of the oldest waiting
+segment, time without archive progress, current upload duration, last upload
+exit status, PostgreSQL restart count, and free space on the actual WAL
+filesystem. Space reserved for root is excluded. A dedicated daemon samples
+locally every 15 seconds, independently of backup jobs and dashboard polling;
+the storage probe runs only after the local protection decision. Missing or
+older-than-60-second samples are errors, never healthy results.
+
+An empty queue is idle, not stalled. With a queue, lack of successful archive
+progress triggers warning/error thresholds. A draining but old backlog stays
+visible. WAL upload attempts have a hard timeout and return failure on timeout
+or termination; PostgreSQL retains the segment and retries. Failed downloads
+of the WAL-G executable never switch configured archiving to a success no-op.
+
+Defaults can be changed in TOML:
+
+```toml
+[production.wal]
+upload_timeout = 120    # seconds; TERM, then KILL after another 5 seconds
+warn_after = 120        # seconds without archive progress, with a queue
+stall_after = 300
+stop_free_gb = 2        # GiB available to postgres: safety reserve
+resume_free_gb = 4      # recovery headroom; must exceed stop_free_gb
+stop_within = 300       # estimated seconds until the reserve is reached
+warn_queue_gb = 2       # GiB of unarchived WAL before warning
+stop_queue_gb = 8       # GiB of unarchived WAL before protective stop
+```
+
+Protection is active whenever production hosting is enabled, even without
+S3 backups or while archiving is paused. It trips as soon as free space
+reaches the reserve. A prediction alone is not enough: consumption measured
+between the two most recent samples must predict reaching the reserve within
+`stop_within`, and that prediction must hold for two consecutive samples.
+`df` covers the whole filesystem, so a finished burst from an unrelated
+consumer never stops the cluster, while a continuing leak still does.
+It also trips when the unarchived queue reaches
+`stop_queue_gb`, even on a large disk. Protection saves a persistent latch,
+disables Docker restart policies, stops managed production applications,
+then stops the shared PostgreSQL container. Failed stops are reported and retried. The latch blocks production
+starts, deploys, restores and new backup jobs, including after Oduflow or
+Docker restarts. Protection can interrupt in-flight jobs; it does not wait for
+their locks while the disk fills.
+
+Set the reserve for peak write volume and shutdown time. The monitor requires
+Oduflow and Docker to be responsive; it cannot guarantee protection against
+arbitrarily fast disk exhaustion or other host processes filling the same
+filesystem after PostgreSQL stops. Monitor `/healthz` externally as well.
+
+The panel and MCP offer these cluster-wide actions (MCP mutations require
+`confirm="ALL-PRODUCTIONS"`):
+
+| Action | Effect |
+| --- | --- |
+| `pause` | Retains unarchived WAL and interrupts the active upload. The queue can grow; disk protection stays active. |
+| `resume` | Refreshes WAL-G config/certificates and resumes archiving. Does not restart stopped PostgreSQL. |
+| `retry` | Terminates only the current `wal-push`, including a legacy upload predating the timeout wrapper; PostgreSQL retries it. |
+| `recover` | Requires recovery headroom; starts only PostgreSQL, keeping applications stopped and rejecting network database connections. Local maintenance and outbound S3 access remain available. Requests a WAL switch to verify real archiving. |
+| `release` | Requires recovery headroom, a safe consumption rate, working storage access, and a successful archive after recovery began. Restores normal connections and restart policies; applications remain stopped until explicitly started. |
+
+Use `production_wal_status()` for cached diagnostics and
+`control_production_wal(action="recover", confirm="ALL-PRODUCTIONS")` for
+control. REST equivalents are `GET /api/productions/wal-status` and
+`POST /api/productions/wal-control`. Full team authentication follows the
+existing cluster PITR access model; environment-scoped access is excluded.
+Queue size warns at `warn_queue_gb` and protects at `stop_queue_gb`. During
+fenced PostgreSQL-only recovery the queue may exceed the stop threshold so
+it can drain; disk pressure still stops PostgreSQL. Releasing protection
+requires the queue to fall below `warn_queue_gb` as well as free-space headroom
+and confirmed archive progress.
+
+The monitor's latch is stored in `<base_data_dir>/wal_guard.json`; do not
+delete it to bypass recovery checks. Recovery temporarily replaces the managed
+`PGDATA/pg_hba.conf`, preserving the original alongside it, and restores it on
+release. Custom HBA paths require operator intervention.
+
+### Recovering from a full WAL disk
+
+Production tables and WAL live together in the `oduflow-prod-db-data` Docker
+volume, unlike the per-team tablespaces used for development. Inspect free
+space on the filesystem containing that volume, including the space available
+to the non-root postgres user. `max_wal_size` is not a hard limit when WAL
+cannot be archived.
+
+If logs report `No space left on device` and WAL-G reports an unknown
+certificate authority:
+
+1. Stop application writers to reduce additional WAL generation. Free several
+   GiB from known disposable files **outside PostgreSQL data**, or expand the
+   volume's filesystem. Never manually delete files from `pg_wal`.
+2. Deploy the fix and restart Oduflow to refresh the mounted CA bundle and
+   WAL-G configuration. If protection is active, use **Resume archiving** if
+   paused, then **Start PostgreSQL recovery** after sufficient space is free.
+   No PostgreSQL recreation is required.
+3. Check the WAL-G health result and PostgreSQL logs. Confirm actual progress:
+   `pg_stat_archiver.archived_count` increases and the queue of `.ready` files
+   in `pg_wal/archive_status` drains. A successful list probe alone is not
+   enough. An already-running WAL-G attempt uses its old configuration until
+   it exits; **Retry upload** interrupts it without discarding the segment.
+4. Allow PostgreSQL to recycle eligible WAL itself and verify free space
+   recovers before releasing protection and explicitly starting the desired
+   applications. Other retention requirements, such as replication slots,
+   can also keep WAL on disk.
+
+Do not switch `archive_command` to `/bin/true` to drain the queue: it reports
+success without saving the segments and can break PITR continuity.
 
 ## Copying production data to dev
 
@@ -3235,8 +3435,11 @@ oduflow call update_service '{"name":"meilisearch","image":"getmeili/meilisearch
 oduflow call update_service '{"name":"wireguard","net_admin":true}'
 oduflow call update_service '{"name":"wireguard","privileged":true}'
 
-# Delete a service
+# Delete a service (its preset is kept, so restore_service can bring it back)
 oduflow call delete_service redis
+
+# Delete a service and its saved preset, leaving nothing behind
+oduflow call delete_service '{"name":"redis","save_preset":false}'
 
 # Execute a command inside a service container
 oduflow call run_service_command redis "redis-cli ping"
@@ -3246,7 +3449,7 @@ oduflow call run_service_command redis "redis-cli ping"
 
 `update_service` is the preferred way to change **any** setting of a running service — image, env vars, port/routes, hostname, `host_mode`, `command`, `volumes`, `privileged`, or `net_admin`. It recreates the container automatically and preserves every setting you do not override, so you rarely need to delete and recreate a service by hand. Passing `routes` fully replaces the route list. To return to a single catch-all port, pass `routes=[]` and the replacement `port` in the same call.
 
-In the dashboard, **Update** on a service card opens a dialog prefilled with the service's current environment variables (from its preset, or from the container for a service created before presets). Edit them and confirm to apply the change and pull the latest image in one go; leave the field untouched to just pull and recreate, or clear it to remove every variable. The other settings are changed over MCP or the CLI.
+In the dashboard, **Update** on a service card opens the same editor as the MCP tool: image, command, exposure (a single port or restricted path routes), hostname, environment variables, host network mode, volumes and capabilities, all prefilled with the service's current configuration (from its preset, or from the container for a service created before presets). Confirm to apply the changes and pull the latest image in one go; confirm without editing anything to just pull and recreate. Only the fields you actually edited are sent, so an open dialog cannot revert a setting changed concurrently over MCP. Clearing the env or volumes field removes every variable or unmounts every volume; clearing the command falls back to the image `CMD`. An empty hostname keeps the current one. Only `runtime` has no form field — change it over MCP or the CLI.
 
 If you do recreate a service manually (e.g. to rename it), call `get_service_info` first and reuse its fields in the new `create_service` call. The returned dict carries the full configuration (`image`, `port` or `routes`, `hostname`, `env_vars`, `host_mode`, `command`, `volumes`, `cap_add`, `privileged`) so you do not lose anything that `list_services` truncates or that lived only inside the preset.
 
@@ -3276,7 +3479,15 @@ Overrides are optional: calling `update_service` with only `name` pulls the curr
 
 ## Service Presets
 
-Every time a service is created, its configuration (image, port or routes, hostname, environment variables, volumes, `host_mode`, `command`, `cap_add`, `privileged`) is automatically saved as a **preset** in `{team_data_dir}/service_presets.json`. This allows you to restore a service after deletion without re-entering its configuration.
+Every time a service is created or updated, its configuration (image, port or routes, hostname, environment variables, volumes, `host_mode`, `command`, `cap_add`, `privileged`) is automatically saved as a **preset** in `{team_data_dir}/service_presets.json`. This allows you to restore a service after deletion without re-entering its configuration.
+
+Deleting a service keeps its preset by default — `delete_service` takes
+`save_preset` (the dashboard's delete dialog has a **Save as preset** checkbox,
+ticked by default). Pass `save_preset=false` to drop the preset together with
+the container. Services created before presets existed get theirs backfilled
+once at server start (migration `0008-backfill-service-presets`), so old and
+new services read from the same store; the delete result reports whether a
+preset actually remains on disk.
 
 ```bash
 # List saved presets
@@ -3941,10 +4152,10 @@ Odoo.sh ingest endpoints accept the import token only in
 |---|---|---|
 | `GET` | `/api/services` | List services |
 | `POST` | `/api/services/create` | Create a service with either catch-all `port` or restricted Traefik `routes`, plus optional image/runtime settings. `command` accepts a shell-quoted string or an argv array and replaces the image `CMD` |
-| `GET` | `/api/services/{name}/env-vars` | Return the environment variables an update keeps — the saved preset, or the container's own environment for a service created before presets |
-| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
+| `GET` | `/api/services/{name}/config` | Return the full configuration an update keeps (image, `port`/`routes`, hostname, env vars, `host_mode`, volumes, capabilities, `command`) — what the dashboard's Update dialog prefills. Env values configured as team secrets come back as their `secret:<name>` reference |
+| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied — omitting the key keeps the current value, sending an empty one clears it. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
 | `POST` | `/api/services/{name}/restart` | Restart a service |
-| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected) |
+| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected). The optional body `{"save_preset": false}` removes the saved preset too; by default it is kept for `restore_service`. The result's `preset_kept` reports what is actually on disk afterwards |
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
@@ -4027,6 +4238,8 @@ and delete operations require explicit confirmation in their JSON body.
 | `GET` | `/api/productions` | List productions and return webhook/backup state |
 | `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image) |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
+| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
+| `POST` | `/api/productions/wal-control` | Body `{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }`; cluster-wide action under the system lock |
 | `GET` | `/api/productions/{name}` | Detailed production information |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |
@@ -4118,9 +4331,9 @@ also available via the [REST API](web-api.md).
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
 | `create_service` | ✓ | Create a managed service with exactly one exposure model: catch-all `port`, or restricted Traefik `routes` (`path`, backend `port`, optional `strip_prefix`). The two parameters are mutually exclusive; `port` remains required outside Traefik. Optional `command` (shell-quoted string) replaces the image `CMD` |
-| `delete_service` | ✓ | Stop and remove a service container. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
+| `delete_service` | ✓ | Stop and remove a service container, keeping its preset unless `save_preset=false`. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
 | `restart_service` | ✓ | Restart a service container |
-| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD`. Protected services refuse updates |
+| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` and `volumes` are tri-state: omitted keeps them, a value fully replaces, an empty string falls back to the image `CMD` / unmounts every volume. Protected services refuse updates |
 | `list_services` | | List all managed service containers |
 | `get_service_info` | | Full live state of a single service (image+digest, port/routes, hostname, host_mode, command, volumes, env, capabilities, restart count, preset). Call before recreating it |
 | `get_service_logs` | | Retrieve service container logs |
@@ -4177,6 +4390,8 @@ also available via the [REST API](web-api.md).
 | `list_production_snapshots` | | List S3 snapshots; `refresh=True` bypasses the cached index |
 | `restore_production` | ✓ | Restore one production's database and filestore from a snapshot or a dev environment; requires its name in `confirm` |
 | `production_backup_status` | | Inspect snapshot schedules, WAL archiving, base backups, and S3 reachability |
+| `production_wal_status` | | Cached shared-cluster WAL queue, upload progress, disk reserve, stale-data and protection state |
+| `control_production_wal` | ✓ | Cluster-wide `pause`, `resume`, `retry`, `recover`, or `release`; requires `confirm="ALL-PRODUCTIONS"`. Recovery starts PostgreSQL only; releasing protection leaves applications stopped |
 | `set_production_backup_schedule` | ✓ | Set a production's daily snapshot time (`HH:MM`) or disable it with `off` |
 | `prune_production_backups` | ✓ | Apply configured snapshot and chunk-store retention immediately |
 | `restore_cluster_pitr` | ✓ | ⚠️ Restore the entire production PostgreSQL cluster from WAL-G; requires `confirm="RESTORE-CLUSTER"` |
@@ -4729,9 +4944,23 @@ tls = {}
 ```
 
 Traefik listens on **:443** and redirects **:80** to HTTPS. Oduflow enables TLS
-on every generated router without a certificate resolver. No ACME requests are
-made, `acme_email` is not required, and auxiliary services receive no implicit
-ACME volume mount.
+on every generated router without a certificate resolver, so no certificates
+are requested for Oduflow-managed hostnames and `acme_email` is not required.
+
+`acme_email` still matters with `tls = {}`: when it is set, the Let's Encrypt
+resolver is *declared* in Traefik (and the ACME certificate store is created and
+mounted read-only into auxiliary services), but only routes that reference it
+explicitly — your own [drop-in dynamic-config files](#2-drop-in-traefik-dynamic-files) —
+obtain certificates through it. Note that the store contains no `acme.json`
+until the first issuance. Without `acme_email` there is no resolver, no store
+and no implicit service mount at all. The four combinations:
+
+| Settings | Behavior |
+| --- | --- |
+| `tls = {}` + `acme_email` set | Resolver declared, used only by explicitly configured routes |
+| `tls = {}` + `acme_email` empty | HTTPS without ACME |
+| `tls = true` + `acme_email` set | Resolver declared and automatically assigned to every managed route |
+| `tls = false` | TLS and ACME off |
 
 Unless you provide your own certificates through Traefik's dynamic configuration,
 Traefik generates and serves its default self-signed certificate. Browsers and
@@ -4751,9 +4980,14 @@ The supported values are `true` (HTTPS with Let's Encrypt, the default),
 `{}` (HTTPS without ACME), and `false` (HTTP only). Nonempty TLS tables are
 rejected; this setting does not pass arbitrary options through to Traefik.
 
-Switching modes recreates Traefik on the next Oduflow startup. Recreate existing
-environments, productions and services too: their Docker routing labels retain
-the previous entrypoint and certificate resolver until their containers are recreated.
+Switching modes recreates Traefik on the next Oduflow startup whenever its
+command line changes (TLS on/off, or the resolver appearing/disappearing);
+`tls = true` ↔ `tls = {}` with the same `acme_email` reuses the running
+container and only rewrites the route configuration. Disabling ACME never
+deletes the certificate store: issued certificates and the Let's Encrypt
+account key survive a later re-enable. Recreate existing environments,
+productions and services too: their Docker routing labels retain the previous
+entrypoint and certificate resolver until their containers are recreated.
 
 ## Behind a Cloudflare tunnel (or other TLS-terminating upstream)
 

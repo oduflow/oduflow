@@ -718,6 +718,29 @@ class TestTeamTemplatePaths:
         t = TeamSettings(team_id="1", data_dir="/srv/data")
         assert t.get_template_sql_path("v17") == "/srv/data/templates/v17/dump.pgdump"
 
+    def test_get_template_sql_path_accepts_db_dump(self, tmp_path):
+        t = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        tpl_dir = tmp_path / "templates" / "v17"
+        tpl_dir.mkdir(parents=True)
+        (tpl_dir / "db.dump").write_bytes(b"PGDMP")
+        assert t.get_template_sql_path("v17") == str(tpl_dir / "db.dump")
+
+    def test_get_template_sql_path_accepts_db_dump_gz(self, tmp_path):
+        t = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        tpl_dir = tmp_path / "templates" / "v17"
+        tpl_dir.mkdir(parents=True)
+        (tpl_dir / "db.dump.gz").write_bytes(b"\x1f\x8b")
+        assert t.get_template_sql_path("v17") == str(tpl_dir / "db.dump.gz")
+
+    def test_canonical_dump_wins_over_db_dump(self, tmp_path):
+        """A dump Oduflow persisted must outrank a hand-placed leftover."""
+        t = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        tpl_dir = tmp_path / "templates" / "v17"
+        tpl_dir.mkdir(parents=True)
+        (tpl_dir / "db.dump").write_bytes(b"PGDMP")
+        (tpl_dir / "dump.pgdump").write_bytes(b"PGDMP")
+        assert t.get_template_sql_path("v17") == str(tpl_dir / "dump.pgdump")
+
     def test_get_template_filestore_path(self):
         t = TeamSettings(team_id="1", data_dir="/srv/data")
         assert (
@@ -968,6 +991,38 @@ class TestProductionSettings:
         toml.write_text("[production]\nworkers_cap = 12\n[team.1]\n")
         assert Settings.from_toml(str(toml)).prod_enabled is False
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "stop_free_gb = 4\nresume_free_gb = 3",
+            "upload_timeout = 0",
+            "warn_after = 301\nstall_after = 300",
+            "stop_free_gb = nan",
+            "warn_queue_gb = 8\nstop_queue_gb = 4",
+            "stop_queue_gb = 0",
+            "stop_within = -1",
+        ],
+    )
+    def test_invalid_wal_safety_thresholds(self, tmp_path, body):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            "[production.wal]\n" + body + '\n[team.1]\nhostname="localhost"\n'
+        )
+        with pytest.raises(ValueError, match=r"\[production.wal\]"):
+            Settings.from_toml(str(toml))
+
+    def test_wal_thresholds_are_loaded(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[production.wal]\nupload_timeout=45\nwarn_queue_gb=3\nstop_queue_gb=12\nstop_free_gb=8\nresume_free_gb=16\n[team.1]\nhostname="localhost"\n'
+        )
+        settings = Settings.from_toml(str(toml))
+        assert settings.wal_upload_timeout == 45
+        assert settings.wal_warn_queue_gb == 3
+        assert settings.wal_stop_queue_gb == 12
+        assert settings.wal_stop_free_gb == 8
+        assert settings.wal_resume_free_gb == 16
+
     def test_production_enabled_must_be_boolean(self, tmp_path):
         toml = tmp_path / "oduflow.toml"
         toml.write_text('[production]\nenabled = "true"\n[team.1]\n')
@@ -1003,7 +1058,15 @@ class TestBackupSettings:
         assert s.backup.prefix == "oduflow"
         assert s.backup.snapshot_time == "02:00"
         assert s.backup.walg_keep_full == 7
+        assert s.backup.upload_threads == 16
         s.validate()
+
+    def test_upload_threads_parsed_and_clamped(self, tmp_path):
+        base = '[backup]\nbucket = "b"\naccess_key = "ak"\nsecret_key = "sk"\n'
+        s = Settings.from_toml(self._toml(tmp_path, base + "upload_threads = 4\n"))
+        assert s.backup is not None and s.backup.upload_threads == 4
+        s = Settings.from_toml(self._toml(tmp_path, base + "upload_threads = 0\n"))
+        assert s.backup is not None and s.backup.upload_threads == 1
 
     def test_partial_section_raises(self, tmp_path):
         with pytest.raises(ValueError, match="requires all of"):
@@ -1200,24 +1263,30 @@ class TestDirectoryResolution:
 
 
 @pytest.mark.parametrize(
-    "value, enabled, acme",
+    "value, email, enabled, auto, resolver",
     [
-        ("true", True, True),
-        ("false", False, False),
-        ("{}", True, False),
+        # tls = true + acme_email: resolver declared and auto-assigned.
+        ("true", True, True, True, True),
+        # tls = false: TLS and ACME both off.
+        ("false", True, False, False, False),
+        # tls = {} + acme_email: resolver declared, only explicit routes use it.
+        ("{}", True, True, False, True),
+        # tls = {} without acme_email: HTTPS without ACME.
+        ("{}", False, True, False, False),
     ],
 )
-def test_tls_modes_from_toml(tmp_path, value, enabled, acme):
+def test_tls_modes_from_toml(tmp_path, value, email, enabled, auto, resolver):
     config = tmp_path / "oduflow.toml"
     config.write_text(
         f'[routing]\nmode = "traefik"\ntls = {value}\n'
-        + ('acme_email = "admin@example.com"\n' if acme else "")
+        + ('acme_email = "admin@example.com"\n' if email else "")
         + '[team.1]\nhostname = "dev.example.com"\n'
     )
     settings = Settings.from_toml(str(config))
     settings.validate()
     assert settings.routing_tls is enabled
-    assert settings.uses_acme is acme
+    assert settings.uses_acme is (enabled and auto)
+    assert settings.acme_enabled is resolver
     assert settings.public_scheme == "https"
     if enabled:
         settings = replace(settings, public_scheme_setting="http")

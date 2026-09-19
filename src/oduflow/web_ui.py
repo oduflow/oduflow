@@ -3215,10 +3215,14 @@ def _build_routes(
                 else None
             )
 
-            volumes_raw = (body.get("volumes") or "").strip() if body else ""
-            volume_override = (
-                volume_ops.parse_volume_mounts(volumes_raw) if volumes_raw else None
-            )
+            # "volumes" follows the same rule as "env_vars": present in the
+            # body means a full replacement, and an empty value unmounts every
+            # volume — that is the only way the edit form can remove one.
+            volume_override = None
+            if body and "volumes" in body:
+                volume_override = volume_ops.parse_volume_mounts(
+                    (body.get("volumes") or "").strip()
+                )
 
             image_override = (body.get("image") or "").strip() or None if body else None
             hostname_override = (
@@ -3275,16 +3279,16 @@ def _build_routes(
         finally:
             locks.release_env(key)
 
-    def api_service_env_vars(request: Request) -> JSONResponse:
+    def api_service_config(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         team = _get_ui_team(request)
         try:
-            env_vars = service_ops.get_service_env_vars(get_settings(), team, name)
-            return JSONResponse({"ok": True, "env_vars": env_vars})
+            config = service_ops.get_service_config(get_settings(), team, name)
+            return JSONResponse({"ok": True, "config": config})
         except FlowError as e:
             return _error_response(e)
         except Exception:
-            logger.exception("Unexpected error in api_service_env_vars")
+            logger.exception("Unexpected error in api_service_config")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -3310,16 +3314,33 @@ def _build_routes(
         finally:
             locks.release_env(key)
 
-    def api_service_delete(request: Request) -> JSONResponse:
+    async def api_service_delete(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         team = _get_ui_team(request)
+        # The body is optional, and an absent "save_preset" keeps the preset —
+        # what deleting a service has always done.
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        # An explicit null counts as absent: only a real false drops the preset.
+        save_preset_raw = body.get("save_preset")
+        save_preset = True if save_preset_raw is None else bool(save_preset_raw)
         key = service_lock_key(team.team_id, name)
         try:
             locks.acquire_env(key, operation="delete_service")
         except BusyError as e:
             return _error_response(e)
         try:
-            result = service_ops.delete_service(get_settings(), team, name)
+            result = await _offload(
+                service_ops.delete_service,
+                get_settings(),
+                team,
+                name,
+                save_preset=save_preset,
+            )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -6135,6 +6156,48 @@ def _build_routes(
     # Health + GitHub webhook (both PUBLIC paths with their own auth)
     # ------------------------------------------------------------------
 
+    def api_production_wal_status(request: Request) -> JSONResponse:
+        try:
+            from oduflow import wal_monitor
+
+            _get_ui_team(request)
+            return JSONResponse({"ok": True, **wal_monitor.status(get_settings())})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("api_production_wal_status failed")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_production_wal_control(request: Request) -> JSONResponse:
+        from oduflow import wal_monitor
+        from oduflow.docker_ops.client import get_client
+
+        try:
+            _get_ui_team(request)
+            data = await request.json()
+            locks.acquire_system(operation="control_production_wal")
+            try:
+                result = await _offload(
+                    wal_monitor.control,
+                    get_settings(),
+                    get_client(),
+                    str(data.get("action", "")),
+                    str(data.get("confirm", "")),
+                )
+                return JSONResponse({"ok": True, **result})
+            finally:
+                locks.release_system()
+        except FlowError as exc:
+            return _error_response(exc)
+        except Exception:
+            logger.exception("Production WAL control failed")
+            return JSONResponse(
+                {"ok": False, "error": "WAL control failed; check server logs"},
+                status_code=500,
+            )
+
     def healthz(request: Request) -> JSONResponse:
         from oduflow.health import collect_health
 
@@ -6159,6 +6222,16 @@ def _build_routes(
         production_routes = [
             Route("/api/productions", api_productions, methods=["GET"]),
             Route("/api/productions/create", api_production_create, methods=["POST"]),
+            Route(
+                "/api/productions/wal-status",
+                api_production_wal_status,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/productions/wal-control",
+                api_production_wal_control,
+                methods=["POST"],
+            ),
             Route(
                 "/api/productions/backup-status",
                 api_production_backup_status,
@@ -6448,7 +6521,7 @@ def _build_routes(
         Route("/api/services", api_services, methods=["GET"]),
         Route("/api/services/create", api_service_create, methods=["POST"]),
         Route("/api/services/{name}/update", api_service_update, methods=["POST"]),
-        Route("/api/services/{name}/env-vars", api_service_env_vars, methods=["GET"]),
+        Route("/api/services/{name}/config", api_service_config, methods=["GET"]),
         Route("/api/services/{name}/restart", api_service_restart, methods=["POST"]),
         Route("/api/services/{name}/delete", api_service_delete, methods=["POST"]),
         Route("/api/services/{name}/protect", api_service_protect, methods=["POST"]),

@@ -382,6 +382,39 @@ def _migrate_template_metadata_permissions(settings: Settings) -> None:
                 _chmod_private_best_effort(os.path.join(root, "metadata.json"))
 
 
+def _migrate_backfill_service_presets(settings: Settings) -> None:
+    """Write a preset for every legacy service that has none.
+
+    Presets are the authoritative service configuration — restore, the
+    dashboard's edit dialog and update all read them first — but services
+    created before presets existed carry theirs only on the container.
+    Backfilling once here gives every reader one source of truth instead of
+    each surface re-deriving the config from container inspection. Best effort
+    per service, like migration 0004: a service whose image or port cannot be
+    reconstructed is logged and skipped (an unrestorable preset is worse than
+    none), and a rerun finds the written presets and does nothing.
+    """
+    from oduflow.docker_ops.client import get_client
+    from oduflow.docker_ops.service_ops import backfill_service_preset
+
+    client = get_client()
+    for team in settings.teams.values():
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{settings.managed_label}=true",
+                    f"{settings.team_label}={team.team_id}",
+                    "oduflow.service",
+                ]
+            },
+        )
+        for container in containers:
+            name = container.labels.get("oduflow.service")
+            if name:
+                backfill_service_preset(settings, team, name, container)
+
+
 # Append-only registry, executed in list order. Ids are recorded in
 # migrations.json once applied; reordering or renaming entries would re-run
 # or skip steps on existing installs.
@@ -441,6 +474,14 @@ MIGRATIONS: list[Migration] = [
             "vars) to owner-only permissions like the credential stores"
         ),
         apply=_migrate_template_metadata_permissions,
+    ),
+    Migration(
+        id="0008-backfill-service-presets",
+        description=(
+            "Write a service preset for every legacy service container that "
+            "predates presets, so restore/update/edit read one source of truth"
+        ),
+        apply=_migrate_backfill_service_presets,
     ),
 ]
 

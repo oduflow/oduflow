@@ -582,10 +582,12 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
 
     system_labels = {settings.managed_label: "true", settings.system_label: "true"}
 
-    # Only an ACME deployment has a certificate store to persist: `tls = {}`
-    # also serves HTTPS, but from Traefik's default certificate, so it needs no
-    # volume.
-    if settings.uses_acme:
+    # Only a deployment with a declared resolver has a certificate store to
+    # persist: without acme_email nothing can issue, so no volume is needed.
+    # An existing store is deliberately never removed here — disabling ACME
+    # just stops mounting it, keeping issued certificates and the account key
+    # for a later re-enable.
+    if settings.acme_enabled:
         try:
             client.volumes.get(settings.traefik_acme_volume)
         except docker.errors.NotFound:
@@ -614,7 +616,13 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         # Recreate on configuration drift:
         #   - routing tls: the HTTP->HTTPS redirect arg is present only in TLS
         #     mode, so its presence must match routing_tls.
-        #   - ACME: switching between tls = true and tls = {}.
+        #   - ACME: the resolver args are present only when acme_enabled
+        #     (traefik TLS with an acme_email), so toggling acme_email — or
+        #     tls = false — must recreate. tls = {} <-> tls = true with the
+        #     same email keeps the container; only route config changes.
+        #     This is a presence check, not a value check: changing acme_email
+        #     from one address to another leaves the container (and the address
+        #     Let's Encrypt has on file) alone until a manual recreate.
         #   - forwarded headers: trusted only in front of an upstream TLS
         #     terminator, so its presence must match _trusts_upstream_headers
         #     (which public_scheme can flip without touching tls).
@@ -637,7 +645,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         )
         if (
             has_redirect != settings.routing_tls
-            or has_acme != settings.uses_acme
+            or has_acme != settings.acme_enabled
             or has_forwarded != wants_forwarded
             or not on_dir_provider
         ):
@@ -652,7 +660,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
                 wants_forwarded,
                 on_dir_provider,
                 has_acme,
-                settings.uses_acme,
+                settings.acme_enabled,
             )
             t.stop()
             t.remove()
@@ -699,7 +707,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
             # exposed and anyone could forge the header, so it stays off.
             command.append("--entrypoints.web.forwardedHeaders.insecure=true")
 
-    if settings.uses_acme:
+    if settings.acme_enabled:
         volumes[settings.traefik_acme_volume] = {"bind": "/acme", "mode": "rw"}
         command += [
             "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",
@@ -1931,6 +1939,9 @@ def _ensure_prod_pg_container(
     Odoo containers reach it over the team networks.
     """
     from oduflow import walg
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
 
     try:
         db_container = client.containers.get(settings.prod_db_container)
@@ -1947,7 +1958,7 @@ def _ensure_prod_pg_container(
     os.makedirs(walg.bin_host_dir(settings), exist_ok=True)
     os.makedirs(walg.conf_host_dir(settings), exist_ok=True)
     client.containers.run(
-        settings.prod_postgres_image or settings.postgres_image,
+        settings.production_pg_image,
         name=settings.prod_db_container,
         detach=True,
         network=settings.shared_network,
@@ -1993,7 +2004,11 @@ def _prod_infra_required(client: DockerClient, settings: Settings) -> bool:
 
 
 def ensure_prod_infra(
-    client: DockerClient, settings: Settings, *, force: bool = False
+    client: DockerClient,
+    settings: Settings,
+    *,
+    force: bool = False,
+    accept_live_evidence: bool = False,
 ) -> bool:
     """Provision the production tier (idempotent, lazy).
 
@@ -2001,8 +2016,14 @@ def ensure_prod_infra(
     Dev-only installs never grow a second PostgreSQL: without ``force`` this
     is a no-op until a production exists or the container is already there.
     Returns True when the production infra is up.
+
+    ``accept_live_evidence`` is forwarded to :func:`walg.prepare_archiving`;
+    see there for when a healthy live sample replaces the full verification.
     """
     from oduflow import walg
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
 
     if not force and not _prod_infra_required(client, settings):
         return False
@@ -2015,15 +2036,14 @@ def ensure_prod_infra(
         client.volumes.create(settings.prod_db_volume, labels=system_labels)
         logger.info("Created volume %s", settings.prod_db_volume)
 
-    # WAL-G binary + config. Best-effort: a github outage must not block
-    # server startup or production provisioning — backups just stay off
-    # (archive_command remains the no-op) until the next start succeeds.
-    walg_ok = False
+    # WAL-G binary + config. A download outage does not prevent PostgreSQL
+    # from starting for diagnosis/recovery. Configured production admission
+    # still requires the in-container preflight below; never acknowledge WAL
+    # merely because the binary is unavailable.
     try:
         walg.ensure_walg(settings)
-        walg_ok = True
     except Exception as exc:
-        logger.warning("wal-g unavailable (backups disabled for now): %s", exc)
+        logger.warning("wal-g unavailable (configured WAL will be retained): %s", exc)
     walg.write_walg_config(settings)
 
     _ensure_prod_pg_container(client, settings, system_labels)
@@ -2041,12 +2061,15 @@ def ensure_prod_infra(
         container_name=settings.prod_db_container,
     )
 
-    try:
-        walg.apply_archive_command(
-            client, settings, enabled=walg_ok and settings.backup is not None
+    # Production is not ready merely because PostgreSQL accepts connections.
+    # Propagate failures to the caller so applications are not started with
+    # an unverified archive. Existing failed archives keep retaining WAL.
+    if settings.backup is not None:
+        walg.prepare_archiving(
+            client, settings, accept_live_evidence=accept_live_evidence
         )
-    except Exception as exc:
-        logger.warning("Could not set production archive_command: %s", exc)
+    else:
+        walg.apply_archive_command(client, settings, enabled=False)
 
     return True
 
@@ -2086,6 +2109,12 @@ def reconcile_prod_workloads(client: DockerClient, settings: Settings) -> None:
     ]
 
     if settings.prod_enabled:
+        from oduflow import wal_monitor
+
+        guard = wal_monitor.state(settings)
+        if guard.get("latched"):
+            wal_monitor.enforce_stop(client, settings, guard)
+            return
         # Capture the transition signal before ensure_prod_infra starts PG.
         was_disabled = not _prod_pg_running(client, settings)
         ensure_prod_infra(client, settings)

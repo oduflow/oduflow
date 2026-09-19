@@ -50,6 +50,8 @@ region = "eu-central-1"
 # basebackup_time = "03:30"    (daily WAL-G base backup)
 # keep = ["30:180", "7:30", "1:7"]  (snapshot retention: interval:age days)
 # walg_keep_full = 7           (base backups retained)
+# upload_threads = 16          (parallel filestore chunk uploads; buffers
+#                               up to max(64 MiB, threads x 4 MiB) in RAM)
 ```
 
 While disabled, the dashboard tab and production HTTP/webhook routes are not
@@ -312,6 +314,193 @@ the cluster the same way.
 `production_backup_status()` shows per-production snapshot state, WAL
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
+
+### WAL-G certificates and storage health
+
+Oduflow writes a CA bundle alongside `walg.json` in
+`<base_data_dir>/walg/` and configures WAL-G to read it through the existing
+read-only `/etc/walg` directory mount. This works even when the PostgreSQL
+image has no system CA bundle, and covers WAL uploads, base backups, and PITR
+helpers. Restarting Oduflow refreshes these files for existing containers;
+PostgreSQL does not need to be recreated for this fix.
+
+The CA source is `AWS_CA_BUNDLE`, then `SSL_CERT_FILE`, then the server's
+default CA file, with the boto3/botocore bundle as a fallback when there is no
+default file. Set an explicit override in the Oduflow service environment for
+a private certificate authority. Invalid overrides fail rather than disabling
+TLS verification or replacing a working bundle.
+
+The background WAL monitor checks storage list access using WAL-G **inside
+production PostgreSQL, as the postgres user**. The dashboard's **WAL-G** health
+chip and `/healthz` use its cached result. The
+diagnostic command has a five-second timeout, with forced termination after
+another two seconds. A TLS/access error degrades `/healthz` even when the
+separate S3 check from the Oduflow server succeeds. List access does not prove
+upload permissions, successful archiving, or a complete PITR chain. The backup
+status API retains local archiver statistics when the remote inventory query
+fails; inventory commands have a 30-second timeout.
+
+### Production readiness at deployment
+
+New installations using the default PostgreSQL 15 use
+`oduist/oduflow-postgres:15-bookworm-1`. This image includes `ca-certificates`
+and pins the upstream Debian Bookworm image by digest. A custom
+`[production].postgres_image` takes precedence; a non-default
+`[database].image` is still inherited for compatibility with other PostgreSQL
+majors. Existing containers are reused, never automatically replaced or
+upgraded across majors. Their WAL-G trust is repaired through the persistent
+mounted CA bundle described above.
+
+With `[backup]` configured, provisioning and production start/restart/deploy
+require a successful check **inside PostgreSQL as the postgres user**:
+
+1. Check the actual disk and queue safety thresholds.
+2. Check the mounted CA bundle, executable and credentials file, then use
+   WAL-G to list storage, upload a unique probe, read it back, compare its
+   content and delete the probe. The storage phase is limited to 30 seconds,
+   with bounded cleanup/forced termination. The credentials need read, list,
+   write and delete permissions for the probe under
+   `<backup.prefix>/walg/oduflow-preflight/`; backup objects are not modified.
+3. Enable the managed archive command and confirm PostgreSQL applied it.
+4. Generate a restore point and switch WAL, then wait up to
+   `upload_timeout + 75` seconds for that segment to be archived. Only then
+   allow the production application to start. This confirms current archive
+   delivery; a recoverable PITR chain additionally requires a base backup.
+
+Step 4 is skipped for an already admitted production — `restart_production`,
+a deploy or a rollback — when the sample from step 1 already proves archiving
+is healthy: the managed archive command is active, archiving is not stalled,
+and the storage listing in that same sample succeeded. A hung production stays
+restartable during a brief storage outage instead of waiting minutes for a new
+segment. Admitting a new production, or starting a stopped one, always runs
+the full check.
+
+An error blocks the operation and appears as **Last startup check** in the
+WAL panel. It stops driving the overall status once a newer healthy sample
+supersedes it; live sampling then reports the current state. It does not convert an existing archive command to `/bin/true` or
+delete retained WAL. An old no-op command is changed to an empty, retaining
+command before preflight; fresh generated configurations also retain WAL
+until provisioning decides. Existing working archiving continues during a
+preflight failure; the disk/queue guard remains responsible for emergency
+shutdown. Development environments can still start if production is unready.
+
+The PostgreSQL image is published for amd64 and arm64 by
+`.github/workflows/publish-postgres.yml` only from `main`, with an immutable
+version tag. Publish it successfully before releasing the Oduflow package;
+both the PyPI and application Docker release workflows verify its availability.
+For an image update, change the base digest, bump `POSTGRES_IMAGE_VERSION`
+and `DEFAULT_PROD_POSTGRES_IMAGE` together, merge, and wait for publication.
+No package installation is performed inside PostgreSQL during deployment or
+emergency recovery.
+
+### WAL monitoring and automatic disk protection
+
+The **PostgreSQL WAL** panel in Production is shared by every production and
+team. It shows the queue's segment count and bytes, age of the oldest waiting
+segment, time without archive progress, current upload duration, last upload
+exit status, PostgreSQL restart count, and free space on the actual WAL
+filesystem. Space reserved for root is excluded. A dedicated daemon samples
+locally every 15 seconds, independently of backup jobs and dashboard polling;
+the storage probe runs only after the local protection decision. Missing or
+older-than-60-second samples are errors, never healthy results.
+
+An empty queue is idle, not stalled. With a queue, lack of successful archive
+progress triggers warning/error thresholds. A draining but old backlog stays
+visible. WAL upload attempts have a hard timeout and return failure on timeout
+or termination; PostgreSQL retains the segment and retries. Failed downloads
+of the WAL-G executable never switch configured archiving to a success no-op.
+
+Defaults can be changed in TOML:
+
+```toml
+[production.wal]
+upload_timeout = 120    # seconds; TERM, then KILL after another 5 seconds
+warn_after = 120        # seconds without archive progress, with a queue
+stall_after = 300
+stop_free_gb = 2        # GiB available to postgres: safety reserve
+resume_free_gb = 4      # recovery headroom; must exceed stop_free_gb
+stop_within = 300       # estimated seconds until the reserve is reached
+warn_queue_gb = 2       # GiB of unarchived WAL before warning
+stop_queue_gb = 8       # GiB of unarchived WAL before protective stop
+```
+
+Protection is active whenever production hosting is enabled, even without
+S3 backups or while archiving is paused. It trips as soon as free space
+reaches the reserve. A prediction alone is not enough: consumption measured
+between the two most recent samples must predict reaching the reserve within
+`stop_within`, and that prediction must hold for two consecutive samples.
+`df` covers the whole filesystem, so a finished burst from an unrelated
+consumer never stops the cluster, while a continuing leak still does.
+It also trips when the unarchived queue reaches
+`stop_queue_gb`, even on a large disk. Protection saves a persistent latch,
+disables Docker restart policies, stops managed production applications,
+then stops the shared PostgreSQL container. Failed stops are reported and retried. The latch blocks production
+starts, deploys, restores and new backup jobs, including after Oduflow or
+Docker restarts. Protection can interrupt in-flight jobs; it does not wait for
+their locks while the disk fills.
+
+Set the reserve for peak write volume and shutdown time. The monitor requires
+Oduflow and Docker to be responsive; it cannot guarantee protection against
+arbitrarily fast disk exhaustion or other host processes filling the same
+filesystem after PostgreSQL stops. Monitor `/healthz` externally as well.
+
+The panel and MCP offer these cluster-wide actions (MCP mutations require
+`confirm="ALL-PRODUCTIONS"`):
+
+| Action | Effect |
+| --- | --- |
+| `pause` | Retains unarchived WAL and interrupts the active upload. The queue can grow; disk protection stays active. |
+| `resume` | Refreshes WAL-G config/certificates and resumes archiving. Does not restart stopped PostgreSQL. |
+| `retry` | Terminates only the current `wal-push`, including a legacy upload predating the timeout wrapper; PostgreSQL retries it. |
+| `recover` | Requires recovery headroom; starts only PostgreSQL, keeping applications stopped and rejecting network database connections. Local maintenance and outbound S3 access remain available. Requests a WAL switch to verify real archiving. |
+| `release` | Requires recovery headroom, a safe consumption rate, working storage access, and a successful archive after recovery began. Restores normal connections and restart policies; applications remain stopped until explicitly started. |
+
+Use `production_wal_status()` for cached diagnostics and
+`control_production_wal(action="recover", confirm="ALL-PRODUCTIONS")` for
+control. REST equivalents are `GET /api/productions/wal-status` and
+`POST /api/productions/wal-control`. Full team authentication follows the
+existing cluster PITR access model; environment-scoped access is excluded.
+Queue size warns at `warn_queue_gb` and protects at `stop_queue_gb`. During
+fenced PostgreSQL-only recovery the queue may exceed the stop threshold so
+it can drain; disk pressure still stops PostgreSQL. Releasing protection
+requires the queue to fall below `warn_queue_gb` as well as free-space headroom
+and confirmed archive progress.
+
+The monitor's latch is stored in `<base_data_dir>/wal_guard.json`; do not
+delete it to bypass recovery checks. Recovery temporarily replaces the managed
+`PGDATA/pg_hba.conf`, preserving the original alongside it, and restores it on
+release. Custom HBA paths require operator intervention.
+
+### Recovering from a full WAL disk
+
+Production tables and WAL live together in the `oduflow-prod-db-data` Docker
+volume, unlike the per-team tablespaces used for development. Inspect free
+space on the filesystem containing that volume, including the space available
+to the non-root postgres user. `max_wal_size` is not a hard limit when WAL
+cannot be archived.
+
+If logs report `No space left on device` and WAL-G reports an unknown
+certificate authority:
+
+1. Stop application writers to reduce additional WAL generation. Free several
+   GiB from known disposable files **outside PostgreSQL data**, or expand the
+   volume's filesystem. Never manually delete files from `pg_wal`.
+2. Deploy the fix and restart Oduflow to refresh the mounted CA bundle and
+   WAL-G configuration. If protection is active, use **Resume archiving** if
+   paused, then **Start PostgreSQL recovery** after sufficient space is free.
+   No PostgreSQL recreation is required.
+3. Check the WAL-G health result and PostgreSQL logs. Confirm actual progress:
+   `pg_stat_archiver.archived_count` increases and the queue of `.ready` files
+   in `pg_wal/archive_status` drains. A successful list probe alone is not
+   enough. An already-running WAL-G attempt uses its old configuration until
+   it exits; **Retry upload** interrupts it without discarding the segment.
+4. Allow PostgreSQL to recycle eligible WAL itself and verify free space
+   recovers before releasing protection and explicitly starting the desired
+   applications. Other retention requirements, such as replication slots,
+   can also keep WAL on disk.
+
+Do not switch `archive_command` to `/bin/true` to drain the queue: it reports
+success without saving the segments and can break PITR continuity.
 
 ## Copying production data to dev
 

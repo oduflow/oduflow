@@ -9,12 +9,19 @@ allow_local_path = true        # trusted single-user local development; disable 
 # ── Routing ───────────────────────────────────────────
 [routing]
 mode = "port"                   # "port" | "traefik"
-# acme_email = "admin@example.com"  # required for traefik (when tls = true)
+# acme_email = "admin@example.com"  # required for traefik when tls = true; optional
+#                                  # with tls = {} (see below)
 # tls = true                       # traefik only. true: Traefik terminates TLS
-#                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt).
-#                                  # {}: same listener and redirect, but no ACME and
-#                                  # no acme_email — Traefik serves its default
-#                                  # (self-signed) certificate; for local/test setups.
+#                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt on
+#                                  # every Oduflow-managed route).
+#                                  # {}: same listener and redirect, but managed routes
+#                                  # get no certificate resolver — Traefik serves its
+#                                  # default (self-signed) certificate; for local/test
+#                                  # setups. acme_email is optional here: set it and the
+#                                  # Let's Encrypt resolver is still declared (with its
+#                                  # certificate store), for use by your own drop-in
+#                                  # Traefik dynamic-config routes only; leave it empty
+#                                  # and there is no resolver and no store at all.
 #                                  # false: plain HTTP on :80 only, no redirect/ACME —
 #                                  # for a TLS-terminating upstream (e.g. Cloudflare
 #                                  # tunnel). Public URLs stay https:// either way.
@@ -84,8 +91,19 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # enabled flag, then restart Oduflow. See https://docs.oduflow.dev/production/
 # [production]
 # enabled = true
-# postgres_image = ""             # default: [database].image
+# postgres_image = ""             # managed PG15 with CA; inherits custom [database].image
 # workers_cap = 8                 # upper bound for auto-tuned Odoo workers
+
+# Production WAL safety (always active while production hosting is enabled).
+# [production.wal]
+# upload_timeout = 120           # seconds per wal-push; then TERM / KILL
+# warn_after = 120               # seconds without archive progress with a queue
+# stall_after = 300
+# stop_free_gb = 2                # GiB available to postgres, excluding root reserve
+# resume_free_gb = 4              # must exceed stop_free_gb
+# stop_within = 300               # stop if estimated time to reserve is this short
+# warn_queue_gb = 2               # warn on queued unarchived WAL size (GiB)
+# stop_queue_gb = 8               # stop production; must exceed warn_queue_gb
 
 # S3 backups for productions: continuous WAL archiving (WAL-G), scheduled
 # snapshots (pg_dump + deduplicated filestore) and retention. Presence of
@@ -101,6 +119,8 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # basebackup_time = "03:30"       # daily WAL-G base backup
 # keep = ["30:180", "7:30", "1:7"]  # snapshot retention: "interval_days:age_days"
 # walg_keep_full = 7              # WAL-G base backups retained
+# upload_threads = 16             # parallel filestore chunk uploads (1 = sequential);
+#                                 # buffers up to max(64 MiB, threads x 4 MiB) in RAM
 
 # ── Teams ─────────────────────────────────────────────
 # Each team gets isolated workspaces, templates, credentials and services.

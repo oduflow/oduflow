@@ -34,6 +34,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from typing import Any, ContextManager
@@ -144,6 +145,9 @@ def snapshot_production(
     a snapshot without a manifest does not exist (orphaned dump/chunks are
     reclaimed by prune).
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     backup = _require_backup(settings)
     production_registry.get_production(team, name)
     client = get_client()
@@ -178,9 +182,11 @@ def snapshot_production(
             digest.update(frame)
             yield frame
 
+    db_started = time.monotonic()
     db_bytes = s3_client.multipart_upload_stream(
         s3, backup.bucket, db_key, _hashing_frames()
     )
+    db_seconds = round(time.monotonic() - db_started, 1)
     if db_bytes == 0:
         raise ExternalCommandError(
             "pg_dump", 1, f"pg_dump of {db_name} produced no output"
@@ -188,8 +194,12 @@ def snapshot_production(
 
     # 2. Filestore: chunkstore revision (incremental, deduplicated).
     if os.path.isdir(filestore_dir):
+        fs_started = time.monotonic()
         fs_result = chunkstore.backup(
-            filestore_dir, filestore_storage(settings, team), name
+            filestore_dir,
+            filestore_storage(settings, team),
+            name,
+            upload_threads=backup.upload_threads,
         )
         filestore_info = {
             "revision": fs_result.revision,
@@ -197,9 +207,10 @@ def snapshot_production(
             "bytes": fs_result.total_bytes,
             "new_chunks": fs_result.new_chunks,
             "uploaded_bytes": fs_result.uploaded_bytes,
+            "seconds": round(time.monotonic() - fs_started, 1),
         }
     else:
-        filestore_info = {"revision": 0, "files": 0, "bytes": 0}
+        filestore_info = {"revision": 0, "files": 0, "bytes": 0, "seconds": 0.0}
 
     # 3. Manifest (uploaded last — commits the snapshot).
     manifest = {
@@ -211,7 +222,12 @@ def snapshot_production(
         "trigger": trigger,
         "note": note,
         "commit_sha": commit,
-        "db": {"key": db_key, "sha256": digest.hexdigest(), "bytes": db_bytes},
+        "db": {
+            "key": db_key,
+            "sha256": digest.hexdigest(),
+            "bytes": db_bytes,
+            "seconds": db_seconds,
+        },
         "filestore": filestore_info,
     }
     s3.put_object(
@@ -232,11 +248,14 @@ def snapshot_production(
         },
     )
     logger.info(
-        "Snapshot %s of production '%s': db %d bytes, filestore rev %s",
+        "Snapshot %s of production '%s': db %d bytes in %.1fs, "
+        "filestore rev %s in %.1fs",
         snapshot_id,
         name,
         db_bytes,
+        db_seconds,
         filestore_info.get("revision"),
+        filestore_info.get("seconds", 0.0),
     )
     return manifest
 
@@ -480,6 +499,9 @@ def _commit_restored_pair(
     finally:
         if container is not None and container_stopped and live_state_safe:
             try:
+                from oduflow.wal_monitor import assert_writable
+
+                assert_writable(settings)
                 container.start()
             except Exception:
                 logger.exception("Could not restart production '%s'", name)
@@ -506,6 +528,9 @@ def restore_production(
     the filestore is rebuilt into a sibling directory and swapped by
     rename. The caller holds the production's lock.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     backup = _require_backup(settings)
     record = production_registry.get_production(team, name)
     manifest = _load_manifest(settings, team, name, snapshot_id)
@@ -726,6 +751,9 @@ def restore_production_from_environment(
     lock; ``env_lock`` scopes the source environment's lock to the copy slice
     so dev work on the branch is not blocked by the whole restore.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     record = production_registry.get_production(team, name)
     client = get_client()
     source_env = production_ops._source_env_info(client, settings, team, source)
@@ -918,17 +946,23 @@ def backup_status(settings: Settings, team: TeamSettings) -> dict[str, Any]:
         status["productions"][name] = record.get("backup", {})
     if settings.backup is None:
         return status
-    status["s3"] = s3_client.check_s3(settings.backup)
+    try:
+        client = get_client()
+        status["walg"]["archiver"] = walg.archiver_status(client, settings)
+    except Exception as exc:
+        status["walg"]["archiver_error"] = str(exc)
     try:
         client = get_client()
         backups = walg.backup_list(client, settings)
-        status["walg"] = {
-            "base_backups": len(backups),
-            "latest_base_backup": (backups[-1] if backups else {}),
-            "archiver": walg.archiver_status(client, settings),
-        }
+        status["walg"].update(
+            {
+                "base_backups": len(backups),
+                "latest_base_backup": (backups[-1] if backups else {}),
+            }
+        )
     except Exception as exc:
-        status["walg"] = {"error": str(exc)}
+        status["walg"]["error"] = str(exc)
+    status["s3"] = s3_client.check_s3(settings.backup)
     return status
 
 

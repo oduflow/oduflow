@@ -144,9 +144,10 @@ class TestCodeProvenance:
 
 
 class TestListTemplatesShowsOrigin:
+    @patch("oduflow.docker_ops.system_ops.get_client")
     @patch("oduflow.docker_ops.system_ops._db_exists", return_value=True)
     def test_source_line_includes_branch_and_short_commit(
-        self, _db_exists, tool_env, tmp_path
+        self, _db_exists, _client, tool_env, tmp_path
     ):
         settings, team = tool_env
         _write_template(

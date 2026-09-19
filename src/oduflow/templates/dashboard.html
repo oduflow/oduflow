@@ -484,6 +484,7 @@
   .menu button.danger:hover { background: color-mix(in oklab, var(--red) 10%, transparent); }
   .btn:hover { border-color: var(--accent); color: var(--accent); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  input:disabled, select:disabled, textarea:disabled { opacity: 0.4; cursor: not-allowed; }
   /* Semantic color appears on intent (hover/focus), not at rest:
      status badges own the resting color story of the screen. */
   .btn-start:hover, .btn-start:focus-visible { border-color: var(--green); color: var(--green); background: color-mix(in oklab, var(--green) 10%, transparent); }
@@ -1388,6 +1389,7 @@
     <button class="btn" onclick="copyToClipboard(document.getElementById('prod-webhook-url').textContent, 'Webhook URL copied')">Copy URL</button>
     <button class="btn" onclick="copyToClipboard(_prodWebhookSecret, 'Webhook secret copied')">Copy secret</button>
   </div>
+  <div id="prod-wal" class="env-card" aria-live="polite">Loading PostgreSQL WAL status…</div>
   <div id="prod-list"></div>
 </div>
 
@@ -1627,22 +1629,73 @@
   </div>
 </div>
 <div class="modal-overlay" id="svc-update-modal" onclick="closeUpdateService(event)">
-  <div class="modal modal-sm">
+  <div class="modal modal-routes">
     <div class="modal-header">
       <h2 id="svc-update-title">Update service</h2>
       <button class="modal-close" onclick="closeUpdateService()" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Pull the latest image for <strong id="svc-update-name"></strong> and re-create its container. Volumes are kept.</p>
+      <p class="modal-note">Applies these settings to <strong id="svc-update-name"></strong> and pulls the latest image in one go. The container is re-created; volumes and their data are kept.</p>
+      <div class="form-error" id="upd-svc-error"></div>
       <div class="form-group">
-        <label for="svc-update-env-vars">Environment variables</label>
-        <textarea id="svc-update-env-vars" rows="6" spellcheck="false" placeholder="MEILI_ENV=production&#10;MEILI_MASTER_KEY=..."></textarea>
-        <div class="hint">Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
-        <p class="modal-note">One KEY=VALUE per line. Clear the field to remove all variables; leave it untouched to keep them.</p>
+        <label for="upd-svc-image">Docker image</label>
+        <input type="text" id="upd-svc-image" placeholder="e.g. redis:7, getmeili/meilisearch:v1.6">
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-command">Command <span class="label-hint">— overrides the image CMD</span></label>
+        <input type="text" id="upd-svc-command" placeholder="e.g. server /data --console-address :9001">
+        <div class="hint">Clear the field to fall back to the image CMD.</div>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-exposure">Public exposure</label>
+        <select id="upd-svc-exposure" onchange="toggleServiceExposure('upd-svc')">
+          <option value="port">Single port (all paths)</option>
+          <option value="routes">Restricted path routes (Traefik)</option>
+        </select>
+      </div>
+      <div class="form-group" id="upd-svc-port-group">
+        <label for="upd-svc-port">Container port</label>
+        <input type="number" id="upd-svc-port" placeholder="e.g. 6379" min="1" max="65535">
+      </div>
+      <div class="form-group" id="upd-svc-routes-group" style="display:none;">
+        <label>Allowed path routes</label>
+        <div class="route-hint">Each prefix reaches a port on this service. Unknown paths return 404. “Strip” removes the prefix before proxying.</div>
+        <button class="btn btn-sm" type="button" id="upd-svc-add-route" onclick="addServiceRoute('upd-svc')">Add route</button>
+        <div class="route-list" id="upd-svc-routes"></div>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-hostname">Hostname (traefik mode)</label>
+        <input type="text" id="upd-svc-hostname" placeholder="e.g. redis">
+        <div class="hint">A name without a dot gets the team domain appended. Leave empty to keep the current hostname.</div>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-envvars">Environment variables</label>
+        <textarea id="upd-svc-envvars" rows="6" spellcheck="false" placeholder="KEY1=val1&#10;KEY2=val2"></textarea>
+        <div class="hint">One KEY=VALUE per line. Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab). Clear the field to remove every variable.</div>
+      </div>
+      <div class="form-group check-row">
+        <input type="checkbox" id="upd-svc-host-mode">
+        <label for="upd-svc-host-mode" >Host network mode</label>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-volumes">Volumes</label>
+        <textarea id="upd-svc-volumes" rows="3" placeholder="volume_name:/container/path&#10;volume_name:/container/path:ro"></textarea>
+        <div class="hint">Clear the field to unmount every volume. The volumes themselves keep their data.</div>
+      </div>
+      <div class="form-group">
+        <label>Capabilities</label>
+        <div class="check-row" style="margin-top:4px;">
+          <input type="checkbox" id="upd-svc-privileged">
+          <label for="upd-svc-privileged" >Privileged <span class="label-hint">— full host access (use with care)</span></label>
+        </div>
+        <div class="check-row" style="margin-top:6px;">
+          <input type="checkbox" id="upd-svc-net-admin">
+          <label for="upd-svc-net-admin" >NET_ADMIN <span class="label-hint">— VPN / tun / iptables</span></label>
+        </div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeUpdateService()">Cancel</button>
-        <button class="btn-create" onclick="confirmUpdateService()">Update service</button>
+        <button class="btn-create" id="upd-svc-submit" onclick="confirmUpdateService()">Update service</button>
       </div>
     </div>
   </div>
@@ -2154,6 +2207,10 @@
     </div>
     <div class="modal-body">
       <p class="modal-note" id="confirm-message"></p>
+      <div class="form-group check-row" id="confirm-check-row" style="display:none;">
+        <input type="checkbox" id="confirm-check">
+        <label for="confirm-check" id="confirm-check-label"></label>
+      </div>
       <div class="form-actions">
         <button class="btn" id="confirm-cancel" onclick="cancelConfirm()">Cancel</button>
         <button class="btn-create" id="confirm-ok" onclick="acceptConfirm()">Confirm</button>
@@ -2702,15 +2759,26 @@ document.querySelectorAll('.modal-overlay').forEach(function(overlay) {
 
 // --- Confirm dialog: in-system replacement for window.confirm() ---
 var _confirmResolve = null;
+var _confirmOpts = null;
 
+// The promise always resolves a boolean, so every `if (!(await
+// confirmDialog(...)))` caller keeps working. opts.checkbox = {label, checked}
+// adds one option to the dialog; on confirm the user's answer is written back
+// into the caller's own opts.checkbox.checked.
 function confirmDialog(opts) {
   return new Promise(function(resolve) {
     _confirmResolve = resolve;
+    _confirmOpts = opts;
     document.getElementById('confirm-title').textContent = opts.title || 'Confirm';
     document.getElementById('confirm-message').textContent = opts.message || '';
     var ok = document.getElementById('confirm-ok');
     ok.textContent = opts.confirmLabel || 'Confirm';
     ok.classList.toggle('danger', !!opts.danger);
+    document.getElementById('confirm-check-row').style.display = opts.checkbox ? '' : 'none';
+    if (opts.checkbox) {
+      document.getElementById('confirm-check-label').textContent = opts.checkbox.label || '';
+      document.getElementById('confirm-check').checked = opts.checkbox.checked !== false;
+    }
     showModal('confirm-modal');
     // Destructive confirms focus Cancel so a buffered Enter cannot delete.
     if (opts.danger) document.getElementById('confirm-cancel').focus();
@@ -2722,6 +2790,7 @@ function _settleConfirm(value) {
   if (!_confirmResolve) return;
   var resolve = _confirmResolve;
   _confirmResolve = null;
+  _confirmOpts = null;
   hideModal('confirm-modal');
   resolve(value);
 }
@@ -2731,7 +2800,12 @@ function cancelConfirm(event) {
   _settleConfirm(false);
 }
 
-function acceptConfirm() { _settleConfirm(true); }
+function acceptConfirm() {
+  if (_confirmOpts && _confirmOpts.checkbox) {
+    _confirmOpts.checkbox.checked = document.getElementById('confirm-check').checked;
+  }
+  _settleConfirm(true);
+}
 
 // --- Tabs: tablist semantics + arrow-key navigation ---
 (function initTabs() {
@@ -5473,7 +5547,10 @@ function resetTimers() {
     // Skip the periodic re-render while a production Settings form has unsaved
     // edits or focus — re-rendering would silently discard them. Manual loads
     // (tab switch, explicit actions) still refresh normally.
-    if (prodTab && prodTab.classList.contains('active') && !_prodSettingsEditing()) loadProductions();
+    if (prodTab && prodTab.classList.contains('active')) {
+      if (_prodSettingsEditing()) loadWalStatus();
+      else loadProductions();
+    }
   }, ms);
 }
 
@@ -5868,62 +5945,170 @@ function closeServiceInfo(event) {
 }
 
 var _updateSvc = '';
-var _updateSvcInitial = '';
+// The /config snapshot the dialog was prefilled from; null until it lands.
+// Submit sends only the fields whose widget differs from this snapshot, so an
+// unedited field cannot revert a concurrent change made elsewhere.
+var _updateSvcCfg = null;
 // Bumped on every open and every close — see _updateEnvSeq: a slow prefill
 // must not land in a dialog reopened for another service and get submitted
 // there.
 var _updateSvcSeq = 0;
 
+// The fields the Restore and Update dialogs share. A saved preset and a live
+// service config carry the same shape, so both prefill through one function.
+function fillServiceFields(prefix, p) {
+  document.getElementById(prefix + '-image').value = p.image || '';
+  document.getElementById(prefix + '-command').value = shellJoin(p.command);
+  document.getElementById(prefix + '-port').value = p.routes && p.routes.length ? '' : (p.port || '');
+  document.getElementById(prefix + '-exposure').value = p.routes && p.routes.length ? 'routes' : 'port';
+  setServiceRoutes(prefix, p.routes || []);
+  toggleServiceExposure(prefix);
+  document.getElementById(prefix + '-hostname').value = p.hostname || '';
+  document.getElementById(prefix + '-envvars').value = formatEnvLines(p.env_vars);
+  document.getElementById(prefix + '-host-mode').checked = !!p.host_mode;
+  document.getElementById(prefix + '-volumes').value = (p.volumes || []).map(function(v) {
+    return v.volume + ':' + v.mount_path + (v.mode === 'ro' ? ':ro' : '');
+  }).join('\n');
+  document.getElementById(prefix + '-privileged').checked = !!p.privileged;
+  document.getElementById(prefix + '-net-admin').checked = !!(p.cap_add && p.cap_add.indexOf('NET_ADMIN') !== -1);
+}
+
+function _setUpdateServiceEnabled(enabled) {
+  // By container, not by id list, so dynamically added route rows and any
+  // future field are covered. Cancel and the close button stay usable.
+  var modal = document.getElementById('svc-update-modal');
+  modal.querySelectorAll('.modal-body input, .modal-body select, .modal-body textarea')
+    .forEach(function(el) { el.disabled = !enabled; });
+  modal.querySelectorAll('#upd-svc-routes button, #upd-svc-add-route, #upd-svc-submit')
+    .forEach(function(el) { el.disabled = !enabled; });
+}
+
 async function doUpdateService(name) {
   var seq = ++_updateSvcSeq;
   _updateSvc = name;
-  _updateSvcInitial = '';
+  _updateSvcCfg = null;
   document.getElementById('svc-update-title').textContent = 'Update service — ' + name;
   document.getElementById('svc-update-name').textContent = name;
-  var ta = document.getElementById('svc-update-env-vars');
-  ta.value = '';
-  ta.disabled = true;
+  var errEl = document.getElementById('upd-svc-error');
+  errEl.style.display = 'none';
+  errEl.textContent = '';
+  // Blank and disabled until the current config lands: an empty form reads as
+  // "no command, no volumes", and submitting it would apply exactly that.
+  fillServiceFields('upd-svc', {});
+  _setUpdateServiceEnabled(false);
   showModal('svc-update-modal');
   try {
-    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/env-vars');
+    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/config');
     var data = await readResult(r);
     if (seq !== _updateSvcSeq) return;
-    if (data.ok) {
-      var vars = data.env_vars || {};
-      _updateSvcInitial = Object.keys(vars).map(function(k) { return k + '=' + vars[k]; }).join('\n');
-      ta.value = _updateSvcInitial;
-      // parseEnvLines trims each line, and a line cannot hold a line break at
-      // all, so a value with either would come back mangled. Show the field
-      // read-only rather than let an edit rewrite a secret it cannot represent.
-      if (Object.keys(vars).some(function(k) {
-        return /[\r\n]/.test(vars[k]) || vars[k] !== vars[k].trim();
-      })) {
-        showToast('A variable value has line breaks or leading/trailing spaces — edit it over MCP', true);
-      } else {
-        ta.disabled = false;
-      }
-    } else {
-      // Keep the field disabled: an empty editable field would look like
-      // "no variables" and the first edit would replace the real ones.
-      showToast(data.error || 'Could not load the current environment variables', true);
+    if (!data.ok) {
+      // Without the current config the dialog cannot do anything safely; a
+      // blank disabled form with no way out is worse than closing.
+      showToast(data.error || 'Could not load the current service configuration', true);
+      closeUpdateService();
+      return;
+    }
+    var cfg = data.config || {};
+    fillServiceFields('upd-svc', cfg);
+    _setUpdateServiceEnabled(true);
+    _updateSvcCfg = cfg;
+    // parseEnvLines trims each line, and a line cannot hold a line break at
+    // all, so a value with either would come back mangled. That one field goes
+    // read-only rather than let an edit rewrite a secret it cannot represent.
+    var vars = cfg.env_vars || {};
+    var envEditable = !Object.keys(vars).some(function(k) {
+      return /[\r\n]/.test(vars[k]) || vars[k] !== vars[k].trim();
+    });
+    if (!envEditable) {
+      document.getElementById('upd-svc-envvars').disabled = true;
+      showToast('A variable value has line breaks or leading/trailing spaces — edit it over MCP', true);
     }
   } catch (e) {
-    showToast('Could not load the current environment variables', true);
+    if (seq !== _updateSvcSeq) return;
+    showToast('Could not load the current service configuration', true);
+    closeUpdateService();
   }
 }
 
 function closeUpdateService(event) {
   if (event && event.target !== event.currentTarget) return;
   _updateSvcSeq++;
+  _updateSvcCfg = null;
   hideModal('svc-update-modal');
+}
+
+function _serviceRoutesEqual(a, b) {
+  a = a || []; b = b || [];
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].path !== b[i].path || a[i].port !== b[i].port ||
+        !a[i].strip_prefix !== !b[i].strip_prefix) return false;
+  }
+  return true;
 }
 
 async function confirmUpdateService() {
   var name = _updateSvc;
-  var raw = document.getElementById('svc-update-env-vars').value;
+  var cfg = _updateSvcCfg;
+  if (!cfg) return;   // submit stays disabled until the prefill landed
+  var errEl = document.getElementById('upd-svc-error');
+  var routeMode = document.getElementById('upd-svc-exposure').value === 'routes';
+  var image = document.getElementById('upd-svc-image').value.trim();
+  var port = document.getElementById('upd-svc-port').value.trim();
+  if (!image || (!routeMode && !port)) {
+    errEl.textContent = 'Docker image and exposure are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  // Absent key = keep. Each field is sent only when it differs from the
+  // prefill snapshot, so an untouched field cannot revert a change made
+  // elsewhere while the dialog was open. An unedited submit posts {} and
+  // still pulls the latest image.
   var payload = {};
+  if (image !== (cfg.image || '')) payload.image = image;
+  var command = document.getElementById('upd-svc-command').value.trim();
+  if (command !== shellJoin(cfg.command)) payload.command = command;
+  var volumes = document.getElementById('upd-svc-volumes').value.trim();
+  var initialVolumes = (cfg.volumes || []).map(function(v) {
+    return v.volume + ':' + v.mount_path + (v.mode === 'ro' ? ':ro' : '');
+  }).join('\n');
+  if (volumes !== initialVolumes) payload.volumes = volumes;
+  var hostMode = document.getElementById('upd-svc-host-mode').checked;
+  if (hostMode !== !!cfg.host_mode) payload.host_mode = hostMode;
+  var privileged = document.getElementById('upd-svc-privileged').checked;
+  if (privileged !== !!cfg.privileged) payload.privileged = privileged;
+  var netAdmin = document.getElementById('upd-svc-net-admin').checked;
+  var hadNetAdmin = !!(cfg.cap_add && cfg.cap_add.indexOf('NET_ADMIN') !== -1);
+  if (netAdmin !== hadNetAdmin) payload.net_admin = netAdmin;
+  var hostname = document.getElementById('upd-svc-hostname').value.trim();
+  // An empty hostname means "keep" on the wire — matching the field's hint —
+  // so only a changed non-empty value is sent.
+  if (hostname && hostname !== (cfg.hostname || '')) payload.hostname = hostname;
+  var hadRoutes = !!(cfg.routes && cfg.routes.length);
+  try {
+    if (routeMode) {
+      var routes = collectServiceRoutes('upd-svc');
+      if (!_serviceRoutesEqual(routes, cfg.routes)) payload.routes = routes;
+    } else if (hadRoutes) {
+      // Leaving route mode takes both halves in one call: the emptied route
+      // list and the catch-all port that replaces it.
+      payload.routes = [];
+      payload.port = parseInt(port, 10);
+    } else if (parseInt(port, 10) !== (cfg.port || 0)) {
+      payload.port = parseInt(port, 10);
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+    return;
+  }
+  var envEl = document.getElementById('upd-svc-envvars');
   // Send a mapping, not the raw blob: the server must not re-split values.
-  if (raw.trim() !== _updateSvcInitial.trim()) payload.env_vars = parseEnvLines(raw);
+  // The field is disabled when a value cannot round-trip the textarea.
+  if (!envEl.disabled && envEl.value.trim() !== formatEnvLines(cfg.env_vars).trim()) {
+    payload.env_vars = parseEnvLines(envEl.value);
+  }
+  errEl.style.display = 'none';
   _updateSvcSeq++;
   hideModal('svc-update-modal');
   var card = document.querySelector('[data-svc="' + name + '"]');
@@ -5998,25 +6183,37 @@ async function doProtectService(name, isProtected) {
 }
 
 async function doDeleteService(name) {
-  if (!(await confirmDialog({
+  var opts = {
     title: 'Delete service',
     message: 'Remove the container of "' + name + '" and its data?',
     confirmLabel: 'Delete service',
-    danger: true
-  }))) return;
+    danger: true,
+    checkbox: { label: 'Save as preset — keeps the configuration so the service can be restored', checked: true }
+  };
+  if (!(await confirmDialog(opts))) return;
+  var savePreset = opts.checkbox.checked;
   var card = document.querySelector('[data-svc="' + name + '"]');
   if (card) card.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
   try {
-    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/delete', { method: 'POST' });
+    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ save_preset: savePreset })
+    });
     var data = await readResult(r);
     if (data.ok) {
-      showToast('Service "' + name + '" deleted');
+      // preset_kept reports what is actually on disk, not the checkbox: a
+      // legacy service may have no preset to keep.
+      var kept = data.result && data.result.preset_kept;
+      showToast('Service "' + name + '" deleted' +
+        (kept ? ' — preset kept' : savePreset ? ' — no saved preset' : ' — preset removed'));
     } else {
       showToast(data.error || 'Delete failed', true);
     }
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
   }
+  // loadServices also refreshes the preset list (see its wrapper below).
   await loadServices();
 }
 
@@ -6037,20 +6234,9 @@ async function showServiceLogs(name) {
 }
 
 function openCreateServiceModal() {
-   document.getElementById('svc-name').value = '';
-   document.getElementById('svc-image').value = '';
-   document.getElementById('svc-command').value = '';
-   document.getElementById('svc-port').value = '';
-   document.getElementById('svc-exposure').value = 'port';
-   setServiceRoutes('svc', []);
-   toggleServiceExposure('svc');
-   document.getElementById('svc-hostname').value = '';
-   document.getElementById('svc-envvars').value = '';
-   document.getElementById('svc-host-mode').checked = false;
-   document.getElementById('svc-volumes').value = '';
-   document.getElementById('svc-privileged').checked = false;
-   document.getElementById('svc-net-admin').checked = false;
-   var errEl = document.getElementById('create-svc-error');
+  document.getElementById('svc-name').value = '';
+  fillServiceFields('svc', {});
+  var errEl = document.getElementById('create-svc-error');
   errEl.style.display = 'none';
   errEl.textContent = '';
   document.getElementById('svc-submit').disabled = false;
@@ -6213,26 +6399,7 @@ var _restoreRuntime = null;
 function _fillRestoreFields(p) {
    _restoreRuntime = p.runtime || {};
    document.getElementById('restore-svc-name').value = p.name || '';
-   document.getElementById('restore-svc-image').value = p.image || '';
-   document.getElementById('restore-svc-port').value = p.routes && p.routes.length ? '' : (p.port || '');
-   document.getElementById('restore-svc-exposure').value = p.routes && p.routes.length ? 'routes' : 'port';
-   setServiceRoutes('restore-svc', p.routes || []);
-   toggleServiceExposure('restore-svc');
-   document.getElementById('restore-svc-hostname').value = p.hostname || '';
-   var envStr = '';
-   if (p.env_vars && Object.keys(p.env_vars).length) {
-     envStr = Object.keys(p.env_vars).map(function(k) { return k + '=' + p.env_vars[k]; }).join('\n');
-   }
-   document.getElementById('restore-svc-envvars').value = envStr;
-   document.getElementById('restore-svc-host-mode').checked = !!p.host_mode;
-   var volStr = '';
-   if (p.volumes && p.volumes.length) {
-     volStr = p.volumes.map(function(v) { return v.volume + ':' + v.mount_path + (v.mode === 'ro' ? ':ro' : ''); }).join('\n');
-   }
-   document.getElementById('restore-svc-volumes').value = volStr;
-   document.getElementById('restore-svc-privileged').checked = !!p.privileged;
-   document.getElementById('restore-svc-net-admin').checked = !!(p.cap_add && p.cap_add.indexOf('NET_ADMIN') !== -1);
-   document.getElementById('restore-svc-command').value = shellJoin(p.command);
+   fillServiceFields('restore-svc', p);
 }
 
 function openRestoreServiceModal(preselect) {
@@ -7786,6 +7953,89 @@ console.log(
 
 const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
+var _walBusy = false;
+var _walStatus = null;
+
+function walDuration(seconds) {
+  if (seconds == null) return '—';
+  if (seconds < 60) return Math.round(seconds) + ' s';
+  if (seconds < 3600) return Math.round(seconds / 60) + ' min';
+  return (seconds / 3600).toFixed(1) + ' h';
+}
+
+function renderWalStatus() {
+  var el = document.getElementById('prod-wal');
+  var s = _walStatus;
+  if (!el || !s) return;
+  var g = s.guard || {};
+  var a = s.archiver || {};
+  var badge = s.status === 'ok' ? 'badge-running' : s.status === 'warn' ? 'badge-busy' : s.status === 'off' ? 'badge-neutral' : 'badge-exited';
+  function metric(label, value) { return '<span>' + label + ': <strong>' + esc(value) + '</strong></span>'; }
+  function button(action, label, disabled) {
+    return '<button class="btn"' + ((_walBusy || disabled) ? ' disabled' : '') +
+      ' onclick="controlWal(\'' + action + '\')">' + (_walBusy ? 'Working…' : label) + '</button>';
+  }
+  var actions = s.configured ? button(g.paused ? 'resume' : 'pause', g.paused ? 'Resume archiving' : 'Pause archiving', false) +
+    button('retry', 'Retry upload', g.paused || s.pg_status !== 'running') : '';
+  if (g.latched) actions += button(g.recovering ? 'release' : 'recover', g.recovering ? 'Release protection' : 'Start PostgreSQL recovery', s.stale);
+  el.innerHTML = '<div class="env-header"><div class="left"><span class="branch-name">PostgreSQL WAL</span>' +
+    '<span class="badge ' + badge + '">' + esc(s.stale ? 'unknown' : s.status) + '</span></div>' +
+    '<div class="env-actions">' + actions + '</div></div>' +
+    '<p>' + esc(s.detail || '') + '</p>' +
+    '<div class="env-meta">' +
+      metric('Queue', s.ready_count == null ? '—' : s.ready_count + ' segments · ' + fmtBytes(s.ready_bytes)) + ' · ' +
+      metric('Queue stop limit', s.stop_queue_bytes == null ? '—' : fmtBytes(s.stop_queue_bytes)) + ' · ' +
+      metric('Oldest waiting', walDuration(s.oldest_ready_seconds)) + ' · ' +
+      metric('No progress', walDuration(s.no_progress_seconds)) + '</div>' +
+    '<div class="env-meta">' + metric('WAL on disk', s.wal_bytes == null ? '—' : fmtBytes(s.wal_bytes)) + ' · ' +
+      metric('Available to PostgreSQL', s.disk_free_bytes == null ? '—' : fmtBytes(s.disk_free_bytes)) + ' · ' +
+      metric('Safety reserve', s.reserve_bytes == null ? '—' : fmtBytes(s.reserve_bytes)) + ' · ' +
+      metric('Disk consumption', s.disk_growth_bytes_per_second == null ? '—' : fmtBytes(s.disk_growth_bytes_per_second) + '/s') + ' · ' +
+      metric('Estimated time to reserve', walDuration(s.seconds_to_reserve)) + '</div>' +
+    '<div class="env-meta">' + metric('Archived', a.archived_count == null ? '—' : a.archived_count) + ' · ' +
+      metric('Last archive', a.last_archived_time || '—') + ' · ' + metric('Failed attempts', a.failed_count == null ? '—' : a.failed_count) + ' · ' +
+      metric('PG restarts', s.restart_count == null ? '—' : s.restart_count) + '</div>' +
+    (s.attempt ? '<div class="env-meta">' + metric('Current upload', s.attempt.segment + ' · ' + walDuration(s.attempt.seconds)) + '</div>' : '') +
+    (s.last_attempt && s.last_attempt.exit_code ? '<p>Last upload failed: exit ' + esc(s.last_attempt.exit_code) + '. Check PostgreSQL logs.</p>' : '') +
+    (s.storage ? '<div class="env-meta">' + metric('Storage probe', s.storage.detail) + '</div>' : '') +
+    (s.preflight && s.preflight.status ? '<div class="env-meta">' + metric('Last startup check', s.preflight.status + ' · ' + s.preflight.detail) + '</div>' : '') +
+    '<div class="env-meta">Shared by all productions and teams. ' +
+      (g.latched ? 'Applications remain stopped during recovery. ' : '') +
+      (g.paused ? 'Paused archiving retains WAL and does not free disk space. ' : '') +
+      'Sample: ' + esc(s.sampled_at ? new Date(s.sampled_at * 1000).toLocaleString() : 'unavailable') + '</div>';
+}
+
+async function loadWalStatus() {
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/wal-status');
+    var s = await readResult(r);
+    if (!s.ok) throw new Error(s.error || 'WAL status unavailable');
+    _walStatus = s;
+  } catch (e) {
+    _walStatus = Object.assign({}, _walStatus || {}, {status: 'error', stale: true, detail: 'WAL status unavailable; displayed values may be stale'});
+  }
+  renderWalStatus();
+}
+
+async function controlWal(action) {
+  var messages = {
+    pause: 'Pause archiving for every production. Unsent WAL is retained and the queue can fill the disk. Disk protection remains active.',
+    resume: 'Resume WAL archiving for the shared production cluster.',
+    retry: 'Interrupt the current WAL upload. PostgreSQL will retry it; no WAL files are discarded.',
+    recover: 'Start only PostgreSQL to drain WAL after checking free space. Production applications stay stopped and disk protection remains active.',
+    release: 'Verify free space and archiving progress, then release cluster protection. Applications remain stopped; start the desired productions separately.'
+  };
+  if (_walBusy || !messages[action]) return;
+  if (!(await confirmDialog({title: 'Shared production cluster', message: messages[action], confirmText: 'Continue'}))) return;
+  _walBusy = true;
+  renderWalStatus();
+  try {
+    await _prodPost(API_PRODUCTIONS + '/wal-control', {action: action, confirm: 'ALL-PRODUCTIONS'}, 'WAL action completed', true);
+  } finally {
+    _walBusy = false;
+    await loadWalStatus();
+  }
+}
 var _prodWebhookSecret = '';
 var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'settings' | undefined
 // name -> true while the Settings form holds unsaved edits (set by the form's
@@ -7807,6 +8057,7 @@ function prodBadgeClass(status) {
 }
 
 async function loadProductions() {
+  loadWalStatus();
   try {
     var r = await fetch(API_PRODUCTIONS);
     var data = await readResult(r);
@@ -8385,7 +8636,7 @@ async function loadHealth() {
     if (!el || !data.checks) return;
     var labels = {
       dev_pg: 'PG DEV', prod_pg: 'PG PROD', traefik: 'TRAEFIK', s3: 'S3', disk: 'DISK',
-      overlays: 'OVERLAY'
+      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK'
     };
     el.innerHTML = Object.keys(labels).map(function(key) {
       var check = data.checks[key];

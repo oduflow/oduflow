@@ -87,6 +87,8 @@ precursors).
 | [0065](0065-team-ssh-deploy-keys.md) | 2026-09-17 | Per-team SSH deploy keys: auto-generated keypair, public key in the dashboard, SSH repository URLs |
 | [0067](0067-unified-template-import.md) | 2026-09-19 | Unified template import: one `import_template` door (Odoo pull, S3 prefix, local path, in-place refresh), staged promote, incremental `overwrite` re-sync |
 
+| [0066](0066-production-wal-disk-protection.md) | 2026-09-19 | Production WAL monitoring, archive controls, persistent disk protection and fenced recovery |
+
 ## Design docs
 
 Forward-looking feature design docs also live here, named by date:

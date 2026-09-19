@@ -17,6 +17,48 @@ from oduflow.naming import get_filestore_paths
 from oduflow.settings import BackupSettings, Settings, TeamSettings
 
 
+class TestBackupStatus:
+    @pytest.mark.parametrize("failed_part", ["archiver", "inventory"])
+    def test_partial_status_survives_independent_probe_failure(
+        self, tmp_path, failed_part
+    ):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team_1"))
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            backup=BackupSettings(bucket="b", access_key="a", secret_key="s"),
+            teams={"1": team},
+        )
+        archiver = {"archived_count": 0, "failed_count": 50}
+        with (
+            patch.object(backup_ops, "get_client"),
+            patch.object(
+                backup_ops.production_registry, "list_productions", return_value={}
+            ),
+            patch.object(backup_ops.s3_client, "check_s3", return_value={"ok": True}),
+            patch(
+                "oduflow.walg.archiver_status",
+                return_value=archiver,
+                side_effect=RuntimeError("PG unavailable")
+                if failed_part == "archiver"
+                else None,
+            ),
+            patch(
+                "oduflow.walg.backup_list",
+                return_value=[],
+                side_effect=RuntimeError("TLS failure")
+                if failed_part == "inventory"
+                else None,
+            ),
+        ):
+            result = backup_ops.backup_status(settings, team)
+        if failed_part == "inventory":
+            assert result["walg"]["archiver"] == archiver
+            assert result["walg"]["error"] == "TLS failure"
+        else:
+            assert result["walg"]["archiver_error"] == "PG unavailable"
+            assert result["walg"]["base_backups"] == 0
+
+
 class _FakeApi:
     def __init__(self, frames, exit_code):
         self._frames = frames

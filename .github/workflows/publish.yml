@@ -25,5 +25,11 @@ jobs:
       - name: Build package
         run: python -m build
 
+      - name: Verify production PostgreSQL image is published
+        run: |
+          image="$(sed -n 's/^DEFAULT_PROD_POSTGRES_IMAGE = "\([^"]*\)"/\1/p' src/oduflow/settings.py)"
+          test -n "$image"
+          docker manifest inspect "$image" >/dev/null
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

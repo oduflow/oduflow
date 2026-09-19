@@ -1078,6 +1078,8 @@ class TestProductionFeatureGate:
             "list_production_snapshots",
             "restore_production",
             "production_backup_status",
+            "production_wal_status",
+            "control_production_wal",
             "set_production_backup_schedule",
             "prune_production_backups",
             "restore_cluster_pitr",
@@ -1508,6 +1510,18 @@ class TestUpdateServiceTool:
         assert mock_update.call_args.kwargs["command_override"] == []
 
     @patch("oduflow.docker_ops.service_ops.update_service")
+    def test_update_empty_volumes_unmounts_everything(self, mock_update):
+        """Like the web API: a passed value fully replaces, unset keeps."""
+        mock_update.return_value = {
+            "name": "redis",
+            "container_name": "oduflow-1-svc-redis",
+            "url": "http://localhost:6379",
+            "image": "redis:7",
+        }
+        _get_tool_fn("update_service")(name="redis", volumes="")
+        assert mock_update.call_args.kwargs["volume_override"] == []
+
+    @patch("oduflow.docker_ops.service_ops.update_service")
     def test_update_net_admin_and_privileged_mapping(self, mock_update):
         mock_update.return_value = {
             "name": "vpn",
@@ -1543,16 +1557,45 @@ class TestUpdateServiceTool:
 
 
 class TestDeleteServiceTool:
+    RESULT = {
+        "name": "redis",
+        "container_name": "oduflow-1-svc-redis",
+        "preset_kept": True,
+    }
+
     @patch("oduflow.docker_ops.service_ops.delete_service")
     def test_delete(self, mock_delete):
-        mock_delete.return_value = {
-            "name": "redis",
-            "container_name": "oduflow-1-svc-redis",
-        }
+        mock_delete.return_value = dict(self.RESULT)
         result = _get_tool_fn("delete_service")(name="redis")
         assert "deleted" in result
         assert "redis" in result
-        mock_delete.assert_called_once_with(TEST_SETTINGS, TEST_TEAM, "redis")
+        assert "Preset kept" in result
+        mock_delete.assert_called_once_with(
+            TEST_SETTINGS, TEST_TEAM, "redis", save_preset=True
+        )
+
+    @patch("oduflow.docker_ops.service_ops.delete_service")
+    def test_delete_without_saving_the_preset(self, mock_delete):
+        mock_delete.return_value = dict(self.RESULT, preset_kept=False)
+        result = _get_tool_fn("delete_service")(name="redis", save_preset=False)
+        assert "Saved preset removed" in result
+        mock_delete.assert_called_once_with(
+            TEST_SETTINGS, TEST_TEAM, "redis", save_preset=False
+        )
+
+    @patch("oduflow.docker_ops.service_ops.delete_service")
+    def test_delete_does_not_promise_a_preset_that_is_not_there(self, mock_delete):
+        """A legacy service without a preset must not be reported restorable."""
+        mock_delete.return_value = dict(self.RESULT, preset_kept=False)
+        result = _get_tool_fn("delete_service")(name="redis")
+        assert "Preset kept" not in result
+        assert "No saved preset exists" in result
+
+    @patch("oduflow.docker_ops.service_ops.delete_service")
+    def test_delete_warns_when_the_preset_removal_failed(self, mock_delete):
+        mock_delete.return_value = dict(self.RESULT, preset_kept=True)
+        result = _get_tool_fn("delete_service")(name="redis", save_preset=False)
+        assert "could not be removed" in result
 
 
 class TestListServicesTool:
@@ -1663,8 +1706,9 @@ class TestResetAdminPasswordTool:
         assert "New password: s3cret" in result
         mock_reset.assert_called_once_with(TEST_SETTINGS, TEST_TEAM, "main", "s3cret")
 
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
     @patch("oduflow.docker_ops.odoo_ops.reset_admin_password")
-    def test_reset_not_found(self, mock_reset):
+    def test_reset_not_found(self, mock_reset, mock_ensure):
         from oduflow.errors import NotFoundError
 
         mock_reset.side_effect = NotFoundError("Environment 'xyz' does not exist.")
