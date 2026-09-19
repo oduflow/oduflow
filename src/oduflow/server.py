@@ -97,6 +97,11 @@ _ODOO_TEST_SUMMARY_RE = re.compile(
 _output_cache = OutputCache()
 
 _MCP_INSTRUCTIONS = """
+On /production, use list_productions and production_odoo_info to discover the
+production and its Odoo policies. Business mutations use preview, approval in
+Odoo, status, then execute. Infrastructure operations do not use Odoo approval.
+The development instructions below apply to /mcp only.
+
 Once at the start of the session, call get_agent_instructions to load the
 current Oduflow workflow guide and active code-delivery mode. Use that guide
 for the rest of the session; do not call it again before each tool.
@@ -223,8 +228,15 @@ def _make_summary(cached: CachedOutput) -> str:
 def _maybe_cache(output: str, header: str, source_tool: str, source_args: str) -> str:
     """If output exceeds threshold, cache it and return header + summary. Otherwise return as-is."""
     if len(output) > _CACHE_THRESHOLD:
+        from oduflow.production_access import PRODUCTION_TOOLS
+
+        is_production = source_tool in PRODUCTION_TOOLS
         cached = _output_cache.store(
-            output, source_tool=source_tool, source_args=source_args
+            output,
+            source_tool=source_tool,
+            source_args=source_args,
+            team_id=_resolve_team(None).team_id if is_production else "",
+            production=is_production,
         )
         return f"{header}\n\n{_make_summary(cached)}"
     return f"{header}\n\nOutput:\n{output}"
@@ -311,6 +323,8 @@ def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
                     if isinstance(result, str) and len(result) > 200
                     else result
                 )
+                if fn.__name__.startswith("production_odoo_"):
+                    preview = "OduMCP call completed (business response omitted from server log)"
                 logger.info("[%s] -> %s", fn.__name__, preview)
                 return result
             except FlowError as e:
@@ -460,6 +474,9 @@ def production_enabled(fn: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(fn)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        from oduflow.production_access import require_production_access
+
+        require_production_access()
         if not _get_settings().prod_enabled:
             raise PrerequisiteNotMetError(_PRODUCTION_DISABLED_MESSAGE)
         return fn(*args, **kwargs)
@@ -2548,6 +2565,9 @@ def read_output(
     if cached is None:
         return f"Output '{output_id}' not found or expired (TTL: 1 hour)."
 
+    from oduflow.production_access import check_cached_output_access
+
+    check_cached_output_access(cached.production, cached.team_id)
     lines = cached.lines
     total = cached.total_lines
 
@@ -5284,6 +5304,156 @@ def create_production(
         "automatically)."
     )
     return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+def sync_production_mcp(name: str = "", ctx: Context | None = None) -> str:
+    """Install/configure odumcp and synchronize the configured production key.
+
+    Empty name processes every production of this team, reporting failures
+    separately. Use after changing production_token in TOML and restarting
+    Oduflow. No secret is accepted or returned. Stopped productions must be
+    started first. Adding the managed addon mount recreates the container.
+    """
+    from oduflow import production_mcp
+
+    settings, team = _get_settings(), _resolve_team(ctx)
+    names = [name] if name else sorted(production_registry.list_productions(team))
+    results = []
+    for target in names:
+        key = prod_lock_key(team.team_id, target)
+        acquired = False
+        try:
+            _locks.acquire_env(key, operation="sync_production_mcp")
+            acquired = True
+            results.append(production_mcp.synchronize(settings, team, target))
+        except FlowError as exc:
+            results.append({"name": target, "status": "failed", "error": str(exc)})
+        except Exception as exc:
+            logger.error(
+                "OduMCP synchronization failed for %s (%s)", target, type(exc).__name__
+            )
+            results.append(
+                {
+                    "name": target,
+                    "status": "failed",
+                    "error": "Synchronization failed; check container availability and retry this production.",
+                }
+            )
+        finally:
+            if acquired:
+                _locks.release_env(key)
+    return json.dumps({"productions": results}, ensure_ascii=False)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+def production_odoo_info(name: str, ctx: Context | None = None) -> dict[str, Any]:
+    """Return the Odoo identity, profile and capabilities through odumcp."""
+    from oduflow import production_mcp
+
+    return production_mcp.execute(
+        _get_settings(), _resolve_team(ctx), name, "system.info"
+    )
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+def production_odoo_read(
+    name: str,
+    operation: str,
+    params: dict[str, Any] | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Policy-governed reads through odumcp; no arbitrary ORM calls.
+
+    Operations: models.list, models.describe, records.search, records.read,
+    records.count, records.aggregate, attachments.read, reports.render.
+    Params follow the odumcp API (model, domain, fields, ids, limit, etc.).
+    Begin with models.describe to discover readable fields.
+    """
+    from oduflow import production_mcp
+
+    if operation not in production_mcp.READ_OPERATIONS:
+        raise ValueError(
+            "Unsupported read operation. Use preview/status/execute for changes."
+        )
+    return production_mcp.execute(
+        _get_settings(), _resolve_team(ctx), name, operation, params
+    )
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+def production_odoo_preview_change(
+    name: str,
+    action: str,
+    payload: dict[str, Any],
+    idempotency_key: str,
+    batch_key: str = "",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Store a change plan in Odoo; this does not execute the business change.
+
+    Actions include record.create/update/delete, method.call, message.post,
+    activity.schedule/update/done and attachment.create. Reuse the same
+    idempotency_key when retrying the same intent. Human approval happens in
+    Odoo unless the existing Odoo policy explicitly permits auto-approval.
+    """
+    from oduflow import production_mcp
+
+    params = {"action": action, "payload": payload, "idempotency_key": idempotency_key}
+    if batch_key:
+        params["batch_key"] = batch_key
+    return production_mcp.execute(
+        _get_settings(), _resolve_team(ctx), name, "changes.preview", params
+    )
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+def production_odoo_change_status(
+    name: str, approval_id: str, ctx: Context | None = None
+) -> dict[str, Any]:
+    """Check approval state/result, including after an uncertain execute response."""
+    from oduflow import production_mcp
+
+    return production_mcp.execute(
+        _get_settings(),
+        _resolve_team(ctx),
+        name,
+        "changes.status",
+        {"approval_id": approval_id},
+    )
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+@with_prod_lock
+def production_odoo_execute_change(
+    name: str, approval_id: str, ctx: Context | None = None
+) -> dict[str, Any]:
+    """Execute the stored approved plan. Never approves it or substitutes payload.
+
+    Check the returned state: pending/expired/rejected/failed is not execution.
+    After a transport failure, check status before creating any new plan.
+    """
+    from oduflow import production_mcp
+
+    return production_mcp.execute(
+        _get_settings(),
+        _resolve_team(ctx),
+        name,
+        "changes.execute",
+        {"approval_id": approval_id},
+    )
 
 
 @mcp.tool()
@@ -8052,6 +8222,9 @@ def _start_http() -> None:
     )
 
     mcp.add_middleware(ScopedAccessMiddleware(build_env_param_tools(mcp)))
+    from oduflow.production_access import ProductionAccessMiddleware
+
+    mcp.add_middleware(ProductionAccessMiddleware(_get_settings))
 
     reaper.start_reaper(_get_settings, _locks)
 
@@ -8093,7 +8266,9 @@ def _start_http() -> None:
     install_stateless_disconnect_filter()
 
     # Outermost shim so /mcp/<env> routes to the canonical /mcp route.
-    served: Any = ScopedEnvASGI(app)
+    from oduflow.production_access import ProductionASGI
+
+    served: Any = ProductionASGI(ScopedEnvASGI(app))
     # FastMCP builds the 401 challenge from one placeholder base URL. Rewrite it
     # to the validated request hostname so every team discovers OAuth on its own
     # origin.
@@ -8138,7 +8313,9 @@ def _build_auth(settings: Settings):  # type: ignore[no-untyped-def]
     team hostname, whether TLS terminates in Traefik or an upstream such as
     Cloudflare Tunnel in port mode.
     """
-    has_team_token = any(t.auth_token for t in settings.teams.values())
+    has_team_token = any(
+        t.auth_token or t.production_token for t in settings.teams.values()
+    )
 
     if has_team_token:
         from oduflow.oauth_provider import OduflowOAuthProvider

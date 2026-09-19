@@ -54,8 +54,10 @@ class TestMCPBootstrapInstructions:
         instructions = oduflow.server.mcp.instructions
 
         assert instructions
-        assert instructions.startswith(
+        assert "On /production" in instructions
+        assert (
             "Once at the start of the session, call get_agent_instructions"
+            in instructions
         )
         assert "get_agent_instructions" in instructions
         assert "get_odoo_development_guide" in instructions

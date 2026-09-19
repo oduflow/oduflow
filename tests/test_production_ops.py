@@ -18,7 +18,12 @@ from oduflow.settings import Settings, TeamSettings
 def team(tmp_path):
     data_dir = tmp_path / "team_1"
     data_dir.mkdir()
-    return TeamSettings(team_id="1", hostname="dev.example.com", data_dir=str(data_dir))
+    return TeamSettings(
+        team_id="1",
+        hostname="dev.example.com",
+        data_dir=str(data_dir),
+        production_token="p" * 40,
+    )
 
 
 @pytest.fixture
@@ -92,6 +97,8 @@ def _patch_create_stack(client, **overrides):
         os.makedirs(repo_path, exist_ok=True)
 
     patches = {
+        "prepare_odumcp": patch("oduflow.production_mcp.prepare_addon"),
+        "provision_odumcp": patch("oduflow.production_mcp.provision"),
         "get_client": patch.object(production_ops, "get_client", return_value=client),
         "ensure_prod_infra": patch.object(production_ops, "ensure_prod_infra"),
         "ensure_team_network": patch.object(production_ops, "ensure_team_network"),
@@ -151,6 +158,32 @@ class _PatchAll:
 
 
 class TestCreateProduction:
+    @pytest.mark.parametrize("stage", ["prepare_odumcp", "provision_odumcp"])
+    def test_odumcp_failure_preserves_production(self, settings, team, stage):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)) as mocks:
+            mocks[stage].side_effect = RuntimeError("internal-secret-error")
+            with patch.object(production_ops, "_cleanup_partial_production") as cleanup:
+                result = production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:19.0",
+                )
+            cleanup.assert_not_called()
+            if stage == "prepare_odumcp":
+                mocks["provision_odumcp"].assert_not_called()
+        assert result["name"] == "erp"
+        assert result["odoo_container"]
+        assert "sync_production_mcp" in result["notes"][0]
+        assert "internal-secret-error" not in str(result)
+        record = production_registry.get_production(team, "erp")
+        assert record["mcp"]["status"] == "sync_failed"
+        assert client.containers.run.called
+
     def test_requires_traefik_mode(self, settings, team):
         port_settings = Settings(
             routing_mode="port",
@@ -366,6 +399,7 @@ class TestBaseDomainProductions:
             team_id="1",
             hostname="oduflow.demo.example.com",
             base_domain="demo.example.com",
+            production_token="p" * 40,
             data_dir=str(data_dir),
         )
 

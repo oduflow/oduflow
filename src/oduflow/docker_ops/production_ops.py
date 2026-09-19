@@ -226,6 +226,11 @@ def _build_prod_odoo_conf(
     for key, value in user_conf.items():
         if str(key).lower() not in RESERVED_ODOO_CONF_KEYS:
             overrides[str(key).lower()] = str(value)
+    from oduflow.production_mcp import MOUNT, addon_checkout
+
+    extra_container_paths = list(extra_container_paths)
+    if (addon_checkout(team, name) / "addons/odumcp/__manifest__.py").is_file():
+        extra_container_paths.append(MOUNT)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
         _prod_base_conf_path(team, repo_path),
@@ -739,6 +744,11 @@ def _container_spec(
     odoo_volumes: dict[str, dict[str, str]] = {
         repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
     }
+    from oduflow.production_mcp import MOUNT, addon_checkout
+
+    connector = addon_checkout(team, name) / "addons/odumcp"
+    if (connector / "__manifest__.py").is_file():
+        odoo_volumes[str(connector)] = {"bind": MOUNT + "/odumcp", "mode": "ro"}
     for host_path, container_path in extra_mount_paths:
         odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
     odoo_volumes[prod_filestore_dir(team, name)] = {
@@ -862,8 +872,9 @@ def create_production(
     """Provision a production environment.
 
     The registry record is created first (reserving the name and — on the
-    team's first production — generating the webhook secret); on any failure
-    the partial resources AND the record are rolled back.
+    team's first production — generating the webhook secret); on infrastructure
+    failure the partial resources AND the record are rolled back. Optional
+    OduMCP setup failures leave production running with a warning.
 
     ``from_environment`` promotes a dev environment: its database and
     filestore are copied (under a briefly stopped Odoo, for consistency) and
@@ -881,6 +892,12 @@ def create_production(
     from oduflow.docker_ops.env_ops import _clone_repo, _init_empty_database
 
     validate_prod_name(name)
+    if not team.production_token:
+        raise PrerequisiteNotMetError(
+            "Set [team."
+            + team.team_id
+            + "].production_token before creating production."
+        )
     if settings.routing_mode != "traefik":
         raise PrerequisiteNotMetError(
             'Production hosting requires routing_mode = "traefik" (custom '
@@ -1023,6 +1040,18 @@ def create_production(
                 extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
                 extra_conf_paths.append(resolve_extra_addons_path(wt_path, repo_name))
 
+        from oduflow import production_mcp
+
+        mcp_warning = ""
+        try:
+            production_mcp.prepare_addon(settings, team, name, extra_mount_paths)
+        except Exception:
+            mcp_warning = (
+                "Production created, but OduMCP addon source preparation failed. "
+                "Odoo MCP tools are unavailable; check the connector repository "
+                "and retry sync_production_mcp."
+            )
+
         _exec_sql(
             client,
             settings,
@@ -1138,6 +1167,26 @@ def create_production(
             extra_mount_paths,
         )
         setup_logs.extend(run_logs)
+        if not mcp_warning:
+            try:
+                production_mcp.provision(settings, team, name)
+            except Exception:
+                mcp_warning = (
+                    "Production created, but OduMCP installation or key setup failed. "
+                    "Odoo MCP tools are unavailable; check production logs and addon "
+                    "compatibility, then retry sync_production_mcp."
+                )
+        if mcp_warning:
+            production_registry.update_production(
+                team, name, {"mcp": {"status": "sync_failed"}}
+            )
+            logger.warning("%s: %s", name, mcp_warning)
+            promo_notes.append(mcp_warning)
+            setup_logs.append(mcp_warning)
+        else:
+            setup_logs.append(
+                "OduMCP installed and production credential synchronized."
+            )
 
         from oduflow.git_ops import rev_parse
 

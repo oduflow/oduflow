@@ -19,6 +19,111 @@ Productions are managed by their own MCP tool stack (`create_production`,
 `update_production`, …) and a dedicated **Production** tab in the dashboard —
 they never mix with dev environment tooling.
 
+## Separate production MCP access
+
+Developer credentials connect to `/mcp`; production administrators connect to
+`/production` on the same Oduflow host using a **different** Bearer credential.
+The production endpoint accepts the team's `production_token`, not the dev token
+or dev OAuth tokens. Token validation uses local configuration, so start, restore
+and other infrastructure operations do not depend on a working Odoo API.
+The shared `read_output` helper remains available for long production logs and
+deploy output; cached production results are bound to their team and cannot be
+read with development credentials. Production tools remain listed on this
+endpoint when hosting is disabled; calls
+return a configuration error. They are not callable from the developer endpoint.
+The dashboard and local CLI remain owner administration interfaces. On a
+multi-team server, cluster-wide PITR and WAL controls require these owner
+interfaces because they affect other teams; a team production token cannot
+perform those global mutations. Deliberate
+production-to-dev copies through `create_environment(from_production=...)` retain
+the existing per-production `allow_copy_to_dev_mcp` policy.
+
+```toml
+[team.1]
+auth_token = "<existing-development-token>"
+production_token = "<separate-random-token-at-least-32-characters>"
+```
+
+Generate a random production credential (for example with
+`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`), store it in the
+private TOML configuration, restart Oduflow and configure the MCP client to send
+it as a Bearer token to `/production`. Production tokens must be unique across
+teams and distinct from every development token. One production token authorizes
+all productions in its team; it does not identify individual administrators.
+
+### Automatic OduMCP installation
+
+New production creation requires a configured production token and automatically
+attempts to install `odumcp` if it is absent. The supported addon release currently targets
+**Odoo 19**. Existing older productions can still be managed with infrastructure
+tools; automatic OduMCP provisioning requires a compatible Odoo 19 deployment.
+
+Oduflow uses addon code in the main or extra repositories when available. Otherwise
+it clones the configured connector repository and mounts **only** its `odumcp`
+addon read-only. This managed checkout survives container recreation and is not
+silently updated by unrelated deployments:
+
+```toml
+[production]
+enabled = true
+odumcp_repo_url = "https://github.com/oduflow/oduflow-client-addons.git"
+odumcp_ref = "19.0"  # branch or tag containing odumcp >= 19.0.1.1.0
+```
+
+Deploy the accompanying addon changes before enabling this feature. The addon
+must implement `_set_oduflow_key`; an older release cannot synchronize credentials.
+For reproducible installations, select a released immutable tag. Source checkout
+failures, unavailable or incompatible modules and failed key provisioning do not
+fail production creation. Production remains available with a warning and an
+OduMCP status of `sync_failed`. Infrastructure tools continue to work. The
+`production_odoo_*` tools remain listed but return a configuration error until
+`sync_production_mcp` succeeds. Fix the addon source or compatibility issue and
+retry synchronization; recreating production is unnecessary.
+
+A fixed internal Odoo shell operation registers the configured production token
+as an MCP-only key on `base.user_admin`. It does not expose arbitrary production
+shell execution through MCP. Odoo stores a password hash, not the plaintext key.
+Personal keys are preserved. An existing MCP profile and suspended MCP access
+are preserved; an administrator without a profile receives a read-only profile.
+Configure write/model/method policies in Odoo before requesting business changes.
+
+### Business operations and approval
+
+No standalone `odumcp_server` is needed. Oduflow calls `/odumcp/v1/execute`
+directly using the configured production key. Model and field policies, Odoo ACLs,
+approvals and audit records remain enforced by the addon. Calls authenticated
+with the managed key have `source = oduflow` in the Odoo audit log.
+
+- `production_odoo_info(name)` returns Odoo/profile information.
+- `production_odoo_read(name, operation, params)` supports schema, records,
+  counts, aggregates, attachments and reports.
+- `production_odoo_preview_change(name, action, payload, idempotency_key)` stores
+  an exact change plan. Optional `batch_key` groups plans for review.
+- `production_odoo_change_status(name, approval_id)` retrieves its state/result.
+- `production_odoo_execute_change(name, approval_id)` executes an approved plan.
+
+Approve plans in Odoo. Explicit Odoo auto-approval policies still apply; Oduflow
+never grants approval itself. After a timeout, check the existing approval status
+before making another plan. Infrastructure actions (deploy, delete, restore)
+remain Oduflow operations and are not governed by Odoo business approvals.
+
+### Existing productions and rotation
+
+After changing `production_token` in TOML and restarting Oduflow, connect with the
+new token and call `sync_production_mcp(name)`; omit `name` to process all team
+productions. The call installs/configures the addon and replaces only its managed
+key. It reports each production independently; start stopped productions and retry
+failures. Adding a missing managed addon mount recreates the container briefly.
+Reapplying the same key is a no-op for the key itself.
+
+The new token immediately controls the Oduflow endpoint after restart. Each Odoo
+accepts the new key only after its synchronization succeeds; until then its old
+managed key may still authenticate directly to Odoo. Rotation is not atomic across
+multiple databases. Also synchronize after restoring an older database backup,
+which can restore an old key or old module state. Disabling or removing a token
+in Oduflow alone does not revoke the stored Odoo API key; revoke that key in Odoo
+when retiring the integration.
+
 ## Requirements
 
 - `routing_mode = "traefik"` (custom domains are Traefik `Host()` rules).

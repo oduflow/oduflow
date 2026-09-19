@@ -132,6 +132,7 @@ hostname = "localhost"            # required and unique; OAuth issuer host for t
 environment_slots = 20            # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                # maximum managed auxiliary services; 0 = unlimited
+production_token = ""             # separate 32+ character Bearer key for /production; synchronized to odumcp
 auth_token = ""                   # MCP bearer token / OAuth client_secret (auto-generated on first run; HTTP refuses to start if empty)
 ui_password = ""                  # Web UI password (auto-generated on first run; HTTP refuses to start if empty unless allow_insecure_http)
 port_range = [50000, 50100]       # port range for Odoo containers
