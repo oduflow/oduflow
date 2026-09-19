@@ -19,6 +19,7 @@ logger = logging.getLogger("oduflow")
 TRACE: bool = False
 
 DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.0"
+DEFAULT_PROD_POSTGRES_IMAGE = "oduist/oduflow-postgres:15-bookworm-1"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 
 # Active MCP transport for the running server ("stdio" | "http").
@@ -345,9 +346,18 @@ class Settings:
     prod_enabled: bool = False
     prod_db_container: str = "oduflow-prod-db"
     prod_db_volume: str = "oduflow-prod-db-data"
-    prod_postgres_image: str = ""  # empty = [database].image
+    prod_postgres_image: str = ""  # empty = managed PG15, or custom [database].image
     prod_walg_version: str = ""  # empty = version pinned in walg.py
     prod_workers_cap: int = 8  # upper bound for auto-tuned Odoo workers
+    # [production.wal]: cluster-wide disk protection, independent of backups.
+    wal_upload_timeout: int = 120
+    wal_warn_after: int = 120
+    wal_stall_after: int = 300
+    wal_stop_free_gb: float = 2.0
+    wal_resume_free_gb: float = 4.0
+    wal_stop_within: int = 300
+    wal_warn_queue_gb: float = 2.0
+    wal_stop_queue_gb: float = 8.0
 
     # Backup subsystem ([backup] TOML section); None = backups disabled.
     backup: BackupSettings | None = None
@@ -367,6 +377,15 @@ class Settings:
 
     # Teams
     teams: dict[str, TeamSettings] = field(default_factory=dict)
+
+    @property
+    def production_pg_image(self) -> str:
+        # Keep existing non-default PostgreSQL majors/custom images compatible.
+        return self.prod_postgres_image or (
+            DEFAULT_PROD_POSTGRES_IMAGE
+            if self.postgres_image == "postgres:15"
+            else self.postgres_image
+        )
 
     def get_team(self, team_id: str) -> TeamSettings:
         if team_id not in self.teams:
@@ -760,6 +779,25 @@ class Settings:
         lifecycle = raw.get("lifecycle", {})
         agent = raw.get("agent", {})
         production = raw.get("production", {})
+        wal = production.get("wal", {})
+        wal_values = {
+            "wal_upload_timeout": int(wal.get("upload_timeout", 120)),
+            "wal_warn_after": int(wal.get("warn_after", 120)),
+            "wal_stall_after": int(wal.get("stall_after", 300)),
+            "wal_stop_free_gb": float(wal.get("stop_free_gb", 2)),
+            "wal_resume_free_gb": float(wal.get("resume_free_gb", 4)),
+            "wal_stop_within": int(wal.get("stop_within", 300)),
+            "wal_warn_queue_gb": float(wal.get("warn_queue_gb", 2)),
+            "wal_stop_queue_gb": float(wal.get("stop_queue_gb", 8)),
+        }
+        if any(not 0 < value < 1e9 for value in wal_values.values()):
+            raise ValueError("[production.wal] thresholds must be positive and finite")
+        if wal_values["wal_stop_queue_gb"] <= wal_values["wal_warn_queue_gb"]:
+            raise ValueError("[production.wal] stop_queue_gb must exceed warn_queue_gb")
+        if wal_values["wal_resume_free_gb"] <= wal_values["wal_stop_free_gb"]:
+            raise ValueError("[production.wal] resume_free_gb must exceed stop_free_gb")
+        if wal_values["wal_stall_after"] < wal_values["wal_warn_after"]:
+            raise ValueError("[production.wal] stall_after must be >= warn_after")
         prod_enabled = production.get("enabled", False)
         if not isinstance(prod_enabled, bool):
             raise ValueError("[production] enabled must be true or false")
@@ -954,6 +992,14 @@ class Settings:
             prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),
             prod_workers_cap=int(production.get("workers_cap", 8)),
+            wal_upload_timeout=int(wal_values["wal_upload_timeout"]),
+            wal_warn_after=int(wal_values["wal_warn_after"]),
+            wal_stall_after=int(wal_values["wal_stall_after"]),
+            wal_stop_free_gb=wal_values["wal_stop_free_gb"],
+            wal_resume_free_gb=wal_values["wal_resume_free_gb"],
+            wal_stop_within=int(wal_values["wal_stop_within"]),
+            wal_warn_queue_gb=wal_values["wal_warn_queue_gb"],
+            wal_stop_queue_gb=wal_values["wal_stop_queue_gb"],
             backup=backup,
             etc_dir=etc_dir,
             toml_path=path,

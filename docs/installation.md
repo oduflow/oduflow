@@ -219,7 +219,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # ── Production hosting (optional) ─────────────────────
 # [production]
 # enabled = true            # opt in; requires routing.mode = "traefik"
-# postgres_image = ""       # empty = [database].image
+# postgres_image = ""       # managed PG15 with CA; inherits custom [database].image
 # walg_version = ""         # empty = Oduflow's pinned WAL-G version
 # workers_cap = 8           # upper bound for auto-tuned Odoo workers
 
@@ -330,9 +330,18 @@ are registered only when `[production].enabled = true`.
 | Key | Default | Description |
 |---|---|---|
 | `[production].enabled` | `false` | Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing |
-| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty inherits `[database].image` |
+| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty uses `oduist/oduflow-postgres:15-bookworm-1` with CA certificates when `[database].image` is the default `postgres:15`; custom database images/majors are inherited |
 | `[production].walg_version` | *(empty)* | WAL-G release override. Empty uses the version pinned by Oduflow |
 | `[production].workers_cap` | `8` | Upper bound for automatically calculated Odoo workers; must be at least `1` |
+| `[production].wal` | *(defaults below)* | Nested `[production.wal]` table for cluster-wide WAL timeouts and disk protection; active whenever production hosting is enabled |
+| `[production.wal].upload_timeout` | `120` | Seconds per WAL upload before termination; forced kill follows after 5 seconds |
+| `[production.wal].warn_after` | `120` | Seconds without archive progress while a queue exists before warning |
+| `[production.wal].stall_after` | `300` | Seconds without progress before error; must be at least `warn_after` |
+| `[production.wal].stop_free_gb` | `2` | GiB available to postgres, excluding root reserve, at which production is stopped |
+| `[production.wal].resume_free_gb` | `4` | Required GiB before recovery/release; must exceed `stop_free_gb` |
+| `[production.wal].stop_within` | `300` | Stop early if measured disk consumption predicts reaching the reserve within this many seconds |
+| `[production.wal].warn_queue_gb` | `2` | Warn when unarchived WAL reaches this size in GiB; recovery release requires a smaller queue |
+| `[production.wal].stop_queue_gb` | `8` | Stop production at this queued WAL size in GiB, even with ample free disk; must exceed `warn_queue_gb` |
 
 ### Backup settings
 

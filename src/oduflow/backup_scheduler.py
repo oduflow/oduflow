@@ -351,6 +351,10 @@ def tick(settings: Settings, locks: LockManager) -> None:
     """One scheduler pass. Cheap when nothing is due."""
     if not settings.prod_enabled:
         return
+    from oduflow.wal_monitor import state as wal_guard_state
+
+    if wal_guard_state(settings).get("latched"):
+        return
     backup = settings.backup
     if backup is None:
         return

@@ -86,6 +86,8 @@ precursors).
 | [0064](0064-team-base-domain.md) | 2026-09-16 | Team base domain (flat env/service/production naming zone) and multi-domain productions |
 | [0065](0065-team-ssh-deploy-keys.md) | 2026-09-17 | Per-team SSH deploy keys: auto-generated keypair, public key in the dashboard, SSH repository URLs |
 
+| [0066](0066-production-wal-disk-protection.md) | 2026-09-19 | Production WAL monitoring, archive controls, persistent disk protection and fenced recovery |
+
 ## Design docs
 
 Forward-looking feature design docs also live here, named by date:

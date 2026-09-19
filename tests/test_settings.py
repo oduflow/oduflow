@@ -968,6 +968,38 @@ class TestProductionSettings:
         toml.write_text("[production]\nworkers_cap = 12\n[team.1]\n")
         assert Settings.from_toml(str(toml)).prod_enabled is False
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "stop_free_gb = 4\nresume_free_gb = 3",
+            "upload_timeout = 0",
+            "warn_after = 301\nstall_after = 300",
+            "stop_free_gb = nan",
+            "warn_queue_gb = 8\nstop_queue_gb = 4",
+            "stop_queue_gb = 0",
+            "stop_within = -1",
+        ],
+    )
+    def test_invalid_wal_safety_thresholds(self, tmp_path, body):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            "[production.wal]\n" + body + '\n[team.1]\nhostname="localhost"\n'
+        )
+        with pytest.raises(ValueError, match=r"\[production.wal\]"):
+            Settings.from_toml(str(toml))
+
+    def test_wal_thresholds_are_loaded(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[production.wal]\nupload_timeout=45\nwarn_queue_gb=3\nstop_queue_gb=12\nstop_free_gb=8\nresume_free_gb=16\n[team.1]\nhostname="localhost"\n'
+        )
+        settings = Settings.from_toml(str(toml))
+        assert settings.wal_upload_timeout == 45
+        assert settings.wal_warn_queue_gb == 3
+        assert settings.wal_stop_queue_gb == 12
+        assert settings.wal_stop_free_gb == 8
+        assert settings.wal_resume_free_gb == 16
+
     def test_production_enabled_must_be_boolean(self, tmp_path):
         toml = tmp_path / "oduflow.toml"
         toml.write_text('[production]\nenabled = "true"\n[team.1]\n')

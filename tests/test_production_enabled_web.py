@@ -39,6 +39,8 @@ def test_disabled_hides_production_tab_and_omits_routes(tmp_path):
     assert "if (!targetTab || targetTab.hidden) return;" in dashboard.text
     assert client.get("/api/productions").status_code == 404
     assert client.post("/api/webhooks/github").status_code == 404
+    assert client.get("/api/productions/wal-status").status_code == 404
+    assert client.post("/api/productions/wal-control").status_code == 404
 
 
 def test_enabled_shows_production_tab_and_registers_routes(tmp_path):
@@ -52,3 +54,29 @@ def test_enabled_shows_production_tab_and_registers_routes(tmp_path):
         response = client.get("/api/productions")
     assert response.status_code == 200
     assert response.json()["productions"] == []
+
+
+def test_wal_status_reports_stale_without_synchronous_docker_probe(tmp_path):
+    client = _client(tmp_path, enabled=True)
+    with patch("oduflow.docker_ops.client.get_client") as docker:
+        response = client.get("/api/productions/wal-status")
+    assert response.status_code == 200
+    assert response.json()["stale"] is True
+    assert response.json()["status"] == "error"
+    docker.assert_not_called()
+
+
+def test_wal_status_failure_stays_json(tmp_path):
+    client = _client(tmp_path, enabled=True)
+    with patch("oduflow.wal_monitor.status", side_effect=RuntimeError("boom")):
+        response = client.get("/api/productions/wal-status")
+    assert response.status_code == 500
+    assert response.json() == {"ok": False, "error": "Internal server error."}
+
+
+def test_wal_control_requires_cluster_confirmation(tmp_path):
+    client = _client(tmp_path, enabled=True)
+    with patch("oduflow.docker_ops.client.get_client"):
+        response = client.post("/api/productions/wal-control", json={"action": "pause"})
+    assert response.json()["ok"] is False
+    assert "ALL-PRODUCTIONS" in response.json()["error"]

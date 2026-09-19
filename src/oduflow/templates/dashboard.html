@@ -1389,6 +1389,7 @@
     <button class="btn" onclick="copyToClipboard(document.getElementById('prod-webhook-url').textContent, 'Webhook URL copied')">Copy URL</button>
     <button class="btn" onclick="copyToClipboard(_prodWebhookSecret, 'Webhook secret copied')">Copy secret</button>
   </div>
+  <div id="prod-wal" class="env-card" aria-live="polite">Loading PostgreSQL WAL status…</div>
   <div id="prod-list"></div>
 </div>
 
@@ -5537,7 +5538,10 @@ function resetTimers() {
     // Skip the periodic re-render while a production Settings form has unsaved
     // edits or focus — re-rendering would silently discard them. Manual loads
     // (tab switch, explicit actions) still refresh normally.
-    if (prodTab && prodTab.classList.contains('active') && !_prodSettingsEditing()) loadProductions();
+    if (prodTab && prodTab.classList.contains('active')) {
+      if (_prodSettingsEditing()) loadWalStatus();
+      else loadProductions();
+    }
   }, ms);
 }
 
@@ -7864,6 +7868,89 @@ console.log(
 
 const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
+var _walBusy = false;
+var _walStatus = null;
+
+function walDuration(seconds) {
+  if (seconds == null) return '—';
+  if (seconds < 60) return Math.round(seconds) + ' s';
+  if (seconds < 3600) return Math.round(seconds / 60) + ' min';
+  return (seconds / 3600).toFixed(1) + ' h';
+}
+
+function renderWalStatus() {
+  var el = document.getElementById('prod-wal');
+  var s = _walStatus;
+  if (!el || !s) return;
+  var g = s.guard || {};
+  var a = s.archiver || {};
+  var badge = s.status === 'ok' ? 'badge-running' : s.status === 'warn' ? 'badge-busy' : s.status === 'off' ? 'badge-neutral' : 'badge-exited';
+  function metric(label, value) { return '<span>' + label + ': <strong>' + esc(value) + '</strong></span>'; }
+  function button(action, label, disabled) {
+    return '<button class="btn"' + ((_walBusy || disabled) ? ' disabled' : '') +
+      ' onclick="controlWal(\'' + action + '\')">' + (_walBusy ? 'Working…' : label) + '</button>';
+  }
+  var actions = s.configured ? button(g.paused ? 'resume' : 'pause', g.paused ? 'Resume archiving' : 'Pause archiving', false) +
+    button('retry', 'Retry upload', g.paused || s.pg_status !== 'running') : '';
+  if (g.latched) actions += button(g.recovering ? 'release' : 'recover', g.recovering ? 'Release protection' : 'Start PostgreSQL recovery', s.stale);
+  el.innerHTML = '<div class="env-header"><div class="left"><span class="branch-name">PostgreSQL WAL</span>' +
+    '<span class="badge ' + badge + '">' + esc(s.stale ? 'unknown' : s.status) + '</span></div>' +
+    '<div class="env-actions">' + actions + '</div></div>' +
+    '<p>' + esc(s.detail || '') + '</p>' +
+    '<div class="env-meta">' +
+      metric('Queue', s.ready_count == null ? '—' : s.ready_count + ' segments · ' + fmtBytes(s.ready_bytes)) + ' · ' +
+      metric('Queue stop limit', s.stop_queue_bytes == null ? '—' : fmtBytes(s.stop_queue_bytes)) + ' · ' +
+      metric('Oldest waiting', walDuration(s.oldest_ready_seconds)) + ' · ' +
+      metric('No progress', walDuration(s.no_progress_seconds)) + '</div>' +
+    '<div class="env-meta">' + metric('WAL on disk', s.wal_bytes == null ? '—' : fmtBytes(s.wal_bytes)) + ' · ' +
+      metric('Available to PostgreSQL', s.disk_free_bytes == null ? '—' : fmtBytes(s.disk_free_bytes)) + ' · ' +
+      metric('Safety reserve', s.reserve_bytes == null ? '—' : fmtBytes(s.reserve_bytes)) + ' · ' +
+      metric('Disk consumption', s.disk_growth_bytes_per_second == null ? '—' : fmtBytes(s.disk_growth_bytes_per_second) + '/s') + ' · ' +
+      metric('Estimated time to reserve', walDuration(s.seconds_to_reserve)) + '</div>' +
+    '<div class="env-meta">' + metric('Archived', a.archived_count == null ? '—' : a.archived_count) + ' · ' +
+      metric('Last archive', a.last_archived_time || '—') + ' · ' + metric('Failed attempts', a.failed_count == null ? '—' : a.failed_count) + ' · ' +
+      metric('PG restarts', s.restart_count == null ? '—' : s.restart_count) + '</div>' +
+    (s.attempt ? '<div class="env-meta">' + metric('Current upload', s.attempt.segment + ' · ' + walDuration(s.attempt.seconds)) + '</div>' : '') +
+    (s.last_attempt && s.last_attempt.exit_code ? '<p>Last upload failed: exit ' + esc(s.last_attempt.exit_code) + '. Check PostgreSQL logs.</p>' : '') +
+    (s.storage ? '<div class="env-meta">' + metric('Storage probe', s.storage.detail) + '</div>' : '') +
+    (s.preflight && s.preflight.status ? '<div class="env-meta">' + metric('Last startup check', s.preflight.status + ' · ' + s.preflight.detail) + '</div>' : '') +
+    '<div class="env-meta">Shared by all productions and teams. ' +
+      (g.latched ? 'Applications remain stopped during recovery. ' : '') +
+      (g.paused ? 'Paused archiving retains WAL and does not free disk space. ' : '') +
+      'Sample: ' + esc(s.sampled_at ? new Date(s.sampled_at * 1000).toLocaleString() : 'unavailable') + '</div>';
+}
+
+async function loadWalStatus() {
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/wal-status');
+    var s = await readResult(r);
+    if (!s.ok) throw new Error(s.error || 'WAL status unavailable');
+    _walStatus = s;
+  } catch (e) {
+    _walStatus = Object.assign({}, _walStatus || {}, {status: 'error', stale: true, detail: 'WAL status unavailable; displayed values may be stale'});
+  }
+  renderWalStatus();
+}
+
+async function controlWal(action) {
+  var messages = {
+    pause: 'Pause archiving for every production. Unsent WAL is retained and the queue can fill the disk. Disk protection remains active.',
+    resume: 'Resume WAL archiving for the shared production cluster.',
+    retry: 'Interrupt the current WAL upload. PostgreSQL will retry it; no WAL files are discarded.',
+    recover: 'Start only PostgreSQL to drain WAL after checking free space. Production applications stay stopped and disk protection remains active.',
+    release: 'Verify free space and archiving progress, then release cluster protection. Applications remain stopped; start the desired productions separately.'
+  };
+  if (_walBusy || !messages[action]) return;
+  if (!(await confirmDialog({title: 'Shared production cluster', message: messages[action], confirmText: 'Continue'}))) return;
+  _walBusy = true;
+  renderWalStatus();
+  try {
+    await _prodPost(API_PRODUCTIONS + '/wal-control', {action: action, confirm: 'ALL-PRODUCTIONS'}, 'WAL action completed', true);
+  } finally {
+    _walBusy = false;
+    await loadWalStatus();
+  }
+}
 var _prodWebhookSecret = '';
 var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'settings' | undefined
 // name -> true while the Settings form holds unsaved edits (set by the form's
@@ -7885,6 +7972,7 @@ function prodBadgeClass(status) {
 }
 
 async function loadProductions() {
+  loadWalStatus();
   try {
     var r = await fetch(API_PRODUCTIONS);
     var data = await readResult(r);
@@ -8463,7 +8551,7 @@ async function loadHealth() {
     if (!el || !data.checks) return;
     var labels = {
       dev_pg: 'PG DEV', prod_pg: 'PG PROD', traefik: 'TRAEFIK', s3: 'S3', disk: 'DISK',
-      overlays: 'OVERLAY'
+      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK'
     };
     el.innerHTML = Object.keys(labels).map(function(key) {
       var check = data.checks[key];

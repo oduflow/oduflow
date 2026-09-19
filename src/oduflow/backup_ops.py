@@ -144,6 +144,9 @@ def snapshot_production(
     a snapshot without a manifest does not exist (orphaned dump/chunks are
     reclaimed by prune).
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     backup = _require_backup(settings)
     production_registry.get_production(team, name)
     client = get_client()
@@ -480,6 +483,9 @@ def _commit_restored_pair(
     finally:
         if container is not None and container_stopped and live_state_safe:
             try:
+                from oduflow.wal_monitor import assert_writable
+
+                assert_writable(settings)
                 container.start()
             except Exception:
                 logger.exception("Could not restart production '%s'", name)
@@ -506,6 +512,9 @@ def restore_production(
     the filestore is rebuilt into a sibling directory and swapped by
     rename. The caller holds the production's lock.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     backup = _require_backup(settings)
     record = production_registry.get_production(team, name)
     manifest = _load_manifest(settings, team, name, snapshot_id)
@@ -726,6 +735,9 @@ def restore_production_from_environment(
     lock; ``env_lock`` scopes the source environment's lock to the copy slice
     so dev work on the branch is not blocked by the whole restore.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     record = production_registry.get_production(team, name)
     client = get_client()
     source_env = production_ops._source_env_info(client, settings, team, source)
@@ -918,17 +930,23 @@ def backup_status(settings: Settings, team: TeamSettings) -> dict[str, Any]:
         status["productions"][name] = record.get("backup", {})
     if settings.backup is None:
         return status
-    status["s3"] = s3_client.check_s3(settings.backup)
+    try:
+        client = get_client()
+        status["walg"]["archiver"] = walg.archiver_status(client, settings)
+    except Exception as exc:
+        status["walg"]["archiver_error"] = str(exc)
     try:
         client = get_client()
         backups = walg.backup_list(client, settings)
-        status["walg"] = {
-            "base_backups": len(backups),
-            "latest_base_backup": (backups[-1] if backups else {}),
-            "archiver": walg.archiver_status(client, settings),
-        }
+        status["walg"].update(
+            {
+                "base_backups": len(backups),
+                "latest_base_backup": (backups[-1] if backups else {}),
+            }
+        )
     except Exception as exc:
-        status["walg"] = {"error": str(exc)}
+        status["walg"]["error"] = str(exc)
+    status["s3"] = s3_client.check_s3(settings.backup)
     return status
 
 

@@ -1027,6 +1027,8 @@ class TestProductionFeatureGate:
             "list_production_snapshots",
             "restore_production",
             "production_backup_status",
+            "production_wal_status",
+            "control_production_wal",
             "set_production_backup_schedule",
             "prune_production_backups",
             "restore_cluster_pitr",

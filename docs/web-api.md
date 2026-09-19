@@ -239,6 +239,8 @@ and delete operations require explicit confirmation in their JSON body.
 | `GET` | `/api/productions` | List productions and return webhook/backup state |
 | `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image) |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
+| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
+| `POST` | `/api/productions/wal-control` | Body `{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }`; cluster-wide action under the system lock |
 | `GET` | `/api/productions/{name}` | Detailed production information |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |

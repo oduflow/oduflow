@@ -5820,6 +5820,48 @@ def production_backup_status(ctx: Context | None = None) -> str:
 @mcp.tool()
 @handle_errors
 @production_enabled
+def production_wal_status(ctx: Context | None = None) -> str:
+    """Cached cluster WAL queue, archiver progress, disk reserve and protection state."""
+    import json as _json
+
+    from oduflow import wal_monitor
+
+    _resolve_team(ctx)
+    return _json.dumps(wal_monitor.status(_get_settings()), indent=2)
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
+def control_production_wal(
+    action: str, confirm: str = "", ctx: Context | None = None
+) -> str:
+    """Control the shared production cluster, affecting ALL teams.
+
+    action: pause (retain WAL), resume, retry (interrupt only wal-push),
+    recover (start PostgreSQL only under disk protection), or release
+    (clear protection after checks; applications remain stopped).
+    confirm must equal ALL-PRODUCTIONS. Never discards unarchived WAL.
+    """
+    import json as _json
+
+    from oduflow import wal_monitor
+    from oduflow.docker_ops.client import get_client
+
+    _resolve_team(ctx)
+    _locks.acquire_system(operation="control_production_wal")
+    try:
+        return _json.dumps(
+            wal_monitor.control(_get_settings(), get_client(), action, confirm),
+            indent=2,
+        )
+    finally:
+        _locks.release_system()
+
+
+@mcp.tool()
+@handle_errors
+@production_enabled
 @with_prod_lock
 def set_production_backup_schedule(
     name: str, schedule: str, ctx: Context | None = None
@@ -7869,6 +7911,9 @@ def _start_stdio() -> None:
     _warn_local_path_security(settings)
     reaper.start_reaper(_get_settings, _locks)
     start_backup_scheduler(_get_settings, _locks)
+    from oduflow.wal_monitor import start_monitor
+
+    start_monitor(_get_settings)
     try:
         asyncio.run(mcp.run_stdio_async())
     except KeyboardInterrupt:
@@ -7996,6 +8041,9 @@ def _start_http() -> None:
     from oduflow.backup_scheduler import start_backup_scheduler
 
     start_backup_scheduler(_get_settings, _locks)
+    from oduflow.wal_monitor import start_monitor
+
+    start_monitor(_get_settings)
 
     from oduflow.web_ui import mount_web_ui
 

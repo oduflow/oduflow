@@ -28,12 +28,12 @@ class TestProdPostgresConf:
         assert conf.splitlines()[0] == "# KEEP"
         assert conf.splitlines()[1].startswith("# ODUFLOW-TUNE ")
 
-    def test_archiving_enabled_with_noop_command(self):
+    def test_archiving_retains_wal_until_provisioning_decides(self):
         # archive_mode needs a PG restart to toggle, so it must ship enabled;
         # the actual command is flipped later via ALTER SYSTEM by walg.py.
         settings = _parse(prod_tune.generate_prod_postgresql_conf(8192, 4))
         assert settings["archive_mode"] == "on"
-        assert settings["archive_command"] == "'/bin/true'"
+        assert settings["archive_command"] == "''"
         assert settings["wal_level"] == "replica"
 
     def test_shared_buffers_share_of_ram(self):

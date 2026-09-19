@@ -91,6 +91,21 @@ def _check_disk(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _check_walg(
+    client: Any, settings: Settings, pg_status: dict[str, Any]
+) -> dict[str, Any]:
+    if not settings.prod_enabled or settings.backup is None:
+        return {"status": "off", "detail": "production backups not configured"}
+    if pg_status.get("status") == "off":
+        return {"status": "off", "detail": "production PostgreSQL not provisioned"}
+    if pg_status.get("status") != "ok":
+        return {"status": "error", "detail": "production PostgreSQL unavailable"}
+    from oduflow import wal_monitor
+
+    result = wal_monitor.status(settings)
+    return {"status": result["status"], "detail": result["detail"]}
+
+
 def _check_overlays(settings: Settings) -> dict[str, Any]:
     """Filestore overlays that are stale, missing, or cannot be inspected.
 
@@ -206,6 +221,16 @@ def collect_health(settings: Settings, *, force: bool = False) -> dict[str, Any]
             else {"status": "off", "detail": "production hosting disabled"}
         )
         checks["traefik"] = _check_traefik(client, settings)
+        checks["walg"] = _check_walg(client, settings, checks["prod_pg"])
+        if settings.prod_enabled and checks["prod_pg"]["status"] != "off":
+            from oduflow import wal_monitor
+
+            result = wal_monitor.status(settings)
+            checks["prod_wal_disk"] = {
+                "status": result["status"],
+                "detail": result["detail"],
+                "free_bytes": result.get("disk_free_bytes"),
+            }
     checks["s3"] = _check_s3(settings)
     checks["disk"] = _check_disk(settings)
     checks["overlays"] = _check_overlays(settings)
@@ -228,6 +253,8 @@ def collect_health(settings: Settings, *, force: bool = False) -> dict[str, Any]
         "prod_pg",
         "traefik",
         "s3",
+        "walg",
+        "prod_wal_disk",
         "productions",
         "docker",
         "overlays",
