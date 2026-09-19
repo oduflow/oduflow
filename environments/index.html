@@ -1,0 +1,2718 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="AI-first Odoo development and CI tool with reusable database templates, powered by MCP">
+      
+      
+        <meta name="author" content="Oduist">
+      
+      
+        <link rel="canonical" href="https://docs.oduflow.dev/environments/">
+      
+      
+        <link rel="prev" href="../templates/">
+      
+      
+        <link rel="next" href="../production/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.ico">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Environment Management - Oduflow</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../css/custom.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#environment-management" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Oduflow" class="md-header__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Oduflow
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Environment Management
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required="">
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard="" data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"></path></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix="">
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Oduflow" class="md-nav__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    Oduflow
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix="">
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1">
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation &amp; Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked="">
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Core Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use Cases &amp; Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Template Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Management
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#creating-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating Environments
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Creating Environments">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#creating-an-environment-from-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating an Environment from Production
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#private-repository-authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Private repository authentication
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Private repository authentication">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ssh-deploy-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSH deploy key
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#auto-dependency-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auto-dependency installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#database-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Database Sanitization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Database Sanitization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#team-level-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Team-level sanitization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#per-project-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-project sanitization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#disabling-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Disabling sanitization
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lifecycle-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lifecycle Management
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Lifecycle Management">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reusing-an-environment-for-the-next-branch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reusing an Environment for the Next Branch
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reusing an Environment for the Next Branch">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#renaming-while-switching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming While Switching
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#renaming-an-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming an Environment
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recreating-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recreating Environments
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#automatic-stop-and-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Automatic Stop and Cleanup
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#viewing-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Viewing Logs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#installing-and-upgrading-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installing and Upgrading Modules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running Tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smart-pull-intelligent-change-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Smart Pull — Intelligent Change Detection
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Smart Pull — Intelligent Change Detection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-it-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#action-priority" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Action priority
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#module-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module detection
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-files-inside-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading Files Inside Environments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#executing-commands-inside-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executing Commands Inside Environments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#orm-and-database-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ORM and Database Operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interactive-terminal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactive Terminal
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-protection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment Protection
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Environment Protection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#via-rest-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Via REST API
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#via-web-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Via Web Dashboard
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Hosting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coding Agent
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auxiliary Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extra-addons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extra Addons Repositories
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stacks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Declarative Stacks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3">
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../web-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Dashboard &amp; REST API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP Tools Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4">
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../traefik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Traefik Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-instance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Team Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Authentication &amp; Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running in Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5">
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../licensing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Licensing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#creating-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating Environments
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Creating Environments">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#creating-an-environment-from-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating an Environment from Production
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#private-repository-authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Private repository authentication
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Private repository authentication">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ssh-deploy-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSH deploy key
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#auto-dependency-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auto-dependency installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#database-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Database Sanitization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Database Sanitization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#team-level-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Team-level sanitization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#per-project-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-project sanitization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#disabling-sanitization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Disabling sanitization
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lifecycle-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lifecycle Management
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Lifecycle Management">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reusing-an-environment-for-the-next-branch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reusing an Environment for the Next Branch
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reusing an Environment for the Next Branch">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#renaming-while-switching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming While Switching
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#renaming-an-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming an Environment
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recreating-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recreating Environments
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#automatic-stop-and-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Automatic Stop and Cleanup
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#viewing-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Viewing Logs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#installing-and-upgrading-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installing and Upgrading Modules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running Tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smart-pull-intelligent-change-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Smart Pull — Intelligent Change Detection
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Smart Pull — Intelligent Change Detection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-it-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#action-priority" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Action priority
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#module-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module detection
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-files-inside-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading Files Inside Environments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#executing-commands-inside-environments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executing Commands Inside Environments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#orm-and-database-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ORM and Database Operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interactive-terminal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactive Terminal
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-protection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment Protection
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Environment Protection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#via-rest-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Via REST API
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#via-web-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Via Web Dashboard
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="environment-management">Environment Management<a class="headerlink" href="#environment-management" title="Permanent link">¶</a></h1>
+<p><a class="glightbox" data-type="image" data-width="auto" data-height="auto" href="../img/envs.png" data-desc-position="bottom"><img alt="Environments Dashboard" src="../img/envs.png"></a></p>
+<h2 id="creating-environments">Creating Environments<a class="headerlink" href="#creating-environments" title="Permanent link">¶</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># Create with a named template (env_name, template_name, repo_url, odoo_image)</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">""</span><span class="w"> </span>myproject<span class="w"> </span>https://github.com/owner/repo.git<span class="w"> </span>odoo:19.0
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># Create without a template (fresh Odoo with -i base)</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">""</span><span class="w"> </span>none<span class="w"> </span>https://github.com/owner/repo.git<span class="w"> </span>odoo:19.0
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1"># Create with JSON arguments (more explicit)</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span><span class="s1">'{"branch":"feature-login","template_name":"myproject","repo_url":"https://github.com/owner/repo.git","odoo_image":"odoo:19.0"}'</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1"># Override the Traefik hostname prefix (dev.example.com -&gt; qa.example.com)</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span><span class="s1">'{"branch":"feature-login","hostname":"qa","template_name":"myproject"}'</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="c1"># Inject container environment variables (comma-separated KEY=VALUE)</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span><span class="s1">'{"branch":"feature-login","template_name":"myproject","env_vars":"WORKERS=2,LIMIT_TIME_CPU=600"}'</span>
+</span></code></pre></div>
+<p><code>env_vars</code> are added on top of the database connection variables (<code>HOST</code>/<code>USER</code>/<code>PASSWORD</code>). They are stored on the container and can later be replaced with <a href="#lifecycle-management"><code>update_environment</code></a>.</p>
+<p>Creating an environment that already exists is not an error over MCP: the call
+returns that environment's URL and details right away, starts it when it was
+stopped, and provisions nothing. So an agent can call <code>create_environment</code>
+first, with no <code>list_environments</code> lookup before it. The one refusal is a
+<strong>branch mismatch</strong> — an existing environment tracking another branch is left
+alone, because its database and URL are in use; move it deliberately with
+<a href="#reusing-an-environment-for-the-next-branch"><code>switch_branch</code></a>, pick another
+<code>env_name</code>, or delete it. The dashboard and the REST API keep the strict
+behaviour and report the conflict instead.</p>
+<p><code>environment_slots = N</code> caps concurrent environments without changing their
+public names. The default Traefik strategy is
+<code>environment_hostname_mode = "branch"</code>, so <code>feature-login</code> remains available at
+<code>feature-login.dev.example.com</code> and continues to work with
+<code>*.dev.example.com</code> DNS or wildcard certificates.</p>
+<p>Set <code>environment_hostname_mode = "slots"</code> explicitly when Let's Encrypt
+certificate reuse is more important than descriptive URLs. For
+<code>hostname = "dev.example.com"</code>, that mode allocates <code>dev1.example.com</code> through
+<code>devN.example.com</code>; assignments survive stops and updates and return to the
+pool on deletion. Pass <code>hostname="qa"</code> to request <code>qa.example.com</code> in either
+mode. Explicit hostnames still consume environment capacity.</p>
+<p>When creating an environment, Oduflow:</p>
+<ol>
+<li><strong>Clones the repository</strong> — shallow clone (<code>--depth 1</code>) for speed</li>
+<li><strong>Creates the database</strong> — <code>CREATE DATABASE ... TEMPLATE oduflow_template_{team_id}_{name}</code> for instant copy, or empty DB when <code>template=none</code></li>
+<li><strong>Mounts the filestore overlay</strong> — fuse-overlayfs with the template as lower layer</li>
+<li><strong>Detects UID/GID</strong> — runs <code>id</code> in the Odoo image to set correct file ownership</li>
+<li><strong>Installs dependencies</strong> — auto-installs from <code>.oduflow/apt_packages.txt</code> and <code>.oduflow/requirements.txt</code> (the latter falls back to the repo root) if present</li>
+<li><strong>Configures Odoo</strong> — uses repo's <code>.oduflow/odoo.conf</code> if available, otherwise the default template; if the repo keeps its modules in a top-level <code>addons/</code> directory, <code>addons_path</code> points there automatically</li>
+<li><strong>Starts the container</strong> — with <code>--dev=xml</code> for hot-reloading XML/QWeb changes</li>
+<li><strong>Initializes base</strong> — when <code>template=none</code>, runs <code>odoo -i base --stop-after-init</code></li>
+</ol>
+<h3 id="creating-an-environment-from-production">Creating an Environment from Production<a class="headerlink" href="#creating-an-environment-from-production" title="Permanent link">¶</a></h3>
+<p><code>from_production</code> builds a development environment out of a <a href="../production/">production</a>'s real data — database, filestore, and the production's code origin (repo, image, extra addons):</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span><span class="s1">'{"branch":"bugfix-invoice","from_production":"erp"}'</span>
+</span></code></pre></div>
+<p>It is mutually exclusive with <code>template_name</code> and <code>local_path</code>: the production supplies all of them.</p>
+<p>The copy always goes through <strong>one managed template per production</strong>, named <code>prod-&lt;name&gt;</code>. It is published on the first call and <strong>reused</strong> by every later one, so a second environment from the same production is an instant <code>CREATE DATABASE ... TEMPLATE</code> clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.</p>
+<p>Refresh the copy when it gets stale — the next <code>from_production</code> call then reuses the fresh snapshot:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>save_production_as_template<span class="w"> </span><span class="s1">'{"prod_name":"erp","template_name":"prod-erp","overwrite":true}'</span>
+</span></code></pre></div>
+<p>The environment is <a href="#database-sanitization">sanitized</a> on creation like any other template-based environment (<code>sanitize=false</code> to skip it — with real production data, do so deliberately). The <code>prod-&lt;name&gt;</code> template itself holds <strong>unsanitized</strong> production data; see <a href="../templates/#create-a-template-from-production">Create a Template from Production</a>.</p>
+<p>An administrator can disable production→dev copies over MCP per production; publishing a new copy then refuses, while an already published <code>prod-&lt;name&gt;</code> template stays usable with <code>sanitize=true</code> only. See <a href="../production/#copying-production-data-to-dev">Copying production data to dev</a>.</p>
+<h3 id="private-repository-authentication">Private repository authentication<a class="headerlink" href="#private-repository-authentication" title="Permanent link">¶</a></h3>
+<p>For private repos, store an access token first:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>setup_repo_auth<span class="w"> </span><span class="s1">'{"repo_url": "https://github.com/owner/private-repo.git", "token": "ghp_..."}'</span>
+</span></code></pre></div>
+<p>The token is stored in the team's git credential store, keyed by host, so one
+token covers every repository on that host. <code>create_environment</code> then uses the
+plain URL without credentials. The legacy inline form
+<code>oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git</code>
+still works.</p>
+<h4 id="ssh-deploy-key">SSH deploy key<a class="headerlink" href="#ssh-deploy-key" title="Permanent link">¶</a></h4>
+<p>Alternatively, use SSH instead of a token. Oduflow keeps one SSH deploy key
+per team (an ed25519 keypair generated automatically at server start; the
+dashboard, API and MCP tools expose only the public key). Copy the public key from the
+dashboard's <strong>Credentials</strong> tab (SSH deploy key section) — or fetch it with
+<code>oduflow call get_ssh_public_key</code> — and register it with your git hosting as
+a repository <strong>deploy key</strong> (read access is enough) or on a machine-user
+account. After that, SSH repository URLs work everywhere a repository URL is
+accepted:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span><span class="s1">'{"branch": "feature-x", "repo_url": "git@github.com:owner/private-repo.git"}'</span>
+</span></code></pre></div>
+<p>Note: GitHub allows a given deploy key on <strong>one</strong> repository only; to reach
+several repositories with the same key, attach it to a machine-user account
+instead. Regenerating the key (dashboard, <em>Regenerate</em>) invalidates the old
+one everywhere it was registered.</p>
+<h3 id="auto-dependency-installation">Auto-dependency installation<a class="headerlink" href="#auto-dependency-installation" title="Permanent link">¶</a></h3>
+<p>Place these files in your repository for automatic installation during environment creation:</p>
+<p><strong><code>.oduflow/requirements.txt</code></strong> — Python packages installed via pip. Oduflow looks in
+<code>.oduflow/</code> first and falls back to a <code>requirements.txt</code> in the repository root (for
+compatibility with conventions used elsewhere, e.g. odoo.sh):</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>phonenumbers==8.13.0
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>python-barcode==0.15.1
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>xlsxwriter&gt;=3.0
+</span></code></pre></div>
+<p><strong><code>.oduflow/apt_packages.txt</code></strong> — System packages installed via apt. This is an
+Oduflow-specific convention and is read <strong>only</strong> from <code>.oduflow/</code> (no repo-root fallback):</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a># Dependencies for wkhtmltopdf
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>libfontconfig1
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>libxrender1
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>xfonts-75dpi
+</span></code></pre></div>
+<p>Both files are also read from every mounted <a href="../extra-addons/">extra addons</a>
+repository, with the same lookup rules — declare an extra module's
+dependencies in its own repo and they are installed alongside the main
+repo's. A change to any of these files (main repo or extra repo) picked up
+by <code>pull_and_apply</code> / <code>update_production</code> reinstalls the dependencies and
+restarts the container.</p>
+<h2 id="database-sanitization">Database Sanitization<a class="headerlink" href="#database-sanitization" title="Permanent link">¶</a></h2>
+<p>When an environment is created from a template, Oduflow <strong>automatically sanitizes</strong> the database to prevent the test instance from sending real emails or polling mailboxes. This is enabled by default (<code>sanitize=True</code>).</p>
+<p>For Odoo versions that provide it, Oduflow first runs Odoo's native <code>odoo neutralize</code> command inside the serving container, after any auto-installed modules are present. Odoo 15 and earlier do not include this command, so Oduflow detects the version from both official and custom Docker image references, skips the native step there, and continues with the custom scripts below.</p>
+<p>Custom sanitization then uses a <strong>two-tier</strong> approach:</p>
+<ol>
+<li><strong>Team-level scripts</strong> from <code>{team_data_dir}/odoo_sanitize/</code> — managed by the administrator, shared across all environments in the team</li>
+<li><strong>Per-project scripts</strong> from <code>.oduflow/odoo_sanitize/</code> in the repository root — managed by the developer, specific to the project</li>
+</ol>
+<p>Both folders support <code>.sql</code> and <code>.py</code> files, executed in alphabetical order (first all <code>.sql</code>, then all <code>.py</code>). Team-level scripts run first, then per-project scripts.</p>
+<h3 id="team-level-sanitization">Team-level sanitization<a class="headerlink" href="#team-level-sanitization" title="Permanent link">¶</a></h3>
+<p>On startup, the folder <code>{team_data_dir}/odoo_sanitize/</code> is created and seeded with a default script:</p>
+<p><strong><code>01_disable_mail.sql</code></strong> — disables incoming and outgoing mail servers:</p>
+<div class="language-sql highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">-- Disable incoming mail servers (fetchmail)</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">fetchmail_server</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">false</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">true</span><span class="p">;</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1">-- Disable outgoing mail servers</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">ir_mail_server</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">false</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">true</span><span class="p">;</span>
+</span></code></pre></div>
+<p>The team administrator can add, modify, or remove scripts in this folder to control sanitization for all environments in the team.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>To disable additional cron jobs team-wide, create <code>{team_data_dir}/odoo_sanitize/02_disable_crons.sql</code>:
+</p><div class="language-sql highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">ir_cron</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">false</span><span class="p">;</span>
+</span></code></pre></div><p></p>
+</div>
+<h3 id="per-project-sanitization">Per-project sanitization<a class="headerlink" href="#per-project-sanitization" title="Permanent link">¶</a></h3>
+<p>You can add project-specific sanitization under <code>.oduflow/odoo_sanitize/</code> in your repository root:</p>
+<table>
+<thead>
+<tr>
+<th>File type</th>
+<th>Execution method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*.sql</code></td>
+<td>Executed directly against the environment database via <code>psql</code></td>
+</tr>
+<tr>
+<td><code>*.py</code></td>
+<td>Executed inside the Odoo container via <code>python3 -c</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example SQL script</strong> (<code>.oduflow/odoo_sanitize/01_clean_partners.sql</code>):</p>
+<div class="language-sql highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">res_partner</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'test@example.com'</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+</span></code></pre></div>
+<p><strong>Example Python script</strong> (<code>.oduflow/odoo_sanitize/02_reset_passwords.py</code>):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">os</span><span class="o">,</span><span class="w"> </span><span class="nn">psycopg2</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="n">conn</span> <span class="o">=</span> <span class="n">psycopg2</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>    <span class="n">host</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"DB_HOST"</span><span class="p">],</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">dbname</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"ODOO_DB"</span><span class="p">],</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">user</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"DB_USER"</span><span class="p">],</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">password</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"DB_PASSWORD"</span><span class="p">],</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="p">)</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="k">with</span> <span class="n">conn</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cr</span><span class="p">:</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="n">cr</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s2">"UPDATE res_partner SET email = 'test@example.com' WHERE email IS NOT NULL"</span><span class="p">)</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>    <span class="n">conn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="n">conn</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</span></code></pre></div>
+<p>Python scripts receive the following environment variables: <code>ODOO_DB</code>, <code>DB_HOST</code>, <code>DB_USER</code>, <code>DB_PASSWORD</code>.</p>
+<h3 id="disabling-sanitization">Disabling sanitization<a class="headerlink" href="#disabling-sanitization" title="Permanent link">¶</a></h3>
+<p>Pass <code>sanitize=false</code> when creating an environment to skip all sanitization (both team-level and per-project):</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>create_environment<span class="w"> </span><span class="s1">'{"branch":"my-branch","template_name":"mytemplate","repo_url":"https://...","odoo_image":"odoo:19.0","sanitize":false}'</span>
+</span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Sanitization only runs when creating from a template. Environments created without a template (<code>template=none</code>) are not sanitized since they start with a clean database.</p>
+</div>
+<h2 id="lifecycle-management">Lifecycle Management<a class="headerlink" href="#lifecycle-management" title="Permanent link">¶</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="c1"># List all environments with status, URL, image, and repo info</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>list_environments
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="c1"># Check detailed environment info (DB, URL, repo, image, CPU/RAM stats)</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>get_environment_info<span class="w"> </span>feature-login
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="c1"># Stop an environment (preserves data)</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>oduflow<span class="w"> </span>call<span class="w"> </span>stop_environment<span class="w"> </span>feature-login
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a><span class="c1"># Start a stopped environment</span>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>oduflow<span class="w"> </span>call<span class="w"> </span>start_environment<span class="w"> </span>feature-login
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a><span class="c1"># Restart the Odoo container</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a>oduflow<span class="w"> </span>call<span class="w"> </span>restart_environment<span class="w"> </span>feature-login
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a><span class="c1"># Re-create the container (keeps database and filestore)</span>
+</span><span id="__span-12-17"><a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a>oduflow<span class="w"> </span>call<span class="w"> </span>update_environment<span class="w"> </span>feature-login
+</span><span id="__span-12-18"><a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a>
+</span><span id="__span-12-19"><a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a><span class="c1"># Switch image and/or replace env vars (keeps database and filestore)</span>
+</span><span id="__span-12-20"><a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a>oduflow<span class="w"> </span>call<span class="w"> </span>update_environment<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">"WORKERS=4,LIMIT_TIME_CPU=900"</span><span class="w"> </span>odoo:19.0
+</span><span id="__span-12-21"><a id="__codelineno-12-21" name="__codelineno-12-21" href="#__codelineno-12-21"></a>
+</span><span id="__span-12-22"><a id="__codelineno-12-22" name="__codelineno-12-22" href="#__codelineno-12-22"></a><span class="c1"># Rename it (keeps database, filestore and a pooled or explicit hostname)</span>
+</span><span id="__span-12-23"><a id="__codelineno-12-23" name="__codelineno-12-23" href="#__codelineno-12-23"></a>oduflow<span class="w"> </span>call<span class="w"> </span>update_environment<span class="w"> </span><span class="s1">'{"env_name": "feature-login", "new_name": "login"}'</span>
+</span><span id="__span-12-24"><a id="__codelineno-12-24" name="__codelineno-12-24" href="#__codelineno-12-24"></a>
+</span><span id="__span-12-25"><a id="__codelineno-12-25" name="__codelineno-12-25" href="#__codelineno-12-25"></a><span class="c1"># Change the public Traefik hostname</span>
+</span><span id="__span-12-26"><a id="__codelineno-12-26" name="__codelineno-12-26" href="#__codelineno-12-26"></a>oduflow<span class="w"> </span>call<span class="w"> </span>update_environment<span class="w"> </span><span class="s1">'{"env_name": "feature-login", "hostname": "qa"}'</span>
+</span><span id="__span-12-27"><a id="__codelineno-12-27" name="__codelineno-12-27" href="#__codelineno-12-27"></a>
+</span><span id="__span-12-28"><a id="__codelineno-12-28" name="__codelineno-12-28" href="#__codelineno-12-28"></a><span class="c1"># Tear down everything (container, database, filestore, workspace)</span>
+</span><span id="__span-12-29"><a id="__codelineno-12-29" name="__codelineno-12-29" href="#__codelineno-12-29"></a>oduflow<span class="w"> </span>call<span class="w"> </span>delete_environment<span class="w"> </span>feature-login
+</span></code></pre></div>
+<p>The <code>hostname</code> parameter of <code>update_environment</code> accepts the same short hostname
+as <code>create_environment</code>: for team <code>dev.example.com</code>, <code>qa</code> routes to
+<code>qa.example.com</code>. It requires Traefik mode. Empty or omitted values keep the
+current hostname policy. Conflicting addresses are rejected before stopping the
+container. The database and filestore are preserved. You can also edit Hostname
+in the dashboard's <strong>Update environment</strong> dialog; leaving the field unchanged
+preserves the current policy, including name-derived routing during a rename.</p>
+<h3 id="reusing-an-environment-for-the-next-branch">Reusing an Environment for the Next Branch<a class="headerlink" href="#reusing-an-environment-for-the-next-branch" title="Permanent link">¶</a></h3>
+<p>An environment is not tied for life to the branch it was created from. When a
+branch is finished — PR merged, worktree gone — point the same environment at the
+next branch instead of deleting it and provisioning a new one.</p>
+<p>This is the answer to a <strong>full slot pool</strong>, not the default way to start a task.
+While the team still has free <code>environment_slots</code>, create a new environment; it
+costs a clone and a template copy and keeps the branches independent. Reuse when
+<code>create_environment</code> reports "No free environment slots", or when that specific
+database and URL are worth carrying over:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="c1"># Same environment, next branch. The branch must already exist on origin.</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>switch_branch<span class="w"> </span><span class="s1">'{"env_name": "dev1", "branch": "feature/next-task"}'</span>
+</span></code></pre></div>
+<p>Everything except the code stays: the environment name, its database and
+filestore, its hostname and URL, its ports, its database credentials and its
+scoped MCP endpoint and token. This matters twice over — provisioning is skipped
+(no fresh clone, no template database copy), and the MCP client you already
+pointed at <code>/mcp/dev1</code> keeps working, because the address never changed.</p>
+<p><code>list_environments</code> prints the evidence needed to choose a reusable slot:
+current git branch, creation and last-activity timestamps, stopped time and
+source, protection, Stack ownership and the operator note. Prefer an exact
+branch match. Otherwise do not switch a running, protected, Stack-managed or
+noted-as-reserved environment. If repository policy permits reclaiming idle
+slots, rank the remaining stopped candidates by oldest activity; <code>unknown</code> is
+not proof that a legacy slot is abandoned. GitHub returning no PR for a branch
+is also inconclusive — confirm completion from a merged PR/branch or an explicit
+operator instruction, and create a new environment when ownership is unclear.</p>
+<h4 id="renaming-while-switching">Renaming While Switching<a class="headerlink" href="#renaming-while-switching" title="Permanent link">¶</a></h4>
+<p>The environment name is a slot label, not a description of what the slot
+currently serves — but a name left over from a finished branch can get
+confusing. Pass <code>new_name</code> to relabel the slot in the same operation:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>switch_branch<span class="w"> </span><span class="s1">'{"env_name": "dev1", "branch": "feature/next-task", "new_name": "next-task"}'</span>
+</span></code></pre></div>
+<p>(To rename without moving to another branch, pass <code>new_name</code> to
+<code>update_environment</code> — see <a href="#renaming-an-environment">Renaming an Environment</a>.)</p>
+<p>The database, filestore, ports, credentials and the environment's URL all move
+with it, so the browser tab you have open keeps working. Two things to know:</p>
+<ul>
+<li><strong>The scoped MCP endpoint moves too</strong>, from <code>/mcp/dev1</code> to <code>/mcp/next-task</code>
+  (the token itself is unchanged). Re-point any MCP client configured against
+  the old path.</li>
+<li><strong>Environments using branch-derived hostnames</strong> get a new URL because the
+  hostname follows the environment name. Pooled and explicit hostnames remain
+  stable across the rename.</li>
+</ul>
+<p>The name must be free: a rename onto a name that already has an environment,
+workspace directory or database is refused before anything is touched.
+Environments managed by a <a href="../stacks/">Stack</a> are refused as well — there the
+name comes from the stack definition.</p>
+<p>After the switch, Oduflow diffs the two branch tips and applies the same logic
+as <a href="#smart-pull--intelligent-change-detection">Smart Pull</a>. Pass
+<code>install</code> / <code>upgrade</code> / <code>restart</code> when you know what changed, or leave them empty
+to let Oduflow classify the difference:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>switch_branch<span class="w"> </span><span class="s1">'{"env_name": "dev1", "branch": "feature/next-task", "upgrade": "sale_custom"}'</span>
+</span></code></pre></div>
+<p>Since the database is kept, it can outlive the code that created it.
+<code>switch_branch</code> deliberately does not inspect installed module state before it
+moves the branch. It applies the requested action and returns any real failure
+from install, upgrade or restart; incompatibilities that only surface at runtime
+remain visible in the normal Odoo logs. <code>strict: true</code> still refuses an explicit
+action that looks incomplete for the detected file changes.</p>
+<p>Two limits are worth knowing:</p>
+<ul>
+<li><strong>The branch must be pushed.</strong> Oduflow switches its own managed clone, which
+  can only fetch from origin. A branch that exists only on your machine fails
+  with a "push it first" message and changes nothing.</li>
+<li><strong>Live-mounted environments are rejected.</strong> With <code>local_path</code> the checkout is
+  yours, not Oduflow's; switch the branch there and call <code>pull_and_apply</code>.</li>
+</ul>
+<p>On the dashboard the branch chip (<code>⎇ branch</code>) on each environment card is also
+the control: click it to switch. Extra addon repositories can move along with
+the main repo by passing <code>extra_addons</code> (<code>"enterprise:19.0"</code>).</p>
+<p>Reuse and recreate answer different questions: switch the branch when the
+database is still a reasonable starting point, and <strong>Recreate</strong> (below) when you
+want it replaced from the template.</p>
+<h3 id="renaming-an-environment">Renaming an Environment<a class="headerlink" href="#renaming-an-environment" title="Permanent link">¶</a></h3>
+<p>A name that no longer describes what the slot holds does not have to be lived
+with, and it does not need a branch switch to fix. <code>update_environment</code> takes a
+<code>new_name</code>:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>update_environment<span class="w"> </span><span class="s1">'{"env_name": "dev1", "new_name": "next-task"}'</span>
+</span></code></pre></div>
+<p>The container is re-created either way — it carries the environment name in its
+own name, its labels and its bind mounts — so the rename rides on that same
+recreate, and it can be combined with an image or env-var change in one call. On
+the dashboard the <strong>Update environment</strong> dialog has an <em>Environment name</em> field
+that does the same thing.</p>
+<p>What moves with the name: the database, the filestore, the workspace directory,
+the allocated port, the environment's PostgreSQL credentials, its activity clock
+and Agent Chat history, and the coding agent's checkout (uncommitted work
+included — the checkout is moved, never re-cloned). The URL is kept for pooled
+and explicit hostnames.</p>
+<p>Two things to know — the same two as for a
+<a href="#renaming-while-switching">rename while switching</a>:</p>
+<ul>
+<li><strong>The scoped MCP endpoint moves</strong>, from <code>/mcp/dev1</code> to <code>/mcp/next-task</code> (the
+  token itself is unchanged). Re-point any MCP client configured against the old
+  path.</li>
+<li><strong>Environments using branch-derived hostnames</strong> get a new URL, because the
+  hostname follows the environment name. Pooled and explicit hostnames stay.</li>
+</ul>
+<p>The target name must be free and Oduflow's to set: a rename onto a name that
+already has an environment, workspace directory or database is refused before
+anything is touched. So is a rename of a production environment (its name is
+recorded in <code>productions.json</code>) or of an environment managed by a
+<a href="../stacks/">Stack</a> (there the name comes from the stack definition).</p>
+<h3 id="recreating-environments">Recreating Environments<a class="headerlink" href="#recreating-environments" title="Permanent link">¶</a></h3>
+<p>The <strong>Recreate</strong> action (available via the Web Dashboard and REST API) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="c1"># Via REST API</span>
+</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/api/environments/feature-login/recreate
+</span></code></pre></div>
+<p>Recreate reads the original configuration from the container's Docker labels, so all parameters (repo URL, image, template, extra addons, git user) are preserved automatically.</p>
+<h3 id="automatic-stop-and-cleanup">Automatic Stop and Cleanup<a class="headerlink" href="#automatic-stop-and-cleanup" title="Permanent link">¶</a></h3>
+<p>Environments accumulate: agents create them faster than anyone cleans up. A
+background sweep inside the Oduflow server keeps the fleet tidy:</p>
+<ul>
+<li><strong>Auto-stop</strong> — a running environment with no <em>work</em> for <code>auto_stop_hours</code>
+  (default <strong>48</strong>) is stopped. Work means any env-scoped MCP tool call
+  (<code>pull_and_apply</code>, module installs, tests, logs, shell, queries, ...) or a
+  lifecycle action in the Web Dashboard. Listing environments and dashboard
+  polling do <strong>not</strong> count.</li>
+<li><strong>Auto-delete</strong> — a stopped environment that nobody started for
+  <code>auto_delete_hours</code> (default <strong>72</strong>) after it stopped is deleted entirely
+  (container, database, filestore, workspace). Manual stops count too: a
+  stopped environment is on the deletion clock.</li>
+</ul>
+<p><strong>Keeping an environment alive.</strong> Protected environments (<code>protect_environment</code>
+or the Protect action in the dashboard) are exempt from both auto-stop and
+auto-delete — protect anything you hand to customers for testing. Keeping an
+environment running (any activity resets the idle clock) also keeps it safe
+from deletion, since only stopped environments are ever deleted.</p>
+<p><strong>Waking up.</strong> Container-level tools start a stopped environment
+automatically and prepend a short note to the response
+(<code>Note: environment was stopped; started it ...</code>): <code>pull_and_apply</code>, module
+installs/upgrades, <code>run_odoo_tests</code>, <code>run_odoo_shell</code>, <code>run_odoo_command</code>,
+the ORM tools (<code>odoo_search_read</code>, <code>odoo_create</code>, <code>odoo_write</code>, <code>odoo_unlink</code>,
+<code>odoo_call</code>, <code>odoo_schema</code>), file tools (<code>read/write/search_in_odoo</code>),
+<code>http_request_to_odoo</code> and <code>reset_admin_password</code>. Read-only and diagnostic
+tools never wake an
+environment: <code>run_db_query</code> and <code>list_installed_modules</code> go to the shared
+PostgreSQL, and <code>get_environment_logs</code> reads logs of stopped containers —
+useful when diagnosing why something died.</p>
+<p>The dashboard shows each environment's last activity (<code>Active: 2h ago</code>) and,
+for stopped ones, when and how it stopped (<code>Stopped: 1d ago (auto)</code>). Every
+auto-stop/auto-delete is logged by the server
+(<code>Auto-stopped environment 'x' (idle longer than 48h)</code>).</p>
+<p>Configure (or disable with <code>0</code>) in <code>oduflow.toml</code>:</p>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="k">[lifecycle]</span>
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="n">auto_stop_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">48</span><span class="w">    </span><span class="c1"># stop after N hours without work; 0 disables</span>
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="n">auto_delete_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w">   </span><span class="c1"># delete N hours after stop; 0 disables (opt-in; DESTRUCTIVE)</span>
+</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="n">prod_purge_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w">    </span><span class="c1"># purge leftovers of deleted productions after N hours; 0 disables</span>
+</span></code></pre></div>
+<p><code>prod_purge_hours</code> concerns <a href="../production/#deleting-a-production">productions</a>,
+not dev environments: it reclaims the database and files that
+<code>delete_production</code> keeps on disk.</p>
+<h2 id="viewing-logs">Viewing Logs<a class="headerlink" href="#viewing-logs" title="Permanent link">¶</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="c1"># Last 100 lines (default)</span>
+</span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>get_environment_logs<span class="w"> </span>feature-login
+</span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>
+</span><span id="__span-19-4"><a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="c1"># Last 500 lines</span>
+</span><span id="__span-19-5"><a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>get_environment_logs<span class="w"> </span>feature-login<span class="w"> </span><span class="m">500</span>
+</span></code></pre></div>
+<h2 id="installing-and-upgrading-modules">Installing and Upgrading Modules<a class="headerlink" href="#installing-and-upgrading-modules" title="Permanent link">¶</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="c1"># Install modules (odoo -i)</span>
+</span><span id="__span-20-2"><a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>install_odoo_modules<span class="w"> </span>feature-login<span class="w"> </span>sale,crm,website
+</span><span id="__span-20-3"><a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>
+</span><span id="__span-20-4"><a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="c1"># Upgrade modules (odoo -u)</span>
+</span><span id="__span-20-5"><a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>upgrade_odoo_modules<span class="w"> </span>feature-login<span class="w"> </span>sale,crm
+</span></code></pre></div>
+<h2 id="running-tests">Running Tests<a class="headerlink" href="#running-tests" title="Permanent link">¶</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_odoo_tests<span class="w"> </span>feature-login<span class="w"> </span>sale,crm
+</span></code></pre></div>
+<p>For agent loops, pass <code>summary_only=true</code> to keep the complete Odoo log out of
+the MCP response:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_odoo_tests<span class="w"> </span><span class="s1">'{"env_name":"feature-login","modules":"sale,crm","summary_only":true}'</span>
+</span></code></pre></div>
+<p>The response is one <code>N failed, M error(s) of K tests</code> line plus an <code>output_id</code>.
+The full log remains server-side and can be inspected with <code>read_output</code> only
+when the summary reports a failure or Odoo aborts before producing a test count.</p>
+<p>This runs <code>odoo --test-enable --stop-after-init --workers 0 --http-port 8089 --gevent-port 8090 -u
+&lt;modules&gt;</code> inside the container. The module must already be installed — tests run via an upgrade
+(<code>-u</code>); <code>-i</code> on an already-installed module is a no-op that never enters the test phase ("0 of 0
+tests"). Because <code>--no-http</code> has no effect under <code>--test-enable</code> (tests require a live HTTP
+server), the test server's HTTP and gevent ports are moved off the defaults (8069/8072) — already
+held by the running Odoo container — to avoid a port conflict. On Odoo 15.0 and earlier the port
+flag is <code>--longpolling-port</code> instead (Odoo 16.0 renamed it to <code>--gevent-port</code>); Oduflow detects the
+environment's Odoo version and uses the right one automatically. <code>--workers 0</code> makes the run
+deterministic (Odoo recommends single-worker mode for unit tests).</p>
+<h2 id="smart-pull-intelligent-change-detection">Smart Pull — Intelligent Change Detection<a class="headerlink" href="#smart-pull-intelligent-change-detection" title="Permanent link">¶</a></h2>
+<p>The <code>pull_and_apply</code> tool is one of Oduflow's most powerful features. It pulls the latest changes from the remote repository and <strong>automatically determines the minimal action required</strong>:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a>oduflow<span class="w"> </span>call<span class="w"> </span>pull_and_apply<span class="w"> </span>feature-login
+</span></code></pre></div>
+<p><code>summary_only=true</code> suppresses install/upgrade logs and changed-file names from
+the MCP response. It returns one line containing the applied action, changed
+file count and exit status; when command output exists, the line includes an
+<code>output_id</code> for targeted inspection with <code>read_output</code>.</p>
+<h3 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">¶</a></h3>
+<p>After <code>git pull --rebase</code>, Oduflow compares <code>HEAD</code> before and after, then classifies every changed file:</p>
+<table>
+<thead>
+<tr>
+<th>Changed File</th>
+<th>Analysis</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>__manifest__.py</code> (new module)</td>
+<td>No previous manifest exists</td>
+<td><strong>Install</strong> the module</td>
+</tr>
+<tr>
+<td><code>__manifest__.py</code> (version changed)</td>
+<td><code>version</code> key differs</td>
+<td><strong>Upgrade</strong> the module</td>
+</tr>
+<tr>
+<td><code>__manifest__.py</code> (data/assets/demo/qweb changed)</td>
+<td>File lists in manifest changed</td>
+<td><strong>Upgrade</strong> the module</td>
+</tr>
+<tr>
+<td><code>*.py</code> with <code>fields.*</code> changes</td>
+<td>Field definitions added/removed/modified</td>
+<td><strong>Upgrade</strong> the module</td>
+</tr>
+<tr>
+<td><code>*.py</code> (no field changes)</td>
+<td>Business logic change</td>
+<td><strong>Restart</strong> the container</td>
+</tr>
+<tr>
+<td><code>security/*.xml</code></td>
+<td>Access control or record rules</td>
+<td><strong>Upgrade</strong> the module</td>
+</tr>
+<tr>
+<td><code>i18n/*.po</code></td>
+<td>Translation terms, loaded into the database on upgrade</td>
+<td><strong>Upgrade</strong> the module</td>
+</tr>
+<tr>
+<td><code>*.xml</code> (not in security/)</td>
+<td>Views, actions, data</td>
+<td><strong>Refresh</strong> (hot-reloaded via <code>--dev=xml</code>)</td>
+</tr>
+<tr>
+<td><code>*.js</code></td>
+<td>Frontend assets</td>
+<td><strong>Refresh</strong> (hot-reloaded via <code>--dev=xml</code>)</td>
+</tr>
+<tr>
+<td><code>*.md</code> (nothing else changed)</td>
+<td>Documentation, never loaded by Odoo</td>
+<td><strong>None</strong> — nothing is applied</td>
+</tr>
+</tbody>
+</table>
+<h3 id="action-priority">Action priority<a class="headerlink" href="#action-priority" title="Permanent link">¶</a></h3>
+<p><code>install</code> &gt; <code>upgrade</code> &gt; <code>restart</code> &gt; <code>refresh</code> &gt; <code>none</code></p>
+<p>If any module needs installation, all pending upgrades are also executed. If only Python files changed (without field modifications), a container restart is sufficient. If only XML/JS changed, no server-side action is needed — just refresh the browser. If the pull brought Markdown files only, nothing is applied at all — in development and in production alike, since the container is not restarted either.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code>pull_and_apply</code> updates only the <strong>main project repository</strong>. Extra addons repositories are pinned to the commit they were deployed with and are not affected. See <a href="../extra-addons/#updating-extra-repos">Extra Addons — Updating</a> for details.</p>
+</div>
+<h3 id="module-detection">Module detection<a class="headerlink" href="#module-detection" title="Permanent link">¶</a></h3>
+<p>Oduflow walks up from each changed file to find the nearest <code>__manifest__.py</code>, correctly identifying which Odoo module a file belongs to, even in nested directory structures.</p>
+<h2 id="reading-files-inside-environments">Reading Files Inside Environments<a class="headerlink" href="#reading-files-inside-environments" title="Permanent link">¶</a></h2>
+<p>Use <code>read_file_in_odoo</code> to inspect files and directories inside the Odoo container without constructing shell commands:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="c1"># Read Odoo source code</span>
+</span><span id="__span-24-2"><a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>read_file_in_odoo<span class="w"> </span>feature-login<span class="w"> </span>/usr/lib/python3/dist-packages/odoo/addons/sale/models/sale_order.py
+</span><span id="__span-24-3"><a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a>
+</span><span id="__span-24-4"><a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a><span class="c1"># Read a specific line range (lines 100–200)</span>
+</span><span id="__span-24-5"><a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>read_file_in_odoo<span class="w"> </span>feature-login<span class="w"> </span>/usr/lib/python3/dist-packages/odoo/addons/sale/models/sale_order.py<span class="w"> </span><span class="s2">"100:200"</span>
+</span><span id="__span-24-6"><a id="__codelineno-24-6" name="__codelineno-24-6" href="#__codelineno-24-6"></a>
+</span><span id="__span-24-7"><a id="__codelineno-24-7" name="__codelineno-24-7" href="#__codelineno-24-7"></a><span class="c1"># List a directory</span>
+</span><span id="__span-24-8"><a id="__codelineno-24-8" name="__codelineno-24-8" href="#__codelineno-24-8"></a>oduflow<span class="w"> </span>call<span class="w"> </span>read_file_in_odoo<span class="w"> </span>feature-login<span class="w"> </span>/mnt/extra-addons/
+</span><span id="__span-24-9"><a id="__codelineno-24-9" name="__codelineno-24-9" href="#__codelineno-24-9"></a>
+</span><span id="__span-24-10"><a id="__codelineno-24-10" name="__codelineno-24-10" href="#__codelineno-24-10"></a><span class="c1"># Check the generated Odoo config</span>
+</span><span id="__span-24-11"><a id="__codelineno-24-11" name="__codelineno-24-11" href="#__codelineno-24-11"></a>oduflow<span class="w"> </span>call<span class="w"> </span>read_file_in_odoo<span class="w"> </span>feature-login<span class="w"> </span>/etc/odoo/odoo.conf
+</span><span id="__span-24-12"><a id="__codelineno-24-12" name="__codelineno-24-12" href="#__codelineno-24-12"></a>
+</span><span id="__span-24-13"><a id="__codelineno-24-13" name="__codelineno-24-13" href="#__codelineno-24-13"></a><span class="c1"># Verify file presence after pull_and_apply</span>
+</span><span id="__span-24-14"><a id="__codelineno-24-14" name="__codelineno-24-14" href="#__codelineno-24-14"></a>oduflow<span class="w"> </span>call<span class="w"> </span>read_file_in_odoo<span class="w"> </span>feature-login<span class="w"> </span>/mnt/extra-addons/my_module/__manifest__.py
+</span></code></pre></div>
+<ul>
+<li>If the path is a <strong>directory</strong>, returns a listing (like <code>ls -la</code>).</li>
+<li>If the path is a <strong>text file</strong>, returns its contents (up to 100KB by default).</li>
+<li><strong>Binary files</strong> are not supported — use <code>run_odoo_command</code> for binary operations.</li>
+<li>The optional <code>read_range</code> parameter accepts a <code>"START:END"</code> format (e.g. <code>"1:50"</code>, <code>"100:200"</code>) to read only specific lines.</li>
+</ul>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>Prefer <code>read_file_in_odoo</code> over <code>run_odoo_command</code> with <code>cat</code> or <code>ls</code> commands — it handles file type detection, size limits, and binary file rejection automatically.</p>
+</div>
+<h2 id="executing-commands-inside-environments">Executing Commands Inside Environments<a class="headerlink" href="#executing-commands-inside-environments" title="Permanent link">¶</a></h2>
+<p>Run arbitrary shell commands inside the Odoo container:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1"># List addon files</span>
+</span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_odoo_command<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">"ls /mnt/extra-addons"</span>
+</span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a>
+</span><span id="__span-25-4"><a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="c1"># Check Python version</span>
+</span><span id="__span-25-5"><a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_odoo_command<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">"python3 --version"</span>
+</span><span id="__span-25-6"><a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a>
+</span><span id="__span-25-7"><a id="__codelineno-25-7" name="__codelineno-25-7" href="#__codelineno-25-7"></a><span class="c1"># Run a Python script</span>
+</span><span id="__span-25-8"><a id="__codelineno-25-8" name="__codelineno-25-8" href="#__codelineno-25-8"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_odoo_command<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">"python3 -c 'import odoo; print(odoo.release.version)'"</span>
+</span><span id="__span-25-9"><a id="__codelineno-25-9" name="__codelineno-25-9" href="#__codelineno-25-9"></a>
+</span><span id="__span-25-10"><a id="__codelineno-25-10" name="__codelineno-25-10" href="#__codelineno-25-10"></a><span class="c1"># Install a package as root</span>
+</span><span id="__span-25-11"><a id="__codelineno-25-11" name="__codelineno-25-11" href="#__codelineno-25-11"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_odoo_command<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">"pip3 install phonenumbers"</span><span class="w"> </span>root
+</span><span id="__span-25-12"><a id="__codelineno-25-12" name="__codelineno-25-12" href="#__codelineno-25-12"></a>
+</span><span id="__span-25-13"><a id="__codelineno-25-13" name="__codelineno-25-13" href="#__codelineno-25-13"></a><span class="c1"># Query the environment database directly</span>
+</span><span id="__span-25-14"><a id="__codelineno-25-14" name="__codelineno-25-14" href="#__codelineno-25-14"></a>oduflow<span class="w"> </span>call<span class="w"> </span>run_db_query<span class="w"> </span>feature-login<span class="w"> </span><span class="s2">"SELECT count(*) FROM res_partner"</span>
+</span></code></pre></div>
+<p>The <code>user</code> parameter defaults to <code>odoo</code>. Use <code>root</code> for privileged operations (installing packages, modifying system files).</p>
+<h2 id="orm-and-database-operations">ORM and Database Operations<a class="headerlink" href="#orm-and-database-operations" title="Permanent link">¶</a></h2>
+<p>For structured record access, prefer the six <code>odoo_*</code> tools over hand-written
+shell snippets. They call the running Odoo server through its dataset API and
+therefore enforce the same access rights and record rules as the web client:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-26-1"><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="c1"># Discover fields first</span>
+</span><span id="__span-26-2"><a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>oduflow<span class="w"> </span>call<span class="w"> </span>odoo_schema<span class="w"> </span><span class="s1">'{"env_name":"feature-login","model":"res.partner"}'</span>
+</span><span id="__span-26-3"><a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a>
+</span><span id="__span-26-4"><a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="c1"># Search as the environment admin (the default)</span>
+</span><span id="__span-26-5"><a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a>oduflow<span class="w"> </span>call<span class="w"> </span>odoo_search_read<span class="w"> </span><span class="s1">'{"env_name":"feature-login","model":"res.partner","domain":[["customer_rank","&gt;",0]],"fields":["name","email"],"limit":20}'</span>
+</span><span id="__span-26-6"><a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a>
+</span><span id="__span-26-7"><a id="__codelineno-26-7" name="__codelineno-26-7" href="#__codelineno-26-7"></a><span class="c1"># Verify what another user can see</span>
+</span><span id="__span-26-8"><a id="__codelineno-26-8" name="__codelineno-26-8" href="#__codelineno-26-8"></a>oduflow<span class="w"> </span>call<span class="w"> </span>odoo_search_read<span class="w"> </span><span class="s1">'{"env_name":"feature-login","model":"sale.order","as_user":"sales@example.com","fields":["name","amount_total"]}'</span>
+</span></code></pre></div>
+<p><code>odoo_create</code>, <code>odoo_write</code>, and <code>odoo_unlink</code> commit immediately;
+<code>odoo_unlink</code> is destructive. <code>odoo_call</code> covers other public model methods,
+while <code>odoo_schema</code> lists models or returns <code>fields_get</code>. Each call is a separate
+transaction. Edited Python code is not visible to these tools until the serving
+Odoo process has restarted.</p>
+<p>Use <code>run_odoo_shell</code> when you need a fresh registry, <code>sudo()</code>, private methods,
+or a multi-step transaction. Successful shell writes are committed by default;
+pass <code>auto_commit=false</code> for a dry run whose transaction is left uncommitted.
+Use <code>run_db_query</code> for direct SQL; it supports CSV (default) or JSON output and
+returns at most 100 rows by default (<code>max_rows</code> changes the cap).</p>
+<h2 id="interactive-terminal">Interactive Terminal<a class="headerlink" href="#interactive-terminal" title="Permanent link">¶</a></h2>
+<p>The Web Dashboard provides an <strong>interactive Odoo Python shell</strong> directly in the browser via WebSocket. It launches <code>odoo shell</code> connected to the environment's database, allowing you to inspect and manipulate Odoo models in real time.</p>
+<p>The terminal is accessible from the environment card in the Web Dashboard. It supports:</p>
+<ul>
+<li>Full interactive Python REPL with Odoo ORM access (<code>self.env['res.partner'].search([])</code>)</li>
+<li>Terminal resizing (adapts to browser window)</li>
+<li>Standard TTY features (colors, line editing)</li>
+</ul>
+<p>The WebSocket endpoint is <code>ws://&lt;host&gt;:&lt;port&gt;/api/environments/{branch}/terminal</code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The terminal requires the environment container to be running. If the container is stopped, the terminal will display an error message.</p>
+</div>
+<h2 id="environment-protection">Environment Protection<a class="headerlink" href="#environment-protection" title="Permanent link">¶</a></h2>
+<p>Environments can be <strong>protected</strong> from accidental deletion. A protected environment cannot be deleted until protection is removed.</p>
+<p>Protection state is stored as a <code>.protected</code> marker file in the environment's workspace directory, so it survives container rebuilds and restarts.</p>
+<p>When an environment is protected:</p>
+<ul>
+<li><strong>Delete</strong> is blocked with a <code>ProtectedError</code></li>
+<li><strong>Stop</strong> is also blocked with a <code>ProtectedError</code></li>
+<li>Other operations (restart, sync, install/upgrade modules) are unaffected</li>
+</ul>
+<h3 id="via-rest-api">Via REST API<a class="headerlink" href="#via-rest-api" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-27-1"><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="c1"># Protect an environment</span>
+</span><span id="__span-27-2"><a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/api/environments/feature-login/protect
+</span><span id="__span-27-3"><a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a>
+</span><span id="__span-27-4"><a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="c1"># Unprotect an environment</span>
+</span><span id="__span-27-5"><a id="__codelineno-27-5" name="__codelineno-27-5" href="#__codelineno-27-5"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/api/environments/feature-login/unprotect
+</span></code></pre></div>
+<h3 id="via-web-dashboard">Via Web Dashboard<a class="headerlink" href="#via-web-dashboard" title="Permanent link">¶</a></h3>
+<p>Click the <strong>🔓 Protect</strong> button on any environment card to toggle protection. When protected:</p>
+<ul>
+<li>The button shows <strong>🔒 Protected</strong> (highlighted)</li>
+<li>The <strong>Delete</strong> button is disabled</li>
+<li>Attempting to delete via MCP or API returns a <code>ProtectedError</code></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden="">
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href="../templates/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Template Management">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Template Management
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../production/" class="md-footer__link md-footer__link--next" aria-label="Next: Production Hosting">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Production Hosting
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"></path></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright © Oduist — Oduflow
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/oduist/oduflow" target="_blank" rel="noopener" title="Oduflow on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Oduflow Docs" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M351.9 280H161c2.9 64.5 17.2 123.9 37.5 167.4 11.4 24.5 23.7 41.8 35.1 52.4 11.2 10.5 18.9 12.2 22.9 12.2s11.7-1.7 22.9-12.2c11.4-10.6 23.7-28 35.1-52.4 20.3-43.5 34.6-102.9 37.5-167.4zm-191-48h190.9c-2.8-64.5-17.1-123.9-37.4-167.4-11.4-24.4-23.7-41.8-35.1-52.4C268.1 1.7 260.4 0 256.4 0s-11.7 1.7-22.9 12.2c-11.4 10.6-23.7 28-35.1 52.4-20.3 43.5-34.6 102.9-37.5 167.4m-48 0c3.5-85.6 25.6-165.1 57.9-217.3C78.7 47.3 10.9 131.2 1.5 232zM1.5 280c9.4 100.8 77.2 184.7 169.3 217.3-32.3-52.2-54.4-131.7-57.9-217.3zm398.4 0c-3.5 85.6-25.6 165.1-57.9 217.3 92.1-32.7 159.9-116.5 169.3-217.3zm111.4-48C501.9 131.2 434.1 47.3 342 14.7c32.3 52.2 54.4 131.7 57.9 217.3z"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>

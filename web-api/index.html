@@ -1,0 +1,2499 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="AI-first Odoo development and CI tool with reusable database templates, powered by MCP">
+      
+      
+        <meta name="author" content="Oduist">
+      
+      
+        <link rel="canonical" href="https://docs.oduflow.dev/web-api/">
+      
+      
+        <link rel="prev" href="../stacks/">
+      
+      
+        <link rel="next" href="../mcp-tools/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.ico">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Web Dashboard &amp; REST API - Oduflow</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../css/custom.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#web-dashboard-rest-api" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Oduflow" class="md-header__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Oduflow
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Web Dashboard &amp; REST API
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required="">
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard="" data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"></path></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix="">
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Oduflow" class="md-nav__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    Oduflow
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix="">
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1">
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation &amp; Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2">
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Core Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use Cases &amp; Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Template Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../environments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Hosting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coding Agent
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auxiliary Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extra-addons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extra Addons Repositories
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stacks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Declarative Stacks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked="">
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Dashboard &amp; REST API
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Dashboard &amp; REST API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#web-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Web Dashboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication-and-responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication and responses
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment endpoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-environment-links" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared environment links
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-websockets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment WebSockets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#templates-and-odoo-imports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Templates and Odoo imports
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-postgresql-databases-presets-and-volumes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services, PostgreSQL databases, presets, and volumes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#extra-addons-and-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extra addons and credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#system-licensing-and-guides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System, licensing, and guides
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#coding-agent-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Coding agent endpoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#production-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production endpoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#browser-routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Browser routes
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP Tools Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4">
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../traefik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Traefik Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-instance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Team Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Authentication &amp; Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running in Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5">
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../licensing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Licensing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#web-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Web Dashboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication-and-responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication and responses
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment endpoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-environment-links" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared environment links
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-websockets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment WebSockets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#templates-and-odoo-imports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Templates and Odoo imports
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#services-postgresql-databases-presets-and-volumes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services, PostgreSQL databases, presets, and volumes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#extra-addons-and-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extra addons and credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#system-licensing-and-guides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System, licensing, and guides
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#coding-agent-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Coding agent endpoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#production-endpoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production endpoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#browser-routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Browser routes
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="web-dashboard-rest-api">Web Dashboard &amp; REST API<a class="headerlink" href="#web-dashboard-rest-api" title="Permanent link">¶</a></h1>
+<h2 id="web-dashboard">Web Dashboard<a class="headerlink" href="#web-dashboard" title="Permanent link">¶</a></h2>
+<p><a class="glightbox" data-type="image" data-width="auto" data-height="auto" href="../img/agent_guides.png" data-desc-position="bottom"><img alt="Web Dashboard — Agent Guides" src="../img/agent_guides.png"></a></p>
+<p>HTTP mode serves the dashboard at <code>/</code>. It manages environments, templates,
+services, volumes, extra addons, credentials, licenses, usage/quotas, and—when
+enabled—coding agents and productions. Environment cards also expose logs,
+Odoo/SQL terminals, Connect As, notes, protection, scoped MCP access,
+single-environment share links, and save-as-template actions.</p>
+<p>The header's <strong>Feedback</strong> action opens a prefilled issue form on
+<code>github.com/oduist/oduflow</code>. Oduflow holds no GitHub credentials and files
+nothing itself: it builds the link with the description and a short
+version/platform/transport block, then the user reviews and submits it from
+their own GitHub account.</p>
+<h2 id="authentication-and-responses">Authentication and responses<a class="headerlink" href="#authentication-and-responses" title="Permanent link">¶</a></h2>
+<p>Dashboard API routes use the authenticated UI session (password from
+<code>[team.*].ui_password</code>, plus TOTP when enabled). The login form creates an
+HTTP-only session cookie; HTTP Basic credentials are rejected. See
+<a href="../security/#enable-authenticator-app-2fa">UI 2FA</a> for setup and recovery. State-changing cookie-auth
+requests and all WebSocket handshakes are protected by Origin/Referer checks.
+This authentication is separate from MCP Bearer authentication.</p>
+<p>Most REST handlers return JSON containing <code>ok</code>. Three public surfaces use their
+own security model:</p>
+<ul>
+<li><code>/healthz</code> is unauthenticated and contains no secrets.</li>
+<li><code>/api/webhooks/github</code> verifies <code>X-Hub-Signature-256</code> against the production
+  webhook secret.</li>
+<li>Odoo.sh import ingest routes require a short-lived Bearer import token. The
+  token-minting endpoint remains UI-authenticated.</li>
+</ul>
+<p><code>/oduflow-connect</code> is a one-time, token-authenticated browser redirect rather
+than a JSON API. Production routes are registered only when
+<code>[production].enabled = true</code>.</p>
+<h2 id="environment-endpoints">Environment endpoints<a class="headerlink" href="#environment-endpoints" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments</code></td>
+<td>List environments</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/create</code></td>
+<td>Create an environment. Body: <code>env_name</code>, optional <code>hostname</code>, <code>repo_url</code>, <code>odoo_image</code>, <code>template_name</code>, <code>extra_addons</code>, <code>auto_install_modules</code>, <code>env_vars</code> (merged per key over the template's), <code>git_user</code>, <code>from_production</code> (build from a dev copy of that production, through its managed <code>prod-&lt;name&gt;</code> template — published on first use; mutually exclusive with <code>template_name</code>)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/start</code></td>
+<td>Start an environment</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/stop</code></td>
+<td>Stop an environment</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/restart</code></td>
+<td>Restart its Odoo container</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/sync</code></td>
+<td>Pull and automatically apply code changes</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/modules</code></td>
+<td>List installed modules (name and version) — the source for the dashboard's Upgrade modules picker</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/modules</code></td>
+<td>Install or upgrade modules. Body: <code>action</code> (<code>install</code> or <code>upgrade</code>), <code>modules</code> (comma-separated string). A successful action returns <code>modules_installed</code> or <code>modules_upgraded</code> plus <code>container_restarted</code>; if the follow-up restart fails, the module action remains successful with <code>container_restarted: false</code> plus a warning. Every result includes <code>modules_attempted</code>; a non-zero Odoo exit code omits the success field and includes the command output</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/switch-branch</code></td>
+<td>Move the environment onto another git branch, keeping DB, filestore and URL, then apply the difference. Body: <code>branch</code>, optional <code>new_name</code> to rename the environment at the same time. The response's <code>env_name</code> is the name to address it by afterwards</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/update</code></td>
+<td>Recreate the container while preserving DB and filestore. Optional body: <code>env_vars</code> (full replacement of the user-supplied container variables — either an object mapping names to values, or a <code>KEY=VALUE</code> string separated by newlines or commas; an empty object/string clears them, an absent key keeps them). The dashboard sends an object, so a value may contain commas, <code>odoo_image</code>, <code>new_name</code> (rename the environment; a pooled or explicit hostname is kept, its scoped MCP endpoint moves to <code>/mcp/&lt;new name&gt;</code>; productions and stack members are refused)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/env-vars</code></td>
+<td>Return the user-supplied container environment variables</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/recreate</code></td>
+<td>Delete and recreate with the recorded parameters</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/delete</code></td>
+<td>Delete the environment</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/logs?n=200&amp;container=</code></td>
+<td>Read environment logs; optionally select a container</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/protect</code></td>
+<td>Protect from stop/delete</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/unprotect</code></td>
+<td>Remove protection</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/note</code></td>
+<td>Store the body <code>note</code> on the environment</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/storage/refresh</code></td>
+<td>Refresh cached DB/workspace sizes</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/mcp-access</code></td>
+<td>Return the scoped MCP URL and per-environment token</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/share</code></td>
+<td>Return the environment's share link status: <code>shared</code>, <code>url</code> (with its key) and <code>created_at</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/share</code></td>
+<td>Start sharing the environment, or return the existing link</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/share/rotate</code></td>
+<td>Issue a new link; the previous one and every session opened with it stop working</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/share/revoke</code></td>
+<td>Stop sharing the environment</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/users</code></td>
+<td>List internal and portal users for Connect As</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/connect-as</code></td>
+<td>Mint an Odoo session for body <code>user</code> and return URL/cookie details</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/connect-open?user=</code></td>
+<td>Mint a session and redirect toward the environment login handoff</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/save-as-template</code></td>
+<td>Save the environment under body <code>template_name</code>; the UI never overwrites an existing template</td>
+</tr>
+</tbody>
+</table>
+<p>Branch parameters use Starlette's <code>path</code> converter internally, so names that
+contain <code>/</code> are accepted and URL-decoded as one environment name.</p>
+<p>The four <code>share</code> routes are operator-only: a shared session cannot read, reissue
+or revoke the link it arrived on. See
+<a href="#shared-environment-links">Shared environment links</a>.</p>
+<h2 id="shared-environment-links">Shared environment links<a class="headerlink" href="#shared-environment-links" title="Permanent link">¶</a></h2>
+<p><code>/env/{name}</code> is the same dashboard reduced to a single environment. An operator
+opens <strong>Share UI</strong> on an environment card, which mints a link
+<code>https://&lt;team-host&gt;/env/&lt;name&gt;?key=&lt;secret&gt;</code> and hands it to a client. Opening
+it exchanges the key for an HTTP-only, SameSite=Strict cookie and redirects to
+the clean <code>/env/&lt;name&gt;</code>, so the key leaves the address bar and browser history.
+The link stays valid until it is regenerated or revoked from the same modal;
+both act immediately on sessions already opened with it.</p>
+<p>A shared session may only do the following, enforced server-side as a
+default-deny allowlist (<code>src/oduflow/ui_scope.py</code>) and re-checked on every
+request:</p>
+<ul>
+<li>see that environment's card, status, storage and logs;</li>
+<li>start, stop, restart and sync it, and install or upgrade modules;</li>
+<li>open its Odoo shell and <code>psql</code> consoles, use Connect As, and read its scoped
+  MCP endpoint and Secret Key;</li>
+<li>use <strong>Agent Chat</strong>.</li>
+</ul>
+<p>Everything else is refused with HTTP 403 (WebSockets close with 1008): the full
+dashboard, any other environment, every team-wide surface (templates, services,
+volumes, extra addons, credentials, productions, host statistics, license), the
+provisioning actions on the shared environment itself (create, delete, update,
+recreate, switch branch, protect, save as template), the share routes, and
+<strong>Agent CLI</strong>.</p>
+<p>Agent CLI is excluded because it is a terminal in the <em>per-team</em> agent
+container, whose workspace holds a checkout of every environment of the team.
+Agent Chat runs in that same container, so the scope of a shared link is a
+policy boundary on the dashboard — it is not the cryptographic confinement that
+the per-environment token gives on <code>/mcp/&lt;env&gt;</code>. Share links with people you
+would let work in the environment.</p>
+<h2 id="environment-websockets">Environment WebSockets<a class="headerlink" href="#environment-websockets" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Protocol</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WebSocket</code></td>
+<td><code>/api/environments/{branch}/terminal</code></td>
+<td>Interactive <code>odoo shell</code> terminal</td>
+</tr>
+<tr>
+<td><code>WebSocket</code></td>
+<td><code>/api/environments/{branch}/sql</code></td>
+<td>Interactive <code>psql</code> terminal using the environment-scoped DB role</td>
+</tr>
+<tr>
+<td><code>WebSocket</code></td>
+<td><code>/api/environments/{branch}/agent</code></td>
+<td>Hosted Agent CLI PTY</td>
+</tr>
+<tr>
+<td><code>WebSocket</code></td>
+<td><code>/api/environments/{branch}/agent-acp</code></td>
+<td>Hosted Agent Chat ACP relay</td>
+</tr>
+</tbody>
+</table>
+<h2 id="templates-and-odoo-imports">Templates and Odoo imports<a class="headerlink" href="#templates-and-odoo-imports" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/templates</code></td>
+<td>List template profiles</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/templates/{name:path}/metadata</code></td>
+<td>Read the complete <code>metadata.json</code> content and its optimistic revision</td>
+</tr>
+<tr>
+<td><code>PUT</code></td>
+<td><code>/api/templates/{name:path}/metadata</code></td>
+<td>Validate and atomically replace <code>metadata.json</code>; body: <code>content</code>, <code>revision</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/{name}/delete</code></td>
+<td>Delete a template</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/{name}/rename</code></td>
+<td>Rename it; body: <code>new_name</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import-from-odoo</code></td>
+<td>UI-authenticated: pull a backup from a running Odoo. Body: <code>odoo_url</code>, <code>master_pwd</code>, <code>template_name</code>, optional <code>db_name</code>, optional boolean <code>without_filestore</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import-token</code></td>
+<td>UI-authenticated: mint a 15-minute Odoo.sh import token</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/templates/import/status</code></td>
+<td>Import-token authenticated: report resumable upload progress</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import/manifest</code></td>
+<td>Upload template metadata</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import/dump</code></td>
+<td>Stream/chunk the compressed SQL dump</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import/filestore</code></td>
+<td>Upload one atomic filestore hash-directory archive</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import/addon</code></td>
+<td>Stream/chunk one private addon archive</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import/addon-remote</code></td>
+<td>Register an addon repo that the server can clone</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/templates/import/finalize</code></td>
+<td>Validate staged data and atomically publish/restore the template</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/import-odoo.sh</code></td>
+<td>Download the token-authenticated Odoo.sh import client</td>
+</tr>
+</tbody>
+</table>
+<p>The pull-import endpoint accepts HTTP and HTTPS source URLs. HTTP sends the Odoo
+master password without transport encryption, so HTTPS remains recommended.
+Loopback, link-local, metadata, and private-network targets remain blocked by
+the outbound URL safety check.</p>
+<p>Odoo.sh ingest endpoints accept the import token only in
+<code>Authorization: Bearer ...</code>, not in the URL. See
+<a href="../templates/">Template Management</a> for the supported import workflow.</p>
+<h2 id="services-postgresql-databases-presets-and-volumes">Services, PostgreSQL databases, presets, and volumes<a class="headerlink" href="#services-postgresql-databases-presets-and-volumes" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/services</code></td>
+<td>List services</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/services/create</code></td>
+<td>Create a service with either catch-all <code>port</code> or restricted Traefik <code>routes</code>, plus optional image/runtime settings. <code>command</code> accepts a shell-quoted string or an argv array and replaces the image <code>CMD</code></td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/services/{name}/config</code></td>
+<td>Return the full configuration an update keeps (image, <code>port</code>/<code>routes</code>, hostname, env vars, <code>host_mode</code>, volumes, capabilities, <code>command</code>) — what the dashboard's Update dialog prefills. Env values configured as team secrets come back as their <code>secret:&lt;name&gt;</code> reference</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/services/{name}/update</code></td>
+<td>Pull/change settings and recreate safely; <code>env_vars</code>, <code>volumes</code>, and <code>routes</code> are full replacements when supplied — omitting the key keeps the current value, sending an empty one clears it. Omit <code>command</code> to keep it, send <code>""</code>/<code>[]</code> to fall back to the image <code>CMD</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/services/{name}/restart</code></td>
+<td>Restart a service</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/services/{name}/delete</code></td>
+<td>Delete a service (refused while protected). The optional body <code>{"save_preset": false}</code> removes the saved preset too; by default it is kept for <code>restore_service</code>. The result's <code>preset_kept</code> reports what is actually on disk afterwards</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/services/{name}/protect</code></td>
+<td>Protect a service: Update, Restore and Delete are refused until unprotected</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/services/{name}/unprotect</code></td>
+<td>Remove service protection</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/services/{name}/logs?n=200</code></td>
+<td>Read service logs</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/service-databases</code></td>
+<td>List managed sidecar databases without passwords</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-databases/create</code></td>
+<td>Create a database and scoped role; body: <code>name</code>, optional <code>cluster</code> (<code>dev</code> default, or <code>prod</code> for the dedicated production cluster)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-databases/{name}/credentials</code></td>
+<td>Explicitly reveal connection credentials and <code>DATABASE_URL</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-databases/{name}/rotate</code></td>
+<td>Rotate the database role password</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-databases/{name}/protect</code></td>
+<td>Protect a database: deletion is refused until unprotected</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-databases/{name}/unprotect</code></td>
+<td>Remove database protection</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-databases/{name}/delete</code></td>
+<td>Permanently drop the database and role, terminating connections (refused while protected)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/service-presets</code></td>
+<td>List saved presets</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-presets/restore</code></td>
+<td>Restore a preset; body: <code>name</code> plus optional runtime overrides</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/service-presets/{name}/delete</code></td>
+<td>Delete a preset</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/volumes</code></td>
+<td>List managed volumes and service usage</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/volumes/create</code></td>
+<td>Create a volume; body: <code>name</code>, optional <code>description</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/volumes/{name}/delete</code></td>
+<td>Delete an unused volume</td>
+</tr>
+</tbody>
+</table>
+<p>Service databases live in the shared development PostgreSQL cluster, inside the
+current team's tablespace. They have a dedicated non-superuser owner and persist
+independently of service containers. Bridge-mode services reach them through
+the returned PostgreSQL container hostname; host-network services are not
+supported because the cluster is not published on a host port.</p>
+<h2 id="extra-addons-and-credentials">Extra addons and credentials<a class="headerlink" href="#extra-addons-and-credentials" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/extra-repos</code></td>
+<td>List extra-addon repositories</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/extra-repos/add</code></td>
+<td>Add one; body: <code>name</code>, <code>repo_url</code>, optional <code>git_user</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/extra-repos/{name}/pull</code></td>
+<td>Fetch remote changes</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/extra-repos/{name}/protect</code></td>
+<td>Protect from deletion</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/extra-repos/{name}/unprotect</code></td>
+<td>Remove protection</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/extra-repos/{name}/delete</code></td>
+<td>Delete the repository and unused cached revisions</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/credentials</code></td>
+<td>List stored credential identities (not secrets)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/credentials/add</code></td>
+<td>Store an access token for a git host: body <code>token</code>, <code>host</code> (default <code>github.com</code>), optional <code>username</code>, optional <code>repo_url</code> to verify with <code>git ls-remote</code>; legacy body <code>repo_url</code> with inline <code>user:PAT@</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/credentials/delete</code></td>
+<td>Delete by body <code>host</code> and <code>username</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/credentials/validate</code></td>
+<td>Validate by body <code>host</code> and <code>username</code></td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/ssh-key</code></td>
+<td>The team's SSH public key and fingerprint (only the public key is returned)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/ssh-key/generate</code></td>
+<td>Create the team SSH key if absent; body <code>{"force": true}</code> regenerates it (the old key stops working)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/secrets</code></td>
+<td>List team secret names and timestamps; stored values are never returned by any endpoint</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/secrets/{name}/set</code></td>
+<td>Create or replace a secret's value from body <code>value</code> (write-only)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/secrets/{name}/delete</code></td>
+<td>Delete a secret; existing <code>secret:&lt;name&gt;</code> references stop resolving on the next create/update</td>
+</tr>
+</tbody>
+</table>
+<h2 id="system-licensing-and-guides">System, licensing, and guides<a class="headerlink" href="#system-licensing-and-guides" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/stats</code></td>
+<td>Container/system metrics plus cached environment storage</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/usage</code></td>
+<td>Cached per-environment and team storage/quotas</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/usage/refresh</code></td>
+<td>Recompute all team storage usage; potentially expensive</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/healthz</code></td>
+<td>Public health report; returns <code>200</code> when healthy, <code>503</code> when degraded</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/license</code></td>
+<td>License information</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/license/activate</code></td>
+<td>Activate body <code>key</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/feedback/link</code></td>
+<td>Build a prefilled <code>github.com/oduist/oduflow</code> issue URL. Body: required <code>details</code>; optional <code>kind</code> (<code>bug</code>, <code>feature</code>, or <code>feedback</code>) and <code>title</code></td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/agent-guides</code></td>
+<td>List available agent guides</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/agent-guides/{filename}</code></td>
+<td>Read a guide</td>
+</tr>
+</tbody>
+</table>
+<h2 id="coding-agent-endpoints">Coding agent endpoints<a class="headerlink" href="#coding-agent-endpoints" title="Permanent link">¶</a></h2>
+<p>These endpoints and the WebSocket surfaces are useful only for teams with
+<code>agent_enabled = true</code>; the dashboard hides agent actions for live-mounted
+environments.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/agent</code></td>
+<td>Agent enablement and effective default (<code>claude</code>, <code>codex</code>, or <code>opencode</code>)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/environments/{branch}/agent-acp/info?type=</code></td>
+<td>ACP working directory, selected/recent sessions, and attachment limits</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/agent-acp/session</code></td>
+<td>Select, title, or clear the current session for body <code>type</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/environments/{branch}/agent-acp/attachments?name=</code></td>
+<td>Stream an attachment into the agent checkout</td>
+</tr>
+<tr>
+<td><code>DELETE</code></td>
+<td><code>/api/environments/{branch}/agent-acp/attachments/{upload_id}</code></td>
+<td>Delete an unsent attachment</td>
+</tr>
+</tbody>
+</table>
+<h2 id="production-endpoints">Production endpoints<a class="headerlink" href="#production-endpoints" title="Permanent link">¶</a></h2>
+<p>These routes exist only when production hosting is enabled. Destructive restore
+and delete operations require explicit confirmation in their JSON body.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions</code></td>
+<td>List productions and return webhook/backup state</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/create</code></td>
+<td>Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body <code>from_environment</code> (inherits its repo/branch/image)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions/backup-status</code></td>
+<td>Team backup, WAL-G, base-backup, and S3 health</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions/wal-status</code></td>
+<td>Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/wal-control</code></td>
+<td>Body <code>{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }</code>; cluster-wide action under the system lock</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions/{name}</code></td>
+<td>Detailed production information</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/start</code></td>
+<td>Start</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/stop</code></td>
+<td>Stop</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/restart</code></td>
+<td>Restart</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/update</code></td>
+<td>Start an asynchronous deploy; returns <code>202</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/rollback?to_commit=</code></td>
+<td>Roll code back to a commit</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/auto-update</code></td>
+<td>Set body <code>enabled</code> for webhook deploys</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/save-as-template</code></td>
+<td>Copy the production database and filestore into the dev template named by body <code>template_name</code>; optional <code>overwrite</code> re-baselines an existing template</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/copy-to-dev-mcp</code></td>
+<td>Set body <code>enabled</code> to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/reconfigure</code></td>
+<td>Change any of body <code>domain</code>, <code>extra_domains</code> (list or comma-separated string), <code>odoo_image</code>, <code>branch</code>, <code>repo_url</code>, <code>git_user</code>, <code>extra_addons</code>; recreates the container (database and filestore preserved). A present-but-empty <code>git_user</code> or <code>extra_domains</code> clears it; an absent key leaves it unchanged</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/odoo-conf</code></td>
+<td>Set body <code>options</code> and remove body <code>unset</code> per-production <code>odoo.conf</code> overrides; optional <code>restart</code> (default true) and <code>replace</code> (body <code>options</code> become the complete override set)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions/{name}/logs?lines=200</code></td>
+<td>Read up to 2,000 log lines</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions/{name}/deploys</code></td>
+<td>Read recent deploy history</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/delete</code></td>
+<td>Delete; body <code>confirm</code> must equal name, optional <code>drop_database</code></td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/productions/{name}/snapshots?refresh=true</code></td>
+<td>List S3 snapshots, optionally bypassing cache</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/snapshot</code></td>
+<td>Take a snapshot now</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/restore</code></td>
+<td>Restore body <code>snapshot_id</code>; body <code>confirm</code> must equal name</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/productions/{name}/backup-schedule</code></td>
+<td>Set body <code>schedule</code> to <code>HH:MM</code> or <code>off</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/webhooks/github</code></td>
+<td>Public HMAC-authenticated GitHub push webhook</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../production/">Production Hosting</a> for deploy, rollback, backup, and PITR
+semantics.</p>
+<h2 id="browser-routes">Browser routes<a class="headerlink" href="#browser-routes" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/</code></td>
+<td>Dashboard application</td>
+</tr>
+<tr>
+<td><code>GET</code>, <code>POST</code></td>
+<td><code>/login</code></td>
+<td>UI login form</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/logout</code></td>
+<td>Clear the UI session</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/oduflow-connect?token=</code></td>
+<td>One-time environment-host login handoff; sets Odoo <code>session_id</code> and redirects to <code>/web</code></td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/favicon.ico</code>, <code>/logo.png</code>, <code>/static/{filename}</code></td>
+<td>Packaged dashboard assets</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden="">
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href="../stacks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Declarative Stacks">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Declarative Stacks
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../mcp-tools/" class="md-footer__link md-footer__link--next" aria-label="Next: MCP Tools Reference">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                MCP Tools Reference
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"></path></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright © Oduist — Oduflow
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/oduist/oduflow" target="_blank" rel="noopener" title="Oduflow on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Oduflow Docs" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M351.9 280H161c2.9 64.5 17.2 123.9 37.5 167.4 11.4 24.5 23.7 41.8 35.1 52.4 11.2 10.5 18.9 12.2 22.9 12.2s11.7-1.7 22.9-12.2c11.4-10.6 23.7-28 35.1-52.4 20.3-43.5 34.6-102.9 37.5-167.4zm-191-48h190.9c-2.8-64.5-17.1-123.9-37.4-167.4-11.4-24.4-23.7-41.8-35.1-52.4C268.1 1.7 260.4 0 256.4 0s-11.7 1.7-22.9 12.2c-11.4 10.6-23.7 28-35.1 52.4-20.3 43.5-34.6 102.9-37.5 167.4m-48 0c3.5-85.6 25.6-165.1 57.9-217.3C78.7 47.3 10.9 131.2 1.5 232zM1.5 280c9.4 100.8 77.2 184.7 169.3 217.3-32.3-52.2-54.4-131.7-57.9-217.3zm398.4 0c-3.5 85.6-25.6 165.1-57.9 217.3 92.1-32.7 159.9-116.5 169.3-217.3zm111.4-48C501.9 131.2 434.1 47.3 342 14.7c32.3 52.2 54.4 131.7 57.9 217.3z"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>

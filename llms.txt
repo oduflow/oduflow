@@ -1,0 +1,239 @@
+# Oduflow
+
+> AI-first Odoo development and CI tool powered by reusable database templates. Provisions isolated, ephemeral Odoo environments on Docker — one per git branch — and exposes them to AI coding agents via MCP.
+
+## Installation
+
+### System Requirements
+
+- Docker (Docker Engine or Docker Desktop)
+- Python 3.10+
+- Git
+- fuse-overlayfs (for filestore overlay mounting; not needed on macOS)
+
+### Install
+
+Recommended — install via [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install oduflow
+```
+
+Alternative — install via pip:
+
+```bash
+pip install oduflow
+```
+
+### Configure
+
+All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`.
+
+Minimal configuration:
+
+```toml
+[team.1]
+hostname = "localhost"
+```
+
+Common configuration (complete reference:
+<https://docs.oduflow.dev/installation/#configuration-reference>):
+
+```toml
+[server]
+bind = "0.0.0.0"                     # HTTP listener; legacy "host" is accepted
+port = 8000                           # HTTP port
+
+[routing]
+mode = "port"                         # "port" | "traefik" (auto-HTTPS)
+# acme_email = "admin@example.com"    # required for traefik mode
+
+[database]
+user = "odoo"
+# password = "..."                    # auto-generated on first launch; set to override
+image = "postgres:15"
+
+[storage]
+# data_dir = "/srv/oduflow"           # default: /srv/oduflow or ~/.oduflow/data
+overlay_threshold_mb = 50             # filestore size threshold for overlay vs copy
+
+[lifecycle]
+auto_stop_hours = 48                  # auto-stop after N hours without MCP/dashboard work; 0 disables
+auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disables (opt-in; DESTRUCTIVE)
+
+# Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
+# [agent]
+# image = "oduist/oduflow-coder:0.3.0"
+# opencode_model = ""               # optional provider/model override
+
+[team.1]
+hostname = "localhost"
+auth_token = ""                       # auto-filled in fresh configs; HTTP MCP Bearer token / OAuth client_secret
+ui_password = ""                      # auto-filled in fresh configs; Web UI password for admin
+port_range = [50000, 50100]           # port range for Odoo containers
+# agent_enabled = false               # enable the per-team coding agent (Agent Chat / Agent CLI)
+# agent_default = "claude"            # "claude" | "codex" | "opencode"
+# [team.1.agent_env]                  # provider credentials injected into the agent container
+# CLAUDE_CODE_OAUTH_TOKEN = ""
+# ANTHROPIC_API_KEY = ""
+# OPENAI_API_KEY = ""
+# OPENCODE_API_KEY = ""               # OpenCode Zen; arbitrary provider vars work
+```
+
+### First launch
+
+On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`; the MCP token and Web Dashboard password are also printed in the startup log.
+
+### Upgrade
+
+```bash
+uv tool upgrade oduflow
+oduflow upgrade
+# For unattended automation:
+oduflow upgrade --force
+```
+
+Package upgrade and deployed-file reconciliation are separate. `oduflow
+upgrade` three-way merges each team's bundled `odoo.conf`, agent guides, and
+sanitize script against a stored pristine baseline. Conflicts preserve the live
+file and create `*.oduflow-merge`; pre-baseline installations create
+`*.oduflow-new` for one-time manual reconciliation. Both cases exit non-zero
+until the sidecar is resolved and removed. `--force` skips the stdin
+confirmation and resolves those cases in favour of the new bundle: the live
+file is backed up under `.bundled_upgrade/backups/` and overwritten, so the
+command needs no manual follow-up. A first-line `# KEEP` opts a file out
+entirely, even under `--force`. PostgreSQL config changes use
+`oduflow retune-postgres`, not `oduflow upgrade`.
+
+### Set up a template
+
+```bash
+# From scratch
+oduflow init-template --odoo-image odoo:19.0 --template-name default
+
+# From production dump
+# Place dump.sql and filestore/ into {data_dir}/team_1/templates/default/ then:
+oduflow reload-template default
+
+# Sync template from S3 or local path and reload DB
+oduflow reload-template default --source s3://mybucket/prod/ [--quiet]
+oduflow reload-template default --source /backups/prod-latest/
+```
+
+### Start the MCP server
+
+```bash
+oduflow --transport http
+# or: oduflow -t http
+```
+
+For HTTP mode, the server starts on `http://0.0.0.0:8000`. MCP endpoint: `http://<host>:8000/mcp`; send `Authorization: Bearer <auth_token>` using the value from `oduflow.toml`. The Web Dashboard is at `http://<host>:8000/`; sign in as `admin` with `ui_password`.
+
+## MCP Client Configuration
+
+### Cursor / Windsurf
+
+`.cursor/mcp.json` or `.windsurf/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "oduflow": {
+      "type": "http",
+      "url": "https://<your-oduflow-host>/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-token>"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop / Amp
+
+Same JSON format in `claude_desktop_config.json` or `.amp/settings.json`.
+
+### Claude.ai (self-hosted OAuth)
+
+For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAuth 2.1 Authorization Server (no external IdP). It is enabled automatically whenever a team has an `auth_token` and always derives the issuer from that team's incoming hostname. Behind Cloudflare Tunnel, publish the same hostname configured under `[team.*]`; use split DNS for direct LAN access if needed. In Claude.ai add a custom MCP at `https://<team-hostname>/mcp` and enter `Client ID = team_<id>` (e.g. `team_1`, non-secret) and `Client Secret = the team's auth_token`. The OAuth flow issues an independent expiring access token; the configured `auth_token` also works directly as a plain Bearer token.
+
+## Core MCP Tools
+
+- `create_environment` — provision a new Odoo environment for a branch (optional `env_vars` injects container environment variables)
+- `delete_environment` — tear down an environment
+- `start_environment` / `stop_environment` / `restart_environment` — lifecycle control
+- Idle environments auto-stop after 48h without work (`[lifecycle].auto_stop_hours`). Auto-delete of long-stopped environments is opt-in and off by default (`auto_delete_hours = 0`; set a positive value to enable — destructive; protected environments are exempt). Container-level tools (pull_and_apply, shell/tests/installs/file ops) wake a stopped environment automatically and note it in the response
+- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `hostname` changes the public Traefik hostname, `env_vars` replaces container environment variables)
+- `install_odoo_modules` — install Odoo modules
+- `upgrade_odoo_modules` — upgrade Odoo modules
+- `export_module_translations` — export a module's .pot/.po translation catalogue
+- `translation_status` — check what translations actually loaded, and lint the .po files
+- `run_odoo_tests` — run Odoo tests for specific modules (`summary_only=True` returns only the final test count plus an `output_id`; `test_tags` narrows to one class/method; `upgrade=False` skips the `-u`, collects `post_install` tests only, and requires module-scoped positive tags)
+- `pull_and_apply` — pull latest code and auto-install/upgrade/restart as needed (`summary_only=True` returns one action/status line and caches command logs for `read_output`)
+- `get_environment_logs` — retrieve container logs
+- `run_odoo_command` — execute shell commands inside the Odoo container (through `sh -c`, so pipes and redirections work; `shell=False` for exact argv)
+- `run_odoo_shell` — execute Python code in the Odoo shell with full ORM access
+- `odoo_search_read` / `odoo_create` / `odoo_write` / `odoo_unlink` / `odoo_call` / `odoo_schema` — XML-RPC `execute_kw`-equivalent ORM tools. Structured JSON in and out, no Python to write; every one takes `as_user` (login or id, empty = the environment's admin) and runs in a real session for that user, so `ir.model.access` and `ir.rule` apply as they do in the web client. `odoo_call` handles other public methods (`read_group`, `name_search`, `action_*`, custom methods), while policy-visible `create`/`write`/`unlink` must use their dedicated tools; `odoo_schema` pages through models or returns `fields_get`. They hit the **running** server: edited Python is invisible until the environment restarts, and each call is its own committed transaction — use `run_odoo_shell` for a fresh registry, `sudo()`, private methods, a dry run, or multi-step atomicity
+- `read_file_in_odoo` — read a text file or list a directory inside the container (supports line ranges)
+- `write_file_in_odoo` — write a text file inside the container (CSV imports, scripts, configs)
+- `search_in_odoo` — search for a pattern (fixed-string grep) in files inside the container
+- `http_request_to_odoo` — make an HTTP request to the running Odoo instance (controllers, JSON-RPC, REST)
+- `list_installed_modules` — list Odoo modules and their states with name/state filtering
+- `run_db_query` — execute SQL queries against the environment's PostgreSQL database
+- `reset_admin_password` — reset the admin user password (default: "test")
+- `connect_as_user` — mint a passwordless Odoo login session for a user and return the `session_id` cookie + URL (Playwright-ready; skips the login form, supports any role incl. portal)
+- `read_output` — read from a cached tool output by ID (paginate, grep, errors, tail)
+- `list_environments` / `get_environment_info` — inspect environments, including current branch, last activity, stopped time/source, protection, Stack ownership and operator notes used for safe slot reuse
+- `create_service` / `delete_service` / `restart_service` / `update_service` / `list_services` / `get_service_info` / `get_service_logs` / `run_service_command` — manage auxiliary services
+  - In Traefik TLS mode every service implicitly receives the exact `oduflow-traefik-acme:/etc/traefik:ro` mount; do not pass or override that system volume
+- `create_service_database` / `list_service_databases` / `get_service_database` / `rotate_service_database_password` / `delete_service_database` — persistent PostgreSQL storage for bridge-mode auxiliary services. Each database has a scoped non-superuser role, survives service deletion, and is removed only explicitly. Creation/get/rotation return `DATABASE_URL` and `PG*` variables; treat them as secrets
+- `create_volume` / `list_volumes` / `inspect_volume` / `delete_volume` — manage Docker volumes
+- `read_file_in_volume` / `write_file_in_volume` / `search_in_volume` / `delete_file_in_volume` — manage files inside Docker volumes
+- `list_service_presets` / `restore_service` / `delete_service_preset` — manage service presets
+- `save_as_template` / `delete_template` / `rename_template` / `list_templates` — template management
+- `import_template_from_odoo` — import a template from a running Odoo instance; optional `without_filestore` imports database-only
+- `refresh_template` — re-apply a template's filestore to live overlay environments (preserves env changes by default; `reset_env_changes=True` is destructive)
+- `attach_filestore` — attach/replace a template filestore from a local dir, archive, `rsync://`, or SSH rsync source; preserves env changes by default
+- `setup_repo_auth` — cache git credentials for private repositories
+- `add_extra_repo` / `list_extra_repos` / `update_extra_repo` / `delete_extra_repo` — manage extra addons repositories
+- `get_agent_instructions` — load the compact Oduflow agent workflow once at session start
+- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–19)
+- `report_issue` — build a prefilled GitHub issue link so the user can report an Oduflow bug, request a feature, or send feedback from their own account
+
+## Production Hosting
+
+Opt-in `[production].enabled = true` adds long-lived Odoo productions with a
+dedicated PostgreSQL cluster, custom Traefik domains, verified deploys with
+automatic code rollback, GitHub webhook auto-deploy, and optional S3 snapshots,
+WAL-G archiving, retention, and cluster PITR. The MCP surface includes
+`create_production`, list/info/lifecycle tools, `update_production`,
+`rollback_production`, deploy history/logs, snapshot/restore/schedule/status,
+`prune_production_backups`, `restore_cluster_pitr`, and `delete_production`.
+Production REST routes and `/api/webhooks/github` are registered only while the
+feature is enabled; public `/healthz` reports dev/prod infrastructure health.
+
+## Coding Agent (hosting)
+
+An opt-in, per-team hosting feature: Oduflow runs one coding-agent container per team (`oduist/oduflow-coder`, Claude Code + OpenAI Codex + OpenCode) and exposes two dashboard surfaces — **Agent CLI** (the agent's TUI in the browser) and **Agent Chat** (a browser ACP chat with per-environment conversation history). The agent edits its own git checkout, `git push`es, and drives the environment through the Oduflow MCP server with a scoped per-environment token. A built-in Agent Browser MCP and Chromium provide browser automation to all three agents, with one persistent profile per environment. Hosted agents run installed MCP methods without interactive approval prompts. OpenCode supports arbitrary provider environment variables or persistent `opencode auth login`. It is off by default; enable it per team with `agent_enabled` and set provider credentials under `[team.X.agent_env]`. The agent UI is hidden for live-mount (`local_path`) environments.
+
+## Database Sanitization
+
+Template-based environments are neutralized by default, then run team-level
+sanitization scripts followed by project scripts from
+`.oduflow/odoo_sanitize/`. Both SQL and Python scripts are supported.
+
+## Typical Agent Workflow
+
+1. Call `list_environments` to check if an environment for the branch exists
+2. If not, call `create_environment` with `branch`, `template_name`, `repo_url`, and `odoo_image`
+3. Write code, `git push`, then call `pull_and_apply(summary_only=True)` (auto-detects what to do); inspect its `output_id` only when the compact status reports a failure
+4. Use `install_odoo_modules` / `run_odoo_tests(summary_only=True)`; inspect the cached output on failure, and use `get_environment_logs` only for errors from the running Odoo server
+5. Inspect and manipulate data with the `odoo_*` ORM tools — `odoo_schema` first to get the real field names, then `odoo_search_read`; add `as_user` to check what a given role can actually see or change
+6. Call `delete_environment` when the task is done
+
+## Links
+
+- Repository: <https://github.com/oduist/oduflow>
+- Documentation: <https://docs.oduflow.dev>
+- License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
+- Website: <https://oduflow.dev>

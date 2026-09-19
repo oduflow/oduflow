@@ -1,0 +1,1970 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="AI-first Odoo development and CI tool with reusable database templates, powered by MCP">
+      
+      
+        <meta name="author" content="Oduist">
+      
+      
+        <link rel="canonical" href="https://docs.oduflow.dev/mcp-tools/">
+      
+      
+        <link rel="prev" href="../web-api/">
+      
+      
+        <link rel="next" href="../cli/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.ico">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>MCP Tools Reference - Oduflow</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../css/custom.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#mcp-tools-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Oduflow" class="md-header__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Oduflow
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              MCP Tools Reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required="">
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard="" data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"></path></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix="">
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Oduflow" class="md-nav__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    Oduflow
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix="">
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1">
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation &amp; Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2">
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Core Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use Cases &amp; Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Template Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../environments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Hosting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coding Agent
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auxiliary Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extra-addons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extra Addons Repositories
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stacks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Declarative Stacks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked="">
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../web-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Dashboard &amp; REST API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP Tools Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4">
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../traefik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Traefik Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-instance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Team Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Authentication &amp; Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running in Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5">
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../licensing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Licensing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="mcp-tools-reference">MCP Tools Reference<a class="headerlink" href="#mcp-tools-reference" title="Permanent link">¶</a></h1>
+<p><a class="glightbox" data-type="image" data-width="auto" data-height="auto" href="../img/agent_instructions.png" data-desc-position="bottom"><img alt="Agent Instructions" src="../img/agent_instructions.png"></a></p>
+<p>All tools are accessible via MCP clients (Cursor, Cline, Amp, etc.), locally via
+<code>oduflow call</code>, and on a remote Oduflow server via <code>oduflow client</code>. A subset is
+also available via the <a href="../web-api/">REST API</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th style="text-align: center;">Lock</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Environment Management</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>create_environment</code></td>
+<td style="text-align: center;">✓</td>
+<td>Provision an Odoo environment for a branch (clone, DB, container, filestore); an environment that already exists is returned as is (started if stopped) instead of raising, unless it tracks another branch; optional <code>hostname</code> selects a short Traefik hostname and <code>env_vars</code> injects container environment variables, merged per key over any recorded on the template; <code>from_production</code> builds the environment from a production's real data through the managed <code>prod-&lt;name&gt;</code> template</td>
+</tr>
+<tr>
+<td><code>delete_environment</code></td>
+<td style="text-align: center;">✓</td>
+<td>Tear down all resources for a branch</td>
+</tr>
+<tr>
+<td><code>list_environments</code></td>
+<td style="text-align: center;"></td>
+<td>List all managed environments with status, URL, current git branch, creation/last-activity/stopped timestamps, stop source, protection, Stack ownership and operator note</td>
+</tr>
+<tr>
+<td><code>get_environment_info</code></td>
+<td style="text-align: center;"></td>
+<td>Full environment details: lifecycle/reuse metadata, DB name, URL, repo, image, template, extra addons, workspace, container status, CPU/RAM stats</td>
+</tr>
+<tr>
+<td><code>start_environment</code></td>
+<td style="text-align: center;"></td>
+<td>Start a stopped environment</td>
+</tr>
+<tr>
+<td><code>stop_environment</code></td>
+<td style="text-align: center;"></td>
+<td>Stop a running environment</td>
+</tr>
+<tr>
+<td><code>restart_environment</code></td>
+<td style="text-align: center;"></td>
+<td>Restart the Odoo container</td>
+</tr>
+<tr>
+<td><code>update_environment</code></td>
+<td style="text-align: center;">✓</td>
+<td>Re-create the container, preserving DB and filestore; optional <code>odoo_image</code> switches the image, <code>hostname</code> changes the public Traefik hostname, <code>env_vars</code> replaces the container environment variables and <code>new_name</code> renames the environment</td>
+</tr>
+<tr>
+<td><code>switch_branch</code></td>
+<td style="text-align: center;">✓</td>
+<td>Point an existing environment at another branch and apply the difference, keeping its database, filestore, hostname and URL — the way to work when the team is out of environment slots; optional <code>new_name</code> renames the environment in the same operation (its scoped MCP endpoint moves with the name)</td>
+</tr>
+<tr>
+<td><strong>Odoo Operations</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>pull_and_apply</code></td>
+<td style="text-align: center;">✓</td>
+<td>Git pull + smart analysis → auto install/upgrade/restart; <code>summary_only=True</code> returns one action/status line and caches command logs for <code>read_output</code></td>
+</tr>
+<tr>
+<td><code>install_odoo_modules</code></td>
+<td style="text-align: center;">✓</td>
+<td>Install Odoo modules (<code>-i</code>)</td>
+</tr>
+<tr>
+<td><code>upgrade_odoo_modules</code></td>
+<td style="text-align: center;">✓</td>
+<td>Upgrade Odoo modules (<code>-u</code>)</td>
+</tr>
+<tr>
+<td><code>export_module_translations</code></td>
+<td style="text-align: center;">✓</td>
+<td>Export a module's <code>.pot</code>/<code>.po</code> with Odoo's own exporter, write it into the module's <code>i18n/</code>, and return a summary plus an HTTP download URL or local temporary path</td>
+</tr>
+<tr>
+<td><code>translation_status</code></td>
+<td style="text-align: center;">✓</td>
+<td>Verdict per language (OK, PARTIAL, NOT LOADED, NOT TRANSLATED, IMPORT SILENTLY DROPPED, IMPORT ABORTS, NO FILE, NOT ACTIVATED) from the module's terms, the database and the committed <code>.po</code> files, including the sibling-POT metadata merge Odoo performs before import, plus the call that fixes it</td>
+</tr>
+<tr>
+<td><code>run_odoo_tests</code></td>
+<td style="text-align: center;">✓</td>
+<td>Run Odoo tests for specific modules; <code>summary_only=True</code> returns the final <code>N failed, M error(s) of K tests</code> line and an <code>output_id</code>; <code>test_tags</code> narrows the run, while <code>upgrade=False</code> skips <code>-u</code> for a fast <code>post_install</code> re-run</td>
+</tr>
+<tr>
+<td><code>get_environment_logs</code></td>
+<td style="text-align: center;"></td>
+<td>Retrieve recent container logs</td>
+</tr>
+<tr>
+<td><code>run_odoo_command</code></td>
+<td style="text-align: center;">✓</td>
+<td>Execute an arbitrary shell command inside the Odoo container (runs through <code>sh -c</code>, so pipes, redirections and <code>&amp;&amp;</code> work; <code>shell=False</code> for exact argv)</td>
+</tr>
+<tr>
+<td><code>run_odoo_shell</code></td>
+<td style="text-align: center;">✓</td>
+<td>Execute Python code in the Odoo shell context with full ORM access; <code>auto_commit=True</code> commits successful writes, while <code>False</code> leaves the shell transaction uncommitted</td>
+</tr>
+<tr>
+<td><code>odoo_search_read</code></td>
+<td style="text-align: center;"></td>
+<td>Search and read records (XML-RPC <code>search_read</code>/<code>search_count</code>) as any user, with ACLs and record rules applied</td>
+</tr>
+<tr>
+<td><code>odoo_create</code></td>
+<td style="text-align: center;"></td>
+<td>Create one or many records (XML-RPC <code>create</code>). Committed immediately</td>
+</tr>
+<tr>
+<td><code>odoo_write</code></td>
+<td style="text-align: center;"></td>
+<td>Update records (XML-RPC <code>write</code>). Committed immediately</td>
+</tr>
+<tr>
+<td><code>odoo_unlink</code></td>
+<td style="text-align: center;"></td>
+<td>⚠️ Delete records (XML-RPC <code>unlink</code>). Committed immediately, not recoverable</td>
+</tr>
+<tr>
+<td><code>odoo_call</code></td>
+<td style="text-align: center;"></td>
+<td>Call public model methods not covered by the dedicated CRUD tools (<code>read_group</code>, <code>name_search</code>, <code>action_*</code>, …)</td>
+</tr>
+<tr>
+<td><code>odoo_schema</code></td>
+<td style="text-align: center;"></td>
+<td>Page through models, or describe one model's fields (XML-RPC <code>fields_get</code>)</td>
+</tr>
+<tr>
+<td><code>read_file_in_odoo</code></td>
+<td style="text-align: center;"></td>
+<td>Read a text file or list a directory inside the Odoo container. Supports line ranges (e.g. <code>"1:50"</code>)</td>
+</tr>
+<tr>
+<td><code>write_file_in_odoo</code></td>
+<td style="text-align: center;">✓</td>
+<td>Write a text file inside the container (CSV imports, scripts, configs)</td>
+</tr>
+<tr>
+<td><code>search_in_odoo</code></td>
+<td style="text-align: center;"></td>
+<td>Search for a pattern (fixed-string grep) in files inside the Odoo container</td>
+</tr>
+<tr>
+<td><code>http_request_to_odoo</code></td>
+<td style="text-align: center;"></td>
+<td>Make an HTTP request to the running Odoo instance (test controllers, JSON-RPC, REST)</td>
+</tr>
+<tr>
+<td><code>list_installed_modules</code></td>
+<td style="text-align: center;"></td>
+<td>List Odoo modules and their states with name/state filtering</td>
+</tr>
+<tr>
+<td><code>run_db_query</code></td>
+<td style="text-align: center;">✓</td>
+<td>Execute SQL against the environment's PostgreSQL database; supports <code>output_format="csv"</code> or <code>"json"</code> and caps returned rows with <code>max_rows</code> (default <code>100</code>)</td>
+</tr>
+<tr>
+<td><code>reset_admin_password</code></td>
+<td style="text-align: center;">✓</td>
+<td>Reset the admin user password in the Odoo database (default: "test")</td>
+</tr>
+<tr>
+<td><code>connect_as_user</code></td>
+<td style="text-align: center;">✓</td>
+<td>Mint a passwordless Odoo login session for a user (by login or id) and return the <code>session_id</code> cookie + URL — hand to Playwright to skip the login form and test as any role (incl. portal)</td>
+</tr>
+<tr>
+<td><code>read_output</code></td>
+<td style="text-align: center;"></td>
+<td>Read from a cached tool output by ID (paginate, grep, errors, tail)</td>
+</tr>
+<tr>
+<td><strong>Template Management</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>save_as_template</code></td>
+<td style="text-align: center;">✓</td>
+<td>⚠️ Save a branch DB + filestore as a new template</td>
+</tr>
+<tr>
+<td><code>save_production_as_template</code></td>
+<td style="text-align: center;">✓</td>
+<td>⚠️ Save a production's DB + filestore as a template (unsanitized production data; refused when the production has MCP copy-to-dev disabled)</td>
+</tr>
+<tr>
+<td><code>list_templates</code></td>
+<td style="text-align: center;"></td>
+<td>List available template profiles, including the branch/commit each database snapshot was taken from</td>
+</tr>
+<tr>
+<td><code>delete_template</code></td>
+<td style="text-align: center;">✓</td>
+<td>⚠️ Delete a template profile (DB + files)</td>
+</tr>
+<tr>
+<td><code>rename_template</code></td>
+<td style="text-align: center;">✓</td>
+<td>Rename a template (directory + PostgreSQL template DB); refused if any environment uses it</td>
+</tr>
+<tr>
+<td><code>import_template_from_odoo</code></td>
+<td style="text-align: center;">✓</td>
+<td>Import a template from a running Odoo instance via database manager API; optional <code>without_filestore</code> requests a database-only PostgreSQL custom dump</td>
+</tr>
+<tr>
+<td><code>refresh_template</code></td>
+<td style="text-align: center;">✓</td>
+<td>⚠️ Re-apply a template's filestore to live overlay environments (preserves env changes by default; <code>reset_env_changes=True</code> discards them — destructive)</td>
+</tr>
+<tr>
+<td><code>attach_filestore</code></td>
+<td style="text-align: center;">✓</td>
+<td>Attach or replace a template filestore from a local directory, archive, <code>rsync://</code> URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default</td>
+</tr>
+<tr>
+<td><strong>Auxiliary Services</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>create_service</code></td>
+<td style="text-align: center;">✓</td>
+<td>Create a managed service with exactly one exposure model: catch-all <code>port</code>, or restricted Traefik <code>routes</code> (<code>path</code>, backend <code>port</code>, optional <code>strip_prefix</code>). The two parameters are mutually exclusive; <code>port</code> remains required outside Traefik. Optional <code>command</code> (shell-quoted string) replaces the image <code>CMD</code></td>
+</tr>
+<tr>
+<td><code>delete_service</code></td>
+<td style="text-align: center;">✓</td>
+<td>Stop and remove a service container, keeping its preset unless <code>save_preset=false</code>. Protected services refuse to be deleted until an administrator unprotects them in the dashboard</td>
+</tr>
+<tr>
+<td><code>restart_service</code></td>
+<td style="text-align: center;">✓</td>
+<td>Restart a service container</td>
+</tr>
+<tr>
+<td><code>update_service</code></td>
+<td style="text-align: center;">✓</td>
+<td>Preflight configuration, pull the latest image and/or change settings. <code>routes</code> replaces the complete allowlist; use <code>routes=[]</code> with <code>port</code> only when switching back to catch-all mode. <code>command</code> and <code>volumes</code> are tri-state: omitted keeps them, a value fully replaces, an empty string falls back to the image <code>CMD</code> / unmounts every volume. Protected services refuse updates</td>
+</tr>
+<tr>
+<td><code>list_services</code></td>
+<td style="text-align: center;"></td>
+<td>List all managed service containers</td>
+</tr>
+<tr>
+<td><code>get_service_info</code></td>
+<td style="text-align: center;"></td>
+<td>Full live state of a single service (image+digest, port/routes, hostname, host_mode, command, volumes, env, capabilities, restart count, preset). Call before recreating it</td>
+</tr>
+<tr>
+<td><code>get_service_logs</code></td>
+<td style="text-align: center;"></td>
+<td>Retrieve service container logs</td>
+</tr>
+<tr>
+<td><code>run_service_command</code></td>
+<td style="text-align: center;">✓</td>
+<td>Execute a shell command inside a service container (through <code>sh -c</code>; <code>shell=False</code> for exact argv)</td>
+</tr>
+<tr>
+<td><strong>Service PostgreSQL Databases</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>create_service_database</code></td>
+<td style="text-align: center;">✓</td>
+<td>Create a persistent team-scoped PostgreSQL database with a dedicated non-superuser owner; returns <code>DATABASE_URL</code> and <code>PG*</code> credentials. <code>cluster="dev"</code> (default) targets the shared development cluster; <code>cluster="prod"</code> targets the dedicated production cluster (requires production hosting; covered by cluster-wide WAL-G backups, exempt from the dev disk quota)</td>
+</tr>
+<tr>
+<td><code>list_service_databases</code></td>
+<td style="text-align: center;"></td>
+<td>List database names, live status, size, and connections without passwords</td>
+</tr>
+<tr>
+<td><code>get_service_database</code></td>
+<td style="text-align: center;"></td>
+<td>Explicitly reveal connection credentials for one managed database</td>
+</tr>
+<tr>
+<td><code>rotate_service_database_password</code></td>
+<td style="text-align: center;">✓</td>
+<td>Rotate the owner password and return replacement credentials; containers must be reconfigured</td>
+</tr>
+<tr>
+<td><code>delete_service_database</code></td>
+<td style="text-align: center;">✓</td>
+<td>⚠️ Permanently drop the database and role after terminating active connections; service containers are unchanged. Protected databases refuse deletion until unprotected in the dashboard</td>
+</tr>
+<tr>
+<td><strong>Volumes</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>create_volume</code></td>
+<td style="text-align: center;">✓</td>
+<td>Create a named Docker volume for use with services</td>
+</tr>
+<tr>
+<td><code>list_volumes</code></td>
+<td style="text-align: center;"></td>
+<td>List all managed Docker volumes and their usage by services</td>
+</tr>
+<tr>
+<td><code>inspect_volume</code></td>
+<td style="text-align: center;"></td>
+<td>Get detailed information about a specific volume</td>
+</tr>
+<tr>
+<td><code>delete_volume</code></td>
+<td style="text-align: center;">✓</td>
+<td>Delete a managed Docker volume (fails if in use)</td>
+</tr>
+<tr>
+<td><code>read_file_in_volume</code></td>
+<td style="text-align: center;"></td>
+<td>Read a text file or list a directory inside a Docker volume</td>
+</tr>
+<tr>
+<td><code>write_file_in_volume</code></td>
+<td style="text-align: center;">✓</td>
+<td>Write a text file inside a Docker volume</td>
+</tr>
+<tr>
+<td><code>search_in_volume</code></td>
+<td style="text-align: center;"></td>
+<td>Search for a pattern (fixed-string grep) in files inside a Docker volume</td>
+</tr>
+<tr>
+<td><code>delete_file_in_volume</code></td>
+<td style="text-align: center;">✓</td>
+<td>Delete a file or directory inside a Docker volume</td>
+</tr>
+<tr>
+<td><strong>Service Presets</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>list_service_presets</code></td>
+<td style="text-align: center;"></td>
+<td>List saved service presets (configurations that can be restored)</td>
+</tr>
+<tr>
+<td><code>restore_service</code></td>
+<td style="text-align: center;">✓</td>
+<td>Restore a service from a saved preset</td>
+</tr>
+<tr>
+<td><code>delete_service_preset</code></td>
+<td style="text-align: center;">✓</td>
+<td>Remove a saved service preset</td>
+</tr>
+<tr>
+<td><strong>Secrets</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>list_secrets</code></td>
+<td style="text-align: center;"></td>
+<td>List the names of the team's named secrets; values are write-only (set in the dashboard) and are never readable over MCP. Reference one in any <code>env_vars</code> argument as <code>KEY=secret:&lt;name&gt;</code></td>
+</tr>
+<tr>
+<td><strong>Container Image Builds</strong></td>
+<td style="text-align: center;"></td>
+<td>Requires a <code>[team.X.image_registry]</code> section</td>
+</tr>
+<tr>
+<td><code>start_image_build</code></td>
+<td style="text-align: center;">✓</td>
+<td>Build a container image from the environment checkout's current commit (asynchronous; returns a <code>build_id</code>); the source is sealed with <code>git archive</code> under the environment lock, with hard timeout, log-size, and per-team concurrency limits</td>
+</tr>
+<tr>
+<td><code>get_image_build</code></td>
+<td style="text-align: center;"></td>
+<td>Status, source commit, publication history, and a build log tail for one build</td>
+</tr>
+<tr>
+<td><code>publish_image_build</code></td>
+<td style="text-align: center;">✓</td>
+<td>Push a succeeded build's exact image (never a rebuild) to comma-separated tags — <code>latest</code>, semver, anything valid — under the team's configured registry namespace; per-tag outcomes, last-writer-wins</td>
+</tr>
+<tr>
+<td><code>cancel_image_build</code></td>
+<td style="text-align: center;"></td>
+<td>Terminate a running build and its Docker connection, including a silent Dockerfile step</td>
+</tr>
+<tr>
+<td><strong>Repository Auth</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>setup_repo_auth</code></td>
+<td style="text-align: center;">✓</td>
+<td>Cache git credentials for a private repository</td>
+</tr>
+<tr>
+<td><code>get_ssh_public_key</code></td>
+<td style="text-align: center;"></td>
+<td>The team's SSH public key (generated automatically); register it with your git hosting as a deploy key or machine-user key, then use SSH repository URLs such as <code>git@github.com:owner/repo.git</code></td>
+</tr>
+<tr>
+<td><strong>Extra Addons</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>add_extra_repo</code></td>
+<td style="text-align: center;"></td>
+<td>Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments</td>
+</tr>
+<tr>
+<td><code>list_extra_repos</code></td>
+<td style="text-align: center;"></td>
+<td>List all cloned extra addons repositories</td>
+</tr>
+<tr>
+<td><code>update_extra_repo</code></td>
+<td style="text-align: center;"></td>
+<td>Fetch latest changes from the remote for an extra addons repository</td>
+</tr>
+<tr>
+<td><code>delete_extra_repo</code></td>
+<td style="text-align: center;"></td>
+<td>Delete a cloned extra addons repository</td>
+</tr>
+<tr>
+<td><strong>Production Hosting</strong></td>
+<td style="text-align: center;"></td>
+<td>Requires <code>[production].enabled = true</code></td>
+</tr>
+<tr>
+<td><code>create_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Provision a long-lived production with its own domain (defaults into the team <code>base_domain</code> zone when configured) plus optional <code>extra_domains</code>, on the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (<code>from_environment</code> copies its DB + filestore and inherits repo/branch/image); <code>allow_copy_to_dev_mcp</code> (default true) controls whether agents may publish new copies of it into dev</td>
+</tr>
+<tr>
+<td><code>list_productions</code></td>
+<td style="text-align: center;"></td>
+<td>List productions with status, domain, deployed commit, and auto-update state</td>
+</tr>
+<tr>
+<td><code>get_production_info</code></td>
+<td style="text-align: center;"></td>
+<td>Detailed status, configuration, deployed commit, deploy history, and backup information</td>
+</tr>
+<tr>
+<td><code>start_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Start a stopped production</td>
+</tr>
+<tr>
+<td><code>stop_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Stop a production, taking it offline</td>
+</tr>
+<tr>
+<td><code>restart_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Restart a production's Odoo container</td>
+</tr>
+<tr>
+<td><code>set_production_auto_update</code></td>
+<td style="text-align: center;">✓</td>
+<td>Enable or disable GitHub push webhook deployments</td>
+</tr>
+<tr>
+<td><code>reconfigure_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Change domain, extra domains, Odoo image, branch, repository, git user, or extra addon repos; recreates the container (database and filestore preserved, brief downtime)</td>
+</tr>
+<tr>
+<td><code>set_production_odoo_conf</code></td>
+<td style="text-align: center;">✓</td>
+<td>Set or remove per-production <code>odoo.conf</code> overrides that win over the auto-tuned worker settings and survive deploys; managed keys (<code>addons_path</code>, <code>data_dir</code>, <code>db_*</code>) are refused</td>
+</tr>
+<tr>
+<td><code>update_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Deploy pulled commits with explicit/automatic actions, health verification, and automatic code rollback on failure</td>
+</tr>
+<tr>
+<td><code>rollback_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Roll production code back to a selected commit and restart it; does not roll back the database</td>
+</tr>
+<tr>
+<td><code>production_deploys</code></td>
+<td style="text-align: center;"></td>
+<td>Read deploy history, including actions, modules, trigger, and rollback status</td>
+</tr>
+<tr>
+<td><code>production_logs</code></td>
+<td style="text-align: center;"></td>
+<td>Read production Odoo logs with line, substring, and level filtering</td>
+</tr>
+<tr>
+<td><code>snapshot_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Create an S3 snapshot containing the database, deduplicated filestore, and deployed commit</td>
+</tr>
+<tr>
+<td><code>list_production_snapshots</code></td>
+<td style="text-align: center;"></td>
+<td>List S3 snapshots; <code>refresh=True</code> bypasses the cached index</td>
+</tr>
+<tr>
+<td><code>restore_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Restore one production's database and filestore from a snapshot or a dev environment; requires its name in <code>confirm</code></td>
+</tr>
+<tr>
+<td><code>production_backup_status</code></td>
+<td style="text-align: center;"></td>
+<td>Inspect snapshot schedules, WAL archiving, base backups, and S3 reachability</td>
+</tr>
+<tr>
+<td><code>production_wal_status</code></td>
+<td style="text-align: center;"></td>
+<td>Cached shared-cluster WAL queue, upload progress, disk reserve, stale-data and protection state</td>
+</tr>
+<tr>
+<td><code>control_production_wal</code></td>
+<td style="text-align: center;">✓</td>
+<td>Cluster-wide <code>pause</code>, <code>resume</code>, <code>retry</code>, <code>recover</code>, or <code>release</code>; requires <code>confirm="ALL-PRODUCTIONS"</code>. Recovery starts PostgreSQL only; releasing protection leaves applications stopped</td>
+</tr>
+<tr>
+<td><code>set_production_backup_schedule</code></td>
+<td style="text-align: center;">✓</td>
+<td>Set a production's daily snapshot time (<code>HH:MM</code>) or disable it with <code>off</code></td>
+</tr>
+<tr>
+<td><code>prune_production_backups</code></td>
+<td style="text-align: center;">✓</td>
+<td>Apply configured snapshot and chunk-store retention immediately</td>
+</tr>
+<tr>
+<td><code>restore_cluster_pitr</code></td>
+<td style="text-align: center;">✓</td>
+<td>⚠️ Restore the entire production PostgreSQL cluster from WAL-G; requires <code>confirm="RESTORE-CLUSTER"</code></td>
+</tr>
+<tr>
+<td><code>delete_production</code></td>
+<td style="text-align: center;">✓</td>
+<td>Remove a production; requires its name in <code>confirm</code>, and preserves its database unless <code>drop_database=True</code></td>
+</tr>
+<tr>
+<td><strong>Agent Instructions</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>get_agent_instructions</code></td>
+<td style="text-align: center;"></td>
+<td>Load the compact Oduflow agent workflow once at the start of a session</td>
+</tr>
+<tr>
+<td><code>get_odoo_development_guide</code></td>
+<td style="text-align: center;"></td>
+<td>Get Odoo development standards guide for a specific version (15–19)</td>
+</tr>
+<tr>
+<td><strong>Feedback</strong></td>
+<td style="text-align: center;"></td>
+<td></td>
+</tr>
+<tr>
+<td><code>report_issue</code></td>
+<td style="text-align: center;"></td>
+<td>Build a prefilled link for the user to file a bug, feature request, or feedback about Oduflow on GitHub</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition info">
+<p class="admonition-title">Locking</p>
+<p>Tools marked with ✓ acquire a lock on exactly what they touch: the branch, one service, one volume, the team's credential store — or the whole team, for the few operations that really are team-wide (template publishing). Operations on different resources run in parallel. If another operation on the <strong>same</strong> resource is already in progress, the call is rejected with <code>BusyError</code>. The rejection names the operation holding the lock and how long it has held it (e.g. <em>"Another operation on environment 'main' (pull_and_apply, running for 4m12s) is in progress"</em>), so a long install is distinguishable from a hung one. A lock is released when its operation finishes — including when the client that started it timed out and stopped waiting, which is why restarting the environment is the wrong response.</p>
+</div>
+<p>The exact current signature and defaults for every tool are also available from
+<code>oduflow list</code> (<code>oduflow list --verbose</code> adds descriptions). The production
+workflow and disaster-recovery consequences are covered in
+<a href="../production/">Production Hosting</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden="">
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href="../web-api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Web Dashboard &amp; REST API">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Web Dashboard &amp; REST API
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../cli/" class="md-footer__link md-footer__link--next" aria-label="Next: CLI Reference">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                CLI Reference
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"></path></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright © Oduist — Oduflow
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/oduist/oduflow" target="_blank" rel="noopener" title="Oduflow on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Oduflow Docs" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M351.9 280H161c2.9 64.5 17.2 123.9 37.5 167.4 11.4 24.5 23.7 41.8 35.1 52.4 11.2 10.5 18.9 12.2 22.9 12.2s11.7-1.7 22.9-12.2c11.4-10.6 23.7-28 35.1-52.4 20.3-43.5 34.6-102.9 37.5-167.4zm-191-48h190.9c-2.8-64.5-17.1-123.9-37.4-167.4-11.4-24.4-23.7-41.8-35.1-52.4C268.1 1.7 260.4 0 256.4 0s-11.7 1.7-22.9 12.2c-11.4 10.6-23.7 28-35.1 52.4-20.3 43.5-34.6 102.9-37.5 167.4m-48 0c3.5-85.6 25.6-165.1 57.9-217.3C78.7 47.3 10.9 131.2 1.5 232zM1.5 280c9.4 100.8 77.2 184.7 169.3 217.3-32.3-52.2-54.4-131.7-57.9-217.3zm398.4 0c-3.5 85.6-25.6 165.1-57.9 217.3 92.1-32.7 159.9-116.5 169.3-217.3zm111.4-48C501.9 131.2 434.1 47.3 342 14.7c32.3 52.2 54.4 131.7 57.9 217.3z"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>

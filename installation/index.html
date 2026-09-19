@@ -1,0 +1,2829 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="AI-first Odoo development and CI tool with reusable database templates, powered by MCP">
+      
+      
+        <meta name="author" content="Oduist">
+      
+      
+        <link rel="canonical" href="https://docs.oduflow.dev/installation/">
+      
+      
+        <link rel="prev" href="../quick-start/">
+      
+      
+        <link rel="next" href="../use-cases/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.ico">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Installation &amp; Configuration - Oduflow</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../css/custom.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#installation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Oduflow" class="md-header__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Oduflow
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Installation &amp; Configuration
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required="">
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard="" data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"></path></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix="">
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Oduflow" class="md-nav__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    Oduflow
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix="">
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" checked="">
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation &amp; Configuration
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation &amp; Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#system-requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System Requirements
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="System Requirements">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#install-fuse-overlayfs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install fuse-overlayfs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#install-rsync" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install rsync
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-oduflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install Oduflow
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Install Oduflow">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#run-without-installing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run without installing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#permanent-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Permanent installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-source" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From source
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#upgrade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Reference
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration Reference">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#minimal-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#full-configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Full configuration reference
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#server-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Server settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#routing-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routing settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#database-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Database settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#storage-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#agent-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agent settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#production-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#backup-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#per-team-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-team settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration-file-overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration file overrides
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Telemetry
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Telemetry">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#opt-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Opt out
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#auto-start-with-systemd" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auto-start with systemd
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Auto-start with systemd">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#install-the-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install the service
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#manage-the-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manage the service
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#remove-the-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remove the service
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2">
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Core Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use Cases &amp; Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Template Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../environments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Hosting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coding Agent
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auxiliary Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extra-addons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extra Addons Repositories
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stacks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Declarative Stacks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3">
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../web-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Dashboard &amp; REST API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP Tools Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4">
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../traefik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Traefik Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-instance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Team Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Authentication &amp; Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running in Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5">
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../licensing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Licensing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#system-requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System Requirements
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="System Requirements">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#install-fuse-overlayfs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install fuse-overlayfs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#install-rsync" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install rsync
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-oduflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install Oduflow
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Install Oduflow">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#run-without-installing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run without installing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#permanent-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Permanent installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-source" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From source
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#upgrade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Reference
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration Reference">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#minimal-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#full-configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Full configuration reference
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#server-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Server settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#routing-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routing settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#database-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Database settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#storage-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#agent-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agent settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#production-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#backup-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#per-team-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-team settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration-file-overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration file overrides
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Telemetry
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Telemetry">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#opt-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Opt out
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#auto-start-with-systemd" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auto-start with systemd
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Auto-start with systemd">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#install-the-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install the service
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#manage-the-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manage the service
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#remove-the-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remove the service
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="installation">Installation<a class="headerlink" href="#installation" title="Permanent link">¶</a></h1>
+<h2 id="system-requirements">System Requirements<a class="headerlink" href="#system-requirements" title="Permanent link">¶</a></h2>
+<ul>
+<li><strong>Docker</strong> (Docker Engine or Docker Desktop)</li>
+<li><strong>Python 3.10+</strong></li>
+<li><strong>Git</strong></li>
+<li><strong>fuse-overlayfs</strong> (Linux only, for filestore overlay mounting) — auto-installed on first launch; see below</li>
+<li><strong>rsync</strong> (all platforms, for incremental filestore copies) — auto-installed on first launch; see below</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">macOS support</p>
+<p>On macOS, Docker Desktop runs containers inside a Linux VM and projects
+files via VirtioFS. <strong>fuse-overlayfs is not needed</strong> — filestore overlays
+are skipped and a plain directory is used instead.
+File ownership (<code>chown</code>) is handled automatically: Oduflow detects the
+<code>PermissionError</code> that VirtioFS raises and falls back to running <code>chown</code>
+inside a throwaway container. No extra configuration is required.</p>
+</div>
+<h3 id="install-fuse-overlayfs">Install fuse-overlayfs<a class="headerlink" href="#install-fuse-overlayfs" title="Permanent link">¶</a></h3>
+<p>On Linux, Oduflow <strong>auto-installs <code>fuse-overlayfs</code> on first launch</strong> if it is
+missing — it runs <code>apt-get install -y fuse-overlayfs</code> when it starts as <strong>root</strong>
+on a Debian/Ubuntu host (the Docker image already bundles it). This is
+best-effort: if Oduflow is not running as root, <code>apt-get</code> is unavailable, or the
+install fails, it logs a warning and you can install the package yourself:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>fuse-overlayfs
+</span></code></pre></div>
+<p>The <code>/dev/fuse</code> device must be available (present by default on Ubuntu).</p>
+<p>Oduflow mounts each environment's filestore with <code>fuse-overlayfs</code>'s <code>allow_other</code> option so the Odoo container's (non-root) user can read it. When Oduflow runs as <strong>root</strong> — the default and recommended setup — no further configuration is needed. Only if you run Oduflow as a <strong>non-root user</strong> must you uncomment <code>user_allow_other</code> in <code>/etc/fuse.conf</code>:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># Only needed when running Oduflow as a non-root user:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>sudo<span class="w"> </span>sed<span class="w"> </span>-i<span class="w"> </span><span class="s1">'s/^#user_allow_other/user_allow_other/'</span><span class="w"> </span>/etc/fuse.conf
+</span></code></pre></div>
+<h3 id="install-rsync">Install rsync<a class="headerlink" href="#install-rsync" title="Permanent link">¶</a></h3>
+<p><code>rsync</code> is auto-installed the same way on Linux (<code>apt-get install -y rsync</code> when
+running as root on a Debian/Ubuntu host; the Docker image bundles it). Unlike
+fuse-overlayfs it matters on <strong>every</strong> platform, including macOS, where it ships
+with the system:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>rsync
+</span></code></pre></div>
+<p>Oduflow uses it to copy only what changed. Saving an environment as a template
+snapshots its filestore by hardlinking every file that already matches the
+template baseline, so a multi-gigabyte filestore costs only the environment's
+own deltas. Without <code>rsync</code>, publishing still works but re-copies the whole
+filestore each time (logged as a warning), and syncing a template from a local
+source fails outright.</p>
+<h2 id="install-oduflow">Install Oduflow<a class="headerlink" href="#install-oduflow" title="Permanent link">¶</a></h2>
+<h3 id="run-without-installing">Run without installing<a class="headerlink" href="#run-without-installing" title="Permanent link">¶</a></h3>
+<p>With <a href="https://docs.astral.sh/uv/">uv</a> you can run Oduflow directly — no installation step needed. <code>uvx</code> downloads the package into a temporary environment and runs it:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>uvx<span class="w"> </span>oduflow<span class="w">                      </span><span class="c1"># stdio mode (default)</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>uvx<span class="w"> </span>oduflow<span class="w"> </span>--transport<span class="w"> </span>http<span class="w">     </span><span class="c1"># HTTP server mode</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>uvx<span class="w"> </span>oduflow<span class="w"> </span>-t<span class="w"> </span>http<span class="w">              </span><span class="c1"># HTTP server mode (short form)</span>
+</span></code></pre></div>
+<p>This is the quickest way to try Oduflow or use it in CI pipelines.</p>
+<h3 id="permanent-installation">Permanent installation<a class="headerlink" href="#permanent-installation" title="Permanent link">¶</a></h3>
+<p>Install via <a href="https://docs.astral.sh/uv/">uv</a> (recommended — manages an isolated environment automatically):</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>oduflow
+</span></code></pre></div>
+<p>Alternative — install via pip:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>pip<span class="w"> </span>install<span class="w"> </span>oduflow
+</span></code></pre></div>
+<p>After installation, the <code>oduflow</code> command is available globally.</p>
+<h3 id="from-source">From source<a class="headerlink" href="#from-source" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/oduist/oduflow.git
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nb">cd</span><span class="w"> </span>oduflow
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>uv<span class="w"> </span>sync<span class="w">          </span><span class="c1"># or: python -m venv .venv &amp;&amp; pip install -e .</span>
+</span></code></pre></div>
+<h3 id="upgrade">Upgrade<a class="headerlink" href="#upgrade" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>upgrade<span class="w"> </span>oduflow
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>oduflow<span class="w"> </span>upgrade
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="c1"># For unattended automation:</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>oduflow<span class="w"> </span>upgrade<span class="w"> </span>--force
+</span></code></pre></div>
+<p>The first command upgrades the Python package. The second is a separate,
+interactive reconciliation of each team's deployed <code>odoo.conf</code>, agent guides,
+and bundled sanitize script. Package upgrade alone does not update those
+deployed copies. <code>postgresql.conf</code> is intentionally separate: preview and apply
+resource-tuning changes with <code>oduflow retune-postgres [--apply]</code>.</p>
+<p>Oduflow keeps the previous pristine bundle under
+<code>&lt;team-data&gt;/.bundled_upgrade/baselines/</code> and performs a three-way merge. An
+unmodified deployed file receives the new bundle directly; local-only changes
+stay untouched; disjoint local and upstream changes are merged. The pre-update
+live file is retained under <code>.bundled_upgrade/backups/</code>.</p>
+<p>For an installation created before baselines existed, the first upgrade keeps
+the live file and writes the new bundle beside it as <code>*.oduflow-new</code>. Merge that
+file manually into the live file, then delete the sidecar. A true merge conflict
+similarly leaves the live file untouched and writes <code>*.oduflow-merge</code>; resolve
+that file, install the resolved content as the live file, and remove the
+sidecar. Until the sidecar is resolved, <code>oduflow upgrade</code> exits non-zero.</p>
+<p>For unattended upgrades, pass <code>--force</code>. It skips the stdin confirmation and
+resolves legacy files, conflicts, and merge failures in favour of the new
+bundle: the live file is copied to <code>.bundled_upgrade/backups/</code>, then
+overwritten, the baseline advances, and any stale sidecar is removed. A forced
+run therefore leaves no sidecar to review and exits 0. Clean merges are still
+merged and local-only changes are still preserved.</p>
+<p>Automatic merging is the default. To opt a file out of all bundled changes,
+add <code># KEEP</code> as the <strong>very first line</strong>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a># KEEP
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>[options]
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a># Keep this odoo.conf entirely operator-managed.
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>...
+</span></code></pre></div>
+<p>Files marked with <code># KEEP</code> are skipped and listed as <code>(kept)</code> in the upgrade
+output, including under <code>--force</code>.</p>
+<h2 id="configuration-reference">Configuration Reference<a class="headerlink" href="#configuration-reference" title="Permanent link">¶</a></h2>
+<p>All settings are configured via a TOML file. Oduflow searches for <code>oduflow.toml</code> in the following order:</p>
+<ol>
+<li><code>ODUFLOW_TOML</code> environment variable (explicit path)</li>
+<li><code>/etc/oduflow/oduflow.toml</code></li>
+<li><code>~/.oduflow/conf/oduflow.toml</code></li>
+</ol>
+<p>If no config file exists when Oduflow starts, the bundled default is copied to
+<code>/etc/oduflow/oduflow.toml</code> when that directory is writable, otherwise to
+<code>~/.oduflow/conf/oduflow.toml</code>. The copied file is populated with generated
+values for <code>[database].password</code>, <code>[team.1].auth_token</code>, and
+<code>[team.1].ui_password</code>; the generated MCP token and Web Dashboard password are
+also printed in the startup log.</p>
+<h3 id="minimal-configuration">Minimal configuration<a class="headerlink" href="#minimal-configuration" title="Permanent link">¶</a></h3>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">[team.1]</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">hostname</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"localhost"</span>
+</span></code></pre></div>
+<h3 id="full-configuration-reference">Full configuration reference<a class="headerlink" href="#full-configuration-reference" title="Permanent link">¶</a></h3>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># ── Server ────────────────────────────────────────────</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="k">[server]</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">bind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"0.0.0.0"</span><span class="w">           </span><span class="c1"># HTTP listener address; legacy "host" is accepted</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8000</span><span class="w">                 </span><span class="c1"># HTTP server port</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="n">allow_local_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">     </span><span class="c1"># trusted single-user local development; disable on hosted/multi-user servers</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="c1"># allow_insecure_http = false  # serve /mcp over HTTP with NO auth (only behind your own proxy)</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="c1"># trace = false             # verbose tracing for git analysis &amp; env ops</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="c1"># disable_telemetry = false # disable anonymous first_run/env_created events</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="c1"># ── Routing ───────────────────────────────────────────</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="k">[routing]</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="n">mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"port"</span><span class="w">               </span><span class="c1"># "port" (direct host port) | "traefik" (reverse proxy with auto-HTTPS)</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="c1"># acme_email = "admin@example.com"  # required when mode = "traefik" and tls = true</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="c1"># tls = true                # traefik only. {} = HTTPS without ACME (self-signed by default); false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="c1"># public_scheme = "https"   # scheme of the URLs Oduflow hands out. Default: https (traefik) / http (port).</span>
+</span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="w">                            </span><span class="c1"># Set "http" with tls = false when nothing terminates TLS in front.</span>
+</span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a><span class="w">                            </span><span class="c1"># Overridable per team ([team.X] public_scheme) for mixed deployments</span>
+</span><span id="__span-10-18"><a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a>
+</span><span id="__span-10-19"><a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a><span class="c1"># ── Extra routes (Traefik only) ───────────────────────</span>
+</span><span id="__span-10-20"><a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a><span class="c1"># [route.legacy-api]</span>
+</span><span id="__span-10-21"><a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a><span class="c1"># host = "api.example.com"</span>
+</span><span id="__span-10-22"><a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a><span class="c1"># url = "http://127.0.0.1:3000"</span>
+</span><span id="__span-10-23"><a id="__codelineno-10-23" name="__codelineno-10-23" href="#__codelineno-10-23"></a>
+</span><span id="__span-10-24"><a id="__codelineno-10-24" name="__codelineno-10-24" href="#__codelineno-10-24"></a><span class="c1"># ── Database ──────────────────────────────────────────</span>
+</span><span id="__span-10-25"><a id="__codelineno-10-25" name="__codelineno-10-25" href="#__codelineno-10-25"></a><span class="k">[database]</span>
+</span><span id="__span-10-26"><a id="__codelineno-10-26" name="__codelineno-10-26" href="#__codelineno-10-26"></a><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"odoo"</span><span class="w">               </span><span class="c1"># PostgreSQL user for the shared database container</span>
+</span><span id="__span-10-27"><a id="__codelineno-10-27" name="__codelineno-10-27" href="#__codelineno-10-27"></a><span class="c1"># password = "..."          # auto-generated on first launch; set explicitly to override</span>
+</span><span id="__span-10-28"><a id="__codelineno-10-28" name="__codelineno-10-28" href="#__codelineno-10-28"></a><span class="n">image</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"postgres:15"</span><span class="w">       </span><span class="c1"># PostgreSQL Docker image</span>
+</span><span id="__span-10-29"><a id="__codelineno-10-29" name="__codelineno-10-29" href="#__codelineno-10-29"></a>
+</span><span id="__span-10-30"><a id="__codelineno-10-30" name="__codelineno-10-30" href="#__codelineno-10-30"></a><span class="c1"># ── Storage ───────────────────────────────────────────</span>
+</span><span id="__span-10-31"><a id="__codelineno-10-31" name="__codelineno-10-31" href="#__codelineno-10-31"></a><span class="k">[storage]</span>
+</span><span id="__span-10-32"><a id="__codelineno-10-32" name="__codelineno-10-32" href="#__codelineno-10-32"></a><span class="c1"># data_dir = "/srv/oduflow"         # base directory for all data (default: /srv/oduflow or ~/.oduflow/data)</span>
+</span><span id="__span-10-33"><a id="__codelineno-10-33" name="__codelineno-10-33" href="#__codelineno-10-33"></a><span class="n">overlay_threshold_mb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">50</span><span class="w">            </span><span class="c1"># template filestore size threshold (MB) — larger uses fuse-overlayfs, smaller uses copy</span>
+</span><span id="__span-10-34"><a id="__codelineno-10-34" name="__codelineno-10-34" href="#__codelineno-10-34"></a>
+</span><span id="__span-10-35"><a id="__codelineno-10-35" name="__codelineno-10-35" href="#__codelineno-10-35"></a><span class="c1"># ── Lifecycle ─────────────────────────────────────────</span>
+</span><span id="__span-10-36"><a id="__codelineno-10-36" name="__codelineno-10-36" href="#__codelineno-10-36"></a><span class="k">[lifecycle]</span>
+</span><span id="__span-10-37"><a id="__codelineno-10-37" name="__codelineno-10-37" href="#__codelineno-10-37"></a><span class="n">auto_stop_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">48</span><span class="w">        </span><span class="c1"># auto-stop environments idle for N hours (no MCP/dashboard work); 0 disables</span>
+</span><span id="__span-10-38"><a id="__codelineno-10-38" name="__codelineno-10-38" href="#__codelineno-10-38"></a><span class="n">auto_delete_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w">       </span><span class="c1"># auto-delete environments stopped for N hours; 0 disables (opt-in; DESTRUCTIVE, protected envs exempt)</span>
+</span><span id="__span-10-39"><a id="__codelineno-10-39" name="__codelineno-10-39" href="#__codelineno-10-39"></a><span class="n">prod_purge_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w">        </span><span class="c1"># purge DB/files kept by a production deletion after N hours; 0 disables (opt-in; DESTRUCTIVE)</span>
+</span><span id="__span-10-40"><a id="__codelineno-10-40" name="__codelineno-10-40" href="#__codelineno-10-40"></a>
+</span><span id="__span-10-41"><a id="__codelineno-10-41" name="__codelineno-10-41" href="#__codelineno-10-41"></a><span class="c1"># ── Coding agent (optional) ───────────────────────────</span>
+</span><span id="__span-10-42"><a id="__codelineno-10-42" name="__codelineno-10-42" href="#__codelineno-10-42"></a><span class="c1"># One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven</span>
+</span><span id="__span-10-43"><a id="__codelineno-10-43" name="__codelineno-10-43" href="#__codelineno-10-43"></a><span class="c1"># from the dashboard (Agent Chat / Agent CLI). Opt-in per team via</span>
+</span><span id="__span-10-44"><a id="__codelineno-10-44" name="__codelineno-10-44" href="#__codelineno-10-44"></a><span class="c1"># agent_enabled below.</span>
+</span><span id="__span-10-45"><a id="__codelineno-10-45" name="__codelineno-10-45" href="#__codelineno-10-45"></a><span class="c1"># [agent]</span>
+</span><span id="__span-10-46"><a id="__codelineno-10-46" name="__codelineno-10-46" href="#__codelineno-10-46"></a><span class="c1"># image = "oduist/oduflow-coder:0.3.0"</span>
+</span><span id="__span-10-47"><a id="__codelineno-10-47" name="__codelineno-10-47" href="#__codelineno-10-47"></a><span class="c1"># claude_model = ""         # optional Claude model override; empty = CLI default</span>
+</span><span id="__span-10-48"><a id="__codelineno-10-48" name="__codelineno-10-48" href="#__codelineno-10-48"></a><span class="c1"># codex_model = ""          # optional Codex model override; empty = CLI default</span>
+</span><span id="__span-10-49"><a id="__codelineno-10-49" name="__codelineno-10-49" href="#__codelineno-10-49"></a><span class="c1"># opencode_model = ""       # optional provider/model override; empty = OpenCode default</span>
+</span><span id="__span-10-50"><a id="__codelineno-10-50" name="__codelineno-10-50" href="#__codelineno-10-50"></a>
+</span><span id="__span-10-51"><a id="__codelineno-10-51" name="__codelineno-10-51" href="#__codelineno-10-51"></a><span class="c1"># ── Production hosting (optional) ─────────────────────</span>
+</span><span id="__span-10-52"><a id="__codelineno-10-52" name="__codelineno-10-52" href="#__codelineno-10-52"></a><span class="c1"># [production]</span>
+</span><span id="__span-10-53"><a id="__codelineno-10-53" name="__codelineno-10-53" href="#__codelineno-10-53"></a><span class="c1"># enabled = true            # opt in; requires routing.mode = "traefik"</span>
+</span><span id="__span-10-54"><a id="__codelineno-10-54" name="__codelineno-10-54" href="#__codelineno-10-54"></a><span class="c1"># postgres_image = ""       # managed PG15 with CA; inherits custom [database].image</span>
+</span><span id="__span-10-55"><a id="__codelineno-10-55" name="__codelineno-10-55" href="#__codelineno-10-55"></a><span class="c1"># walg_version = ""         # empty = Oduflow's pinned WAL-G version</span>
+</span><span id="__span-10-56"><a id="__codelineno-10-56" name="__codelineno-10-56" href="#__codelineno-10-56"></a><span class="c1"># workers_cap = 8           # upper bound for auto-tuned Odoo workers</span>
+</span><span id="__span-10-57"><a id="__codelineno-10-57" name="__codelineno-10-57" href="#__codelineno-10-57"></a>
+</span><span id="__span-10-58"><a id="__codelineno-10-58" name="__codelineno-10-58" href="#__codelineno-10-58"></a><span class="c1"># [backup]                  # optional; requires all three credentials below</span>
+</span><span id="__span-10-59"><a id="__codelineno-10-59" name="__codelineno-10-59" href="#__codelineno-10-59"></a><span class="c1"># bucket = ""</span>
+</span><span id="__span-10-60"><a id="__codelineno-10-60" name="__codelineno-10-60" href="#__codelineno-10-60"></a><span class="c1"># access_key = ""</span>
+</span><span id="__span-10-61"><a id="__codelineno-10-61" name="__codelineno-10-61" href="#__codelineno-10-61"></a><span class="c1"># secret_key = ""</span>
+</span><span id="__span-10-62"><a id="__codelineno-10-62" name="__codelineno-10-62" href="#__codelineno-10-62"></a><span class="c1"># endpoint = ""             # empty = AWS; set for MinIO/R2</span>
+</span><span id="__span-10-63"><a id="__codelineno-10-63" name="__codelineno-10-63" href="#__codelineno-10-63"></a><span class="c1"># region = ""</span>
+</span><span id="__span-10-64"><a id="__codelineno-10-64" name="__codelineno-10-64" href="#__codelineno-10-64"></a><span class="c1"># prefix = "oduflow"</span>
+</span><span id="__span-10-65"><a id="__codelineno-10-65" name="__codelineno-10-65" href="#__codelineno-10-65"></a><span class="c1"># snapshot_time = "02:00"</span>
+</span><span id="__span-10-66"><a id="__codelineno-10-66" name="__codelineno-10-66" href="#__codelineno-10-66"></a><span class="c1"># basebackup_time = "03:30"</span>
+</span><span id="__span-10-67"><a id="__codelineno-10-67" name="__codelineno-10-67" href="#__codelineno-10-67"></a><span class="c1"># keep = ["30:180", "7:30", "1:7"]</span>
+</span><span id="__span-10-68"><a id="__codelineno-10-68" name="__codelineno-10-68" href="#__codelineno-10-68"></a><span class="c1"># walg_keep_full = 7</span>
+</span><span id="__span-10-69"><a id="__codelineno-10-69" name="__codelineno-10-69" href="#__codelineno-10-69"></a><span class="c1"># upload_threads = 16</span>
+</span><span id="__span-10-70"><a id="__codelineno-10-70" name="__codelineno-10-70" href="#__codelineno-10-70"></a>
+</span><span id="__span-10-71"><a id="__codelineno-10-71" name="__codelineno-10-71" href="#__codelineno-10-71"></a><span class="c1"># ── Teams ─────────────────────────────────────────────</span>
+</span><span id="__span-10-72"><a id="__codelineno-10-72" name="__codelineno-10-72" href="#__codelineno-10-72"></a><span class="c1"># Each team gets isolated workspaces, templates, credentials, and services.</span>
+</span><span id="__span-10-73"><a id="__codelineno-10-73" name="__codelineno-10-73" href="#__codelineno-10-73"></a><span class="c1"># At least one [team.*] section is required.</span>
+</span><span id="__span-10-74"><a id="__codelineno-10-74" name="__codelineno-10-74" href="#__codelineno-10-74"></a>
+</span><span id="__span-10-75"><a id="__codelineno-10-75" name="__codelineno-10-75" href="#__codelineno-10-75"></a><span class="k">[team.1]</span>
+</span><span id="__span-10-76"><a id="__codelineno-10-76" name="__codelineno-10-76" href="#__codelineno-10-76"></a><span class="n">hostname</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"localhost"</span><span class="w">               </span><span class="c1"># required and unique; OAuth issuer host for this team</span>
+</span><span id="__span-10-77"><a id="__codelineno-10-77" name="__codelineno-10-77" href="#__codelineno-10-77"></a><span class="w">                                     </span><span class="c1"># port mode: http://{hostname}:{port}, traefik: https://{slug}.{hostname}</span>
+</span><span id="__span-10-78"><a id="__codelineno-10-78" name="__codelineno-10-78" href="#__codelineno-10-78"></a><span class="c1"># base_domain = "demo.example.com"   # team DNS zone (traefik mode): envs/services live at {name}.{base_domain},</span>
+</span><span id="__span-10-79"><a id="__codelineno-10-79" name="__codelineno-10-79" href="#__codelineno-10-79"></a><span class="w">                                     </span><span class="c1"># hostname defaults to oduflow.{base_domain}, productions default into the zone</span>
+</span><span id="__span-10-80"><a id="__codelineno-10-80" name="__codelineno-10-80" href="#__codelineno-10-80"></a><span class="n">environment_slots</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="w">               </span><span class="c1"># maximum concurrent environments; 0 = unlimited</span>
+</span><span id="__span-10-81"><a id="__codelineno-10-81" name="__codelineno-10-81" href="#__codelineno-10-81"></a><span class="n">environment_hostname_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"branch"</span><span class="w"> </span><span class="c1"># "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com</span>
+</span><span id="__span-10-82"><a id="__codelineno-10-82" name="__codelineno-10-82" href="#__codelineno-10-82"></a><span class="n">service_slots</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="w">                   </span><span class="c1"># maximum managed auxiliary services; 0 = unlimited</span>
+</span><span id="__span-10-83"><a id="__codelineno-10-83" name="__codelineno-10-83" href="#__codelineno-10-83"></a><span class="n">auth_token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">""</span><span class="w">                      </span><span class="c1"># auto-filled in fresh configs; HTTP MCP Bearer token</span>
+</span><span id="__span-10-84"><a id="__codelineno-10-84" name="__codelineno-10-84" href="#__codelineno-10-84"></a><span class="n">ui_password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">""</span><span class="w">                     </span><span class="c1"># auto-filled in fresh configs; Web UI password for admin</span>
+</span><span id="__span-10-85"><a id="__codelineno-10-85" name="__codelineno-10-85" href="#__codelineno-10-85"></a><span class="n">port_range</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">50000</span><span class="p">,</span><span class="w"> </span><span class="mi">50100</span><span class="p">]</span><span class="w">          </span><span class="c1"># port range for Odoo containers [start, end)</span>
+</span><span id="__span-10-86"><a id="__codelineno-10-86" name="__codelineno-10-86" href="#__codelineno-10-86"></a><span class="c1"># agent_enabled = false              # enable the per-team coding agent (Agent Chat / Agent CLI)</span>
+</span><span id="__span-10-87"><a id="__codelineno-10-87" name="__codelineno-10-87" href="#__codelineno-10-87"></a><span class="c1"># agent_default = "claude"           # "claude" | "codex" | "opencode" — default agent</span>
+</span><span id="__span-10-88"><a id="__codelineno-10-88" name="__codelineno-10-88" href="#__codelineno-10-88"></a><span class="c1"># db_quota_gb = 50                   # combined PostgreSQL database cap; 0 disables</span>
+</span><span id="__span-10-89"><a id="__codelineno-10-89" name="__codelineno-10-89" href="#__codelineno-10-89"></a><span class="c1"># disk_quota_gb = 0                  # XFS project quota for team files + databases; 0 disables</span>
+</span><span id="__span-10-90"><a id="__codelineno-10-90" name="__codelineno-10-90" href="#__codelineno-10-90"></a><span class="c1"># [team.1.agent_env]                 # provider credentials injected into the agent container</span>
+</span><span id="__span-10-91"><a id="__codelineno-10-91" name="__codelineno-10-91" href="#__codelineno-10-91"></a><span class="c1"># CLAUDE_CODE_OAUTH_TOKEN = ""</span>
+</span><span id="__span-10-92"><a id="__codelineno-10-92" name="__codelineno-10-92" href="#__codelineno-10-92"></a><span class="c1"># ANTHROPIC_API_KEY = ""</span>
+</span><span id="__span-10-93"><a id="__codelineno-10-93" name="__codelineno-10-93" href="#__codelineno-10-93"></a><span class="c1"># OPENAI_API_KEY = ""</span>
+</span><span id="__span-10-94"><a id="__codelineno-10-94" name="__codelineno-10-94" href="#__codelineno-10-94"></a><span class="c1"># OPENCODE_API_KEY = ""              # OpenCode Zen; arbitrary provider vars also work</span>
+</span><span id="__span-10-95"><a id="__codelineno-10-95" name="__codelineno-10-95" href="#__codelineno-10-95"></a><span class="c1"># [team.1.image_registry]            # enables the image build/publish MCP tools for this team</span>
+</span><span id="__span-10-96"><a id="__codelineno-10-96" name="__codelineno-10-96" href="#__codelineno-10-96"></a><span class="c1"># repository_prefix = "acme"         # registry namespace all published images live under (required)</span>
+</span><span id="__span-10-97"><a id="__codelineno-10-97" name="__codelineno-10-97" href="#__codelineno-10-97"></a><span class="c1"># host = "docker.io"                 # plain registry hostname, optionally with :port</span>
+</span><span id="__span-10-98"><a id="__codelineno-10-98" name="__codelineno-10-98" href="#__codelineno-10-98"></a><span class="c1"># username = "acme-ci"               # optional; with token, request-scoped push credentials</span>
+</span><span id="__span-10-99"><a id="__codelineno-10-99" name="__codelineno-10-99" href="#__codelineno-10-99"></a><span class="c1"># token = "&lt;registry-token&gt;"         # registry token/password stored in this config</span>
+</span><span id="__span-10-100"><a id="__codelineno-10-100" name="__codelineno-10-100" href="#__codelineno-10-100"></a><span class="c1"># build_timeout_seconds = 1800       # per-build wall clock limit</span>
+</span><span id="__span-10-101"><a id="__codelineno-10-101" name="__codelineno-10-101" href="#__codelineno-10-101"></a><span class="c1"># max_context_mb = 512               # sealed build context size cap</span>
+</span><span id="__span-10-102"><a id="__codelineno-10-102" name="__codelineno-10-102" href="#__codelineno-10-102"></a><span class="c1"># max_log_mb = 16                    # persisted log cap per build</span>
+</span><span id="__span-10-103"><a id="__codelineno-10-103" name="__codelineno-10-103" href="#__codelineno-10-103"></a><span class="c1"># max_concurrent_builds = 2          # active build workers allowed for this team</span>
+</span><span id="__span-10-104"><a id="__codelineno-10-104" name="__codelineno-10-104" href="#__codelineno-10-104"></a><span class="c1"># keep_images = 10                   # local staging images kept per team; 0 disables pruning</span>
+</span></code></pre></div>
+<h3 id="server-settings">Server settings<a class="headerlink" href="#server-settings" title="Permanent link">¶</a></h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[server].bind</code></td>
+<td><code>0.0.0.0</code></td>
+<td>HTTP server listener address. The legacy key <code>[server].host</code> remains accepted with a deprecation warning; if both are present they must have the same value</td>
+</tr>
+<tr>
+<td><code>[server].host</code></td>
+<td><em>(legacy)</em></td>
+<td>Deprecated alias for <code>[server].bind</code></td>
+</tr>
+<tr>
+<td><code>[server].port</code></td>
+<td><code>8000</code></td>
+<td>HTTP server port</td>
+</tr>
+<tr>
+<td><code>[server].allow_local_path</code></td>
+<td><code>true</code></td>
+<td>Allow trusted local-development live-mounts that bind a host checkout read/write. Set <code>false</code> on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required</td>
+</tr>
+<tr>
+<td><code>[server].allow_insecure_http</code></td>
+<td><code>false</code></td>
+<td>Serve the <code>/mcp</code> endpoint over plain HTTP with <strong>no</strong> authentication. Only enable behind your own authenticating proxy</td>
+</tr>
+<tr>
+<td><code>[server].trace</code></td>
+<td><code>false</code></td>
+<td>Enable detailed trace logging for git analysis and environment operations</td>
+</tr>
+<tr>
+<td><code>[server].disable_telemetry</code></td>
+<td><code>false</code></td>
+<td>Disable anonymous usage telemetry (see <a href="#telemetry">Telemetry</a>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="routing-settings">Routing settings<a class="headerlink" href="#routing-settings" title="Permanent link">¶</a></h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[routing].mode</code></td>
+<td><code>port</code></td>
+<td><code>port</code> — direct host port mapping; <code>traefik</code> — reverse proxy with auto-HTTPS</td>
+</tr>
+<tr>
+<td><code>[routing].acme_email</code></td>
+<td><em>(empty)</em></td>
+<td>Let's Encrypt email for TLS certificates. Required when <code>mode = "traefik"</code> and <code>tls = true</code></td>
+</tr>
+<tr>
+<td><code>[routing].tls</code></td>
+<td><code>true</code></td>
+<td>Traefik only. <code>true</code>: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). <code>{}</code>: HTTPS on :443 with the default certificate (self-signed unless supplied), redirect, no ACME/email requirement. <code>false</code>: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay <code>https://</code> either way unless <code>public_scheme</code> says otherwise</td>
+</tr>
+<tr>
+<td><code>[routing].public_scheme</code></td>
+<td><em>(derived)</em></td>
+<td>Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: <code>https</code> in traefik mode, <code>http</code> in port mode. Set to <code>http</code> alongside <code>tls = false</code> when <strong>nothing</strong> terminates TLS in front — this also stops Traefik trusting inbound <code>X-Forwarded-*</code> on :80 (unless a per-team override still resolves to <code>https</code>). Overridable per team with <code>[team.X] public_scheme</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="database-settings">Database settings<a class="headerlink" href="#database-settings" title="Permanent link">¶</a></h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[database].user</code></td>
+<td><code>odoo</code></td>
+<td>PostgreSQL user for the shared database container</td>
+</tr>
+<tr>
+<td><code>[database].password</code></td>
+<td><em>(generated)</em></td>
+<td>PostgreSQL password. The bundled config omits it and one is auto-generated on first launch; set explicitly to override</td>
+</tr>
+<tr>
+<td><code>[database].image</code></td>
+<td><code>postgres:15</code></td>
+<td>PostgreSQL Docker image</td>
+</tr>
+</tbody>
+</table>
+<h3 id="storage-settings">Storage settings<a class="headerlink" href="#storage-settings" title="Permanent link">¶</a></h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[storage].data_dir</code></td>
+<td><code>/srv/oduflow</code> or <code>~/.oduflow/data</code></td>
+<td>Base directory for all data. Team data directories are <code>team_{ID}</code> subdirectories inside</td>
+</tr>
+<tr>
+<td><code>[storage].overlay_threshold_mb</code></td>
+<td><code>50</code></td>
+<td>Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in <code>metadata.json</code> at template creation time</td>
+</tr>
+<tr>
+<td><code>[lifecycle].auto_stop_hours</code></td>
+<td><code>48</code></td>
+<td>Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). <code>0</code> disables. Protected environments are exempt</td>
+</tr>
+<tr>
+<td><code>[lifecycle].auto_delete_hours</code></td>
+<td><code>0</code></td>
+<td>Auto-delete stopped environments N hours after they stopped (manual stops count). Default <code>0</code> = <strong>disabled</strong> — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; <code>pull_and_apply</code> wakes a stopped environment automatically</td>
+</tr>
+<tr>
+<td><code>[lifecycle].prod_purge_hours</code></td>
+<td><code>0</code></td>
+<td>Purge the database and workspace kept by <code>delete_production</code> N hours after the deletion (tombstoned leftovers only; a re-created production is never purged). Default <code>0</code> = <strong>disabled</strong> — leftovers are kept forever; <code>oduflow cleanup --purge-deleted-productions --force</code> purges them immediately</td>
+</tr>
+</tbody>
+</table>
+<h3 id="agent-settings">Agent settings<a class="headerlink" href="#agent-settings" title="Permanent link">¶</a></h3>
+<p>The global <code>[agent]</code> section holds deployment-wide settings for the per-team coding agent (see <a href="../agent/">Coding Agent</a>). Per-team enablement lives in the <code>[team.*]</code> sections below.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[agent].image</code></td>
+<td><code>oduist/oduflow-coder:0.3.0</code></td>
+<td>Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release</td>
+</tr>
+<tr>
+<td><code>[agent].claude_model</code></td>
+<td><em>(empty)</em></td>
+<td>Optional Claude model override for the agent; empty = CLI default</td>
+</tr>
+<tr>
+<td><code>[agent].codex_model</code></td>
+<td><em>(empty)</em></td>
+<td>Optional Codex model override for the agent; empty = CLI default</td>
+</tr>
+<tr>
+<td><code>[agent].opencode_model</code></td>
+<td><em>(empty)</em></td>
+<td>Optional OpenCode model override in <code>provider/model</code> format; empty = OpenCode default</td>
+</tr>
+</tbody>
+</table>
+<h3 id="production-settings">Production settings<a class="headerlink" href="#production-settings" title="Permanent link">¶</a></h3>
+<p>Production hosting is opt-in and is documented in detail in
+<a href="../production/">Production Hosting</a>. Production routes and the dashboard tab
+are registered only when <code>[production].enabled = true</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[production].enabled</code></td>
+<td><code>false</code></td>
+<td>Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing</td>
+</tr>
+<tr>
+<td><code>[production].postgres_image</code></td>
+<td><em>(empty)</em></td>
+<td>PostgreSQL image for the production cluster. Empty uses <code>oduist/oduflow-postgres:15-bookworm-1</code> with CA certificates when <code>[database].image</code> is the default <code>postgres:15</code>; custom database images/majors are inherited</td>
+</tr>
+<tr>
+<td><code>[production].walg_version</code></td>
+<td><em>(empty)</em></td>
+<td>WAL-G release override. Empty uses the version pinned by Oduflow</td>
+</tr>
+<tr>
+<td><code>[production].workers_cap</code></td>
+<td><code>8</code></td>
+<td>Upper bound for automatically calculated Odoo workers; must be at least <code>1</code></td>
+</tr>
+<tr>
+<td><code>[production].wal</code></td>
+<td><em>(defaults below)</em></td>
+<td>Nested <code>[production.wal]</code> table for cluster-wide WAL timeouts and disk protection; active whenever production hosting is enabled</td>
+</tr>
+<tr>
+<td><code>[production.wal].upload_timeout</code></td>
+<td><code>120</code></td>
+<td>Seconds per WAL upload before termination; forced kill follows after 5 seconds</td>
+</tr>
+<tr>
+<td><code>[production.wal].warn_after</code></td>
+<td><code>120</code></td>
+<td>Seconds without archive progress while a queue exists before warning</td>
+</tr>
+<tr>
+<td><code>[production.wal].stall_after</code></td>
+<td><code>300</code></td>
+<td>Seconds without progress before error; must be at least <code>warn_after</code></td>
+</tr>
+<tr>
+<td><code>[production.wal].stop_free_gb</code></td>
+<td><code>2</code></td>
+<td>GiB available to postgres, excluding root reserve, at which production is stopped</td>
+</tr>
+<tr>
+<td><code>[production.wal].resume_free_gb</code></td>
+<td><code>4</code></td>
+<td>Required GiB before recovery/release; must exceed <code>stop_free_gb</code></td>
+</tr>
+<tr>
+<td><code>[production.wal].stop_within</code></td>
+<td><code>300</code></td>
+<td>Stop early if measured disk consumption predicts reaching the reserve within this many seconds</td>
+</tr>
+<tr>
+<td><code>[production.wal].warn_queue_gb</code></td>
+<td><code>2</code></td>
+<td>Warn when unarchived WAL reaches this size in GiB; recovery release requires a smaller queue</td>
+</tr>
+<tr>
+<td><code>[production.wal].stop_queue_gb</code></td>
+<td><code>8</code></td>
+<td>Stop production at this queued WAL size in GiB, even with ample free disk; must exceed <code>warn_queue_gb</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="backup-settings">Backup settings<a class="headerlink" href="#backup-settings" title="Permanent link">¶</a></h3>
+<p>The <code>[backup]</code> section is optional. If it is present, <code>bucket</code>, <code>access_key</code>,
+and <code>secret_key</code> are all required; remove the whole section to disable backups.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[backup].bucket</code></td>
+<td><em>(required)</em></td>
+<td>S3-compatible bucket name</td>
+</tr>
+<tr>
+<td><code>[backup].access_key</code></td>
+<td><em>(required)</em></td>
+<td>S3 access key</td>
+</tr>
+<tr>
+<td><code>[backup].secret_key</code></td>
+<td><em>(required)</em></td>
+<td>S3 secret key</td>
+</tr>
+<tr>
+<td><code>[backup].endpoint</code></td>
+<td><em>(empty)</em></td>
+<td>Custom S3 endpoint for MinIO, R2, or another compatible service; enables path-style addressing</td>
+</tr>
+<tr>
+<td><code>[backup].region</code></td>
+<td><em>(empty)</em></td>
+<td>S3 region</td>
+</tr>
+<tr>
+<td><code>[backup].prefix</code></td>
+<td><code>oduflow</code></td>
+<td>Object-key prefix, normalized without leading or trailing <code>/</code></td>
+</tr>
+<tr>
+<td><code>[backup].snapshot_time</code></td>
+<td><code>02:00</code></td>
+<td>Default daily per-production snapshot time in server-local <code>HH:MM</code></td>
+</tr>
+<tr>
+<td><code>[backup].basebackup_time</code></td>
+<td><code>03:30</code></td>
+<td>Daily WAL-G base-backup time in server-local <code>HH:MM</code></td>
+</tr>
+<tr>
+<td><code>[backup].keep</code></td>
+<td><code>["30:180", "7:30", "1:7"]</code></td>
+<td>Snapshot retention tiers as <code>interval_days:age_days</code> pairs</td>
+</tr>
+<tr>
+<td><code>[backup].walg_keep_full</code></td>
+<td><code>7</code></td>
+<td>Number of WAL-G full base backups to retain; must be at least <code>1</code></td>
+</tr>
+<tr>
+<td><code>[backup].upload_threads</code></td>
+<td><code>16</code></td>
+<td>Concurrent filestore chunk uploads per snapshot; <code>1</code> uploads sequentially. A running snapshot buffers up to <code>max(64 MiB, threads x 4 MiB)</code> of chunk data in memory, so lower it on small-RAM hosts</td>
+</tr>
+</tbody>
+</table>
+<h3 id="per-team-settings">Per-team settings<a class="headerlink" href="#per-team-settings" title="Permanent link">¶</a></h3>
+<p>Each <code>[team.*]</code> section defines an isolated team with its own workspaces, templates, credentials, and services. At least one team is required.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hostname</code></td>
+<td><em>(required)</em></td>
+<td>Unique team hostname and host-relative OAuth identity. In port mode environment URLs use <code>http://{hostname}:{port}</code>; in traefik mode they use <code>https://{slug}.{hostname}</code>. Behind Cloudflare Tunnel, publish this same hostname and use split DNS for direct LAN access when needed</td>
+</tr>
+<tr>
+<td><code>base_domain</code></td>
+<td><em>(empty — legacy layout)</em></td>
+<td>The team's DNS zone (traefik mode only), e.g. <code>demo.example.com</code>. When set, environments and services get hostnames directly under it (<code>feature.demo.example.com</code>), <code>hostname</code> defaults to <code>oduflow.{base_domain}</code> (the dashboard), and production domains must be the zone apex or a subdomain of it (the apex is the default for the team's first production; client-owned domains go in a production's <code>extra_domains</code>). The zone is exclusive: another team's hostname or base_domain may not live inside it. Requires <code>*.{base_domain}</code> DNS pointing at this server. Existing environments move into the zone on their next update</td>
+</tr>
+<tr>
+<td><code>environment_slots</code></td>
+<td><code>20</code></td>
+<td>Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. <code>0</code> disables the cap</td>
+</tr>
+<tr>
+<td><code>environment_hostname_mode</code></td>
+<td><code>branch</code></td>
+<td>Traefik public hostname strategy. <code>branch</code> keeps environment-derived names such as <code>feature.dev.example.com</code>; <code>slots</code> reuses <code>dev1.example.com</code> through <code>devN.example.com</code> and requires <code>environment_slots &gt; 0</code></td>
+</tr>
+<tr>
+<td><code>service_slots</code></td>
+<td><code>10</code></td>
+<td>Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. <code>0</code> disables the cap</td>
+</tr>
+<tr>
+<td><code>auth_token</code></td>
+<td><em>(generated in fresh config)</em></td>
+<td>Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with <code>[server].allow_insecure_http = true</code>; otherwise HTTP startup refuses it</td>
+</tr>
+<tr>
+<td><code>ui_password</code></td>
+<td><em>(generated in fresh config)</em></td>
+<td>Password for Web UI login (user: <code>admin</code>). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with <code>[server].allow_insecure_http = true</code>; otherwise HTTP startup refuses it</td>
+</tr>
+<tr>
+<td><code>port_range</code></td>
+<td><code>[50000, 50100]</code></td>
+<td>Port range for Odoo containers <code>[start, end)</code> — supports up to 100 concurrent environments</td>
+</tr>
+<tr>
+<td><code>agent_enabled</code></td>
+<td><code>false</code></td>
+<td>Enable the per-team coding agent (dashboard Agent Chat / Agent CLI). Off by default</td>
+</tr>
+<tr>
+<td><code>agent_default</code></td>
+<td><code>claude</code></td>
+<td>Which agent consoles/chats open by default: <code>claude</code>, <code>codex</code>, or <code>opencode</code></td>
+</tr>
+<tr>
+<td><code>db_quota_gb</code></td>
+<td><code>50</code></td>
+<td>Combined size cap for the team's environment and template PostgreSQL databases. <code>0</code> disables the check</td>
+</tr>
+<tr>
+<td><code>disk_quota_gb</code></td>
+<td><code>0</code></td>
+<td>Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. <code>0</code> disables it</td>
+</tr>
+<tr>
+<td><code>public_scheme</code></td>
+<td><em>(empty — global value)</em></td>
+<td>Per-team override of <code>[routing].public_scheme</code> (<code>http</code> or <code>https</code>) for the URLs handed out for this team. Lets one <code>tls = false</code> deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see <a href="../traefik/#mixing-http-and-https-teams-in-one-deployment">Traefik routing</a>. Same wire-reality rules as the global setting: <code>https</code> is rejected in port mode, <code>http</code> is rejected with <code>tls = true</code> or <code>tls = {}</code></td>
+</tr>
+<tr>
+<td><code>[team.X.agent_env]</code></td>
+<td><em>(empty)</em></td>
+<td>Sub-table of environment variables injected into the team's agent container — provider credentials (<code>CLAUDE_CODE_OAUTH_TOKEN</code>, <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>OPENCODE_API_KEY</code>, or any provider-specific OpenCode variable) and custom vars</td>
+</tr>
+<tr>
+<td><code>[team.X.image_registry]</code></td>
+<td><em>(absent — image building disabled)</em></td>
+<td>Sub-table enabling the container image build/publish MCP tools for the team. <code>repository_prefix</code> (required) is the registry namespace agents may publish under — the authorization boundary; <code>host</code> (default <code>docker.io</code>) is a plain registry hostname; <code>username</code> + <code>token</code> (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own <code>docker login</code> credentials. Resource bounds are <code>build_timeout_seconds</code> (default <code>1800</code>, hard wall-clock deadline), <code>max_context_mb</code> (default <code>512</code>), <code>max_log_mb</code> (default <code>16</code>), and <code>max_concurrent_builds</code> (default <code>2</code>). <code>keep_images</code> (default <code>10</code>, <code>0</code> disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix</td>
+</tr>
+</tbody>
+</table>
+<p><code>environment_hostname_mode = "slots"</code> requires Traefik and a hostname with a
+distinct host prefix and parent domain, such as <code>dev.example.com</code>. A bare
+registrable domain such as <code>example.com</code> has no prefix to number and is
+rejected. The default <code>branch</code> mode works with the existing
+<code>*.dev.example.com</code> DNS and wildcard-certificate layout.</p>
+<p>Team data is stored at <code>{data_dir}/team_{ID}/</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>team_{ID}/
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>├── workspaces/           # Per-branch environments
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>├── templates/            # Reusable database snapshots
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>├── shared_repos/         # Extra addon repositories (bare clones)
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>├── ports.json            # Port registry
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>├── hostnames.json        # Environment capacity reservations and optional reusable hostnames
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>├── .git-credentials      # Git credentials for this team
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>└── agent_guides/         # AI agent guides (markdown)
+</span></code></pre></div>
+<h3 id="configuration-file-overrides">Configuration file overrides<a class="headerlink" href="#configuration-file-overrides" title="Permanent link">¶</a></h3>
+<p>On first startup, Oduflow generates <code>postgresql.conf</code> from one host-wide
+resource plan and copies the bundled <code>odoo.conf</code> if it does not exist. These
+files take <strong>priority</strong> over the bundled defaults — edit them to customize
+PostgreSQL tuning or Odoo settings globally:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>/etc/oduflow/             (or ~/.oduflow/conf/)
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>  oduflow.toml            ← main configuration file
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>  postgresql.conf         ← dev PostgreSQL tuning (used by oduflow-db)
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>  postgresql-prod.conf    ← production PostgreSQL tuning (created lazily)
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>  odoo.conf               ← custom Odoo defaults (used by new environments)
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>  license.key             ← license file (optional)
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>  traefik/                ← Traefik dynamic configuration (auto-generated)
+</span></code></pre></div>
+<p><code>pg_hba.conf</code> remains in the PostgreSQL data volume rather than this config
+directory. On every startup Oduflow reads the active file reported by
+PostgreSQL and reconciles a marked block containing password-authenticated
+rules for the real Docker IPAM subnets of the shared and per-team networks.
+All standard and operator-managed rules outside that block are preserved. This
+also repairs an existing data volume whose original image initialization did
+not add a rule for Docker clients.</p>
+<p>The resource plan considers <code>[production].enabled</code>. With production disabled,
+the lean dev PostgreSQL profile targets about 10% of host RAM for
+<code>shared_buffers</code> (128 MB–1 GB). With production enabled, the planner budgets
+the host as a whole: dev PostgreSQL targets 5% (128–512 MB), production
+PostgreSQL targets 20% (512 MB–8 GB), production Odoo worker sizing gets a 45%
+RAM budget, and 20% stays reserved for the OS and other services. CPU values
+are concurrency ceilings, not Docker reservations.</p>
+<p>Generated configs contain an <code>ODUFLOW-TUNE</code> fingerprint. Oduflow warns when
+CPU, RAM, or the production mode no longer matches that fingerprint, but never
+rewrites or restarts PostgreSQL during a normal startup or package upgrade.
+Preview and explicitly apply a new plan with:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>oduflow<span class="w"> </span>retune-postgres<span class="w">          </span><span class="c1"># plan + unified diff; writes nothing</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>oduflow<span class="w"> </span>retune-postgres<span class="w"> </span>--apply<span class="w">  </span><span class="c1"># backup/write and stage managed configs</span>
+</span></code></pre></div>
+<p><code>--apply</code> refuses a custom config unless <code>--force</code> is also given. Existing
+files are backed up with a UTC timestamp. For each existing production it also
+regenerates the derived <code>odoo.conf</code> and stages it inside the Odoo container.
+Restart the PostgreSQL and Odoo containers listed by the command to activate
+the new database and worker settings.</p>
+<p>If a repository contains an <code>odoo.conf</code> in its <code>.oduflow/</code> directory (<code>&lt;repo&gt;/.oduflow/odoo.conf</code>), it takes priority over both the bundled and system-level versions for that specific environment.</p>
+<h2 id="telemetry">Telemetry<a class="headerlink" href="#telemetry" title="Permanent link">¶</a></h2>
+<p>Oduflow collects <strong>anonymous</strong> usage telemetry to help us understand adoption and prioritize development. Two events are sent:</p>
+<ul>
+<li><strong><code>first_run</code></strong> — sent once on the very first startup (when the instance ID is created).</li>
+<li><strong><code>env_created</code></strong> — sent each time a new environment is provisioned.</li>
+</ul>
+<p>Each event contains only:</p>
+<ul>
+<li>The event name</li>
+<li>The oduflow version</li>
+<li>A random instance ID (UUID)</li>
+</ul>
+<p><strong>No</strong> personal data, hostnames, IP addresses, branch names, repository URLs, or environment details are collected.</p>
+<h3 id="opt-out">Opt out<a class="headerlink" href="#opt-out" title="Permanent link">¶</a></h3>
+<p>Add to your <code>oduflow.toml</code>:</p>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="k">[server]</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="n">disable_telemetry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+</span></code></pre></div>
+<h2 id="auto-start-with-systemd">Auto-start with systemd<a class="headerlink" href="#auto-start-with-systemd" title="Permanent link">¶</a></h2>
+<p>On Linux servers, Oduflow can be registered as a systemd service so it starts automatically on boot.</p>
+<h3 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="c1"># Install uv (if not already installed)</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>curl<span class="w"> </span>-LsSf<span class="w"> </span>https://astral.sh/uv/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>sh
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="c1"># Install oduflow as a tool (as root)</span>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>oduflow
+</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>
+</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="c1"># Create the configuration file (optional — Oduflow auto-creates a default oduflow.toml on first start)</span>
+</span></code></pre></div>
+<h3 id="install-the-service">Install the service<a class="headerlink" href="#install-the-service" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>oduflow<span class="w"> </span>systemd-install
+</span></code></pre></div>
+<p>This will:</p>
+<ol>
+<li>Generate a systemd unit file at <code>/etc/systemd/system/oduflow.service</code></li>
+<li>Write <code>/etc/needrestart/conf.d/oduflow.conf</code> (only if needrestart is installed)</li>
+<li>Run <code>systemctl daemon-reload</code></li>
+<li>Enable the service for auto-start on boot</li>
+</ol>
+<p>The unit is ordered after <code>docker.service</code> and <code>containerd.service</code>, restarts
+always, and has no start-rate limit, so a host that upgrades Docker underneath
+Oduflow cannot leave the service parked in <code>failed</code>.</p>
+<p>The needrestart snippet excludes <code>oduflow.service</code> from needrestart's automatic
+restarts. Oduflow drives the Docker daemon; when <code>unattended-upgrades</code> restarts
+a library, needrestart would otherwise restart Oduflow in the same batch as
+containerd and Docker, and Oduflow's startup would race a daemon that is itself
+going down. With the exclusion in place, needrestart lists Oduflow as needing a
+manual restart instead:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>systemctl<span class="w"> </span>restart<span class="w"> </span>oduflow
+</span></code></pre></div>
+<p>Already installed the service with an older Oduflow? Re-run
+<code>oduflow systemd-install</code> to refresh the unit and add the needrestart override,
+then <code>systemctl daemon-reload &amp;&amp; systemctl restart oduflow</code>.</p>
+<h3 id="manage-the-service">Manage the service<a class="headerlink" href="#manage-the-service" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="c1"># Start</span>
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>systemctl<span class="w"> </span>start<span class="w"> </span>oduflow
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>
+</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="c1"># Status</span>
+</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>systemctl<span class="w"> </span>status<span class="w"> </span>oduflow
+</span><span id="__span-18-6"><a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>
+</span><span id="__span-18-7"><a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a><span class="c1"># Logs (follow)</span>
+</span><span id="__span-18-8"><a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a>journalctl<span class="w"> </span>-u<span class="w"> </span>oduflow<span class="w"> </span>-f
+</span><span id="__span-18-9"><a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a>
+</span><span id="__span-18-10"><a id="__codelineno-18-10" name="__codelineno-18-10" href="#__codelineno-18-10"></a><span class="c1"># Restart after config changes</span>
+</span><span id="__span-18-11"><a id="__codelineno-18-11" name="__codelineno-18-11" href="#__codelineno-18-11"></a>systemctl<span class="w"> </span>restart<span class="w"> </span>oduflow
+</span></code></pre></div>
+<h3 id="remove-the-service">Remove the service<a class="headerlink" href="#remove-the-service" title="Permanent link">¶</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>oduflow<span class="w"> </span>systemd-uninstall
+</span></code></pre></div>
+<p>This stops, disables, and removes the unit file, along with the needrestart
+override.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden="">
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href="../quick-start/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Quick Start">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Quick Start
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../use-cases/" class="md-footer__link md-footer__link--next" aria-label="Next: Use Cases &amp; Workflows">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Use Cases &amp; Workflows
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"></path></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright © Oduist — Oduflow
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/oduist/oduflow" target="_blank" rel="noopener" title="Oduflow on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Oduflow Docs" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M351.9 280H161c2.9 64.5 17.2 123.9 37.5 167.4 11.4 24.5 23.7 41.8 35.1 52.4 11.2 10.5 18.9 12.2 22.9 12.2s11.7-1.7 22.9-12.2c11.4-10.6 23.7-28 35.1-52.4 20.3-43.5 34.6-102.9 37.5-167.4zm-191-48h190.9c-2.8-64.5-17.1-123.9-37.4-167.4-11.4-24.4-23.7-41.8-35.1-52.4C268.1 1.7 260.4 0 256.4 0s-11.7 1.7-22.9 12.2c-11.4 10.6-23.7 28-35.1 52.4-20.3 43.5-34.6 102.9-37.5 167.4m-48 0c3.5-85.6 25.6-165.1 57.9-217.3C78.7 47.3 10.9 131.2 1.5 232zM1.5 280c9.4 100.8 77.2 184.7 169.3 217.3-32.3-52.2-54.4-131.7-57.9-217.3zm398.4 0c-3.5 85.6-25.6 165.1-57.9 217.3 92.1-32.7 159.9-116.5 169.3-217.3zm111.4-48C501.9 131.2 434.1 47.3 342 14.7c32.3 52.2 54.4 131.7 57.9 217.3z"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>

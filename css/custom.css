@@ -1,0 +1,345 @@
+/* ===========================================================================
+   Oduflow docs — Material theme customisation
+   Dark-first, blue brand accent (matches oduflow.dev), seamless header,
+   landing hero + cards.
+   =========================================================================== */
+
+:root {
+  --odu-brand:        #2e79f5;  /* brand primary (oduflow.dev) */
+  --odu-brand-bright: #4f8dff;  /* accent / hover            */
+  --odu-brand-link:   #74a8ff;  /* dark-mode links           */
+  --odu-brand-glow:   rgba(46, 121, 245, .30);
+}
+
+/* --- Custom primary / accent (applies to both colour schemes) ------------- */
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color:         #2e79f5;
+  --md-primary-fg-color--light:  #4f8dff;
+  --md-primary-fg-color--dark:   #1f5fd0;
+  --md-primary-bg-color:         #ffffff;
+  --md-primary-bg-color--light:  rgba(255, 255, 255, .7);
+}
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color:             #4f8dff;
+  --md-accent-fg-color--transparent: rgba(46, 121, 245, .1);
+  --md-accent-bg-color:             #ffffff;
+  --md-accent-bg-color--light:      rgba(255, 255, 255, .7);
+}
+
+/* --- Dark scheme: blue-tinted near-black (matches oduflow.dev) ------------ */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color:          #060a12;
+  --md-default-bg-color--light:   rgba(6, 10, 18, .7);
+  --md-default-bg-color--lighter: rgba(6, 10, 18, .3);
+  --md-default-bg-color--lightest:rgba(6, 10, 18, .12);
+
+  --md-default-fg-color:          rgba(230, 232, 235, .92);
+  --md-default-fg-color--light:   rgba(230, 232, 235, .70);
+  --md-default-fg-color--lighter: rgba(230, 232, 235, .42);
+  --md-default-fg-color--lightest:rgba(230, 232, 235, .10);
+
+  --md-code-bg-color:  #0c1322;
+  --md-code-fg-color:  #d6dee8;
+
+  --md-typeset-a-color: var(--odu-brand-link);
+
+  --md-footer-bg-color:      #04070d;
+  --md-footer-bg-color--dark:#03050a;
+
+  --odu-surface:        #0b1220;
+  --odu-surface-2:      #111a2b;
+  --odu-border:         rgba(140, 170, 225, .12);
+  --odu-border-strong:  rgba(140, 170, 225, .20);
+}
+
+/* --- Light scheme: cool white + soft blue borders ------------------------ */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #ffffff;
+  --md-typeset-a-color:  #1b5fd0;
+
+  --odu-surface:        #f4f8ff;
+  --odu-surface-2:      #e9f1ff;
+  --odu-border:         rgba(20, 60, 140, .10);
+  --odu-border-strong:  rgba(20, 60, 140, .16);
+}
+
+/* ===========================================================================
+   Seamless header — page-coloured bar instead of a solid blue band
+   =========================================================================== */
+.md-header {
+  background-color: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  border-bottom: 1px solid var(--odu-border);
+  box-shadow: none;
+  transition: background-color .25s, border-color .25s;
+}
+.md-header[data-md-state="shadow"],
+.md-header--shadow {
+  box-shadow: 0 0 .4rem rgba(0, 0, 0, .08), 0 .2rem .4rem rgba(0, 0, 0, .12);
+}
+.md-tabs { background-color: var(--md-default-bg-color); }
+
+/* White logo PNG → flip to dark in light mode */
+[data-md-color-scheme="default"] .md-header__button.md-logo img,
+[data-md-color-scheme="default"] .md-nav__title .md-logo img {
+  filter: invert(1);
+}
+.md-header__button.md-logo img,
+.md-nav__title .md-logo img { height: 1.4rem; width: auto; }
+
+/* Search field on the seamless header */
+.md-search__form {
+  background-color: var(--odu-surface);
+  border: 1px solid var(--odu-border);
+  border-radius: .6rem;
+  box-shadow: none;
+}
+.md-search__form:hover { background-color: var(--odu-surface-2); }
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form {
+  border-color: var(--odu-brand);
+}
+
+/* ===========================================================================
+   Typography & global polish
+   =========================================================================== */
+.md-typeset { font-feature-settings: "kern", "liga", "calt"; }
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 { letter-spacing: -.01em; font-weight: 700; }
+.md-typeset h2 {
+  margin-top: 2.4em;
+  padding-bottom: .3em;
+  border-bottom: 1px solid var(--odu-border);
+}
+
+.md-typeset a { transition: color .15s, opacity .15s; }
+.md-typeset a:hover { color: var(--odu-brand-bright); }
+
+/* Inline code + fenced blocks */
+.md-typeset code { border-radius: .35rem; }
+.md-typeset pre > code {
+  border: 1px solid var(--odu-border);
+  border-radius: .7rem;
+}
+.md-typeset .highlight { border-radius: .7rem; }
+
+/* Tables */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--odu-border);
+  border-radius: .7rem;
+  overflow: hidden;
+  box-shadow: none;
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--odu-surface-2);
+  font-weight: 600;
+}
+.md-typeset table:not([class]) tr:hover { background-color: var(--odu-surface); }
+
+/* Slim, themed scrollbar (WebKit) */
+* { scrollbar-width: thin; scrollbar-color: var(--odu-border-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--odu-border-strong);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--md-default-fg-color--lighter); background-clip: content-box; }
+
+/* Sidebar section labels (navigation.sections) */
+.md-nav__item--section > .md-nav__link {
+  font-size: .66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Active nav link accent */
+.md-nav__link--active,
+.md-nav__link--active:focus { color: var(--odu-brand); font-weight: 600; }
+
+/* Headerlinks (kept from previous theme) */
+.headerlink { opacity: 0; transition: opacity .2s; text-decoration: none; color: inherit; }
+h1:hover .headerlink, h2:hover .headerlink, h3:hover .headerlink,
+h4:hover .headerlink, h5:hover .headerlink, h6:hover .headerlink { opacity: 1; }
+
+/* ===========================================================================
+   Landing hero
+   =========================================================================== */
+.odu-hero {
+  position: relative;
+  margin: -1rem -.8rem 3rem;
+  padding: 4.5rem 1.5rem 3.5rem;
+  text-align: center;
+  border-radius: 1.2rem;
+  overflow: hidden;
+  isolation: isolate;
+}
+/* Layered blue glow + grid texture */
+.odu-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(120% 120% at 50% -10%, var(--odu-brand-glow) 0%, transparent 55%),
+    radial-gradient(80% 80% at 85% 20%, rgba(46, 121, 245, .18) 0%, transparent 60%);
+}
+.odu-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(var(--odu-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--odu-border) 1px, transparent 1px);
+  background-size: 38px 38px;
+  -webkit-mask-image: radial-gradient(100% 80% at 50% 0%, #000 30%, transparent 75%);
+          mask-image: radial-gradient(100% 80% at 50% 0%, #000 30%, transparent 75%);
+  opacity: .6;
+}
+
+.odu-hero__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: .5em;
+  margin: 0 0 1.1rem;
+  padding: .32rem .8rem;
+  font-family: var(--md-code-font-family, "JetBrains Mono", monospace);
+  font-size: .66rem;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--odu-brand);
+  background: var(--md-accent-fg-color--transparent);
+  border: 1px solid var(--odu-brand-glow);
+  border-radius: 2rem;
+}
+
+.md-typeset .odu-hero__title {
+  margin: 0;
+  font-size: clamp(2.4rem, 7vw, 4.6rem);
+  line-height: 1.1;
+  font-weight: 800;
+  letter-spacing: -.035em;
+  background: linear-gradient(180deg, var(--md-default-fg-color) 25%, var(--odu-brand) 130%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+
+.odu-hero__subtitle {
+  max-width: 40rem;
+  margin: 1.2rem auto 0;
+  font-size: 1.06rem;
+  line-height: 1.6;
+  color: var(--md-default-fg-color--light);
+}
+.odu-hero__subtitle strong { color: var(--md-default-fg-color); font-weight: 600; }
+
+.odu-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .8rem;
+  justify-content: center;
+  margin-top: 2rem;
+}
+.md-typeset .odu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .5em;
+  padding: .62rem 1.3rem;
+  font-size: .82rem;
+  font-weight: 600;
+  border-radius: .65rem;
+  border: 1px solid transparent;
+  transition: transform .15s ease, box-shadow .2s ease, background-color .2s, border-color .2s;
+}
+.md-typeset .odu-btn:hover { transform: translateY(-2px); }
+.md-typeset .odu-btn--primary {
+  color: #ffffff;
+  background: var(--odu-brand);
+  box-shadow: 0 .4rem 1.2rem var(--odu-brand-glow);
+}
+.md-typeset .odu-btn--primary:hover {
+  color: #ffffff;
+  background: var(--odu-brand-bright);
+  box-shadow: 0 .7rem 1.6rem var(--odu-brand-glow);
+}
+.md-typeset .odu-btn--ghost {
+  color: var(--md-default-fg-color);
+  background: var(--odu-surface);
+  border-color: var(--odu-border-strong);
+}
+.md-typeset .odu-btn--ghost:hover {
+  color: var(--md-default-fg-color);
+  border-color: var(--odu-brand-bright);
+  background: var(--odu-surface-2);
+}
+.md-typeset .odu-btn--changelog {
+  color: #ffffff;
+  background: linear-gradient(135deg, #2e79f5 0%, #4a00e0 100%);
+  border-color: transparent;
+  border-right: 1px solid #4a00e0 !important;
+  box-shadow: 0 .4rem 1.2rem rgba(64, 25, 95, .30);
+}
+.md-typeset .odu-btn--changelog:hover {
+  color: #ffffff;
+  background: linear-gradient(135deg, #4f8dff 0%, #5a1dff 100%);
+  border-right: 1px solid #5a1dff !important;
+  box-shadow: 0 .7rem 1.6rem rgba(64, 25, 95, .35);
+}
+
+/* ===========================================================================
+   Feature card grid (Material `grid cards`)
+   =========================================================================== */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border: 1px solid var(--odu-border);
+  border-radius: .9rem;
+  padding: 1.1rem 1.2rem;
+  background: var(--odu-surface);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .25s ease, background-color .2s;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  transform: translateY(-4px);
+  border-color: var(--odu-brand-bright);
+  background: var(--odu-surface-2);
+  box-shadow: 0 .6rem 1.6rem rgba(0, 0, 0, .18);
+}
+.md-typeset .grid.cards > ul > li > hr {
+  margin: .8rem 0;
+  border-color: var(--odu-border);
+}
+.md-typeset .grid.cards .twemoji.lg,
+.md-typeset .grid.cards .twemoji svg {
+  height: 1.6rem;
+  width: 1.6rem;
+}
+.md-typeset .grid.cards > ul > li .twemoji {
+  color: var(--odu-brand);
+}
+
+/* ===========================================================================
+   Screenshot frame
+   =========================================================================== */
+.odu-shot {
+  margin: 2.5rem 0;
+  border-radius: 1rem;
+  border: 1px solid var(--odu-border-strong);
+  overflow: hidden;
+  box-shadow: 0 1.2rem 3rem rgba(0, 0, 0, .25);
+}
+.odu-shot img { display: block; width: 100%; }
+
+/* ===========================================================================
+   Footer + misc
+   =========================================================================== */
+.md-footer-meta { backdrop-filter: none; }
+
+@media screen and (max-width: 44.9em) {
+  .odu-hero { padding: 3rem 1rem 2.5rem; margin: -1rem -.6rem 2rem; }
+}

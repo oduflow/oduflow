@@ -1,0 +1,2424 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="AI-first Odoo development and CI tool with reusable database templates, powered by MCP">
+      
+      
+        <meta name="author" content="Oduist">
+      
+      
+        <link rel="canonical" href="https://docs.oduflow.dev/production/">
+      
+      
+        <link rel="prev" href="../environments/">
+      
+      
+        <link rel="next" href="../agent/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.ico">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Production Hosting - Oduflow</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../css/custom.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#production-hosting" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Oduflow" class="md-header__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Oduflow
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Production Hosting
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required="">
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard="" data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"></path></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix="">
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Oduflow" class="md-nav__button md-logo" aria-label="Oduflow" data-md-component="logo">
+      
+  <img src="../assets/logo.png" alt="logo">
+
+    </a>
+    Oduflow
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oduist/oduflow" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    oduist/oduflow
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix="">
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1">
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation &amp; Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked="">
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Core Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use Cases &amp; Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Template Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../environments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Hosting
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Hosting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requirements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#creating-a-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating a production
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Creating a production">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#domains" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Domains
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#promoting-a-dev-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Promoting a dev environment
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconfiguring-a-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconfiguring a production
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reconfiguring a production">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#odooconf-overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        odoo.conf overrides
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deploys-and-rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deploys and rollback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#github-webhooks-auto-deploy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GitHub webhooks (auto-deploy)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backups
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Backups">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#wal-g-certificates-and-storage-health" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WAL-G certificates and storage health
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#production-readiness-at-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production readiness at deployment
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#wal-monitoring-and-automatic-disk-protection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WAL monitoring and automatic disk protection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recovering-from-a-full-wal-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recovering from a full WAL disk
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#copying-production-data-to-dev" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Copying production data to dev
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#health" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deleting-a-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deleting a production
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mcp-tool-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MCP tool reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coding Agent
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auxiliary Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extra-addons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extra Addons Repositories
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stacks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Declarative Stacks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3">
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../web-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Dashboard &amp; REST API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP Tools Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4">
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../traefik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Traefik Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-instance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Team Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Authentication &amp; Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running in Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5">
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../licensing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Licensing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requirements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#creating-a-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating a production
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Creating a production">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#domains" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Domains
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#promoting-a-dev-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Promoting a dev environment
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconfiguring-a-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconfiguring a production
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reconfiguring a production">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#odooconf-overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        odoo.conf overrides
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deploys-and-rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deploys and rollback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#github-webhooks-auto-deploy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GitHub webhooks (auto-deploy)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backups
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Backups">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#wal-g-certificates-and-storage-health" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WAL-G certificates and storage health
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#production-readiness-at-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production readiness at deployment
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#wal-monitoring-and-automatic-disk-protection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WAL monitoring and automatic disk protection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recovering-from-a-full-wal-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recovering from a full WAL disk
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#copying-production-data-to-dev" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Copying production data to dev
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#health" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deleting-a-production" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deleting a production
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mcp-tool-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MCP tool reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="production-hosting">Production Hosting<a class="headerlink" href="#production-hosting" title="Permanent link">¶</a></h1>
+<p>Oduflow can host <strong>production</strong> Odoo environments alongside the dev
+environments it was built for. Productions get special treatment:</p>
+<ul>
+<li>a <strong>dedicated PostgreSQL cluster</strong> (<code>oduflow-prod-db</code>) — physically
+  separate from the dev one, auto-tuned for production workloads;</li>
+<li>a <strong>custom domain</strong> per production (<code>erp.customer.com</code>), routed by Traefik
+  with a Let's Encrypt certificate — plus optional <strong>extra domains</strong> routed to
+  the same production (e.g. the client's own public domain);</li>
+<li>an <strong>auto-tuned production <code>odoo.conf</code></strong> (workers from host CPU/RAM, cron
+  enabled, proxy mode) — never the dev profile;</li>
+<li><strong>no sanitization/neutralization</strong>, no idle reaper, no <code>--dev=xml</code>;</li>
+<li>deploys with <strong>automatic code rollback</strong> on failure;</li>
+<li><strong>S3 backups</strong>: continuous WAL archiving (WAL-G), scheduled snapshots
+  (database dump + deduplicated filestore), disaster-recovery PITR.</li>
+</ul>
+<p>Productions are managed by their own MCP tool stack (<code>create_production</code>,
+<code>update_production</code>, …) and a dedicated <strong>Production</strong> tab in the dashboard —
+they never mix with dev environment tooling.</p>
+<h2 id="requirements">Requirements<a class="headerlink" href="#requirements" title="Permanent link">¶</a></h2>
+<ul>
+<li><code>routing_mode = "traefik"</code> (custom domains are Traefik <code>Host()</code> rules).</li>
+<li>The production's DNS record must point at the server.</li>
+<li>For backups: an S3-compatible bucket (AWS, MinIO, Cloudflare R2, …).</li>
+<li>Debian-based <code>postgres:*</code> images (the default; <code>-alpine</code> images do not run
+  the WAL-G binary).</li>
+</ul>
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">¶</a></h2>
+<p>Production hosting is disabled by default. Enable it globally in TOML and
+restart Oduflow; productions themselves are then created at runtime:</p>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">[production]</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">          </span><span class="c1"># required; restart Oduflow after changing</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">postgres_image</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">""</span><span class="w">     </span><span class="c1"># default: [database].image</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">workers_cap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">         </span><span class="c1"># upper bound for auto-tuned Odoo workers</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="k">[backup]</span><span class="w">                </span><span class="c1"># configures backups; production must also be enabled</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"acme-backups"</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="n">access_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"AKIA..."</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="n">secret_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="n">endpoint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">""</span><span class="w">           </span><span class="c1"># empty = AWS; set for MinIO/R2 (path-style implied)</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">region</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"eu-central-1"</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="c1"># defaults you normally leave alone:</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="c1"># prefix = "oduflow"</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="c1"># snapshot_time = "02:00"      (daily per-production snapshots)</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="c1"># basebackup_time = "03:30"    (daily WAL-G base backup)</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="c1"># keep = ["30:180", "7:30", "1:7"]  (snapshot retention: interval:age days)</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="c1"># walg_keep_full = 7           (base backups retained)</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="c1"># upload_threads = 16          (parallel filestore chunk uploads; buffers</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="c1">#                               up to max(64 MiB, threads x 4 MiB) in RAM)</span>
+</span></code></pre></div>
+<p>While disabled, the dashboard tab and production HTTP/webhook routes are not
+registered, production MCP tools return an enablement error, and scheduled
+backup work does not run.</p>
+<p>The production PostgreSQL cluster is provisioned lazily and idempotently. If
+production hosting is disabled, Oduflow stops every managed production Odoo
+container and then its dedicated PostgreSQL container without deleting any
+container, volume, database, filestore, or registry data. Re-enabling starts
+PostgreSQL first and then starts all managed production Odoo containers.</p>
+<p>Enabling production also changes the unified host resource plan. New configs
+coordinate dev PostgreSQL, production PostgreSQL, and production Odoo workers
+instead of letting each profile size itself against the whole host. Existing
+configs are not silently replaced: after changing <code>enabled</code>, run
+<code>oduflow retune-postgres</code> to inspect the new plan, then
+<code>oduflow retune-postgres --apply</code>. The apply step also stages regenerated
+worker settings in every existing production Odoo container; restart the
+PostgreSQL and Odoo containers it lists.</p>
+<h2 id="creating-a-production">Creating a production<a class="headerlink" href="#creating-a-production" title="Permanent link">¶</a></h2>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>create_production(
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    name="erp",
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    repo_url="https://github.com/acme/odoo-erp.git",
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    branch="production",
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    domain="erp.acme.com",
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    odoo_image="odoo:18.0",
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    template_name="acme-prod",   # optional: seed DB+filestore from a template
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    auto_update=False,
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    allow_copy_to_dev_mcp=True,  # may agents copy this production into dev?
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>)
+</span></code></pre></div>
+<h3 id="domains">Domains<a class="headerlink" href="#domains" title="Permanent link">¶</a></h3>
+<p>In a team with <a href="../traefik/#team-base-domain"><code>base_domain</code></a> configured, the
+primary <code>domain</code> must lie in the team zone — the zone apex
+(<code>demo.example.com</code>) or a subdomain (<code>erp.demo.example.com</code>) — and may be
+omitted: the team's <strong>first</strong> production defaults to the apex, later ones to
+<code>&lt;name&gt;.&lt;base_domain&gt;</code>. Without a base domain, <code>domain</code> is required and may be
+any FQDN.</p>
+<p><code>extra_domains</code> adds further public FQDNs routed to the same production —
+typically the client's own domain alongside the team-zone name:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>create_production(name="erp", domain="demo.example.com",
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>                  extra_domains=["myodoo.pl"], ...)
+</span></code></pre></div>
+<p>All domains land in one Traefik router (<code>Host(a) || Host(b)</code>), each with its
+own Let's Encrypt certificate; every DNS record must point at this server.
+Extra domains may be arbitrary FQDNs but must not fall inside another team's
+zone, and every domain — primary or extra — must be unused anywhere else in
+the deployment (other productions, team hostnames, static routes).</p>
+<p><code>template_name</code> is the migration path for an existing production: import it
+first (e.g. <a href="../templates/">from Odoo.sh</a>), then create the production from
+that template — the database is copied into the production cluster and the
+filestore into the production's plain (non-overlay) directory.</p>
+<p>The clone is <strong>full</strong> (not shallow): the branch's commit history is the
+production's deploy history and the source of rollback targets.</p>
+<h3 id="promoting-a-dev-environment">Promoting a dev environment<a class="headerlink" href="#promoting-a-dev-environment" title="Permanent link">¶</a></h3>
+<p><code>from_environment</code> turns an existing dev environment into the seed — the
+promotion path from "it works on the branch" to "it serves customers":</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>create_production(name="erp", domain="erp.acme.com", from_environment="feature-x")
+</span></code></pre></div>
+<p>The environment's database and filestore are copied (its Odoo container is
+briefly stopped so the pair is consistent, then restarted), and omitted
+<code>repo_url</code> / <code>branch</code> / <code>odoo_image</code> / <code>git_user</code> / <code>extra_addons</code> default to
+the environment's own — explicit arguments still win. Unlike the
+save-as-template detour, no intermediate template is created and the source
+environment is <strong>not reset</strong> — it keeps living as a dev environment.
+<code>from_environment</code> and <code>template_name</code> are mutually exclusive.</p>
+<p>Promotion also inherits the source environment's user environment variables.
+<code>secret:&lt;name&gt;</code> references stay in the production registry and container labels;
+values are resolved from the team's secret store only for the container runtime.
+They survive domain/image/branch reconfiguration. Missing secrets are rejected
+before the source is stopped. Pass <code>env_vars={...}</code> to replace the inherited set,
+or <code>{}</code> to inherit none. <code>reconfigure_production(env_vars={...})</code> replaces the
+stored set; omitting it preserves the existing variables. The managed database
+variables <code>HOST</code>, <code>PORT</code>, <code>USER</code>, and <code>PASSWORD</code> cannot be overridden.</p>
+<p>No sanitization happens — the data goes <em>into</em> production. One caveat: if
+the source environment was itself created from a production
+(<code>from_production</code>), its data was sanitized on that copy, and the new
+production starts with that sanitized data (the result warns about this).</p>
+<p>The dashboard offers the same via <strong>More → Promote to Production</strong> on an
+environment card, which opens the create-production form pre-filled.</p>
+<p>To promote into a production that <strong>already exists</strong>, use
+<code>restore_production(from_environment=…)</code> instead — see
+<a href="#backups">Backups</a> for the restore mechanics.</p>
+<h2 id="reconfiguring-a-production">Reconfiguring a production<a class="headerlink" href="#reconfiguring-a-production" title="Permanent link">¶</a></h2>
+<p>A production's settings are not frozen at creation.
+<code>reconfigure_production</code> changes any of the domain, extra domains, Odoo
+image, deployed branch, repository URL, git user, or the extra addon repos,
+then <strong>recreates the container</strong> to match — the database and filestore live outside the
+container and are preserved; expect a brief downtime:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>reconfigure_production(name="erp", domain="erp.newcustomer.com")
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>reconfigure_production(name="erp", extra_domains=["myodoo.pl"])  # [] removes all
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>reconfigure_production(name="erp", branch="18.0-stable")
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
+</span></code></pre></div>
+<p>Omitted arguments are left unchanged (<code>git_user=""</code> explicitly clears the
+git user). The registry record is updated first and the workspace/container
+are converged to it, so re-running the same call after a mid-way failure
+repairs a missing container or checkout instead of reporting a no-op. Two
+things reconfigure deliberately does <strong>not</strong> do:</p>
+<ul>
+<li>Changing <code>odoo_image</code> does not migrate the database. A minor image refresh
+  is safe; a major Odoo version bump additionally needs an explicit module
+  upgrade plan.</li>
+<li>Changing <code>branch</code>/<code>repo_url</code> deploys the new code as-is (restart only).
+  Run <code>update_production(install=..., upgrade=...)</code> afterwards if the new
+  code needs module changes.</li>
+</ul>
+<p>The dashboard offers the same settings on each production card under
+<strong>More → Settings</strong>, together with the <em>agent copy to dev</em> gate
+(dashboard-only, see <a href="#copying-production-data-to-dev">Copying production data to dev</a>).</p>
+<h3 id="odooconf-overrides">odoo.conf overrides<a class="headerlink" href="#odooconf-overrides" title="Permanent link">¶</a></h3>
+<p>The generated production <code>odoo.conf</code> merges a base conf chain
+(<code>.oduflow/odoo.prod.conf</code> in the repo &gt; team <code>odoo.prod.conf</code> &gt; bundled)
+with <a href="#configuration">auto-tuned</a> worker/limit settings. Per-production
+overrides sit on top of both and survive deploys, retunes and reconfigures:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>set_production_odoo_conf(name="erp", options={"limit_time_real": "300"})
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>set_production_odoo_conf(name="erp", unset="limit_time_real")
+</span></code></pre></div>
+<p>An explicit override beats the auto-tuned value (e.g. pin <code>workers</code>). Keys
+managed by Oduflow are refused: <code>addons_path</code> and <code>data_dir</code> are generated,
+and the <code>db_*</code> connection keys come from container env vars (option names
+are compared case-insensitively and stored lowercased, matching how Odoo
+reads them). Current overrides are shown by <code>get_production_info</code>; the
+dashboard edits them in the same <strong>Settings</strong> panel. Applying restarts the
+container (brief downtime) unless <code>restart=false</code>; a call that leaves the
+overrides unchanged skips the restart entirely.</p>
+<h2 id="deploys-and-rollback">Deploys and rollback<a class="headerlink" href="#deploys-and-rollback" title="Permanent link">¶</a></h2>
+<p>Module preflight and post-install checks use the production PostgreSQL cluster
+and the production's own database role. Development requests retain their
+separate cluster. An exception after source synchronization, including a module
+preflight SQL failure, triggers code rollback just like a failed module command.</p>
+<p><code>update_production(name)</code> pulls the branch (and extra-addon worktrees),
+classifies the changes (or takes explicit <code>install=</code> / <code>upgrade=</code> /
+<code>restart=true</code>), applies them, and <strong>verifies</strong> the deploy — module exit
+codes plus an in-container health check. A changed <code>.oduflow/requirements.txt</code>
+or <code>.oduflow/apt_packages.txt</code> — in the main repo or an extra-addon repo —
+reinstalls the pip/apt dependencies into the container before the restart
+(they are also installed from scratch whenever the container is recreated:
+create, reconfigure). In production a "refresh"-class
+change (XML/JS only) still restarts the container: there is no <code>--dev=xml</code>.</p>
+<p>If verification fails, the checkout is reset to the pre-deploy commit, the
+config re-applied and the container restarted — <strong>the code rolls back
+automatically</strong>. The database is <em>never</em> rolled back automatically: if a
+module upgrade left it inconsistent, restore a snapshot explicitly
+(<code>restore_production</code>). A snapshot is taken automatically before every deploy
+when backups are configured.</p>
+<p>Every deploy lands in the production's history (<code>production_deploys</code>):
+commits, action, modules, status (<code>success</code> / <code>rolled_back</code> /
+<code>rollback_failed</code>), trigger (mcp / ui / webhook / schedule).</p>
+<p>Manual code rollback to any commit: <code>rollback_production(name, to_commit)</code>.</p>
+<h2 id="github-webhooks-auto-deploy">GitHub webhooks (auto-deploy)<a class="headerlink" href="#github-webhooks-auto-deploy" title="Permanent link">¶</a></h2>
+<p>Point a GitHub webhook at <code>POST https://&lt;server&gt;/api/webhooks/github</code>
+(content type <code>application/json</code>) with the team's webhook secret — shown in
+the dashboard's Production tab, auto-generated with the first production.
+Requests are authenticated by their <code>X-Hub-Signature-256</code> HMAC.</p>
+<p>A push deploys only productions that match the repo + branch <strong>and</strong> have
+<code>auto_update</code> enabled (<code>set_production_auto_update</code>). Dev environments are
+never touched by webhooks. Failed webhook deploys roll back like any other.</p>
+<h2 id="backups">Backups<a class="headerlink" href="#backups" title="Permanent link">¶</a></h2>
+<p>Two complementary layers (both to S3, enabled by <code>[backup]</code>):</p>
+<p><strong>Snapshots — per-production restore.</strong> A snapshot is a consistent triple:
+<code>pg_dump</code> of the production database (streamed to S3, no temp disk), a
+deduplicated filestore revision, and a manifest recording the deployed commit
+sha. Taken daily (<code>snapshot_time</code>, per-production override via
+<code>set_production_backup_schedule</code>), before every deploy, and on demand
+(<code>snapshot_production</code>). Restore with:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>restore_production(name="erp", snapshot_id="20260711T020000Z", confirm="erp")
+</span></code></pre></div>
+<p>Restore is swap-based: the dump is restored into a scratch database and
+swapped in by rename; the filestore is rebuilt beside the live one and
+swapped in. A failed restore leaves the previous state untouched. If the
+snapshot's commit differs from the checkout, the result warns you to
+<code>rollback_production</code> to the matching commit.</p>
+<p><strong>Restoring from a dev environment.</strong> The same tool also promotes a dev
+environment's data into an <em>existing</em> production — the counterpart of
+<code>create_production(from_environment=…)</code> for productions that already live:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>restore_production(name="erp", from_environment="feature-x", confirm="erp")
+</span></code></pre></div>
+<p>The environment's database and filestore are copied while its Odoo is
+briefly stopped (the environment is <strong>not reset</strong>), staged, and swapped in
+with the same all-or-nothing mechanics as a snapshot restore. No
+sanitization happens — the data goes <em>into</em> production — and no <code>[backup]</code>
+configuration is required. The production's code checkout is not touched;
+the result warns when the environment's commit differs from the deployed
+one. Take a <code>snapshot_production</code> first if the current production data may
+still be needed. <code>snapshot_id</code> and <code>from_environment</code> are mutually
+exclusive.</p>
+<p>The filestore engine (a clean-room, duplicacy-inspired content-defined
+chunking store) deduplicates across daily revisions <em>and</em> across a team's
+productions; retention (<code>keep</code>) is applied weekly with safe two-step fossil
+collection.</p>
+<p><strong>WAL-G — cluster disaster recovery.</strong> Continuous WAL archiving plus daily
+base backups of the whole production cluster. This is the "server burned
+down" path:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>restore_cluster_pitr(target_time="", confirm="RESTORE-CLUSTER")
+</span></code></pre></div>
+<p>restores the <strong>entire cluster</strong> (every production database at once — including
+auxiliary service databases created with <code>cluster="prod"</code>) from the
+latest base backup + WAL replay — optionally to a point in time
+(<code>target_time="2026-07-10 12:00:00+00"</code>). The displaced data directory is
+kept inside the Docker volume for manual cleanup. Because the state lives in
+S3, a <strong>fresh Oduflow server</strong> with the same <code>[backup]</code> section can resurrect
+the cluster the same way.</p>
+<p><code>production_backup_status()</code> shows per-production snapshot state, WAL
+archiver health (<code>pg_stat_archiver</code>), base backup inventory, and S3
+reachability.</p>
+<h3 id="wal-g-certificates-and-storage-health">WAL-G certificates and storage health<a class="headerlink" href="#wal-g-certificates-and-storage-health" title="Permanent link">¶</a></h3>
+<p>Oduflow writes a CA bundle alongside <code>walg.json</code> in
+<code>&lt;base_data_dir&gt;/walg/</code> and configures WAL-G to read it through the existing
+read-only <code>/etc/walg</code> directory mount. This works even when the PostgreSQL
+image has no system CA bundle, and covers WAL uploads, base backups, and PITR
+helpers. Restarting Oduflow refreshes these files for existing containers;
+PostgreSQL does not need to be recreated for this fix.</p>
+<p>The CA source is <code>AWS_CA_BUNDLE</code>, then <code>SSL_CERT_FILE</code>, then the server's
+default CA file, with the boto3/botocore bundle as a fallback when there is no
+default file. Set an explicit override in the Oduflow service environment for
+a private certificate authority. Invalid overrides fail rather than disabling
+TLS verification or replacing a working bundle.</p>
+<p>The background WAL monitor checks storage list access using WAL-G <strong>inside
+production PostgreSQL, as the postgres user</strong>. The dashboard's <strong>WAL-G</strong> health
+chip and <code>/healthz</code> use its cached result. The
+diagnostic command has a five-second timeout, with forced termination after
+another two seconds. A TLS/access error degrades <code>/healthz</code> even when the
+separate S3 check from the Oduflow server succeeds. List access does not prove
+upload permissions, successful archiving, or a complete PITR chain. The backup
+status API retains local archiver statistics when the remote inventory query
+fails; inventory commands have a 30-second timeout.</p>
+<h3 id="production-readiness-at-deployment">Production readiness at deployment<a class="headerlink" href="#production-readiness-at-deployment" title="Permanent link">¶</a></h3>
+<p>New installations using the default PostgreSQL 15 use
+<code>oduist/oduflow-postgres:15-bookworm-1</code>. This image includes <code>ca-certificates</code>
+and pins the upstream Debian Bookworm image by digest. A custom
+<code>[production].postgres_image</code> takes precedence; a non-default
+<code>[database].image</code> is still inherited for compatibility with other PostgreSQL
+majors. Existing containers are reused, never automatically replaced or
+upgraded across majors. Their WAL-G trust is repaired through the persistent
+mounted CA bundle described above.</p>
+<p>With <code>[backup]</code> configured, provisioning and production start/restart/deploy
+require a successful check <strong>inside PostgreSQL as the postgres user</strong>:</p>
+<ol>
+<li>Check the actual disk and queue safety thresholds.</li>
+<li>Check the mounted CA bundle, executable and credentials file, then use
+   WAL-G to list storage, upload a unique probe, read it back, compare its
+   content and delete the probe. The storage phase is limited to 30 seconds,
+   with bounded cleanup/forced termination. The credentials need read, list,
+   write and delete permissions for the probe under
+   <code>&lt;backup.prefix&gt;/walg/oduflow-preflight/</code>; backup objects are not modified.</li>
+<li>Enable the managed archive command and confirm PostgreSQL applied it.</li>
+<li>Generate a restore point and switch WAL, then wait up to
+   <code>upload_timeout + 75</code> seconds for that segment to be archived. Only then
+   allow the production application to start. This confirms current archive
+   delivery; a recoverable PITR chain additionally requires a base backup.</li>
+</ol>
+<p>Step 4 is skipped for an already admitted production — <code>restart_production</code>,
+a deploy or a rollback — when the sample from step 1 already proves archiving
+is healthy: the managed archive command is active, archiving is not stalled,
+and the storage listing in that same sample succeeded. A hung production stays
+restartable during a brief storage outage instead of waiting minutes for a new
+segment. Admitting a new production, or starting a stopped one, always runs
+the full check.</p>
+<p>An error blocks the operation and appears as <strong>Last startup check</strong> in the
+WAL panel. It stops driving the overall status once a newer healthy sample
+supersedes it; live sampling then reports the current state. It does not convert an existing archive command to <code>/bin/true</code> or
+delete retained WAL. An old no-op command is changed to an empty, retaining
+command before preflight; fresh generated configurations also retain WAL
+until provisioning decides. Existing working archiving continues during a
+preflight failure; the disk/queue guard remains responsible for emergency
+shutdown. Development environments can still start if production is unready.</p>
+<p>The PostgreSQL image is published for amd64 and arm64 by
+<code>.github/workflows/publish-postgres.yml</code> only from <code>main</code>, with an immutable
+version tag. Publish it successfully before releasing the Oduflow package;
+both the PyPI and application Docker release workflows verify its availability.
+For an image update, change the base digest, bump <code>POSTGRES_IMAGE_VERSION</code>
+and <code>DEFAULT_PROD_POSTGRES_IMAGE</code> together, merge, and wait for publication.
+No package installation is performed inside PostgreSQL during deployment or
+emergency recovery.</p>
+<h3 id="wal-monitoring-and-automatic-disk-protection">WAL monitoring and automatic disk protection<a class="headerlink" href="#wal-monitoring-and-automatic-disk-protection" title="Permanent link">¶</a></h3>
+<p>The <strong>PostgreSQL WAL</strong> panel in Production is shared by every production and
+team. It shows the queue's segment count and bytes, age of the oldest waiting
+segment, time without archive progress, current upload duration, last upload
+exit status, PostgreSQL restart count, and free space on the actual WAL
+filesystem. Space reserved for root is excluded. A dedicated daemon samples
+locally every 15 seconds, independently of backup jobs and dashboard polling;
+the storage probe runs only after the local protection decision. Missing or
+older-than-60-second samples are errors, never healthy results.</p>
+<p>An empty queue is idle, not stalled. With a queue, lack of successful archive
+progress triggers warning/error thresholds. A draining but old backlog stays
+visible. WAL upload attempts have a hard timeout and return failure on timeout
+or termination; PostgreSQL retains the segment and retries. Failed downloads
+of the WAL-G executable never switch configured archiving to a success no-op.</p>
+<p>Defaults can be changed in TOML:</p>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">[production.wal]</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">upload_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">120</span><span class="w">    </span><span class="c1"># seconds; TERM, then KILL after another 5 seconds</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">warn_after</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">120</span><span class="w">        </span><span class="c1"># seconds without archive progress, with a queue</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">stall_after</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="n">stop_free_gb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="w">        </span><span class="c1"># GiB available to postgres: safety reserve</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="n">resume_free_gb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="w">      </span><span class="c1"># recovery headroom; must exceed stop_free_gb</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="n">stop_within</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span><span class="w">       </span><span class="c1"># estimated seconds until the reserve is reached</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="n">warn_queue_gb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="w">       </span><span class="c1"># GiB of unarchived WAL before warning</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="n">stop_queue_gb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w">       </span><span class="c1"># GiB of unarchived WAL before protective stop</span>
+</span></code></pre></div>
+<p>Protection is active whenever production hosting is enabled, even without
+S3 backups or while archiving is paused. It trips as soon as free space
+reaches the reserve. A prediction alone is not enough: consumption measured
+between the two most recent samples must predict reaching the reserve within
+<code>stop_within</code>, and that prediction must hold for two consecutive samples.
+<code>df</code> covers the whole filesystem, so a finished burst from an unrelated
+consumer never stops the cluster, while a continuing leak still does.
+It also trips when the unarchived queue reaches
+<code>stop_queue_gb</code>, even on a large disk. Protection saves a persistent latch,
+disables Docker restart policies, stops managed production applications,
+then stops the shared PostgreSQL container. Failed stops are reported and retried. The latch blocks production
+starts, deploys, restores and new backup jobs, including after Oduflow or
+Docker restarts. Protection can interrupt in-flight jobs; it does not wait for
+their locks while the disk fills.</p>
+<p>Set the reserve for peak write volume and shutdown time. The monitor requires
+Oduflow and Docker to be responsive; it cannot guarantee protection against
+arbitrarily fast disk exhaustion or other host processes filling the same
+filesystem after PostgreSQL stops. Monitor <code>/healthz</code> externally as well.</p>
+<p>The panel and MCP offer these cluster-wide actions (MCP mutations require
+<code>confirm="ALL-PRODUCTIONS"</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pause</code></td>
+<td>Retains unarchived WAL and interrupts the active upload. The queue can grow; disk protection stays active.</td>
+</tr>
+<tr>
+<td><code>resume</code></td>
+<td>Refreshes WAL-G config/certificates and resumes archiving. Does not restart stopped PostgreSQL.</td>
+</tr>
+<tr>
+<td><code>retry</code></td>
+<td>Terminates only the current <code>wal-push</code>, including a legacy upload predating the timeout wrapper; PostgreSQL retries it.</td>
+</tr>
+<tr>
+<td><code>recover</code></td>
+<td>Requires recovery headroom; starts only PostgreSQL, keeping applications stopped and rejecting network database connections. Local maintenance and outbound S3 access remain available. Requests a WAL switch to verify real archiving.</td>
+</tr>
+<tr>
+<td><code>release</code></td>
+<td>Requires recovery headroom, a safe consumption rate, working storage access, and a successful archive after recovery began. Restores normal connections and restart policies; applications remain stopped until explicitly started.</td>
+</tr>
+</tbody>
+</table>
+<p>Use <code>production_wal_status()</code> for cached diagnostics and
+<code>control_production_wal(action="recover", confirm="ALL-PRODUCTIONS")</code> for
+control. REST equivalents are <code>GET /api/productions/wal-status</code> and
+<code>POST /api/productions/wal-control</code>. Full team authentication follows the
+existing cluster PITR access model; environment-scoped access is excluded.
+Queue size warns at <code>warn_queue_gb</code> and protects at <code>stop_queue_gb</code>. During
+fenced PostgreSQL-only recovery the queue may exceed the stop threshold so
+it can drain; disk pressure still stops PostgreSQL. Releasing protection
+requires the queue to fall below <code>warn_queue_gb</code> as well as free-space headroom
+and confirmed archive progress.</p>
+<p>The monitor's latch is stored in <code>&lt;base_data_dir&gt;/wal_guard.json</code>; do not
+delete it to bypass recovery checks. Recovery temporarily replaces the managed
+<code>PGDATA/pg_hba.conf</code>, preserving the original alongside it, and restores it on
+release. Custom HBA paths require operator intervention.</p>
+<h3 id="recovering-from-a-full-wal-disk">Recovering from a full WAL disk<a class="headerlink" href="#recovering-from-a-full-wal-disk" title="Permanent link">¶</a></h3>
+<p>Production tables and WAL live together in the <code>oduflow-prod-db-data</code> Docker
+volume, unlike the per-team tablespaces used for development. Inspect free
+space on the filesystem containing that volume, including the space available
+to the non-root postgres user. <code>max_wal_size</code> is not a hard limit when WAL
+cannot be archived.</p>
+<p>If logs report <code>No space left on device</code> and WAL-G reports an unknown
+certificate authority:</p>
+<ol>
+<li>Stop application writers to reduce additional WAL generation. Free several
+   GiB from known disposable files <strong>outside PostgreSQL data</strong>, or expand the
+   volume's filesystem. Never manually delete files from <code>pg_wal</code>.</li>
+<li>Deploy the fix and restart Oduflow to refresh the mounted CA bundle and
+   WAL-G configuration. If protection is active, use <strong>Resume archiving</strong> if
+   paused, then <strong>Start PostgreSQL recovery</strong> after sufficient space is free.
+   No PostgreSQL recreation is required.</li>
+<li>Check the WAL-G health result and PostgreSQL logs. Confirm actual progress:
+   <code>pg_stat_archiver.archived_count</code> increases and the queue of <code>.ready</code> files
+   in <code>pg_wal/archive_status</code> drains. A successful list probe alone is not
+   enough. An already-running WAL-G attempt uses its old configuration until
+   it exits; <strong>Retry upload</strong> interrupts it without discarding the segment.</li>
+<li>Allow PostgreSQL to recycle eligible WAL itself and verify free space
+   recovers before releasing protection and explicitly starting the desired
+   applications. Other retention requirements, such as replication slots,
+   can also keep WAL on disk.</li>
+</ol>
+<p>Do not switch <code>archive_command</code> to <code>/bin/true</code> to drain the queue: it reports
+success without saving the segments and can break PITR continuity.</p>
+<h2 id="copying-production-data-to-dev">Copying production data to dev<a class="headerlink" href="#copying-production-data-to-dev" title="Permanent link">¶</a></h2>
+<p>Productions are seeded from templates; the same road runs backwards, so a
+developer can reproduce a bug on real data:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>save_production_as_template(prod_name="erp", template_name="erp-2026-09")
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>create_environment(branch="bugfix-invoice", from_production="erp")
+</span></code></pre></div>
+<p>Both dump the production database out of the production cluster with a
+consistent <code>pg_dump</code> and restore it into the <strong>dev</strong> cluster, and snapshot the
+production filestore as the template's baseline. <strong>The production keeps
+serving</strong> — nothing is stopped or modified on its side.</p>
+<p><code>create_environment(from_production=…)</code> routes through one managed template per
+production, <code>prod-&lt;name&gt;</code>, published on first use and reused afterwards; refresh
+it with <code>save_production_as_template(name, "prod-&lt;name&gt;", overwrite=True)</code>. See
+<a href="../templates/#create-a-template-from-production">Create a Template from Production</a>
+and <a href="../environments/#creating-an-environment-from-production">Creating an Environment from Production</a>.</p>
+<div class="admonition danger">
+<p class="admonition-title">The copy is unsanitized until an environment is created</p>
+<p>The template carries real customer data and credentials. Environments made
+from it are neutralized and run the repository's sanitize scripts by
+default; the template itself is production-confidential.</p>
+</div>
+<p><strong><code>allow_copy_to_dev_mcp</code></strong> (default <code>true</code>, set at <code>create_production</code>) gates
+<strong>new copies</strong>: when it is <code>false</code>, an MCP/CLI agent asking for either tool gets
+a refusal — and no MCP tool can turn the flag back on. It is a gate on <em>agents</em>,
+not on people: the dashboard's Production tab is never gated and is the only
+place the flag can be toggled, so an agent cannot re-enable its own access.
+Productions created before the flag existed behave as <code>true</code>.</p>
+<p>The flag does <strong>not</strong> revoke a copy that already exists. A <code>prod-&lt;name&gt;</code> (or
+any) template published from the production stays usable through
+<code>create_environment(template_name=...)</code> like every other template — its data is
+neutralized on the way into each environment. The one thing agents lose is the
+raw form: <code>sanitize=false</code> on a template whose <code>source_production</code> has the flag
+off is refused. To withdraw the data itself, <code>delete_template</code> the copy.</p>
+<h2 id="health">Health<a class="headerlink" href="#health" title="Permanent link">¶</a></h2>
+<p><code>GET /healthz</code> (public, no auth, no secrets) returns 200 when healthy and
+503 when degraded — point your uptime monitor at it. Checks: dev PostgreSQL,
+production PostgreSQL, Traefik, S3 (HeadBucket), disk usage (warn at 85%),
+and productions flagged unhealthy by a failed rollback. The dashboard's
+status bar shows the same checks as chips.</p>
+<h2 id="deleting-a-production">Deleting a production<a class="headerlink" href="#deleting-a-production" title="Permanent link">¶</a></h2>
+<p><code>delete_production</code> (or <strong>Delete</strong> in the dashboard) removes the container and
+the registry record, but <strong>keeps the database and the workspace</strong> (filestore,
+repo, deploy history) on disk — productions are precious, deleting bytes is
+opt-in. Pass <code>drop_database=true</code> over MCP/CLI to remove everything at once.</p>
+<p>Kept leftovers are <em>tombstoned</em> (a <code>deleted.json</code> marker in the workspace) so
+they can be reclaimed later:</p>
+<ul>
+<li><strong>Deferred purge</strong> — set <code>[lifecycle] prod_purge_hours = N</code> in
+  <code>oduflow.toml</code> and the background sweep permanently purges the leftovers
+  (database, PostgreSQL role, workspace) N hours after the deletion. <code>0</code>
+  (default) keeps them forever. Re-creating a production with the same name
+  clears the tombstone, so a revived production is never purged.</li>
+<li><strong>Immediate purge</strong> — <code>oduflow cleanup --purge-deleted-productions</code>
+  lists tombstoned leftovers; add <code>--force</code> to purge them now, regardless of
+  age.</li>
+</ul>
+<p>Only tombstoned leftovers are ever purged: a workspace without the marker is
+presumed alive and is never touched (<code>oduflow cleanup</code> skips the whole
+<code>prod-*</code> namespace for the same reason).</p>
+<h2 id="mcp-tool-reference">MCP tool reference<a class="headerlink" href="#mcp-tool-reference" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>create_production</code></td>
+<td>Provision a production (optionally from a template)</td>
+</tr>
+<tr>
+<td><code>list_productions</code> / <code>get_production_info</code></td>
+<td>Status, deployed commit, history, backups</td>
+</tr>
+<tr>
+<td><code>update_production</code></td>
+<td>Deploy latest commits with auto code rollback</td>
+</tr>
+<tr>
+<td><code>rollback_production</code></td>
+<td>Manual code rollback to a commit</td>
+</tr>
+<tr>
+<td><code>production_deploys</code></td>
+<td>Deploy history</td>
+</tr>
+<tr>
+<td><code>production_logs</code></td>
+<td>Container logs</td>
+</tr>
+<tr>
+<td><code>start_production</code> / <code>stop_production</code> / <code>restart_production</code></td>
+<td>Lifecycle</td>
+</tr>
+<tr>
+<td><code>set_production_auto_update</code></td>
+<td>Toggle webhook auto-deploy</td>
+</tr>
+<tr>
+<td><code>reconfigure_production</code></td>
+<td>Change domain/image/branch/repo/extra addons; recreates the container</td>
+</tr>
+<tr>
+<td><code>set_production_odoo_conf</code></td>
+<td>Per-production odoo.conf overrides on top of auto-tuning</td>
+</tr>
+<tr>
+<td><code>snapshot_production</code> / <code>list_production_snapshots</code></td>
+<td>Snapshots to S3</td>
+</tr>
+<tr>
+<td><code>restore_production</code></td>
+<td>Restore DB + filestore from a snapshot or a dev environment</td>
+</tr>
+<tr>
+<td><code>set_production_backup_schedule</code></td>
+<td>Per-production snapshot time / off</td>
+</tr>
+<tr>
+<td><code>production_backup_status</code></td>
+<td>Backup posture (snapshots + WAL-G + S3)</td>
+</tr>
+<tr>
+<td><code>save_production_as_template</code></td>
+<td>Publish the production's DB + filestore as a dev template (unsanitized)</td>
+</tr>
+<tr>
+<td><code>prune_production_backups</code></td>
+<td>Apply retention now</td>
+</tr>
+<tr>
+<td><code>restore_cluster_pitr</code></td>
+<td>Cluster-wide disaster recovery / PITR</td>
+</tr>
+<tr>
+<td><code>delete_production</code></td>
+<td>Remove (database/files kept unless <code>drop_database</code>)</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden="">
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href="../environments/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Environment Management">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Environment Management
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../agent/" class="md-footer__link md-footer__link--next" aria-label="Next: Coding Agent">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Coding Agent
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"></path></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright © Oduist — Oduflow
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/oduist/oduflow" target="_blank" rel="noopener" title="Oduflow on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Oduflow Docs" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M351.9 280H161c2.9 64.5 17.2 123.9 37.5 167.4 11.4 24.5 23.7 41.8 35.1 52.4 11.2 10.5 18.9 12.2 22.9 12.2s11.7-1.7 22.9-12.2c11.4-10.6 23.7-28 35.1-52.4 20.3-43.5 34.6-102.9 37.5-167.4zm-191-48h190.9c-2.8-64.5-17.1-123.9-37.4-167.4-11.4-24.4-23.7-41.8-35.1-52.4C268.1 1.7 260.4 0 256.4 0s-11.7 1.7-22.9 12.2c-11.4 10.6-23.7 28-35.1 52.4-20.3 43.5-34.6 102.9-37.5 167.4m-48 0c3.5-85.6 25.6-165.1 57.9-217.3C78.7 47.3 10.9 131.2 1.5 232zM1.5 280c9.4 100.8 77.2 184.7 169.3 217.3-32.3-52.2-54.4-131.7-57.9-217.3zm398.4 0c-3.5 85.6-25.6 165.1-57.9 217.3 92.1-32.7 159.9-116.5 169.3-217.3zm111.4-48C501.9 131.2 434.1 47.3 342 14.7c32.3 52.2 54.4 131.7 57.9 217.3z"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>
