@@ -113,6 +113,8 @@ also available via the [REST API](web-api.md).
 | `list_production_snapshots` | | List S3 snapshots; `refresh=True` bypasses the cached index |
 | `restore_production` | ✓ | Restore one production's database and filestore from a snapshot or a dev environment; requires its name in `confirm` |
 | `production_backup_status` | | Inspect snapshot schedules, WAL archiving, base backups, and S3 reachability |
+| `production_wal_status` | | Cached shared-cluster WAL queue, upload progress, disk reserve, stale-data and protection state |
+| `control_production_wal` | ✓ | Cluster-wide `pause`, `resume`, `retry`, `recover`, or `release`; requires `confirm="ALL-PRODUCTIONS"`. Recovery starts PostgreSQL only; releasing protection leaves applications stopped |
 | `set_production_backup_schedule` | ✓ | Set a production's daily snapshot time (`HH:MM`) or disable it with `off` |
 | `prune_production_backups` | ✓ | Apply configured snapshot and chunk-store retention immediately |
 | `restore_cluster_pitr` | ✓ | ⚠️ Restore the entire production PostgreSQL cluster from WAL-G; requires `confirm="RESTORE-CLUSTER"` |

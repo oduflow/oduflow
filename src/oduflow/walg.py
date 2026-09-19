@@ -3,10 +3,11 @@
 WAL-G provides continuous WAL archiving to S3 ("replication to S3"),
 scheduled base backups, and cluster-level disaster recovery / PITR. It is
 delivered as the official static binary downloaded by the Oduflow server at
-bootstrap — not a custom Docker image: the binary directory and a config
-directory are bind-mounted into the (official-image) production PG
-container, so backups can be enabled, reconfigured, or upgraded without
-recreating the container.
+bootstrap: the binary directory and a config directory are bind-mounted
+into the production PG container, so backups can be enabled, reconfigured,
+or upgraded without recreating the container. The managed PostgreSQL image
+adds system CA certificates; the mounted bundle also supports existing and
+custom images.
 
 Container-side layout (both mounts are read-only directories, so their
 contents can change while the container runs):
@@ -36,10 +37,14 @@ import json
 import logging
 import os
 import re
+import ssl
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.request
+import uuid
+from pathlib import Path
 from typing import Any
 
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
@@ -64,8 +69,13 @@ BIN_MOUNT = "/opt/oduflow-bin"
 CONF_MOUNT = "/etc/walg"
 WALG_BIN = f"{BIN_MOUNT}/wal-g"
 WALG_CONF = f"{CONF_MOUNT}/walg.json"
+WALG_CA_BUNDLE = f"{CONF_MOUNT}/ca-certificates.crt"
+ARCHIVE_WRAPPER = f"{BIN_MOUNT}/wal-archive.sh"
 
 _PGDATA = "/var/lib/postgresql/data"
+_readiness: dict[str, dict[str, Any]] = {}
+_activation_locks: dict[str, threading.Lock] = {}
+_activation_registry_lock = threading.Lock()
 
 
 def bin_host_dir(settings: Settings) -> str:
@@ -197,6 +207,41 @@ def ensure_walg(settings: Settings) -> str:
     return versioned
 
 
+def _write_ca_bundle(conf_dir: str) -> None:
+    """Share the server's trusted CAs with WAL-G, including existing containers.
+
+    Official PostgreSQL images need not contain ca-certificates. Use the
+    existing directory mount so atomic updates also reach running containers
+    and the PITR helper. Explicit CA overrides must fail if invalid.
+    """
+    from botocore.httpsession import get_cert_path
+
+    source = (
+        os.environ.get("AWS_CA_BUNDLE")
+        or os.environ.get("SSL_CERT_FILE")
+        or ssl.get_default_verify_paths().cafile
+        or get_cert_path(True)
+    )
+    with open(source, "rb") as f:
+        bundle = f.read()
+    # Validate before replacing a working bundle or publishing its config.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cadata=bundle.decode("ascii"))
+    if not context.get_ca_certs():
+        raise PrerequisiteNotMetError("WAL-G CA bundle contains no trusted CAs.")
+
+    fd, tmp_path = tempfile.mkstemp(prefix="ca.", suffix=".tmp", dir=conf_dir)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(bundle)
+            os.fchmod(f.fileno(), 0o644)
+        os.replace(tmp_path, os.path.join(conf_dir, "ca-certificates.crt"))
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
 def write_walg_config(settings: Settings) -> str | None:
     """Write (or refresh) walg.json from [backup] settings; return its path.
 
@@ -214,11 +259,35 @@ def write_walg_config(settings: Settings) -> str | None:
             logger.info("Removed stale walg.json (backups unconfigured)")
         return None
 
+    _write_ca_bundle(conf_dir)
+    from oduflow.wal_monitor import state
+
+    if state(settings).get("paused"):
+        with open(os.path.join(conf_dir, "archive-paused"), "a"):
+            pass
+    bin_dir = bin_host_dir(settings)
+    os.makedirs(bin_dir, exist_ok=True)
+    with open(
+        os.path.join(os.path.dirname(__file__), "templates", "wal-archive.sh")
+    ) as f:
+        wrapper = f.read()
+    fd, wrapper_tmp = tempfile.mkstemp(dir=bin_dir, prefix="archive.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(wrapper)
+            os.fchmod(f.fileno(), 0o755)
+        os.replace(wrapper_tmp, os.path.join(bin_dir, "wal-archive.sh"))
+    finally:
+        if os.path.exists(wrapper_tmp):
+            os.unlink(wrapper_tmp)
+    # The directory is shared with postgres; credentials themselves stay 0600.
+    os.chmod(conf_dir, 0o755)
     config: dict[str, str] = {
         "WALG_S3_PREFIX": f"s3://{backup.bucket}/{backup.prefix}/walg",
         "AWS_ACCESS_KEY_ID": backup.access_key,
         "AWS_SECRET_ACCESS_KEY": backup.secret_key,
         "WALG_COMPRESSION_METHOD": "lz4",
+        "WALG_S3_CA_CERT_FILE": WALG_CA_BUNDLE,
         # Local unix socket inside the PG container (trust auth in the
         # official image); superuser needed for backup-push.
         "PGHOST": "/var/run/postgresql",
@@ -298,7 +367,15 @@ def apply_walg_config_ownership(settings: Settings, client: Any) -> None:
     path = os.path.join(conf_host_dir(settings), "walg.json")
     if not os.path.isfile(path):
         return
-    image = settings.prod_postgres_image or settings.postgres_image
+    image = settings.production_pg_image
+    try:
+        running_image = client.containers.get(settings.prod_db_container).attrs.get(
+            "Image"
+        )
+        if isinstance(running_image, str) and running_image:
+            image = running_image
+    except Exception:
+        pass  # no container yet; use the configured image
     uid, gid = _postgres_uid_gid(client, image)
     try:
         os.chown(path, uid, gid)
@@ -321,10 +398,10 @@ def apply_walg_config_ownership(settings: Settings, client: Any) -> None:
         logger.warning("Could not chown walg.json to postgres: %s", exc)
 
 
-def archive_command(enabled: bool) -> str:
+def archive_command(enabled: bool, timeout: int = 120) -> str:
     if not enabled:
         return "/bin/true"
-    return f"{WALG_BIN} --config {WALG_CONF} wal-push %p"
+    return f'/bin/sh {ARCHIVE_WRAPPER} {int(timeout)} "%p" "%f"'
 
 
 def apply_archive_command(client: Any, settings: Settings, enabled: bool) -> None:
@@ -334,34 +411,269 @@ def apply_archive_command(client: Any, settings: Settings, enabled: bool) -> Non
     postgresql.auto.conf which overrides the generated conf, so backups can
     be enabled/disabled without recreating or restarting the container.
     """
-    from oduflow.docker_ops.system_ops import _exec_sql
-
-    command = archive_command(enabled).replace("'", "''")
-    _exec_sql(
-        client,
-        settings,
-        f"ALTER SYSTEM SET archive_command TO '{command}';",
-        container_name=settings.prod_db_container,
-    )
-    _exec_sql(
-        client,
-        settings,
-        "SELECT pg_reload_conf();",
-        container_name=settings.prod_db_container,
+    _set_archive_command(
+        client, settings, archive_command(enabled, settings.wal_upload_timeout)
     )
     logger.info("Production archive_command -> %s", "wal-g" if enabled else "/bin/true")
 
 
-def _exec_walg(client: Any, settings: Settings, args: list[str]) -> str:
+def _pg_probe(client: Any, settings: Settings, sql: str) -> str:
+    code, output = client.containers.get(settings.prod_db_container).exec_run(
+        [
+            "timeout",
+            "--kill-after=1s",
+            "5s",
+            "psql",
+            "-X",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            settings.db_user,
+            "-d",
+            "postgres",
+            "-Atc",
+            sql,
+        ],
+        user="postgres",
+        environment={"PGOPTIONS": "-c statement_timeout=4000 -c lock_timeout=3000"},
+    )
+    if code:
+        raise PrerequisiteNotMetError(
+            "PostgreSQL WAL readiness query failed or timed out"
+        )
+    result: str = output.decode("utf-8", errors="replace").strip()
+    return result
+
+
+def _set_archive_command(client: Any, settings: Settings, command: str) -> None:
+    safe = command.replace("'", "''")
+    _pg_probe(client, settings, f"ALTER SYSTEM SET archive_command TO '{safe}'")
+    _pg_probe(client, settings, "SELECT pg_reload_conf()")
+
+
+def readiness_status(settings: Settings) -> dict[str, Any]:
+    """Last activation attempt, for diagnostics only; never a readiness cache."""
+    return dict(_readiness.get(settings.base_data_dir, {}))
+
+
+def clear_readiness(settings: Settings) -> None:
+    """Drop the last activation record once live sampling proves archiving works."""
+    _readiness.pop(settings.base_data_dir, None)
+
+
+def live_archiving_healthy(settings: Settings) -> bool:
+    """True when the freshest sample already proves archiving is working.
+
+    Evidence, not a cache: it reads the sample taken moments ago (including
+    that sample's storage probe), never a stored readiness verdict.
+    """
+    from oduflow.wal_monitor import STALE_AFTER, _monitor
+
+    latest = _monitor(settings).latest
+    if latest.get("status") != "ok":
+        return False
+    if time.time() - latest.get("sampled_at", 0) > STALE_AFTER:
+        return False
+    if (latest.get("storage") or {}).get("status") != "ok":
+        return False
+    archiver = latest.get("archiver") or {}
+    if archiver.get("archive_mode") not in {"on", "always"}:
+        return False
+    if "wal-archive.sh" not in (archiver.get("archive_command") or ""):
+        return False
+    return bool(latest.get("no_progress_seconds", 0) < settings.wal_stall_after)
+
+
+def _storage_error_detail(error: str) -> str:
+    error = error.lower()
+    if "x509:" in error or "certificate" in error:
+        return "WAL-G TLS certificate verification failed; check CA bundle"
+    if "timed out" in error or "timeout" in error:
+        return "WAL-G storage probe timed out"
+    if "accessdenied" in error or "invalidaccesskeyid" in error:
+        return "WAL-G storage access denied; check credentials and permissions"
+    if "preflight prerequisites" in error:
+        return (
+            "WAL-G preflight prerequisites missing: check binary, config and CA bundle"
+        )
+    if "preflight content" in error:
+        return "WAL-G preflight read-back did not match the uploaded object"
+    return "WAL-G storage probe failed; check production backup status"
+
+
+def storage_preflight(client: Any, settings: Settings) -> None:
+    """Bounded LIST/PUT/GET/DELETE using the real postgres user and WAL-G config.
+
+    Only the unique probe namespace is cleaned up. No backup or WAL object is
+    overwritten/deleted, and credentials never enter the command line.
+    """
+    script = (Path(__file__).parent / "templates" / "wal-preflight.sh").read_text()
+    code, output = client.containers.get(settings.prod_db_container).exec_run(
+        [
+            "timeout",
+            "--kill-after=7s",
+            "30s",
+            "sh",
+            "-c",
+            script,
+            "wal-preflight",
+            uuid.uuid4().hex,
+        ],
+        user="postgres",
+        environment={"WALG_S3_MAX_RETRIES": "0"},
+    )
+    if code:
+        detail = _storage_error_detail(
+            "timeout"
+            if code in (124, 137)
+            else output.decode("utf-8", errors="replace")
+        )
+        raise PrerequisiteNotMetError(detail)
+
+
+def prepare_archiving(
+    client: Any, settings: Settings, *, accept_live_evidence: bool = False
+) -> None:
+    """Gate production admission on storage access and an actual archived WAL.
+
+    Failure preserves the current archive command/queue. An old no-op command
+    is first replaced with an empty (retaining) command. Existing working
+    archiving is never disabled just because storage is temporarily unavailable.
+
+    ``accept_live_evidence`` is for operations on an already-admitted
+    production (restart/deploy/rollback): when the sample taken below already
+    proves archiving is healthy, the forced verification segment is skipped so
+    a hung production stays restartable and the call does not block for
+    minutes. Admitting a new or stopped production always verifies in full.
+    """
+    from oduflow.wal_monitor import _monitor, assert_writable, cancel_attempt, state
+
+    with _activation_registry_lock:
+        lock = _activation_locks.setdefault(settings.base_data_dir, threading.Lock())
+    with lock:
+
+        def report(status: str, detail: str) -> None:
+            _readiness[settings.base_data_dir] = {
+                "status": status,
+                "detail": detail,
+                "checked_at": time.time(),
+            }
+
+        report("pending", "Checking production WAL readiness")
+        try:
+            assert_writable(settings)
+            # Sample the actual filesystem before forcing another WAL segment.
+            # This also enforces protection during startup, before the daemon
+            # monitor has started its periodic loop.
+            _monitor(settings).tick(settings, client)
+            assert_writable(settings)
+            if state(settings).get("paused"):
+                raise PrerequisiteNotMetError(
+                    "Resume WAL archiving before starting production"
+                )
+            if accept_live_evidence and live_archiving_healthy(settings):
+                report("ok", "Live WAL archiving confirmed by the current sample")
+                return
+            command = _pg_probe(client, settings, "SHOW archive_command")
+            if command.strip() in {"/bin/true", "true", ":"}:
+                _set_archive_command(client, settings, "")
+            storage_preflight(client, settings)
+            assert_writable(settings)
+            apply_archive_command(client, settings, enabled=True)
+            expected = archive_command(True, settings.wal_upload_timeout)
+            # Reload is asynchronous; confirm the effective command before
+            # generating the verification segment (no success from an old no-op).
+            deadline = time.monotonic() + 10
+            while _pg_probe(client, settings, "SHOW archive_command") != expected:
+                if time.monotonic() >= deadline:
+                    raise PrerequisiteNotMetError(
+                        "Managed archive_command did not become active"
+                    )
+                time.sleep(0.2)
+            if command != expected:
+                # A legacy WAL-G process can still be stuck with the old trust
+                # context. Terminate only wal-push so PG retries the new command.
+                cancel_attempt(client, settings)
+            if _pg_probe(client, settings, "SHOW archive_mode") not in {"on", "always"}:
+                raise PrerequisiteNotMetError(
+                    "PostgreSQL archive_mode requires enabling and restart"
+                )
+            # pg_switch_wal alone does nothing on an idle cluster. A restore
+            # point forces a WAL record without creating application tables.
+            _pg_probe(
+                client,
+                settings,
+                f"SELECT pg_create_restore_point('oduflow-preflight-{uuid.uuid4().hex}')",
+            )
+            segment = _pg_probe(
+                client, settings, "SELECT pg_walfile_name(pg_switch_wal())"
+            )
+            if not re.fullmatch(r"[0-9A-F]{24}", segment):
+                raise PrerequisiteNotMetError(
+                    "PostgreSQL returned an invalid verification WAL segment"
+                )
+            report(
+                "pending", "Waiting for the verification WAL segment to reach storage"
+            )
+            deadline = time.monotonic() + settings.wal_upload_timeout + 75
+            while True:
+                assert_writable(settings)
+                if state(settings).get("paused"):
+                    raise PrerequisiteNotMetError(
+                        "WAL archiving was paused during verification"
+                    )
+                # Once a segment has been recycled its .done can be gone too.
+                # The archiver's last success covers that case on this timeline.
+                confirmed = _pg_probe(
+                    client,
+                    settings,
+                    f"SELECT (EXISTS (SELECT 1 FROM pg_stat_file('pg_wal/archive_status/{segment}.done', true) WHERE size IS NOT NULL) "
+                    f"OR (left(last_archived_wal, 8) = '{segment[:8]}' AND last_archived_wal >= '{segment}')) "
+                    "FROM pg_stat_archiver",
+                )
+                if confirmed == "t":
+                    break
+                if time.monotonic() >= deadline:
+                    raise PrerequisiteNotMetError(
+                        "Verification WAL was not archived before the deadline; production start blocked"
+                    )
+                time.sleep(1)
+            report("ok", "Storage read/write and verification WAL archive confirmed")
+        except Exception as exc:
+            detail = (
+                str(exc)
+                if isinstance(exc, PrerequisiteNotMetError)
+                else "Production WAL readiness check failed"
+            )
+            report("error", detail)
+            raise PrerequisiteNotMetError(detail) from exc
+
+
+def _exec_walg(
+    client: Any, settings: Settings, args: list[str], *, timeout: int | None = None
+) -> str:
     """Run wal-g inside the production PG container as the postgres OS user."""
     container = client.containers.get(settings.prod_db_container)
     cmd = [WALG_BIN, "--config", WALG_CONF, *args]
-    exit_code, output = container.exec_run(cmd, user="postgres")
+    if timeout is not None:
+        # Bound the process inside the container, not just the Docker HTTP
+        # request: a timed-out request would leave WAL-G running indefinitely.
+        cmd = ["timeout", "--kill-after=2s", f"{timeout}s", *cmd]
+    exec_kwargs: dict[str, Any] = {"user": "postgres"}
+    if timeout is not None:
+        # Return the actual TLS/access error promptly instead of spending the
+        # entire diagnostic deadline on WAL-G's default 15 retries.
+        exec_kwargs["environment"] = {"WALG_S3_MAX_RETRIES": "0"}
+    exit_code, output = container.exec_run(cmd, **exec_kwargs)
     text: str = (
         output.decode("utf-8", errors="replace")
         if isinstance(output, bytes)
         else str(output)
     )
+    if timeout is not None and exit_code in (124, 137):
+        raise ExternalCommandError(
+            "wal-g " + " ".join(args), exit_code, f"Timed out after {timeout}s"
+        )
     if exit_code != 0:
         raise ExternalCommandError("wal-g " + " ".join(args), exit_code, text[-2000:])
     return text
@@ -369,26 +681,55 @@ def _exec_walg(client: Any, settings: Settings, args: list[str]) -> str:
 
 def backup_push(client: Any, settings: Settings) -> str:
     """Take a base backup of the production cluster into S3."""
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     return _exec_walg(client, settings, ["backup-push", _PGDATA])
 
 
-def backup_list(client: Any, settings: Settings) -> list[dict[str, Any]]:
+def backup_list(
+    client: Any, settings: Settings, *, timeout: int = 30
+) -> list[dict[str, Any]]:
     """Parsed ``wal-g backup-list --detail --json`` (empty list when none)."""
     try:
-        text = _exec_walg(client, settings, ["backup-list", "--detail", "--json"])
+        text = _exec_walg(
+            client, settings, ["backup-list", "--detail", "--json"], timeout=timeout
+        )
     except ExternalCommandError as exc:
         # No backups yet is not an error condition for status reporting.
-        if "No backups found" in exc.output:
-            return []
-        raise
+        if "No backups found" not in exc.output:
+            raise
+        text = exc.output
     text = text.strip()
-    if not text:
+    if "No backups found" in text:
+        # v3.0.3's detailed listing checks len(backups) before its storage
+        # error, so it can print this even when ListObjects failed.
+        _exec_walg(client, settings, ["st", "ls"], timeout=timeout)
         return []
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
+    except json.JSONDecodeError as exc:
+        raise PrerequisiteNotMetError(
+            "WAL-G returned invalid backup inventory."
+        ) from exc
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise PrerequisiteNotMetError("WAL-G returned invalid backup inventory.")
+    return data
+
+
+def storage_status(client: Any, settings: Settings) -> dict[str, str]:
+    """Read-only storage probe using postgres's actual WAL-G TLS/config context.
+
+    Success proves list access, not upload permissions or WAL/PITR continuity.
+    Details are safe for the public health endpoint (no raw S3 errors/URLs).
+    """
+    try:
+        # Unlike backup-list --detail in v3.0.3, st ls propagates listing
+        # errors and does not fetch metadata for every base backup.
+        _exec_walg(client, settings, ["st", "ls"], timeout=5)
+    except Exception as exc:
+        return {"status": "error", "detail": _storage_error_detail(str(exc))}
+    return {"status": "ok", "detail": "WAL-G storage list access from production PG"}
 
 
 def delete_retain(client: Any, settings: Settings, keep_full: int) -> str:
@@ -543,6 +884,9 @@ def pitr_restore_cluster(
         raise PrerequisiteNotMetError(
             "Cluster PITR requires a configured [backup] section."
         )
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     client = get_client()
     ensure_walg(settings)
     write_walg_config(settings)
@@ -553,7 +897,7 @@ def pitr_restore_cluster(
     # while the container and PGDATA are still intact.
     fetch_target = _select_pitr_base_backup(client, settings, target_time)
 
-    image = settings.prod_postgres_image or settings.postgres_image
+    image = settings.production_pg_image
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     old_dir = f".pitr-old-{stamp}"
 

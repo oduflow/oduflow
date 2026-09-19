@@ -91,8 +91,19 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # enabled flag, then restart Oduflow. See https://docs.oduflow.dev/production/
 # [production]
 # enabled = true
-# postgres_image = ""             # default: [database].image
+# postgres_image = ""             # managed PG15 with CA; inherits custom [database].image
 # workers_cap = 8                 # upper bound for auto-tuned Odoo workers
+
+# Production WAL safety (always active while production hosting is enabled).
+# [production.wal]
+# upload_timeout = 120           # seconds per wal-push; then TERM / KILL
+# warn_after = 120               # seconds without archive progress with a queue
+# stall_after = 300
+# stop_free_gb = 2                # GiB available to postgres, excluding root reserve
+# resume_free_gb = 4              # must exceed stop_free_gb
+# stop_within = 300               # stop if estimated time to reserve is this short
+# warn_queue_gb = 2               # warn on queued unarchived WAL size (GiB)
+# stop_queue_gb = 8               # stop production; must exceed warn_queue_gb
 
 # S3 backups for productions: continuous WAL archiving (WAL-G), scheduled
 # snapshots (pg_dump + deduplicated filestore) and retention. Presence of

@@ -7,9 +7,9 @@ from :mod:`oduflow.resource_plan`; production no longer sizes itself
 independently from the dev cluster and production Odoo workers.
 
 WAL archiving is enabled from day one (``archive_mode`` requires a restart
-to toggle, so it ships on) with a no-op ``archive_command``; the backup
-subsystem flips the command to WAL-G via ``ALTER SYSTEM`` + reload when a
-[backup] section is configured (see :mod:`oduflow.walg`).
+to toggle, so it ships on) with an empty, retaining ``archive_command``.
+Provisioning activates WAL-G only after its storage preflight, or explicitly
+sets the no-op when backups are unconfigured (see :mod:`oduflow.walg`).
 
 Like pg_tune, the generated file starts with ``# KEEP`` so ``oduflow
 upgrade`` never overwrites it, and generators here are pure functions.
@@ -116,9 +116,9 @@ checkpoint_timeout = 15min
 # archive_mode cannot be toggled without a restart, so it ships enabled.
 # The actual command is set via ALTER SYSTEM (postgresql.auto.conf) by the
 # backup subsystem: /bin/true when backups are unconfigured, wal-g wal-push
-# when a [backup] section is present.
+# after a successful storage preflight. Retain WAL until this decision.
 archive_mode = on
-archive_command = '/bin/true'
+archive_command = ''
 archive_timeout = 60
 
 # =============================================================================

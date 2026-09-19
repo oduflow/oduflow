@@ -808,6 +808,9 @@ def _run_odoo_container(
     """Run the production Odoo container and finish its in-container setup
     (odoo.conf copy, apt/pip requirements from the main repo and every
     extra-addons worktree, one restart picking everything up)."""
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow.docker_ops.env_ops import _install_repo_dependencies
 
     container = client.containers.run(
@@ -829,6 +832,9 @@ def _run_odoo_container(
     dep_paths = [(repo_path, "/mnt/extra-addons")] + list(extra_mount_paths or [])
     _, _, setup_logs = _install_repo_dependencies(container, dep_paths)
     # One restart picks up both the copied odoo.conf and pip packages.
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     container.restart()
     return container, setup_logs
 
@@ -868,6 +874,9 @@ def create_production(
     only over the stop/copy/restart slice, so the env is not blocked for the
     remaining multi-minute provisioning.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import _clone_repo, _init_empty_database
 
@@ -1219,6 +1228,9 @@ def set_production_odoo_conf(
     the overrides unchanged returns early without touching (or restarting)
     the container. The caller must hold the production's lock.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
 
     record = production_registry.get_production(team, name)
@@ -1265,6 +1277,9 @@ def set_production_odoo_conf(
         reapply_prod_odoo_conf(settings, team, name, container)
         applied = True
         if restart and container.status == "running":
+            from oduflow.wal_monitor import assert_writable
+
+            assert_writable(settings)
             container.restart()
             restarted = True
     return {
@@ -1305,6 +1320,9 @@ def reconfigure_production(
     ``force_recreate`` lets Stack repair verified runtime drift or complete an
     interrupted apply whose registry intent already matches the request.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import _clone_repo
     from oduflow.extra_addons import (
@@ -1373,6 +1391,8 @@ def reconfigure_production(
     # mid-way) is drift that the run below repairs from the record.
     container = _get_container(client, settings, team, name)
     drift = force_recreate or container is None or not os.path.isdir(repo_path)
+    if settings.backup is not None and (updates or drift):
+        ensure_prod_infra(client, settings, force=True)
     if not updates and not drift:
         return {
             "name": name,
@@ -1816,6 +1836,9 @@ def purge_deleted_productions(
 def start_production(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, Any]:
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
 
     production_registry.get_production(team, name)
@@ -1844,11 +1867,19 @@ def stop_production(
 def restart_production(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, Any]:
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
 
     production_registry.get_production(team, name)
     client = get_client()
+    if settings.backup is not None:
+        ensure_prod_infra(client, settings, force=True, accept_live_evidence=True)
     container = _require_container(client, settings, team, name)
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     container.restart()
     logger.info("Production restarted", extra={"env_name": prod_env_name(name)})
     return {"name": name, "odoo_container": container.name, "status": "running"}
@@ -1937,12 +1968,17 @@ def update_production(
 
     The caller must hold the production's lock.
     """
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
     from oduflow.docker_ops.env_ops import pull_environment
     from oduflow.git_ops import rev_parse
 
     production_registry.get_production(team, name)  # NotFoundError if absent
     client = get_client()
+    if settings.backup is not None:
+        ensure_prod_infra(client, settings, force=True, accept_live_evidence=True)
     env_name = prod_env_name(name)
     repo_path = get_repo_path(env_name, team.workspaces_dir)
     if not os.path.isdir(repo_path):
@@ -2022,6 +2058,9 @@ def update_production(
         # Production runs without --dev=xml: a "refresh" outcome (XML/JS
         # only) still requires a restart to serve the new code.
         if result.get("action") == "refresh":
+            from oduflow.wal_monitor import assert_writable
+
+            assert_writable(settings)
             container.restart()
             deploy["action"] = "restart"
             result["action"] = "restart"
@@ -2061,6 +2100,9 @@ def update_production(
         try:
             _reset_code(repo_path, old_head, old_worktrees)
             reapply_prod_odoo_conf(settings, team, name, container)
+            from oduflow.wal_monitor import assert_writable
+
+            assert_writable(settings)
             container.restart()
             recovered = wait_production_healthy(
                 client, settings, team, name, timeout=120
@@ -2151,11 +2193,16 @@ def rollback_production(
 ) -> dict[str, Any]:
     """Manual code-only rollback to *to_commit* (default: the previous
     deploy's starting commit). The caller must hold the production's lock."""
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     from oduflow import production_registry
     from oduflow.git_ops import rev_parse
 
     production_registry.get_production(team, name)
     client = get_client()
+    if settings.backup is not None:
+        ensure_prod_infra(client, settings, force=True, accept_live_evidence=True)
     env_name = prod_env_name(name)
     repo_path = get_repo_path(env_name, team.workspaces_dir)
     container = _require_container(client, settings, team, name)
@@ -2195,6 +2242,9 @@ def rollback_production(
             "recorded worktree state for this commit)."
         )
     reapply_prod_odoo_conf(settings, team, name, container)
+    from oduflow.wal_monitor import assert_writable
+
+    assert_writable(settings)
     container.restart()
     healthy = wait_production_healthy(client, settings, team, name, timeout=120)
 

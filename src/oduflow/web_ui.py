@@ -6079,6 +6079,48 @@ def _build_routes(
     # Health + GitHub webhook (both PUBLIC paths with their own auth)
     # ------------------------------------------------------------------
 
+    def api_production_wal_status(request: Request) -> JSONResponse:
+        try:
+            from oduflow import wal_monitor
+
+            _get_ui_team(request)
+            return JSONResponse({"ok": True, **wal_monitor.status(get_settings())})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("api_production_wal_status failed")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_production_wal_control(request: Request) -> JSONResponse:
+        from oduflow import wal_monitor
+        from oduflow.docker_ops.client import get_client
+
+        try:
+            _get_ui_team(request)
+            data = await request.json()
+            locks.acquire_system(operation="control_production_wal")
+            try:
+                result = await _offload(
+                    wal_monitor.control,
+                    get_settings(),
+                    get_client(),
+                    str(data.get("action", "")),
+                    str(data.get("confirm", "")),
+                )
+                return JSONResponse({"ok": True, **result})
+            finally:
+                locks.release_system()
+        except FlowError as exc:
+            return _error_response(exc)
+        except Exception:
+            logger.exception("Production WAL control failed")
+            return JSONResponse(
+                {"ok": False, "error": "WAL control failed; check server logs"},
+                status_code=500,
+            )
+
     def healthz(request: Request) -> JSONResponse:
         from oduflow.health import collect_health
 
@@ -6103,6 +6145,16 @@ def _build_routes(
         production_routes = [
             Route("/api/productions", api_productions, methods=["GET"]),
             Route("/api/productions/create", api_production_create, methods=["POST"]),
+            Route(
+                "/api/productions/wal-status",
+                api_production_wal_status,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/productions/wal-control",
+                api_production_wal_control,
+                methods=["POST"],
+            ),
             Route(
                 "/api/productions/backup-status",
                 api_production_backup_status,
