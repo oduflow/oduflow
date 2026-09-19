@@ -4468,7 +4468,7 @@ def update_service(
     port: int = 0,
     hostname: str = "",
     host_mode: bool | None = None,
-    volumes: str = "",
+    volumes: str | None = None,
     privileged: bool | None = None,
     net_admin: bool | None = None,
     routes: list[dict[str, object]] | None = None,
@@ -4493,7 +4493,7 @@ def update_service(
         port: New container port. Pass 0 to keep current port.
         hostname: New hostname for traefik routing. Leave empty to keep current hostname.
         host_mode: Run in host network mode. Leave unset (null) to keep current mode.
-        volumes: Comma-separated volume mounts that fully replace existing user volumes (e.g. "mydata:/data,config:/etc/app:ro"). Leave empty to keep current volumes. The implicit Traefik TLS mount at /etc/traefik:ro is preserved separately.
+        volumes: Comma-separated volume mounts that fully replace existing user volumes (e.g. "mydata:/data,config:/etc/app:ro"). Leave unset (null) to keep current volumes; pass an empty string to unmount every volume (the volumes keep their data). Matches the web API, where a "volumes" key present in the body is a full replacement. The implicit Traefik TLS mount at /etc/traefik:ro is preserved separately.
         privileged: Run the container in privileged mode (full host access). Leave unset (null) to keep current mode. Mutually exclusive with net_admin (privileged already grants NET_ADMIN).
         net_admin: Add (True) or remove (False) the NET_ADMIN Linux capability — required for VPN/WireGuard, tun/tap, and iptables. Leave unset (null) to keep current capabilities.
         routes: Full replacement HTTP route list. Leave unset to preserve it. Pass [] together with port to return to a single catch-all port.
@@ -4508,7 +4508,7 @@ def update_service(
         parsed_env = parse_env_vars(env_vars)
 
     parsed_volumes = None
-    if volumes:
+    if volumes is not None:
         parsed_volumes = volume_ops.parse_volume_mounts(volumes)
 
     cap_add_override = None
@@ -4561,7 +4561,9 @@ def update_service(
 @mcp.tool()
 @handle_errors
 @with_key_lock(service_lock_key)
-def delete_service(name: str, ctx: Context | None = None) -> str:
+def delete_service(
+    name: str, save_preset: bool = True, ctx: Context | None = None
+) -> str:
     """
     Stop and remove a managed auxiliary service container.
 
@@ -4570,9 +4572,30 @@ def delete_service(name: str, ctx: Context | None = None) -> str:
 
     Args:
         name: The name of the service to delete.
+        save_preset: Keep the saved configuration so restore_service can bring the service back (default). Pass False to delete the preset along with the container.
     """
-    result = service_ops.delete_service(_get_settings(), _resolve_team(ctx), name)
-    return f"Service '{result['name']}' deleted. Container '{result['container_name']}' removed."
+    result = service_ops.delete_service(
+        _get_settings(), _resolve_team(ctx), name, save_preset=save_preset
+    )
+    # preset_kept reports what is actually on disk, not the request flag.
+    if save_preset:
+        preset_line = (
+            "Preset kept — restore_service can bring it back."
+            if result["preset_kept"]
+            else "No saved preset exists for this service, so restore_service "
+            "cannot recreate it."
+        )
+    else:
+        preset_line = (
+            "Warning: the saved preset could not be removed — it is still "
+            "listed by list_service_presets."
+            if result["preset_kept"]
+            else "Saved preset removed."
+        )
+    return (
+        f"Service '{result['name']}' deleted. "
+        f"Container '{result['container_name']}' removed.\n{preset_line}"
+    )
 
 
 @mcp.tool()

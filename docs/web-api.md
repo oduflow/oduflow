@@ -154,10 +154,10 @@ Odoo.sh ingest endpoints accept the import token only in
 |---|---|---|
 | `GET` | `/api/services` | List services |
 | `POST` | `/api/services/create` | Create a service with either catch-all `port` or restricted Traefik `routes`, plus optional image/runtime settings. `command` accepts a shell-quoted string or an argv array and replaces the image `CMD` |
-| `GET` | `/api/services/{name}/env-vars` | Return the environment variables an update keeps — the saved preset, or the container's own environment for a service created before presets |
-| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
+| `GET` | `/api/services/{name}/config` | Return the full configuration an update keeps (image, `port`/`routes`, hostname, env vars, `host_mode`, volumes, capabilities, `command`) — what the dashboard's Update dialog prefills. Env values configured as team secrets come back as their `secret:<name>` reference |
+| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied — omitting the key keeps the current value, sending an empty one clears it. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
 | `POST` | `/api/services/{name}/restart` | Restart a service |
-| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected) |
+| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected). The optional body `{"save_preset": false}` removes the saved preset too; by default it is kept for `restore_service`. The result's `preset_kept` reports what is actually on disk afterwards |
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
