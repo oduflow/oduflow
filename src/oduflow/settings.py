@@ -153,7 +153,19 @@ class TeamSettings:
 
     def get_template_sql_path(self, template_name: str) -> str:
         tpl_dir = self.get_template_dir(template_name)
-        for name in ("dump.pgdump", "dump.sql", "dump.pgdump.gz", "dump.sql.gz"):
+        # Canonical names first, then the ``db.dump`` names a hand-placed dump
+        # may carry. Oduflow only ever writes the canonical four, so a dump it
+        # persisted always wins over a leftover the operator dropped in here.
+        # Format is detected from the file's contents, not its name; only the
+        # ``.gz`` suffix has to be right.
+        for name in (
+            "dump.pgdump",
+            "dump.sql",
+            "dump.pgdump.gz",
+            "dump.sql.gz",
+            "db.dump",
+            "db.dump.gz",
+        ):
             path = os.path.join(tpl_dir, name)
             if os.path.isfile(path):
                 return path

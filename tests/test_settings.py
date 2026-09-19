@@ -718,6 +718,29 @@ class TestTeamTemplatePaths:
         t = TeamSettings(team_id="1", data_dir="/srv/data")
         assert t.get_template_sql_path("v17") == "/srv/data/templates/v17/dump.pgdump"
 
+    def test_get_template_sql_path_accepts_db_dump(self, tmp_path):
+        t = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        tpl_dir = tmp_path / "templates" / "v17"
+        tpl_dir.mkdir(parents=True)
+        (tpl_dir / "db.dump").write_bytes(b"PGDMP")
+        assert t.get_template_sql_path("v17") == str(tpl_dir / "db.dump")
+
+    def test_get_template_sql_path_accepts_db_dump_gz(self, tmp_path):
+        t = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        tpl_dir = tmp_path / "templates" / "v17"
+        tpl_dir.mkdir(parents=True)
+        (tpl_dir / "db.dump.gz").write_bytes(b"\x1f\x8b")
+        assert t.get_template_sql_path("v17") == str(tpl_dir / "db.dump.gz")
+
+    def test_canonical_dump_wins_over_db_dump(self, tmp_path):
+        """A dump Oduflow persisted must outrank a hand-placed leftover."""
+        t = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        tpl_dir = tmp_path / "templates" / "v17"
+        tpl_dir.mkdir(parents=True)
+        (tpl_dir / "db.dump").write_bytes(b"PGDMP")
+        (tpl_dir / "dump.pgdump").write_bytes(b"PGDMP")
+        assert t.get_template_sql_path("v17") == str(tpl_dir / "dump.pgdump")
+
     def test_get_template_filestore_path(self):
         t = TeamSettings(team_id="1", data_dir="/srv/data")
         assert (
