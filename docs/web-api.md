@@ -18,9 +18,10 @@ their own GitHub account.
 
 ## Authentication and responses
 
-Dashboard API routes use the authenticated UI session (user `admin`, password
-from `[team.*].ui_password`). The login form creates an HTTP-only session
-cookie; HTTP Basic credentials are also accepted. State-changing cookie-auth
+Dashboard API routes use the authenticated UI session (password from
+`[team.*].ui_password`, plus TOTP when enabled). The login form creates an
+HTTP-only session cookie; HTTP Basic credentials are rejected. See
+[UI 2FA](security.md#enable-authenticator-app-2fa) for setup and recovery. State-changing cookie-auth
 requests and all WebSocket handshakes are protected by Origin/Referer checks.
 This authentication is separate from MCP Bearer authentication.
 

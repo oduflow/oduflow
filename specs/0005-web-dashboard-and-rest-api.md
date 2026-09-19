@@ -86,7 +86,11 @@ matured:
    a proper **`/login` page and `/logout`** (`#54`): unauthenticated page loads
    redirect to `/login`, `/api/*` returns `401 JSON`, WebSocket handshakes close
    with `1008`. **Basic auth is retained for API/CLI clients** — so scripts keep
-   working while humans get a real login. This is the current model.
+   working while humans get a real login.
+4. **Session-only UI with optional TOTP.** With the remote MCP CLI available,
+   UI Basic authentication is removed. The operator login can require a local
+   authenticator factor; shared environment links retain their own limited
+   sessions. See [[0067-dashboard-totp]].
 
 ## Consequences
 

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Dashboard authenticator 2FA** — optional per-team TOTP for full UI login.
+  `oduflow ui-2fa setup --team 1` prints a local QR code and confirms enrollment;
+  `oduflow ui-2fa reset --team 1` provides server-side recovery. Enrollment/reset
+  revoke full UI cookies without restarting the server. Replay protection and
+  team attempt limits persist across restarts. Shared links remain accessible
+  without OTP, and MCP client authentication is unchanged.
+- **UI Basic Auth removed** — dashboard REST and WebSocket access now use UI
+  session cookies. Remote automation should use `oduflow client`; the obsolete
+  `scripts/create_env.py` and `scripts/sync_env.py` helpers are removed. Existing
+  full UI cookies require a fresh login on upgrade; sessions expire seven days
+  after login instead of being renewed by dashboard loads.
 - Support `[routing] tls = {}` for HTTPS on port 443 with Traefik’s default
   self-signed certificate, without Let’s Encrypt or an ACME email. HTTP redirects
   to HTTPS; generated routes omit the ACME resolver and services omit its volume.

@@ -219,21 +219,90 @@ share; renaming one carries it over.
 
 ## Web Dashboard Auth
 
-The browser login form creates a signed, seven-day HTTP-only session cookie.
-The REST API also accepts HTTP Basic authentication. Both use a **separate**
-password:
+The browser login form checks the team's `ui_password` and, when enabled, its
+TOTP authenticator code. It creates a signed, seven-day HTTP-only session cookie
+for the dashboard, UI REST API, and WebSocket handshakes. Opening the dashboard
+does not extend that expiry. HTTP Basic authentication is no longer accepted.
 
-- **Username**: `admin`
-- **Password**: value of `ui_password` from `oduflow.toml`
-
-This is independent from the MCP Bearer token (`auth_token`). Credentials are
-compared using `hmac.compare_digest` to prevent timing attacks. State-changing
-cookie-auth requests and WebSocket handshakes are additionally checked for a
-same-origin `Origin`/`Referer` to prevent CSRF.
+The UI password is independent from the MCP Bearer token (`auth_token`). Use
+`oduflow client` for remote automation; it does not need the UI password or TOTP.
+Password comparisons use `hmac.compare_digest`. State-changing cookie-auth
+requests and WebSocket handshakes have a same-origin `Origin`/`Referer` check;
+the login POST also rejects cross-origin submissions.
 
 Fresh configs get a generated `ui_password` for `[team.1]` on first startup.
 Older HTTP configs with an empty `ui_password` are also auto-filled on startup
 and written back to `oduflow.toml`, so an upgrade does not expose the dashboard.
+
+### Enable authenticator-app 2FA
+
+UI 2FA is optional and uses standard six-digit TOTP codes from Google
+Authenticator, Microsoft Authenticator, or another compatible app. It protects
+the **full operator UI**. Shared environment links keep their separate,
+restricted access without OTP; MCP clients and import/webhook authentication
+are unchanged. Odoo's own login is separate.
+
+1. On the Oduflow server, run the command as the **same OS user as the Oduflow
+   service**, with its existing configuration and persistent data directory:
+
+   ```bash
+   oduflow ui-2fa setup --team 1
+   # For a non-default configuration:
+   ODUFLOW_TOML=/path/to/oduflow.toml oduflow ui-2fa setup --team 1
+   ```
+
+   For Docker installations, run the command inside the running Oduflow
+   container using an interactive terminal (`docker exec -it <container> ...`).
+
+2. Scan the QR code printed in the terminal with your authenticator. A manual
+   setup key is printed as a fallback. Both contain the secret: do not put them
+   in logs, tickets, screenshots, or source control. QR generation is local.
+3. Enter the current authenticator code in the CLI. Only a correct code enables
+   2FA. A failed or cancelled setup leaves the previous state unchanged.
+4. Wait for the next code, then sign in to the dashboard with the existing
+   password and the **Authenticator code** field. The setup code is already
+   consumed. If 2FA is disabled, leave that field empty.
+
+No server restart is needed. Enabling 2FA revokes existing full UI cookies;
+shared-link cookies are unaffected. One secret belongs to the **team**, matching
+its existing shared UI password; this is not a personal-user account system.
+A code can be accepted only once, including simultaneous requests. Keep the
+server and phone clocks synchronized; verification tolerates one 30-second
+step in either direction. Failed logins are limited by IP, and ten failed TOTP
+attempts within five minutes lock further attempts for the team until that
+window clears. Team attempts and consumed time steps survive server restarts.
+
+### Lost phone or replacing an authenticator
+
+Use the local server CLI (over SSH if necessary):
+
+```bash
+oduflow ui-2fa reset --team 1
+oduflow ui-2fa setup --team 1
+```
+
+Reset asks for confirmation, disables the factor, and revokes full UI cookies.
+Until setup completes again, the UI accepts the team password alone. There is
+no web or MCP reset endpoint and no recovery-code system in this version.
+Revocation is checked on subsequent HTTP requests and new WebSocket handshakes;
+it does not disconnect an already established terminal connection.
+
+The secret, revocation generation, replay counter, and failed attempts live in
+`<team-data-dir>/.ui_totp.json` (permissions `0600`). Updates are locked across
+processes and atomically replaced. Keep this file on the persistent data volume
+and protect backups as credentials. An unreadable or malformed file blocks full
+UI authentication; restore it or use CLI reset. Do not delete the file to reset
+2FA: absence represents a team that has never enrolled, whereas CLI reset keeps
+a fresh generation so old cookies remain revoked.
+
+### Migrating scripts from HTTP Basic
+
+Use `oduflow client create_environment ...` and `oduflow client pull_and_apply ...`
+instead of the removed `scripts/create_env.py` and `scripts/sync_env.py` helpers.
+Other scripts using Basic against `/api/` must migrate to the corresponding MCP
+tools. The browser continues to use these API routes with its session cookie.
+The session format change signs out existing operators once on upgrade, even
+for teams without 2FA; shared links keep working.
 
 ## When auth is disabled
 

@@ -19,6 +19,8 @@ dependencies = [
     "packaging",
     "cryptography",
     "itsdangerous",
+    "pyotp>=2.9,<3",
+    "qrcode>=7.4,<9",
     "tomli>=2.0; python_version < '3.11'",
     # Production backup subsystem: S3 client + per-chunk compression.
     "boto3",

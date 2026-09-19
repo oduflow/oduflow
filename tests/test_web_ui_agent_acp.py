@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 from unittest.mock import patch
 
@@ -13,18 +12,13 @@ from starlette.testclient import TestClient
 
 from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings
-from oduflow.web_ui import _annotate_acp_auth_error, mount_web_ui
+from oduflow.web_ui import _AUTH_COOKIE, _annotate_acp_auth_error, mount_web_ui
 
 _PW = "s3cret"
 _BRANCH = "feature-x"
 _INFO_URL = f"/api/environments/{_BRANCH}/agent-acp/info?type=claude"
 _SESSION_URL = f"/api/environments/{_BRANCH}/agent-acp/session"
 _ATTACHMENTS_URL = f"/api/environments/{_BRANCH}/agent-acp/attachments"
-
-
-def _basic() -> dict[str, str]:
-    blob = base64.b64encode(f"admin:{_PW}".encode()).decode()
-    return {"Authorization": f"Basic {blob}"}
 
 
 def _app(tmp_path, *, agent_enabled: bool = False) -> Starlette:
@@ -41,7 +35,14 @@ def _app(tmp_path, *, agent_enabled: bool = False) -> Starlette:
 
 
 def _client(tmp_path, *, agent_enabled: bool = False) -> TestClient:
-    return TestClient(_app(tmp_path, agent_enabled=agent_enabled), headers=_basic())
+    client = TestClient(_app(tmp_path, agent_enabled=agent_enabled))
+    assert (
+        client.post(
+            "/login", data={"password": _PW}, follow_redirects=False
+        ).status_code
+        == 303
+    )
+    return client
 
 
 def _post(client: TestClient, session_id: str, title: str | None = None):
@@ -125,6 +126,9 @@ def test_attachment_upload_rejects_oversized_body_before_storage(tmp_path, monke
 def test_attachment_upload_handles_client_disconnect_quietly(tmp_path):
     """An aborted XHR (Remove during upload) must not raise through ASGI."""
     app = _app(tmp_path, agent_enabled=True)
+    client = TestClient(app)
+    client.post("/login", data={"password": _PW}, follow_redirects=False)
+    cookie = client.cookies.get(_AUTH_COOKIE)
     messages = [
         {"type": "http.request", "body": b"partial", "more_body": True},
         {"type": "http.disconnect"},
@@ -147,7 +151,7 @@ def test_attachment_upload_handles_client_disconnect_quietly(tmp_path):
         "root_path": "",
         "path": f"/api/environments/{_BRANCH}/agent-acp/attachments",
         "query_string": b"name=notes.txt",
-        "headers": [(b"authorization", _basic()["Authorization"].encode())],
+        "headers": [(b"cookie", f"{_AUTH_COOKIE}={cookie}".encode())],
     }
 
     with patch("oduflow.web_ui.agent_uploads.store_attachment") as store:

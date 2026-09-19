@@ -6805,7 +6805,7 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
         return settings
     for password in generated:
         logger.warning(
-            "Auto-generated a web-UI password (user 'admin') for a team that had "
+            "Auto-generated a web-UI password for a team that had "
             "none, so upgrading does not serve the dashboard unauthenticated: %s",
             password,
         )
@@ -7329,6 +7329,14 @@ def _run_cli() -> None:
     )
     sub = parser.add_subparsers(dest="command", title="commands", metavar="")
 
+    p_ui_2fa = sub.add_parser(
+        "ui-2fa", help="Configure local dashboard TOTP authentication"
+    )
+    ui_2fa_sub = p_ui_2fa.add_subparsers(dest="ui_2fa_action", required=True)
+    for action in ("setup", "reset"):
+        command = ui_2fa_sub.add_parser(action)
+        command.add_argument("--team", default="1", help="Team ID (default: 1)")
+
     # --- System commands ---
     sub.add_parser("destroy", help="Destroy all shared infrastructure")
     p_upgrade = sub.add_parser(
@@ -7613,6 +7621,15 @@ def _run_cli() -> None:
         systemd_uninstall()
         return
 
+    if args.command == "ui-2fa":
+        from oduflow.ui_totp import run_cli
+
+        # Use the existing server configuration; never bootstrap a new install,
+        # initialize Docker, or publish this operation through MCP.
+        settings = _get_settings()
+        run_cli(settings, settings.get_team(args.team), args.ui_2fa_action)
+        return
+
     # --- Load TOML settings ----------------------------------------
 
     logging.basicConfig(
@@ -7657,7 +7674,7 @@ def _run_cli() -> None:
             generated_token,
         )
         logger.info(
-            "Generated web-UI password for team 1 (user 'admin'): %s",
+            "Generated web-UI password for team 1: %s",
             generated_ui_password,
         )
 
