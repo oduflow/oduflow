@@ -406,3 +406,35 @@ class TestTemplateMetadataPermissions:
             teams={"2": TeamSettings(team_id="2", data_dir=str(tmp_path / "team_2"))},
         )
         _migrate_template_metadata_permissions(empty)
+
+
+class TestBackfillServicePresetsMigration:
+    def test_backfills_each_labelled_service(self, monkeypatch):
+        from unittest.mock import patch
+
+        from oduflow.migrations import _migrate_backfill_service_presets
+        from oduflow.settings import TeamSettings
+
+        svc = MagicMock()
+        svc.labels = {
+            "oduflow.managed": "true",
+            "oduflow.team": "1",
+            "oduflow.service": "redis",
+        }
+        unlabeled = MagicMock()
+        unlabeled.labels = {}
+        client = MagicMock()
+        client.containers.list.return_value = [svc, unlabeled]
+        monkeypatch.setattr("oduflow.docker_ops.client.get_client", lambda: client)
+        team = TeamSettings(team_id="1")
+        settings = Settings(teams={"1": team})
+
+        with patch(
+            "oduflow.docker_ops.service_ops.backfill_service_preset"
+        ) as backfill:
+            _migrate_backfill_service_presets(settings)
+
+        # One call per service-labelled container; the unlabeled one is skipped.
+        backfill.assert_called_once_with(settings, team, "redis", svc)
+        filters = client.containers.list.call_args.kwargs["filters"]
+        assert "oduflow.service" in filters["label"]

@@ -3157,8 +3157,11 @@ oduflow call update_service '{"name":"meilisearch","image":"getmeili/meilisearch
 oduflow call update_service '{"name":"wireguard","net_admin":true}'
 oduflow call update_service '{"name":"wireguard","privileged":true}'
 
-# Delete a service
+# Delete a service (its preset is kept, so restore_service can bring it back)
 oduflow call delete_service redis
+
+# Delete a service and its saved preset, leaving nothing behind
+oduflow call delete_service '{"name":"redis","save_preset":false}'
 
 # Execute a command inside a service container
 oduflow call run_service_command redis "redis-cli ping"
@@ -3168,7 +3171,7 @@ oduflow call run_service_command redis "redis-cli ping"
 
 `update_service` is the preferred way to change **any** setting of a running service — image, env vars, port/routes, hostname, `host_mode`, `command`, `volumes`, `privileged`, or `net_admin`. It recreates the container automatically and preserves every setting you do not override, so you rarely need to delete and recreate a service by hand. Passing `routes` fully replaces the route list. To return to a single catch-all port, pass `routes=[]` and the replacement `port` in the same call.
 
-In the dashboard, **Update** on a service card opens a dialog prefilled with the service's current environment variables (from its preset, or from the container for a service created before presets). Edit them and confirm to apply the change and pull the latest image in one go; leave the field untouched to just pull and recreate, or clear it to remove every variable. The other settings are changed over MCP or the CLI.
+In the dashboard, **Update** on a service card opens the same editor as the MCP tool: image, command, exposure (a single port or restricted path routes), hostname, environment variables, host network mode, volumes and capabilities, all prefilled with the service's current configuration (from its preset, or from the container for a service created before presets). Confirm to apply the changes and pull the latest image in one go; confirm without editing anything to just pull and recreate. Only the fields you actually edited are sent, so an open dialog cannot revert a setting changed concurrently over MCP. Clearing the env or volumes field removes every variable or unmounts every volume; clearing the command falls back to the image `CMD`. An empty hostname keeps the current one. Only `runtime` has no form field — change it over MCP or the CLI.
 
 If you do recreate a service manually (e.g. to rename it), call `get_service_info` first and reuse its fields in the new `create_service` call. The returned dict carries the full configuration (`image`, `port` or `routes`, `hostname`, `env_vars`, `host_mode`, `command`, `volumes`, `cap_add`, `privileged`) so you do not lose anything that `list_services` truncates or that lived only inside the preset.
 
@@ -3198,7 +3201,15 @@ Overrides are optional: calling `update_service` with only `name` pulls the curr
 
 ## Service Presets
 
-Every time a service is created, its configuration (image, port or routes, hostname, environment variables, volumes, `host_mode`, `command`, `cap_add`, `privileged`) is automatically saved as a **preset** in `{team_data_dir}/service_presets.json`. This allows you to restore a service after deletion without re-entering its configuration.
+Every time a service is created or updated, its configuration (image, port or routes, hostname, environment variables, volumes, `host_mode`, `command`, `cap_add`, `privileged`) is automatically saved as a **preset** in `{team_data_dir}/service_presets.json`. This allows you to restore a service after deletion without re-entering its configuration.
+
+Deleting a service keeps its preset by default — `delete_service` takes
+`save_preset` (the dashboard's delete dialog has a **Save as preset** checkbox,
+ticked by default). Pass `save_preset=false` to drop the preset together with
+the container. Services created before presets existed get theirs backfilled
+once at server start (migration `0008-backfill-service-presets`), so old and
+new services read from the same store; the delete result reports whether a
+preset actually remains on disk.
 
 ```bash
 # List saved presets
@@ -3863,10 +3874,10 @@ Odoo.sh ingest endpoints accept the import token only in
 |---|---|---|
 | `GET` | `/api/services` | List services |
 | `POST` | `/api/services/create` | Create a service with either catch-all `port` or restricted Traefik `routes`, plus optional image/runtime settings. `command` accepts a shell-quoted string or an argv array and replaces the image `CMD` |
-| `GET` | `/api/services/{name}/env-vars` | Return the environment variables an update keeps — the saved preset, or the container's own environment for a service created before presets |
-| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
+| `GET` | `/api/services/{name}/config` | Return the full configuration an update keeps (image, `port`/`routes`, hostname, env vars, `host_mode`, volumes, capabilities, `command`) — what the dashboard's Update dialog prefills. Env values configured as team secrets come back as their `secret:<name>` reference |
+| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied — omitting the key keeps the current value, sending an empty one clears it. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
 | `POST` | `/api/services/{name}/restart` | Restart a service |
-| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected) |
+| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected). The optional body `{"save_preset": false}` removes the saved preset too; by default it is kept for `restore_service`. The result's `preset_kept` reports what is actually on disk afterwards |
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
@@ -4039,9 +4050,9 @@ also available via the [REST API](web-api.md).
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
 | `create_service` | ✓ | Create a managed service with exactly one exposure model: catch-all `port`, or restricted Traefik `routes` (`path`, backend `port`, optional `strip_prefix`). The two parameters are mutually exclusive; `port` remains required outside Traefik. Optional `command` (shell-quoted string) replaces the image `CMD` |
-| `delete_service` | ✓ | Stop and remove a service container. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
+| `delete_service` | ✓ | Stop and remove a service container, keeping its preset unless `save_preset=false`. Protected services refuse to be deleted until an administrator unprotects them in the dashboard |
 | `restart_service` | ✓ | Restart a service container |
-| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` is tri-state: omitted keeps it, a string replaces it, an empty string falls back to the image `CMD`. Protected services refuse updates |
+| `update_service` | ✓ | Preflight configuration, pull the latest image and/or change settings. `routes` replaces the complete allowlist; use `routes=[]` with `port` only when switching back to catch-all mode. `command` and `volumes` are tri-state: omitted keeps them, a value fully replaces, an empty string falls back to the image `CMD` / unmounts every volume. Protected services refuse updates |
 | `list_services` | | List all managed service containers |
 | `get_service_info` | | Full live state of a single service (image+digest, port/routes, hostname, host_mode, command, volumes, env, capabilities, restart count, preset). Call before recreating it |
 | `get_service_logs` | | Retrieve service container logs |
