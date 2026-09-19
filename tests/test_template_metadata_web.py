@@ -1,9 +1,11 @@
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from oduflow.docker_ops import system_ops
 from oduflow.errors import BusyError
 from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings
@@ -133,7 +135,8 @@ def test_template_list_reads_during_a_team_operation(tmp_path):
     client, locks = _client(tmp_path)
     locks.acquire_team("1")
     try:
-        response = client.get("/api/templates")
+        with patch.object(system_ops, "get_client", return_value=MagicMock()):
+            response = client.get("/api/templates")
         assert response.status_code == 200
         with pytest.raises(BusyError):
             locks.acquire_team("1")

@@ -231,7 +231,9 @@ class BackupSettings:
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
     # Concurrent chunk uploads (HEAD+PUT) during filestore snapshots;
-    # 1 = sequential.
+    # 1 = sequential. Also sets the snapshot's in-flight plaintext budget
+    # (max(64 MiB, threads x 4 MiB average chunk)), i.e. the extra memory a
+    # running snapshot costs the server process.
     upload_threads: int = 16
 
 

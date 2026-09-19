@@ -1,6 +1,7 @@
 """Chunkstore tests — all against LocalStorage, no S3/Docker required."""
 
 import datetime
+import importlib
 import os
 import random
 import threading
@@ -23,6 +24,10 @@ from oduflow.chunkstore.storage import CountingStorage, LocalStorage
 
 # Small chunk parameters so tests work on kilobytes, not megabytes.
 SMALL = dict(min_size=1024, avg_size=4096, max_size=16384)
+
+# The package __init__ re-exports the backup *function* under the same name,
+# so resolve the module itself to reach (and patch) its internals.
+backup_mod = importlib.import_module("oduflow.chunkstore.backup")
 
 
 def _chunk_all(chunker: Chunker, data: bytes, block: int = 8192) -> list[bytes]:
@@ -133,13 +138,7 @@ def small_config_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(fmt, "META_MIN_SIZE", 256)
     monkeypatch.setattr(fmt, "META_AVG_SIZE", 1024)
     monkeypatch.setattr(fmt, "META_MAX_SIZE", 4096)
-    # backup.py imported the names at module load; patch there too. (The
-    # package __init__ re-exports the backup *function* under the same
-    # name, so resolve the module via importlib.)
-    import importlib
-
-    backup_mod = importlib.import_module("oduflow.chunkstore.backup")
-
+    # backup.py imported the names at module load; patch there too.
     monkeypatch.setattr(backup_mod, "META_MIN_SIZE", 256)
     monkeypatch.setattr(backup_mod, "META_AVG_SIZE", 1024)
     monkeypatch.setattr(backup_mod, "META_MAX_SIZE", 4096)
@@ -266,6 +265,81 @@ class TestParallelUploads:
         dst = tmp_path / "dst"
         chunkstore.restore(small_config_storage, "erp", None, str(dst))
         assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    def test_inflight_plaintext_is_bounded_by_bytes(
+        self, small_config_storage, monkeypatch
+    ):
+        # Budget = max(floor, threads x avg_size) = 2 x 4096 with the floor
+        # neutralized: the producer must block on the third 4 KiB chunk
+        # instead of queueing the whole tree in memory.
+        monkeypatch.setattr(backup_mod, "_INFLIGHT_BYTES_FLOOR", 1)
+        config = ensure_config(small_config_storage)
+        gate = threading.Event()
+
+        class _Gated:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def exists(self, key):
+                gate.wait(10)
+                return self.inner.exists(key)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        sink = backup_mod._ChunkSink(
+            storage=_Gated(small_config_storage),
+            config=config,
+            known_ids=set(),
+            upload_threads=2,
+        )
+        emitted = []
+
+        def produce():
+            for i in range(20):
+                sink.emit_new((b"%04d" % i) * 1024)  # 4096 distinct bytes
+                emitted.append(i)
+
+        producer = threading.Thread(target=produce)
+        producer.start()
+        try:
+            time.sleep(0.2)
+            assert len(emitted) == 2  # 8192 bytes in flight, then blocked
+        finally:
+            gate.set()
+            producer.join(10)
+            sink.wait()
+            sink.close()
+        assert len(emitted) == 20
+        assert sink.new_chunks == 20
+
+    def test_byte_budget_admits_a_chunk_larger_than_the_budget(self):
+        # A chunk bigger than the whole budget must still pass when nothing
+        # else is in flight, or the producer would deadlock on it.
+        budget = backup_mod._ByteBudget(1024)
+        budget.acquire(8192)
+        budget.release(8192)
+
+    def test_completed_futures_do_not_accumulate(
+        self, small_config_storage, monkeypatch
+    ):
+        monkeypatch.setattr(backup_mod, "_FUTURE_REAP_THRESHOLD", 8)
+        config = ensure_config(small_config_storage)
+        sink = backup_mod._ChunkSink(
+            storage=small_config_storage,
+            config=config,
+            known_ids=set(),
+            upload_threads=2,
+        )
+        peak = 0
+        for i in range(200):
+            sink.emit_new((b"%06d" % i) * 512)
+            peak = max(peak, len(sink._futures))
+        sink.wait()
+        sink.close()
+        # Without reaping this would be 200 — one live Future per chunk.
+        assert peak <= 12
+        assert sink.new_chunks == 200
 
     @pytest.mark.parametrize("threads", [1, 8])
     def test_failed_upload_aborts_revision(

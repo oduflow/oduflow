@@ -9,7 +9,9 @@ content-derived ID does not already exist in the storage (existence check),
 with the previous revision's chunk IDs cached to skip even those checks.
 Per-chunk storage round-trips (existence check + put) run on a bounded
 thread pool (``upload_threads``) so object-store latency is not paid
-serially per chunk.
+serially per chunk; the plaintext queued for those uploads is capped by a
+byte budget (see ``_ChunkSink``), so a large first snapshot cannot grow the
+server's resident memory without bound.
 
 Packing: changed files are concatenated into one continuous stream (small
 files share chunks). The stream is cut (``Chunker.flush``) whenever an
@@ -50,6 +52,17 @@ logger = logging.getLogger("oduflow")
 
 _READ_BLOCK = 1024 * 1024
 
+# Floor for the in-flight plaintext budget (see _ChunkSink). Chunk count
+# alone is a weak bound — chunks range from min_size to max_size — so the
+# producer blocks on queued *bytes* instead. The effective budget scales
+# with upload_threads, so raising the knob still keeps every worker fed.
+_INFLIGHT_BYTES_FLOOR = 64 * 1024 * 1024
+
+# Finished futures are reaped from the pending list once it grows past this
+# many entries, so the list stays O(upload_threads) rather than growing with
+# the number of chunks in the revision (~125k for a 500 GB first snapshot).
+_FUTURE_REAP_THRESHOLD = 512
+
 
 @dataclass
 class BackupResult:
@@ -68,6 +81,30 @@ class BackupResult:
     elapsed_seconds: float = 0.0
 
 
+class _ByteBudget:
+    """Blocks the producer once in-flight plaintext exceeds *limit* bytes.
+
+    A chunk larger than the whole budget is still admitted when nothing
+    else is in flight, so the producer can never deadlock on it.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, limit)
+        self._used = 0
+        self._cond = threading.Condition()
+
+    def acquire(self, size: int) -> None:
+        with self._cond:
+            while self._used and self._used + size > self._limit:
+                self._cond.wait()
+            self._used += size
+
+    def release(self, size: int) -> None:
+        with self._cond:
+            self._used -= size
+            self._cond.notify_all()
+
+
 @dataclass
 class _ChunkSink:
     """Accumulates the revision's chunk sequence and uploads new chunks.
@@ -76,9 +113,12 @@ class _ChunkSink:
     (existence check + compress + put) run on a bounded thread pool; the
     revision's chunk *sequence* (``hashes``/``lengths``) and the dedup set
     stay producer-ordered because they are appended before submission.
-    A semaphore of ``2 × threads`` bounds the plaintext held in flight.
-    Callers must ``wait()`` (which re-raises the first upload error) before
-    committing the revision file, and ``close()`` when done.
+    Two bounds keep memory flat over a long backup: a semaphore of
+    ``2 × threads`` caps how many chunks are queued, and a byte budget of
+    ``max(64 MiB, threads × avg_size)`` caps how much plaintext they hold;
+    finished futures are reaped as they accumulate. Callers must ``wait()``
+    (which re-raises the first upload error) before committing the revision
+    file, and ``close()`` when done.
     """
 
     storage: Storage
@@ -101,6 +141,9 @@ class _ChunkSink:
                 max_workers=self.upload_threads, thread_name_prefix="chunk-upload"
             )
             self._slots = threading.BoundedSemaphore(self.upload_threads * 2)
+            self._budget = _ByteBudget(
+                max(_INFLIGHT_BYTES_FLOOR, self.upload_threads * self.config.avg_size)
+            )
 
     def emit_new(self, plaintext: bytes) -> None:
         chunk_hash = self.config.chunk_hash(plaintext)
@@ -116,7 +159,10 @@ class _ChunkSink:
             return
         if self._error is not None:
             self.wait()  # fail fast: re-raises the recorded error
+        if len(self._futures) >= _FUTURE_REAP_THRESHOLD:
+            self._reap()
         self._slots.acquire()
+        self._budget.acquire(len(plaintext))
         self._futures.append(
             self._executor.submit(self._store_in_thread, key, plaintext)
         )
@@ -130,6 +176,7 @@ class _ChunkSink:
                     self._error = exc
             raise
         finally:
+            self._budget.release(len(plaintext))
             self._slots.release()
 
     def _store(self, key: str, plaintext: bytes) -> None:
@@ -145,6 +192,19 @@ class _ChunkSink:
         finally:
             with self._lock:
                 self.upload_seconds += time.monotonic() - start
+
+    def _reap(self) -> None:
+        """Drop finished futures; re-raise the first upload error.
+
+        Called from the producer thread only, so ``_futures`` needs no lock.
+        """
+        pending: list[Future[None]] = []
+        for future in self._futures:
+            if future.done():
+                future.result()  # re-raises a failed upload
+            else:
+                pending.append(future)
+        self._futures = pending
 
     def wait(self) -> None:
         """Drain in-flight uploads; re-raise the first upload error."""
@@ -344,7 +404,9 @@ def backup(
     Caller contract: backups and prunes against one storage are serialized
     (Oduflow runs them under the team's `prod-backups:` lock / a single
     scheduler thread). *upload_threads* bounds concurrent chunk uploads
-    (1 = sequential).
+    (1 = sequential); it also sets the in-flight plaintext budget
+    (``max(64 MiB, threads × avg chunk size)``), which is the memory this
+    call adds to the server process.
     """
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"source_dir does not exist: {source_dir}")

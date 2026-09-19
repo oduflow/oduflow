@@ -352,7 +352,7 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | `[backup].basebackup_time` | `03:30` | Daily WAL-G base-backup time in server-local `HH:MM` |
 | `[backup].keep` | `["30:180", "7:30", "1:7"]` | Snapshot retention tiers as `interval_days:age_days` pairs |
 | `[backup].walg_keep_full` | `7` | Number of WAL-G full base backups to retain; must be at least `1` |
-| `[backup].upload_threads` | `16` | Concurrent filestore chunk uploads per snapshot; `1` uploads sequentially |
+| `[backup].upload_threads` | `16` | Concurrent filestore chunk uploads per snapshot; `1` uploads sequentially. A running snapshot buffers up to `max(64 MiB, threads x 4 MiB)` of chunk data in memory, so lower it on small-RAM hosts |
 
 ### Per-team settings
 

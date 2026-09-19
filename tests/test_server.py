@@ -1612,8 +1612,9 @@ class TestResetAdminPasswordTool:
         assert "New password: s3cret" in result
         mock_reset.assert_called_once_with(TEST_SETTINGS, TEST_TEAM, "main", "s3cret")
 
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
     @patch("oduflow.docker_ops.odoo_ops.reset_admin_password")
-    def test_reset_not_found(self, mock_reset):
+    def test_reset_not_found(self, mock_reset, mock_ensure):
         from oduflow.errors import NotFoundError
 
         mock_reset.side_effect = NotFoundError("Environment 'xyz' does not exist.")
