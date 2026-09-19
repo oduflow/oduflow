@@ -85,8 +85,8 @@ precursors).
 | [0063](0063-production-stack-targets.md) | 2026-09-16 | Production Stack targets, explicit adoption, registry ownership and retryable reconciliation |
 | [0064](0064-team-base-domain.md) | 2026-09-16 | Team base domain (flat env/service/production naming zone) and multi-domain productions |
 | [0065](0065-team-ssh-deploy-keys.md) | 2026-09-17 | Per-team SSH deploy keys: auto-generated keypair, public key in the dashboard, SSH repository URLs |
-
 | [0066](0066-production-wal-disk-protection.md) | 2026-09-19 | Production WAL monitoring, archive controls, persistent disk protection and fenced recovery |
+| [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
 
 ## Design docs
 

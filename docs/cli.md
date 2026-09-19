@@ -25,7 +25,7 @@ Shared infrastructure (Docker network, PostgreSQL, team directories) is initiali
 
 **stdio mode** — the server communicates over stdin/stdout. The MCP client starts the process directly; no network port is needed. Ideal for local clients like Claude Desktop, Windsurf, etc.
 
-**HTTP mode** — starts a persistent HTTP server on `http://0.0.0.0:8000` by default. Exposes the MCP endpoint at `/mcp`, a Web Dashboard at `/`, and a REST API at `/api/`. MCP uses Bearer tokens; the dashboard uses a form/session cookie, while API clients may also use HTTP Basic auth.
+**HTTP mode** — starts a persistent HTTP server on `http://0.0.0.0:8000` by default. Exposes the MCP endpoint at `/mcp`, a Web Dashboard at `/`, and a REST API at `/api/`. MCP uses Bearer tokens; the dashboard and its REST/WS API use session cookies obtained through the login form (with TOTP when enabled). HTTP Basic is not accepted.
 
 Configuration is loaded from `oduflow.toml` (see [Installation](installation.md#configuration-reference)).
 See [Quick Start](quick-start.md) for MCP client configuration examples for both modes.
@@ -38,6 +38,28 @@ oduflow --stack /path/to/oduflow.yaml --stack-team 1 --transport http
 
 Startup stops with a non-zero exit if Stack validation, preflight, or apply
 fails. See [Declarative Stacks](stacks.md).
+
+## Dashboard Two-Factor Authentication
+
+Run locally on the server as the Oduflow service user, with the server's existing
+configuration and persistent data directory. Docker users should execute these
+commands inside the running Oduflow container with an interactive terminal.
+
+```bash
+# Print a local QR code and enable TOTP after confirming an authenticator code
+oduflow ui-2fa setup --team 1
+
+# Confirm disabling TOTP and revoke full operator UI sessions
+oduflow ui-2fa reset --team 1
+```
+
+`--team` defaults to `1`. Setup requires a configured `ui_password`; an existing
+factor must be reset before replacement. Reset returns the UI to password-only
+login until setup runs again. Commands use the same `ODUFLOW_TOML` configuration
+lookup as the server, do not require Docker access, and do not start the server.
+Changes take effect without a restart. Shared links and MCP clients are
+unaffected. See [UI 2FA](security.md#enable-authenticator-app-2fa) for enrollment,
+session expiry, and recovery details.
 
 ## Declarative Stack Commands
 

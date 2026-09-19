@@ -1,15 +1,4 @@
-"""Tests for Web UI auth, focused on the cookie fallback that lets WebSocket
-handshakes (which cannot carry an Authorization header) authenticate.
-
-Regression: the Console/SQL terminal buttons opened WebSocket connections that
-``BasicAuthMiddleware`` rejected with HTTP 403, because the browser never sends
-HTTP Basic credentials on a WebSocket upgrade. The fix mints a signed session
-cookie on dashboard load and validates it for both HTTP and WebSocket scopes.
-
-The cookie is an ``itsdangerous`` timed token signed with a persistent
-server-side secret (stored in the data dir), so it survives restarts, expires
-after ``_SESSION_MAX_AGE``, and never exposes the team password.
-"""
+"""Dashboard login, signed sessions, and rejection of legacy Basic credentials."""
 
 from __future__ import annotations
 
@@ -28,7 +17,7 @@ from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings
 from oduflow.web_ui import (
     _AUTH_COOKIE,
-    BasicAuthMiddleware,
+    UIAuthMiddleware,
     _check_cookie_token,
     _get_signer,
     _make_ui_token,
@@ -66,7 +55,7 @@ def _basic(user: str, password: str) -> dict[str, str]:
 
 
 def _full_app(settings: Settings) -> Starlette:
-    """The real web UI sub-app (auto-wrapped in BasicAuthMiddleware since a team
+    """The real web UI sub-app (auto-wrapped in UIAuthMiddleware since a team
     has a ui_password)."""
     app = Starlette()
     mount_web_ui(app, lambda: settings, LockManager())
@@ -238,9 +227,10 @@ def test_api_unauthenticated_is_401_without_basic_challenge():
     assert "www-authenticate" not in {k.lower() for k in resp.headers}
 
 
-def test_api_basic_auth_still_works(tmp_path):
+def test_api_session_auth_works(tmp_path):
     client = TestClient(_full_app(_settings(etc_dir=str(tmp_path / "conf"))))
-    resp = client.get("/api/license", headers=_basic("admin", _PW))
+    client.post("/login", data={"password": _PW})
+    resp = client.get("/api/license")
     assert resp.status_code == 200
     assert resp.json()["license"]["type"] == TYPE_UNLICENSED
 
@@ -261,9 +251,9 @@ def test_api_license_activate_uses_settings_etc_dir(tmp_path, monkeypatch):
     settings = _settings(etc_dir=str(tmp_path / "conf"))
     client = TestClient(_full_app(settings))
 
+    client.post("/login", data={"password": _PW})
     resp = client.post(
         "/api/license/activate",
-        headers=_basic("admin", _PW),
         json={"key": " fake-key "},
     )
 
@@ -272,18 +262,12 @@ def test_api_license_activate_uses_settings_etc_dir(tmp_path, monkeypatch):
     assert calls == {"key_text": "fake-key", "etc_dir": settings.etc_dir}
 
 
-def test_dashboard_basic_sets_cookie():
+@pytest.mark.parametrize("path,status", [("/", 302), ("/api/license", 401)])
+def test_basic_auth_is_rejected(path, status):
     client = TestClient(_full_app(_settings()))
-    resp = client.get("/", headers=_basic("admin", _PW))
-    assert resp.status_code == 200
-    set_cookie = resp.headers.get("set-cookie", "")
-    assert f"{_AUTH_COOKIE}=" in set_cookie
-    assert "httponly" in set_cookie.lower()
-    assert "samesite=strict" in set_cookie.lower()
-    assert "max-age=" in set_cookie.lower()
-    # The minted cookie validates back to the team.
-    token = client.cookies.get(_AUTH_COOKIE)
-    assert _check_cookie_token(token, _settings()) is not None
+    resp = client.get(path, headers=_basic("admin", _PW), follow_redirects=False)
+    assert resp.status_code == status
+    assert _AUTH_COOKIE not in client.cookies
 
 
 def test_dashboard_cookie_fallback_without_basic():
@@ -317,28 +301,25 @@ def test_non_ascii_cookie_does_not_crash():
     assert _check_cookie_token("é", settings) is None
 
 
-def test_cookie_secure_flag():
-    # plain http, port mode -> no Secure
-    client = TestClient(_full_app(_settings("port")))
-    resp = client.get("/", headers=_basic("admin", _PW))
-    assert "secure" not in resp.headers.get("set-cookie", "").lower()
-
-    # X-Forwarded-Proto: https -> Secure
-    headers = {**_basic("admin", _PW), "X-Forwarded-Proto": "https"}
-    resp = client.get("/", headers=headers)
-    assert "secure" in resp.headers.get("set-cookie", "").lower()
-
-    # Chained proxies "https, http": first hop is https -> Secure
-    headers = {**_basic("admin", _PW), "X-Forwarded-Proto": "https, http"}
-    resp = client.get("/", headers=headers)
-    assert "secure" in resp.headers.get("set-cookie", "").lower()
-
-    # traefik mode but reached over plain http with no X-Forwarded-Proto:
-    # NOT Secure, otherwise the browser would silently drop the cookie and the
-    # terminal buttons would stay broken on that origin.
-    client = TestClient(_full_app(_settings("traefik")))
-    resp = client.get("/", headers=_basic("admin", _PW))
-    assert "secure" not in resp.headers.get("set-cookie", "").lower()
+@pytest.mark.parametrize(
+    "mode,proto,secure",
+    [
+        ("port", "", False),
+        ("port", "https", True),
+        ("port", "https, http", True),
+        ("traefik", "", False),
+    ],
+)
+def test_cookie_secure_flag(mode, proto, secure):
+    client = TestClient(_full_app(_settings(mode)))
+    headers = {"X-Forwarded-Proto": proto} if proto else {}
+    resp = client.post(
+        "/login", data={"password": _PW}, headers=headers, follow_redirects=False
+    )
+    cookie = resp.headers["set-cookie"].lower()
+    assert ("secure" in cookie) is secure
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
 
 
 # --- WebSocket handshake -------------------------------------------------
@@ -354,7 +335,7 @@ def _ws_app(settings: Settings):
     router = Router(
         routes=[WebSocketRoute("/api/environments/{branch:path}/terminal", _stub_ws)]
     )
-    return BasicAuthMiddleware(router, lambda: settings)
+    return UIAuthMiddleware(router, lambda: settings)
 
 
 _WS_URL = "/api/environments/main/terminal"
@@ -386,11 +367,11 @@ def test_ws_rejects_invalid_cookie():
             pass
 
 
-def test_ws_accepts_basic_header():
-    """Header path still works (e.g. non-browser clients)."""
+def test_ws_rejects_basic_header():
     client = TestClient(_ws_app(_settings()))
-    with client.websocket_connect(_WS_URL, headers=_basic("admin", _PW)) as ws:
-        assert ws.receive_text() == "ok"
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(_WS_URL, headers=_basic("admin", _PW)):
+            pass
 
 
 # --- production endpoints ---------------------------------------------------
@@ -437,3 +418,261 @@ def test_productions_api_requires_auth():
     client = TestClient(_full_app(_settings()))
     assert client.get("/api/productions").status_code == 401
     assert client.post("/api/productions/x/stop").status_code == 401
+
+
+@pytest.fixture
+def mfa_config(tmp_path, monkeypatch):
+    import pyotp
+
+    from oduflow import ui_totp
+
+    now = 1_800_000_000
+    secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+    monkeypatch.setattr(ui_totp.time, "time", lambda: now)
+    team = TeamSettings(team_id="1", ui_password=_PW, data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    ui_totp.enroll(settings, team, secret, pyotp.TOTP(secret).at(now - 30))
+    return settings, pyotp.TOTP(secret).at(now)
+
+
+@pytest.mark.parametrize("code", ["", "bad", "1234567", "１２３４５６"])
+def test_mfa_login_rejects_missing_or_invalid_code(mfa_config, code):
+    settings, _ = mfa_config
+    client = TestClient(_full_app(settings))
+    response = client.post(
+        "/login", data={"password": _PW, "otp": code}, follow_redirects=False
+    )
+    assert response.status_code == 401
+    assert _AUTH_COOKIE not in client.cookies
+    assert client.get("/api/license").status_code == 401
+
+
+def test_mfa_session_authenticates_http_and_websocket_and_rejects_replay(mfa_config):
+    settings, code = mfa_config
+    client = TestClient(_full_app(settings))
+    response = client.post(
+        "/login", json={"password": _PW, "otp": code}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    cookie = client.cookies.get(_AUTH_COOKIE)
+    assert _check_cookie_token(cookie, settings) is settings.teams["1"]
+    assert client.get("/").status_code == 200
+    # Dashboard loads do not extend the authenticated session indefinitely.
+    assert "set-cookie" not in client.get("/").headers
+    with TestClient(_ws_app(settings)).websocket_connect(
+        _WS_URL, headers={"cookie": f"{_AUTH_COOKIE}={cookie}"}
+    ) as ws:
+        assert ws.receive_text() == "ok"
+    other = TestClient(_full_app(settings))
+    assert other.post("/login", data={"password": _PW, "otp": code}).status_code == 401
+    assert _AUTH_COOKIE not in other.cookies
+
+
+def test_mfa_basic_does_not_bypass_factor(mfa_config):
+    settings, _ = mfa_config
+    client = TestClient(_full_app(settings))
+    assert (
+        client.get(
+            "/", headers=_basic("admin", _PW), follow_redirects=False
+        ).status_code
+        == 302
+    )
+    assert client.get("/api/license", headers=_basic("admin", _PW)).status_code == 401
+    with pytest.raises(WebSocketDisconnect):
+        with TestClient(_ws_app(settings)).websocket_connect(
+            _WS_URL, headers=_basic("admin", _PW)
+        ):
+            pass
+
+
+def test_enrollment_and_reset_revoke_sessions_without_restart(tmp_path, monkeypatch):
+    import pyotp
+
+    from oduflow import ui_totp
+
+    now = 1_800_000_000
+    monkeypatch.setattr(ui_totp.time, "time", lambda: now)
+    team = TeamSettings(team_id="1", ui_password=_PW, data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    client = TestClient(_full_app(settings))
+    client.post("/login", data={"password": _PW})
+    password_cookie = client.cookies.get(_AUTH_COOKIE)
+    secret = pyotp.random_base32()
+    ui_totp.enroll(settings, team, secret, pyotp.TOTP(secret).at(now - 30))
+    assert _check_cookie_token(password_cookie, settings) is None
+    assert client.get("/api/license").status_code == 401
+    assert client.post("/login", data={"password": _PW}).status_code == 401
+    assert (
+        client.post(
+            "/login",
+            data={"password": _PW, "otp": pyotp.TOTP(secret).at(now)},
+            follow_redirects=False,
+        ).status_code
+        == 303
+    )
+    mfa_cookie = client.cookies.get(_AUTH_COOKIE)
+    ui_totp.reset(settings, team)
+    assert _check_cookie_token(mfa_cookie, settings) is None
+    assert _check_cookie_token(password_cookie, settings) is None
+    assert (
+        client.post(
+            "/login", data={"password": _PW}, follow_redirects=False
+        ).status_code
+        == 303
+    )
+
+
+def test_login_generation_cannot_race_enrollment(tmp_path):
+    import pyotp
+
+    from oduflow import ui_totp
+
+    settings = Settings(
+        base_data_dir=str(tmp_path),
+        teams={"1": TeamSettings(team_id="1", ui_password=_PW)},
+    )
+    team = settings.teams["1"]
+    generation = ui_totp.verify(settings, team, "")
+    secret = pyotp.random_base32()
+    ui_totp.enroll(settings, team, secret, pyotp.TOTP(secret).now())
+    stale_cookie = _make_ui_token(team, settings, mfa_version=generation)
+    assert _check_cookie_token(stale_cookie, settings) is None
+    with pytest.raises(ValueError, match="TOTP verification"):
+        _make_ui_token(team, settings)
+
+
+def test_corrupt_mfa_state_denies_cookie_and_login(mfa_config):
+    from oduflow import ui_totp
+
+    settings, code = mfa_config
+    client = TestClient(_full_app(settings))
+    client.post("/login", data={"password": _PW, "otp": code})
+    ui_totp._path(settings, settings.teams["1"]).write_text("{}")
+    assert client.get("/api/license").status_code == 401
+    assert client.post("/login", data={"password": _PW, "otp": code}).status_code == 503
+
+
+def test_team_mfa_throttle_survives_new_app_instances(mfa_config):
+    settings, code = mfa_config
+    for _ in range(10):
+        client = TestClient(_full_app(settings))
+        assert (
+            client.post("/login", data={"password": _PW, "otp": "bad"}).status_code
+            == 401
+        )
+    client = TestClient(_full_app(settings))
+    assert client.post("/login", data={"password": _PW, "otp": code}).status_code == 429
+
+
+def test_cross_origin_login_cannot_consume_totp(mfa_config):
+    settings, code = mfa_config
+    client = TestClient(_full_app(settings))
+    credentials = {"password": _PW, "otp": code}
+    assert (
+        client.post(
+            "/login", data=credentials, headers={"Origin": "https://evil.example"}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post("/login", data=credentials, follow_redirects=False).status_code
+        == 303
+    )
+
+
+@pytest.mark.parametrize("body", [[], None, 42, "password"])
+def test_malformed_json_login_is_rejected(body):
+    client = TestClient(_full_app(_settings()))
+    response = client.post("/login", json=body, follow_redirects=False)
+    assert response.status_code == 401
+
+
+def test_legacy_two_field_session_is_rejected():
+    settings = _settings()
+    token = _get_signer(settings).dumps(
+        ["1", web_ui._password_fingerprint(web_ui._get_secret(settings), _PW)]
+    )
+    assert _check_cookie_token(token, settings) is None
+
+
+def test_wrong_password_cannot_consume_valid_totp(mfa_config):
+    settings, code = mfa_config
+    client = TestClient(_full_app(settings))
+    assert (
+        client.post("/login", data={"password": "wrong", "otp": code}).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/login", data={"password": _PW, "otp": code}, follow_redirects=False
+        ).status_code
+        == 303
+    )
+
+
+def test_mfa_and_reset_are_scoped_to_the_passwords_team(mfa_config, tmp_path):
+    from dataclasses import replace
+
+    from oduflow import ui_totp
+
+    settings, code = mfa_config
+    other = TeamSettings(
+        team_id="2", ui_password="other-password", data_dir=str(tmp_path / "team2")
+    )
+    settings = replace(settings, teams={**settings.teams, "2": other})
+    client = TestClient(_full_app(settings))
+    assert (
+        client.post(
+            "/login", data={"password": other.ui_password}, follow_redirects=False
+        ).status_code
+        == 303
+    )
+    other_cookie = client.cookies.get(_AUTH_COOKIE)
+    assert _check_cookie_token(other_cookie, settings) is other
+    protected = TestClient(_full_app(settings))
+    assert (
+        protected.post(
+            "/login", data={"password": _PW}, follow_redirects=False
+        ).status_code
+        == 401
+    )
+    assert (
+        protected.post(
+            "/login", data={"password": _PW, "otp": code}, follow_redirects=False
+        ).status_code
+        == 303
+    )
+    full_cookie = protected.cookies.get(_AUTH_COOKIE)
+    ui_totp.reset(settings, settings.teams["1"])
+    assert _check_cookie_token(other_cookie, settings) is other
+    with pytest.raises(WebSocketDisconnect):
+        with TestClient(_ws_app(settings)).websocket_connect(
+            _WS_URL, headers={"cookie": f"{_AUTH_COOKIE}={full_cookie}"}
+        ):
+            pass
+
+
+def test_session_helper_cannot_upgrade_auth_during_concurrent_enrollment(
+    tmp_path, monkeypatch
+):
+    import pyotp
+
+    from oduflow import ui_totp
+
+    team = TeamSettings(team_id="1", ui_password=_PW, data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    read = ui_totp._load
+    enrolled = False
+
+    def enroll_after_read(path):
+        nonlocal enrolled
+        snapshot = read(path)
+        if not enrolled:
+            enrolled = True
+            secret = pyotp.random_base32()
+            ui_totp.enroll(settings, team, secret, pyotp.TOTP(secret).now())
+        return snapshot
+
+    monkeypatch.setattr(ui_totp, "_load", enroll_after_read)
+    cookie = _make_ui_token(team, settings)
+    assert _check_cookie_token(cookie, settings) is None

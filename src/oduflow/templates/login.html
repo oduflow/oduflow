@@ -99,7 +99,7 @@
       font-weight: 500;
       color: var(--text-dim);
     }
-    input[type="password"] {
+    input[type="password"], input[type="text"] {
       width: 100%;
       background: var(--bg);
       color: var(--text);
@@ -109,7 +109,7 @@
       font-family: inherit;
       font-size: 14px;
     }
-    input[type="password"]:focus {
+    input[type="password"]:focus, input[type="text"]:focus {
       border-color: var(--accent);
     }
     button {
@@ -144,6 +144,9 @@
     <label for="password">Password</label>
     <input id="password" name="password" type="password"
            autocomplete="current-password" autofocus required>
+    <label for="otp">Authenticator code (if enabled)</label>
+    <input id="otp" name="otp" type="text" inputmode="numeric"
+           autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6">
     <button type="submit">Sign in</button>
   </form>
 </body>

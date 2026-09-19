@@ -14,7 +14,7 @@
 │  • Per-branch / per-team / system locking        │
 │  • Unified error handler (FlowError → ToolError) │
 │  • Web UI mount (Starlette)                      │
-│  • Bearer auth (MCP) / session+Basic auth (UI)   │
+│  • Bearer auth (MCP) / session/TOTP auth (UI)   │
 │  • Team resolution (token → Host → default)      │
 └────────────────────┬─────────────────────────────┘
                      │
@@ -71,7 +71,7 @@ src/oduflow/
   git_analysis.py      # Classify changed files → install / upgrade / restart / refresh
   bundled_upgrade.py   # Three-way merge bundled files using persistent baselines
   port_registry.py     # Stable port allocation with JSON persistence
-  web_ui.py            # Starlette dashboard, REST/WS API, session+Basic auth middleware
+  web_ui.py            # Starlette dashboard, REST/WS API, session/TOTP auth middleware
   extra_addons.py      # Extra addon repo management (clone, worktree, odoo.conf generation)
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM

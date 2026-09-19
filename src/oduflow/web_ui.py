@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import html
@@ -49,6 +48,7 @@ from oduflow import (
     production_registry,
     secret_store,
     ui_scope,
+    ui_totp,
 )
 from oduflow.docker_ops import (
     env_ops,
@@ -100,14 +100,13 @@ from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
-_AUTH_USER = "admin"
 _AUTH_COOKIE = "oduflow_ui_auth"
 # Reachable without authentication: the login flow and static brand assets
 # (so the login page can render its logo/favicon/fonts). /static/ serves only
 # vetted extensions from the packaged assets dir (fonts, icons, xterm).
 # /import-odoo.sh (the Odoo.sh client script) and the five import ingest
 # endpoints authenticate with a short-lived import token, not the UI password,
-# so they bypass Basic auth. They are listed as EXACT paths (never a prefix):
+# so they bypass UI session authentication. They are EXACT paths (not prefixes):
 # a prefix like "/api/templates/import/" would also expose sibling routes such
 # as /api/templates/{name}/delete with name="import" to unauthenticated calls.
 # NOTE: /api/templates/import-token (which mints the token) is deliberately NOT
@@ -215,13 +214,19 @@ def _password_fingerprint(secret: str, ui_password: str) -> str:
     ).hexdigest()
 
 
-def _make_ui_token(team: "TeamSettings", settings: Settings) -> str:
+def _make_ui_token(
+    team: "TeamSettings", settings: Settings, *, mfa_version: str | None = None
+) -> str:
     """Signed, timestamped session token for a team, stored as a cookie so
     WebSocket handshakes (which cannot send an Authorization header) can
     authenticate. Expires after `_SESSION_MAX_AGE`; carries a password
     fingerprint so a password change revokes it at once."""
     fingerprint = _password_fingerprint(_get_secret(settings), team.ui_password)
-    return _get_signer(settings).dumps([team.team_id, fingerprint])
+    if mfa_version is None:
+        # Convenience for password-only callers. MFA sessions may only be minted
+        # with the generation returned by a successful TOTP verification.
+        mfa_version = ui_totp.version(settings, team, password_only=True)
+    return _get_signer(settings).dumps([team.team_id, fingerprint, mfa_version])
 
 
 def _check_cookie_token(token: str, settings: Settings) -> "TeamSettings | None":
@@ -234,13 +239,18 @@ def _check_cookie_token(token: str, settings: Settings) -> "TeamSettings | None"
         data = _get_signer(settings).loads(token, max_age=_SESSION_MAX_AGE)
     except BadData:
         return None
-    if not (isinstance(data, list) and len(data) == 2):
+    if not (isinstance(data, list) and len(data) == 3):
         return None
-    team_id, fingerprint = data
+    team_id, fingerprint, mfa_version = data
     if not isinstance(team_id, str) or not isinstance(fingerprint, str):
         return None
     team = settings.teams.get(team_id)
     if not team or not team.ui_password:
+        return None
+    try:
+        if mfa_version != ui_totp.version(settings, team):
+            return None
+    except ui_totp.TOTPStateError:
         return None
     expected = _password_fingerprint(_get_secret(settings), team.ui_password)
     if not hmac.compare_digest(fingerprint, expected):
@@ -328,7 +338,7 @@ def _is_cross_origin(headers: Headers) -> bool:
     return netloc != host
 
 
-class BasicAuthMiddleware:
+class UIAuthMiddleware:
     def __init__(self, app: ASGIApp, get_settings: Callable[[], Settings]) -> None:
         self._app = app
         self._get_settings = get_settings
@@ -357,8 +367,6 @@ class BasicAuthMiddleware:
         if share:
             team = share[0]
             scoped_env = share[1]
-        else:
-            team = self._check_credentials(conn.headers.get("authorization", ""))
         if not team:
             token = conn.cookies.get(_AUTH_COOKIE)
             if token:
@@ -422,18 +430,6 @@ class BasicAuthMiddleware:
             response = RedirectResponse("/login", status_code=302)
             await response(scope, receive, send)
 
-    def _check_credentials(self, auth_header: str) -> "TeamSettings | None":
-        if not auth_header.startswith("Basic "):
-            return None
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode()
-            user, password = decoded.split(":", 1)
-        except Exception:
-            return None
-        if user != _AUTH_USER:
-            return None
-        return self._get_settings().get_team_by_ui_password(password)
-
 
 def _is_secure_request(request: Request) -> bool:
     """Whether the browser sees this connection as HTTPS, honouring a single
@@ -457,10 +453,8 @@ def _render_login(error: str = "") -> str:
     return page.replace("<!--ERROR-->", banner)
 
 
-async def _read_login_password(request: Request) -> str:
-    """Extract the password from a login POST, accepting either an HTML form
-    (application/x-www-form-urlencoded) or a JSON body. Parsed directly so the
-    UI needs no python-multipart dependency."""
+async def _read_login_credentials(request: Request) -> tuple[str, str]:
+    """Read form/JSON credentials without a multipart dependency."""
     import urllib.parse
 
     body = await request.body()
@@ -468,10 +462,16 @@ async def _read_login_password(request: Request) -> str:
         try:
             data = json.loads(body or b"{}")
         except (ValueError, TypeError):
-            return ""
-        return str((data or {}).get("password") or "").strip()
+            return "", ""
+        if not isinstance(data, dict):
+            return "", ""
+        return str(data.get("password") or "").strip(), str(
+            data.get("otp") or ""
+        ).strip()
     parsed = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
-    return (parsed.get("password", [""])[0]).strip()
+    return (parsed.get("password", [""])[0]).strip(), (
+        parsed.get("otp", [""])[0]
+    ).strip()
 
 
 _EXTERNAL_COMMAND_UI_ERROR = "Operation failed. Check server logs for details."
@@ -896,11 +896,11 @@ def _build_routes(
     import_staging_locks = _ImportStagingLocks()
 
     def _set_session_cookie(
-        response: Response, team: TeamSettings, request: Request
+        response: Response, team: TeamSettings, request: Request, mfa_version: str
     ) -> None:
         response.set_cookie(
             _AUTH_COOKIE,
-            _make_ui_token(team, get_settings()),
+            _make_ui_token(team, get_settings(), mfa_version=mfa_version),
             max_age=_SESSION_MAX_AGE,
             httponly=True,
             samesite="strict",
@@ -946,10 +946,7 @@ def _build_routes(
         settings = get_settings()
         team = getattr(request.state, "team", None)
         page = _render_dashboard(settings, team=team)
-        response = HTMLResponse(page)
-        if team is not None and team.ui_password:
-            _set_session_cookie(response, team, request)
-        return response
+        return HTMLResponse(page)
 
     def _team_for_share(
         settings: Settings, env_name: str, key: str, host: str
@@ -1045,15 +1042,44 @@ def _build_routes(
                     _render_login("Too many failed attempts. Try again later."),
                     status_code=429,
                 )
-            password = await _read_login_password(request)
+            if _is_cross_origin(request.headers):
+                return HTMLResponse(
+                    _render_login("Cross-origin request blocked."), status_code=403
+                )
+            password, code = await _read_login_credentials(request)
             team = settings.get_team_by_ui_password(password) if password else None
             if team is not None:
-                login_limiter.clear(client_ip)
-                response: Response = RedirectResponse("/", status_code=303)
-                _set_session_cookie(response, team, request)
-                return response
+                try:
+                    mfa_version = await run_in_threadpool(
+                        ui_totp.verify, settings, team, code
+                    )
+                except ui_totp.TOTPThrottled:
+                    return HTMLResponse(
+                        _render_login("Too many failed attempts. Try again later."),
+                        status_code=429,
+                    )
+                except (ui_totp.TOTPStateError, OSError):
+                    # Fail-closed: log the cause, or the operator sees a 503
+                    # with nothing in the log explaining what to restore/reset.
+                    logger.exception(
+                        "UI 2FA state unavailable for team %s", team.team_id
+                    )
+                    return HTMLResponse(
+                        _render_login(
+                            "Sign-in unavailable. Contact the server administrator."
+                        ),
+                        status_code=503,
+                    )
+                if mfa_version is not None:
+                    login_limiter.clear(client_ip)
+                    response: Response = RedirectResponse("/", status_code=303)
+                    _set_session_cookie(response, team, request, mfa_version)
+                    return response
             login_limiter.record_failure(client_ip)
-            return HTMLResponse(_render_login("Invalid password."), status_code=401)
+            return HTMLResponse(
+                _render_login("Invalid password or authenticator code."),
+                status_code=401,
+            )
         return HTMLResponse(_render_login())
 
     def logout(request: Request) -> RedirectResponse:
@@ -2266,8 +2292,8 @@ def _build_routes(
         """Read the import token from the Authorization: Bearer header only.
 
         A ``?token=`` query param is deliberately NOT accepted: these endpoints
-        bypass Basic auth, so the token is the sole credential, and tokens in
-        URLs leak into reverse-proxy/CDN access logs and Referer headers. The
+        bypass UI session authentication, so the token is the sole credential.
+        Tokens in URLs leak into proxy/CDN access logs and Referer headers. The
         official ``import-odoo.sh`` client always sends the Bearer header."""
         auth = request.headers.get("authorization", "")
         if auth.startswith("Bearer "):
@@ -6415,7 +6441,7 @@ def _build_routes(
         ),
         Route(
             # POST, not GET: this is the only endpoint that returns an
-            # unmasked secret, and the CSRF backstop in BasicAuthMiddleware
+            # unmasked secret, and the CSRF backstop in UIAuthMiddleware
             # only guards unsafe methods.
             "/api/service-databases/{name}/credentials",
             api_service_database_credentials,
@@ -6509,8 +6535,8 @@ def mount_web_ui(
     settings = get_settings()
     has_ui_passwords = any(t.ui_password for t in settings.teams.values())
     if has_ui_passwords:
-        sub_app = BasicAuthMiddleware(sub_app, get_settings)
-        logger.info("Web UI Basic Auth ENABLED (user: %s)", _AUTH_USER)
+        sub_app = UIAuthMiddleware(sub_app, get_settings)
+        logger.info("Web UI session authentication ENABLED")
     else:
         logger.warning("Web UI auth DISABLED (no ui_password set in any team)")
 

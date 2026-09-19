@@ -95,7 +95,7 @@ generated password for the Web Dashboard. Read them from `oduflow.toml`:
 [team.1]
 hostname = "localhost"
 auth_token = "..."     # Bearer token for MCP clients
-ui_password = "..."    # Web Dashboard password for user admin
+ui_password = "..."    # Web Dashboard login password
 ```
 
 To sign in to the Web Dashboard, open `http://<host>:8000/`, use username
@@ -107,7 +107,7 @@ Authorization: Bearer <auth_token>
 ```
 
 MCP auth and Web Dashboard auth are independent — they use different credentials
-and different mechanisms (Bearer vs form/Basic auth).
+and different mechanisms (Bearer vs form/session auth).
 
 ### Self-hosted OAuth (Claude.ai)
 
