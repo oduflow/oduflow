@@ -252,7 +252,7 @@ class TestCLIUpgrade:
         assert deployed.read_text(encoding="utf-8") == "custom\n"
 
 
-class TestImportTemplateFromOdoo:
+class TestImportTemplate:
     def _result(self, includes_filestore: bool = False):
         return {
             "template_name": "prod",
@@ -268,7 +268,7 @@ class TestImportTemplateFromOdoo:
             "remount_failures": [],
         }
 
-    @patch("oduflow.docker_ops.system_ops.import_from_odoo")
+    @patch("oduflow.docker_ops.system_ops.import_template")
     def test_cli_import_passes_without_filestore(self, mock_import, capsys):
         from oduflow.server import _run_import_template
 
@@ -277,7 +277,7 @@ class TestImportTemplateFromOdoo:
         _run_import_template(
             TEST_SETTINGS,
             TEST_TEAM,
-            odoo_url="https://odoo.example.com",
+            source="https://odoo.example.com",
             master_pwd="master",
             db_name="db",
             template_name="prod",
@@ -287,13 +287,13 @@ class TestImportTemplateFromOdoo:
         assert mock_import.call_args.kwargs["without_filestore"] is True
         assert "Filestore: not included" in capsys.readouterr().out
 
-    @patch("oduflow.docker_ops.system_ops.import_from_odoo")
+    @patch("oduflow.docker_ops.system_ops.import_template")
     def test_mcp_import_passes_without_filestore(self, mock_import):
         mock_import.return_value = self._result(includes_filestore=False)
 
         result = _call_tool(
-            "import_template_from_odoo",
-            odoo_url="https://odoo.example.com",
+            "import_template",
+            source="https://odoo.example.com",
             master_pwd="master",
             db_name="db",
             template_name="prod",
@@ -302,6 +302,57 @@ class TestImportTemplateFromOdoo:
 
         assert mock_import.call_args.kwargs["without_filestore"] is True
         assert "Filestore: not included" in result
+
+    def _s3_result(self, dump_reloaded: bool = True):
+        return {
+            "status": "synced",
+            "template_name": "prod",
+            "source_url": "s3://bucket/backups/prod",
+            "source_db": "dump.pgdump",
+            "odoo_version": "19.0",
+            "odoo_image": "odoo:19.0",
+            "template_db": "oduflow_template_1_prod",
+            "restore_seconds": 42,
+            "dump_reloaded": dump_reloaded,
+            "includes_filestore": True,
+            "downloaded_files": 12,
+            "downloaded_mb": 340.5,
+            "reused_files": 8800,
+            "removed_files": 3,
+            "affected_envs": [],
+            "remount_failures": [],
+        }
+
+    @patch("oduflow.docker_ops.system_ops.import_template")
+    def test_mcp_import_s3_without_master_pwd(self, mock_import):
+        mock_import.return_value = self._s3_result()
+
+        result = _call_tool(
+            "import_template",
+            source="s3://bucket/backups/prod",
+            template_name="prod",
+            overwrite=True,
+        )
+
+        kwargs = mock_import.call_args.kwargs
+        assert kwargs["master_pwd"] == ""
+        assert kwargs["overwrite"] is True
+        assert "synced successfully" in result
+        assert "12 fetched (340.5 MB), 8800 reused, 3 removed" in result
+        assert "DB restore time: 42s" in result
+
+    @patch("oduflow.docker_ops.system_ops.import_template")
+    def test_mcp_import_s3_reports_skipped_reload(self, mock_import):
+        mock_import.return_value = self._s3_result(dump_reloaded=False)
+
+        result = _call_tool(
+            "import_template",
+            source="s3://bucket/backups/prod",
+            template_name="prod",
+            overwrite=True,
+        )
+
+        assert "template DB reload skipped" in result
 
 
 class TestCreateEnvironmentTool:

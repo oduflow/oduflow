@@ -2057,27 +2057,40 @@ def _build_routes(
                 status_code=400,
             )
 
-        odoo_url = str(body.get("odoo_url") or "").strip()
+        # "odoo_url" is the legacy field name the dashboard form still posts.
+        source = str(body.get("source") or body.get("odoo_url") or "").strip()
         master_pwd = str(body.get("master_pwd") or "")
         db_name = str(body.get("db_name") or "").strip()
         template_name = str(body.get("template_name") or "").strip()
         without_filestore = body.get("without_filestore", False)
-        if not odoo_url:
+        overwrite = body.get("overwrite", False)
+        refresh = body.get("refresh", False)
+        s3_endpoint = str(body.get("s3_endpoint") or "").strip()
+        s3_access_key = str(body.get("s3_access_key") or "")
+        s3_secret_key = str(body.get("s3_secret_key") or "")
+        s3_region = str(body.get("s3_region") or "").strip()
+        for flag_name, flag in (
+            ("without_filestore", without_filestore),
+            ("overwrite", overwrite),
+            ("refresh", refresh),
+        ):
+            if not isinstance(flag, bool):
+                return JSONResponse(
+                    {"ok": False, "error": f"{flag_name} must be a boolean"},
+                    status_code=400,
+                )
+        if not source and not refresh:
             return JSONResponse(
-                {"ok": False, "error": "odoo_url is required"}, status_code=400
+                {"ok": False, "error": "source is required"}, status_code=400
             )
-        if not master_pwd:
+        # Only the Odoo database-manager path needs the master password.
+        if not master_pwd and source.startswith(("http://", "https://")):
             return JSONResponse(
                 {"ok": False, "error": "master_pwd is required"}, status_code=400
             )
         if not template_name:
             return JSONResponse(
                 {"ok": False, "error": "template_name is required"}, status_code=400
-            )
-        if not isinstance(without_filestore, bool):
-            return JSONResponse(
-                {"ok": False, "error": "without_filestore must be a boolean"},
-                status_code=400,
             )
         try:
             validate_template_name(template_name)
@@ -2090,36 +2103,49 @@ def _build_routes(
             return _error_response(e)
         try:
             result = await _offload(
-                system_ops.import_from_odoo,
+                system_ops.import_template,
                 get_settings(),
                 team,
-                odoo_url=odoo_url,
+                source=source,
                 master_pwd=master_pwd,
                 db_name=db_name,
                 template_name=template_name,
                 without_filestore=without_filestore,
+                overwrite=overwrite,
+                refresh=refresh,
+                s3_endpoint=s3_endpoint,
+                s3_access_key=s3_access_key,
+                s3_secret_key=s3_secret_key,
+                s3_region=s3_region,
             )
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "result": {
-                        "template_name": result.get("template_name"),
-                        "source_url": result.get("source_url"),
-                        "source_db": result.get("source_db"),
-                        "odoo_version": result.get("odoo_version"),
-                        "odoo_image": result.get("odoo_image"),
-                        "template_db": result.get("template_db"),
-                        "includes_filestore": result.get("includes_filestore"),
-                        "zip_size_mb": result.get("zip_size_mb"),
-                        "restore_seconds": result.get("restore_seconds"),
-                        "affected_envs": result.get("affected_envs", []),
-                        "remount_failures": result.get("remount_failures", []),
-                    },
-                }
-            )
+            payload = {
+                "template_name": result.get("template_name"),
+                "source_url": result.get("source_url"),
+                "source_db": result.get("source_db"),
+                "odoo_version": result.get("odoo_version"),
+                "odoo_image": result.get("odoo_image"),
+                "template_db": result.get("template_db"),
+                "includes_filestore": result.get("includes_filestore"),
+                "zip_size_mb": result.get("zip_size_mb"),
+                "restore_seconds": result.get("restore_seconds"),
+                "affected_envs": result.get("affected_envs", []),
+                "remount_failures": result.get("remount_failures", []),
+            }
+            if "dump_reloaded" in result:  # s3 / local-path / refresh engine
+                payload.update(
+                    {
+                        "status": result.get("status"),
+                        "dump_reloaded": result.get("dump_reloaded"),
+                        "downloaded_files": result.get("downloaded_files"),
+                        "downloaded_mb": result.get("downloaded_mb"),
+                        "reused_files": result.get("reused_files"),
+                        "removed_files": result.get("removed_files"),
+                    }
+                )
+            return JSONResponse({"ok": True, "result": payload})
         except FlowError as e:
             logger.warning(
-                "import_from_odoo failed for template %s: %s", template_name, e
+                "import_template failed for template %s: %s", template_name, e
             )
             return _error_response(e)
         except Exception:
@@ -3905,21 +3931,72 @@ def _build_routes(
             name = (body.get("name") or "").strip()
             repo_url = (body.get("repo_url") or "").strip()
             git_user = (body.get("git_user") or "").strip()
+            branches = body.get("branches") or []
             if not name or not repo_url:
                 return JSONResponse(
                     {"ok": False, "error": "name and repo_url are required."},
                     status_code=400,
                 )
+            if not isinstance(branches, list) or any(
+                not isinstance(b, str) for b in branches
+            ):
+                return JSONResponse(
+                    {"ok": False, "error": "branches must be a list of names."},
+                    status_code=400,
+                )
+            # Same URL validation + SSRF guard as the MCP add_extra_repo path.
+            from oduflow.git_ops import validate_repo_url
+
+            validate_repo_url(repo_url)
+
             from oduflow.extra_addons import clone_extra_repo
 
             result = await _offload(
-                clone_extra_repo, team, name, repo_url, git_user=git_user
+                clone_extra_repo,
+                team,
+                name,
+                repo_url,
+                git_user=git_user,
+                branches=branches,
             )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception:
             logger.exception("Unexpected error in api_extra_repo_add")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_ls_remote(request: Request) -> JSONResponse:
+        """List remote branches before cloning (add-repo wizard branch picker)."""
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            repo_url = (body.get("repo_url") or "").strip()
+            git_user = (body.get("git_user") or "").strip()
+            if not repo_url:
+                return JSONResponse(
+                    {"ok": False, "error": "repo_url is required."}, status_code=400
+                )
+            # SSRF guard: ls-remote runs server-side with team credentials, so
+            # apply the same URL validation as the MCP add_extra_repo path.
+            from oduflow.git_ops import validate_repo_url
+
+            validate_repo_url(repo_url)
+
+            from oduflow.extra_addons import list_remote_branches
+
+            branches = await _offload(
+                list_remote_branches, team, repo_url, git_user=git_user
+            )
+            return JSONResponse({"ok": True, "branches": branches})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_ls_remote")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -6391,6 +6468,7 @@ def _build_routes(
         Route("/api/volumes/{name}/delete", api_volume_delete, methods=["POST"]),
         Route("/api/extra-repos", api_extra_repos, methods=["GET"]),
         Route("/api/extra-repos/add", api_extra_repo_add, methods=["POST"]),
+        Route("/api/extra-repos/ls-remote", api_extra_repo_ls_remote, methods=["POST"]),
         Route("/api/extra-repos/{name}/pull", api_extra_repo_pull, methods=["POST"]),
         Route(
             "/api/extra-repos/{name}/protect", api_extra_repo_protect, methods=["POST"]

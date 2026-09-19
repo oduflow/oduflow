@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **One unified template import** — the new `import_template` MCP tool (CLI
+  `import-template`, dashboard API) is now the single door for template data,
+  dispatched on the source shape: an http(s) Odoo URL (database manager API,
+  `master_pwd` required, as before), an `s3://bucket/prefix`, a local
+  directory with the same raw layout, a single local dump file
+  (database-only), or `refresh=true` with no source to reload the template
+  from files already placed in its directory (an external rsync/scp drop).
+- **Raw-layout import from S3 or a local path** — a `dump.pgdump`/
+  `dump.sql[.gz]` plus an as-is `filestore/` copy (e.g. uploaded with
+  `aws s3 sync`), imported without a master password or archiving. S3
+  downloads run in parallel and resume after interruption; local files are
+  hardlinked (near-instant on the same filesystem). Nothing touches the live
+  template until the staged copy is promoted under the overlay remount
+  guard. `overwrite=true` re-syncs an existing template incrementally — only
+  changed filestore files are fetched, files deleted at the source are
+  removed, and an unchanged dump (same S3 ETag, or local size+mtime) skips
+  the database reload. S3 credentials: explicit `s3_access_key`/
+  `s3_secret_key` (+ `s3_endpoint` for MinIO etc.), the `[backup]` settings
+  when the bucket matches, or anonymous for public buckets. Every variant
+  refreshes `metadata.json` (Odoo version and modules from the restored
+  database, sizes, overlay mode, data age).
+- **Breaking:** the `import_template_from_odoo` MCP tool is renamed to
+  `import_template` (first argument `odoo_url` → `source`), and the
+  `reload-template` CLI command is removed — its jobs are covered by
+  `import-template`: bare reload → `--refresh`, `--dump-path` → a dump-file
+  source with `--overwrite`, `--source s3://…|/dir` → the same source with
+  `--overwrite`. The old `--source` implementation shelled out to
+  `aws s3 sync`/`rsync` into the live template directory (environments
+  stayed unmounted for the whole download, metadata went stale); the unified
+  path needs no AWS CLI and stages before swapping. The REST endpoint
+  `/api/templates/import-from-odoo` keeps its path and accepts `odoo_url` as
+  a legacy alias for `source`.
 - Support `[routing] tls = {}` for HTTPS on port 443 with Traefik’s default
   self-signed certificate, without Let’s Encrypt or an ACME email. HTTP redirects
   to HTTPS; generated routes omit the ACME resolver and services omit its volume.

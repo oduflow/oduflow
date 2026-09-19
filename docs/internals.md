@@ -76,7 +76,7 @@ src/oduflow/
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM
   sanitizer.py         # DB sanitization (SQL/Python scripts)
-  sync.py              # Sync template data from S3 or local path (aws s3 sync / rsync)
+  template_import.py   # Template import engine: S3 prefix / local path / in-place refresh
   licensing.py         # License verification and installation (RSA signatures)
   systemd.py           # Systemd service install/uninstall
   production_registry.py # Per-team production metadata and deploy history

@@ -19,7 +19,10 @@ from oduflow.extra_addons import (
     create_worktree,
     delete_extra_repo,
     ensure_shared_checkout,
+    fetch_extra_repo,
     list_extra_repos,
+    list_remote_branches,
+    track_branch,
 )
 from oduflow.settings import Settings, TeamSettings
 
@@ -136,6 +139,83 @@ class TestCloneExtraRepoShallow:
 
         # new.xml was committed after the clone → only present if fetched.
         assert (wt / "sale_enterprise" / "new.xml").is_file()
+
+
+class TestCloneSelectedBranches:
+    def test_clone_keeps_only_selected_branches(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        result = clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+
+        assert _is_shallow(result["path"])
+        repos = list_extra_repos(team)
+        assert set(repos[0]["branches"]) == {"18.0"}
+
+    def test_invalid_branch_name_rejected(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        with pytest.raises(ValueError):
+            clone_extra_repo(team, "enterprise", url, branches=["--upload-pack=x"])
+        # Nothing left behind: the repo can still be added afterwards.
+        assert list_extra_repos(team) == []
+
+    def test_update_only_touches_selected_branches(self, team, tmp_path):
+        """fetch --all respects the restricted refspec: a branch created
+        upstream after the clone must not appear."""
+        url = _make_git_source(tmp_path)
+        clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+
+        src = tmp_path / "source"
+        subprocess.run(
+            ["git", "-C", str(src), "checkout", "-b", "19.0"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(src), *_GIT_ID, "commit", "--allow-empty", "-m", "19.0"],
+            check=True,
+            capture_output=True,
+        )
+
+        summary = fetch_extra_repo(team, "enterprise")
+        assert summary["new_branches"] == []
+        assert set(list_extra_repos(team)[0]["branches"]) == {"18.0"}
+
+    def test_track_branch_adds_branch(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+
+        result = track_branch(team, "enterprise", "main")
+        assert result["tracked"] is True
+        assert set(list_extra_repos(team)[0]["branches"]) == {"18.0", "main"}
+
+        # Tracked branches are updated by later plain fetches too.
+        src = tmp_path / "source"
+        subprocess.run(
+            ["git", "-C", str(src), *_GIT_ID, "commit", "--allow-empty", "-m", "more"],
+            check=True,
+            capture_output=True,
+        )
+        summary = fetch_extra_repo(team, "enterprise")
+        assert [b["branch"] for b in summary["updated_branches"]] == ["main"]
+
+    def test_worktree_from_selected_branch(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+
+        checkout = ensure_shared_checkout(team, "enterprise", "18.0")
+        assert (Path(checkout["path"]) / "sale_enterprise" / "views.xml").is_file()
+
+    def test_empty_branch_list_means_all_branches(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        clone_extra_repo(team, "enterprise", url, branches=[])
+
+        assert set(list_extra_repos(team)[0]["branches"]) == {"main", "18.0"}
+
+
+class TestListRemoteBranches:
+    def test_lists_branches_without_cloning(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        assert list_remote_branches(team, url) == ["18.0", "main"]
+        assert list_extra_repos(team) == []
 
 
 class TestSharedCheckoutCache:
