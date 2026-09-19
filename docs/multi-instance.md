@@ -72,7 +72,7 @@ disk_quota_gb = 0     # default: 0 (off)
 - `db_quota_gb` caps the combined size of the team's PostgreSQL databases —
   environments plus templates. It is checked before operations that create a
   *new* database (`create_environment`, `save_as_template` of a new template,
-  `import_template_from_odoo`) with a single catalog query
+  `import_template`) with a single catalog query
   (`pg_database_size()`), so there is no per-file scanning in the hot path.
   Replacement operations (refresh/reload of an existing template) are not
   gated, so a team at its quota can still shrink or refresh what it has.

@@ -49,7 +49,7 @@ also available via the [REST API](web-api.md).
 | `list_templates` | | List available template profiles, including the branch/commit each database snapshot was taken from |
 | `delete_template` | ✓ | ⚠️ Delete a template profile (DB + files) |
 | `rename_template` | ✓ | Rename a template (directory + PostgreSQL template DB); refused if any environment uses it |
-| `import_template_from_odoo` | ✓ | Import a template from a running Odoo instance via database manager API; optional `without_filestore` requests a database-only PostgreSQL custom dump |
+| `import_template` | ✓ | Import a template from any source: a running Odoo's database manager API (`master_pwd` required), an `s3://bucket/prefix` or local path holding a raw `dump.*` + `filestore/` copy (parallel, resumable, no master password; `overwrite=true` incrementally re-syncs an existing template), or `refresh=true` with no source to reload the template from files already placed in its directory |
 | `refresh_template` | ✓ | ⚠️ Re-apply a template's filestore to live overlay environments (preserves env changes by default; `reset_env_changes=True` discards them — destructive) |
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
@@ -91,9 +91,9 @@ also available via the [REST API](web-api.md).
 | `setup_repo_auth` | ✓ | Cache git credentials for a private repository |
 | `get_ssh_public_key` | | The team's SSH public key (generated automatically); register it with your git hosting as a deploy key or machine-user key, then use SSH repository URLs such as `git@github.com:owner/repo.git` |
 | **Extra Addons** | | |
-| `add_extra_repo` | | Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments |
+| `add_extra_repo` | | Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments; optional `branches` clones/tracks only a comma-separated subset (default: all branches) |
 | `list_extra_repos` | | List all cloned extra addons repositories |
-| `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
+| `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository; optional `add_branch` starts tracking one more branch on a branch-subset repo |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
 | `create_production` | ✓ | Provision a long-lived production with its own domain (defaults into the team `base_domain` zone when configured) plus optional `extra_domains`, on the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (`from_environment` copies its DB + filestore and inherits repo/branch/image); `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |

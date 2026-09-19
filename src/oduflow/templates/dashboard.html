@@ -2462,6 +2462,12 @@
           <option value="">— None —</option>
         </select>
       </div>
+      <div class="form-group">
+        <label>Branches</label>
+        <button class="btn" id="extra-repo-load-branches" onclick="loadExtraRepoRemoteBranches()">Load branches</button>
+        <span class="hint" id="extra-repo-branches-hint">All branches are cloned by default. Load the list to pick a subset.</span>
+        <div id="extra-repo-branches" style="display:none; max-height: 180px; overflow-y: auto; margin-top: 8px;"></div>
+      </div>
       <div class="form-actions">
         <button class="btn" onclick="closeAddExtraRepoModal()">Cancel</button>
         <button class="btn-create" id="extra-repo-submit" onclick="submitAddExtraRepo()">Clone</button>
@@ -5284,7 +5290,9 @@ function openCreateFromTemplate(templateName) {
         '<input type="checkbox" class="cr-extra-cb" value="' + escAttr(r.name) + '"' + checked + '>' +
         esc(r.name) + ' <span class="hint" style="margin-top:0;">(' + esc(r.repo_url) + ')</span>' +
         '<input type="text" class="cr-extra-branch-input branch-input" data-repo="' + escAttr(r.name) + '"' +
-        ' placeholder="branch" value="' + escAttr(defaultBranch) + '">' +
+        ' placeholder="branch" value="' + escAttr(defaultBranch) + '"' +
+        ' list="extra-branches-' + escAttr(r.name) + '">' +
+        extraRepoBranchDatalist(r) +
       '</label>';
     }).join('');
   });
@@ -5341,7 +5349,8 @@ function openCreateModal(fromProduction) {
         '<input type="checkbox" class="cr-extra-cb" value="' + escAttr(r.name) + '">' +
         esc(r.name) + ' <span class="hint" style="margin-top:0;">(' + esc(r.repo_url) + ')</span>' +
         '<input type="text" class="cr-extra-branch-input branch-input" data-repo="' + escAttr(r.name) + '"' +
-        ' placeholder="branch" value="">' +
+        ' placeholder="branch" value="" list="extra-branches-' + escAttr(r.name) + '">' +
+        extraRepoBranchDatalist(r) +
       '</label>';
     }).join('');
   });
@@ -6826,6 +6835,15 @@ async function loadExtraRepos() {
   }
 }
 
+// Branch suggestions for a repo's branch input in the create wizard: repo
+// names are [a-zA-Z0-9_-] (validate_extra_repo_name), so they are id-safe.
+function extraRepoBranchDatalist(r) {
+  var opts = (r.branches || []).map(function(b) {
+    return '<option value="' + escAttr(b) + '"></option>';
+  }).join('');
+  return '<datalist id="extra-branches-' + escAttr(r.name) + '">' + opts + '</datalist>';
+}
+
 function renderExtraRepos(repos) {
   var el = document.getElementById('extra-repos-list');
   if (!repos || repos.length === 0) {
@@ -6864,6 +6882,14 @@ function openAddExtraRepoModal() {
   document.getElementById('add-extra-repo-error').style.display = 'none';
   document.getElementById('extra-repo-submit').disabled = false;
   document.getElementById('extra-repo-submit').textContent = 'Clone';
+  var brContainer = document.getElementById('extra-repo-branches');
+  brContainer.style.display = 'none';
+  brContainer.innerHTML = '';
+  document.getElementById('extra-repo-branches-hint').textContent =
+    'All branches are cloned by default. Load the list to pick a subset.';
+  var brBtn = document.getElementById('extra-repo-load-branches');
+  brBtn.disabled = false;
+  brBtn.textContent = 'Load branches';
   loadCredentials().then(function() {
     var sel = document.getElementById('extra-repo-git-user');
     sel.innerHTML = '<option value="">— None —</option>';
@@ -6880,6 +6906,61 @@ function closeAddExtraRepoModal(event) {
   hideModal('add-extra-repo-modal');
 }
 
+function updateExtraRepoBranchesHint() {
+  var checked = document.querySelectorAll('.extra-repo-branch-cb:checked').length;
+  document.getElementById('extra-repo-branches-hint').textContent = checked
+    ? 'Only the ' + checked + ' selected branch(es) will be cloned and updated.'
+    : 'None selected — all branches will be cloned.';
+}
+
+async function loadExtraRepoRemoteBranches() {
+  var url = document.getElementById('extra-repo-url').value.trim();
+  var gitUser = document.getElementById('extra-repo-git-user').value;
+  var errEl = document.getElementById('add-extra-repo-error');
+  if (!url) {
+    errEl.textContent = 'Enter the repository URL first.';
+    errEl.style.display = 'block';
+    return;
+  }
+  errEl.style.display = 'none';
+  var btn = document.getElementById('extra-repo-load-branches');
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  try {
+    var r = await fetch(API_EXTRA_REPOS + '/ls-remote', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_url: url, git_user: gitUser})
+    });
+    var data = await readResult(r);
+    if (!data.ok) {
+      errEl.textContent = data.error || 'Failed to list branches';
+      errEl.style.display = 'block';
+      return;
+    }
+    var container = document.getElementById('extra-repo-branches');
+    var branches = data.branches || [];
+    if (branches.length === 0) {
+      container.innerHTML = '<span class="hint" style="margin-top:0;">No branches found.</span>';
+    } else {
+      container.innerHTML = branches.map(function(b) {
+        return '<label class="check-item">' +
+          '<input type="checkbox" class="extra-repo-branch-cb" value="' + escAttr(b) + '"' +
+          ' onchange="updateExtraRepoBranchesHint()">' + esc(b) +
+        '</label>';
+      }).join('');
+    }
+    container.style.display = '';
+    updateExtraRepoBranchesHint();
+  } catch (e) {
+    errEl.textContent = 'Connection error: ' + e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Reload branches';
+  }
+}
+
 async function submitAddExtraRepo() {
   var name = document.getElementById('extra-repo-name').value.trim();
   var url = document.getElementById('extra-repo-url').value.trim();
@@ -6890,6 +6971,10 @@ async function submitAddExtraRepo() {
     errEl.style.display = 'block';
     return;
   }
+  var branches = Array.prototype.map.call(
+    document.querySelectorAll('.extra-repo-branch-cb:checked'),
+    function(cb) { return cb.value; }
+  );
   errEl.style.display = 'none';
   var btn = document.getElementById('extra-repo-submit');
   btn.disabled = true;
@@ -6898,7 +6983,7 @@ async function submitAddExtraRepo() {
     var r = await fetch(API_EXTRA_REPOS + '/add', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name: name, repo_url: url, git_user: gitUser})
+      body: JSON.stringify({name: name, repo_url: url, git_user: gitUser, branches: branches})
     });
     var data = await readResult(r);
     if (data.ok) {

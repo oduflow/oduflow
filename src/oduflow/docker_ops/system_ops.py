@@ -4065,26 +4065,98 @@ def destroy_system(settings: Settings) -> dict[str, str]:
     return {"status": "destroyed", "removed": ", ".join(removed)}
 
 
-def import_from_odoo(
+def import_template(
     settings: Settings,
     team: TeamSettings,
-    odoo_url: str,
-    master_pwd: str,
+    source: str = "",
+    master_pwd: str = "",
     db_name: str = "",
     template_name: str = "",
     without_filestore: bool = False,
+    overwrite: bool = False,
+    refresh: bool = False,
+    s3_endpoint: str = "",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
+    s3_region: str = "",
 ) -> dict[str, object]:
-    """Import a template from a running Odoo instance via its database manager API.
+    """Import a template — the single door for external data, dispatched on
+    the shape of ``source``:
 
-    Downloads a full ZIP backup or DB-only custom dump, saves metadata.json,
-    and loads the dump into PostgreSQL as a template DB.
+    - ``http(s)://`` — a running Odoo's database manager API (``master_pwd``
+      required): full ZIP backup or DB-only custom dump.
+    - ``s3://bucket/prefix`` — raw ``dump.*`` + ``filestore/`` layout synced
+      file-by-file (no master password); ``s3_*`` credential parameters
+      apply only here. See :mod:`oduflow.template_import`.
+    - a local directory with the same raw layout, or a single dump file
+      (database-only import).
+    - no source with ``refresh=True`` — the files already sit in the
+      template directory (an external rsync/scp drop): reload the template
+      DB from them and refresh metadata.
+
+    ``overwrite`` (s3/local) incrementally re-syncs an existing template.
     """
     import urllib.request
     import zipfile
 
+    from oduflow import template_import
     from oduflow.url_safety import assert_allowed_url
 
-    base = odoo_url.rstrip("/")
+    is_http = source.startswith(("http://", "https://"))
+    if not is_http and master_pwd:
+        raise PrerequisiteNotMetError(
+            "master_pwd is only used for http(s) Odoo sources; leave it empty."
+        )
+    if refresh:
+        if source:
+            raise PrerequisiteNotMetError(
+                "refresh=true reloads the template from its own files; "
+                "do not pass a source."
+            )
+        return template_import.refresh_from_own_files(
+            settings, team, template_name=template_name
+        )
+    if not source:
+        raise PrerequisiteNotMetError(
+            "source is required (http(s):// Odoo URL, s3://bucket/prefix, "
+            "or a local path) unless refresh=true."
+        )
+    if source.startswith("s3://"):
+        return template_import.import_from_s3_prefix(
+            settings,
+            team,
+            url=source,
+            template_name=template_name,
+            overwrite=overwrite,
+            without_filestore=without_filestore,
+            endpoint=s3_endpoint,
+            access_key=s3_access_key,
+            secret_key=s3_secret_key,
+            region=s3_region,
+        )
+    if s3_endpoint or s3_access_key or s3_secret_key or s3_region:
+        raise PrerequisiteNotMetError(
+            "The s3_* parameters are only valid for s3:// sources."
+        )
+    if not is_http:
+        return template_import.import_from_local_path(
+            settings,
+            team,
+            path=source,
+            template_name=template_name,
+            overwrite=overwrite,
+            without_filestore=without_filestore,
+        )
+    if not master_pwd:
+        raise PrerequisiteNotMetError(
+            "master_pwd is required for http(s) Odoo sources."
+        )
+    if overwrite:
+        raise PrerequisiteNotMetError(
+            "overwrite is only valid for s3:// and local-path sources."
+        )
+
+    base = source.rstrip("/")
     validate_template_name(template_name)
     template_dir = team.get_template_dir(template_name)
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -4307,7 +4379,9 @@ def import_from_odoo(
 
     # 6. Load dump into PostgreSQL
     result = reload_template(settings, team, template_name=template_name)
-    if without_filestore:
+    # DB-only dumps carry no manifest, and a hand-built ZIP may omit it: in
+    # both cases read version/modules from the restored database instead.
+    if not manifest:
         manifest = _read_template_manifest_from_db(
             client, settings, str(result["template_db"])
         )
@@ -4597,7 +4671,7 @@ def finalize_imported_template(
 
     The push-based Odoo.sh import uploads into ``staging_dir`` (metadata.json,
     dump.sql.gz, filestore/); nothing touches the live template until now.
-    This mirrors the tail of :func:`import_from_odoo`: within the overlay
+    This mirrors the tail of :func:`import_template`: within the overlay
     remount guard (live envs keep their upper deltas), swap the staged
     filestore/dump/metadata into the template directory, chown the filestore
     for the odoo user, then refresh sizes and restore the dump into the

@@ -602,28 +602,40 @@ def get_ssh_public_key(ctx: Context | None = None) -> str:
 
 @mcp.tool()
 @handle_errors
-def add_extra_repo(name: str, repo_url: str, ctx: Context | None = None) -> str:
+def add_extra_repo(
+    name: str, repo_url: str, branches: str = "", ctx: Context | None = None
+) -> str:
     """
     Clone an extra addons repository for use with environments.
 
     The repository is cloned as a shallow bare repo (only the latest commit of
     each branch, no history) to the shared repos directory, so large repos like
-    Odoo Enterprise clone quickly. All branches are kept, so one repo serves any
-    Odoo version. When creating an environment, reference it by name to mount it
-    as additional addons (e.g., Odoo Enterprise).
+    Odoo Enterprise clone quickly. By default all branches are kept, so one
+    repo serves any Odoo version; pass `branches` to fetch and track only a
+    subset. When creating an environment, reference it by name to mount it as
+    additional addons (e.g., Odoo Enterprise).
 
     Args:
         name: Short name for the repo (e.g. "enterprise", "custom-themes").
         repo_url: Repository URL — HTTPS (https://github.com/owner/repo.git)
             or SSH (git@github.com:owner/repo.git, needs the team deploy key,
             see get_ssh_public_key).
+        branches: Optional comma-separated branch names (e.g. "17.0,18.0").
+            When given, only these branches are cloned and later updated;
+            more can be added afterwards with update_extra_repo(add_branch=...).
+            Empty (default): all branches.
     """
     from oduflow.extra_addons import clone_extra_repo
 
     git_ops.validate_repo_url(repo_url)
     team = _resolve_team(ctx)
-    result = clone_extra_repo(team, name, repo_url)
-    return f"Extra repo '{result['name']}' cloned successfully.\nPath: {result['path']}"
+    branch_list = [b.strip() for b in branches.split(",") if b.strip()]
+    result = clone_extra_repo(team, name, repo_url, branches=branch_list)
+    scope = f" (branches: {', '.join(branch_list)})" if branch_list else ""
+    return (
+        f"Extra repo '{result['name']}' cloned successfully{scope}.\n"
+        f"Path: {result['path']}"
+    )
 
 
 @mcp.tool()
@@ -662,18 +674,25 @@ def delete_extra_repo(name: str, ctx: Context | None = None) -> str:
 
 @mcp.tool()
 @handle_errors
-def update_extra_repo(name: str, ctx: Context | None = None) -> str:
+def update_extra_repo(
+    name: str, add_branch: str = "", ctx: Context | None = None
+) -> str:
     """
     Pull latest changes from the remote for an extra addons repository.
 
-    Fetches all branches and prunes deleted remote refs.
+    Fetches all tracked branches and prunes deleted remote refs. For a repo
+    cloned with a branch subset, `add_branch` starts tracking one more branch.
 
     Args:
         name: Name of the extra repo to update (e.g. "enterprise").
+        add_branch: Optional branch to add to the tracked set (and fetch)
+            before updating, e.g. "16.0". No-op for all-branches repos.
     """
-    from oduflow.extra_addons import fetch_extra_repo
+    from oduflow.extra_addons import fetch_extra_repo, track_branch
 
     team = _resolve_team(ctx)
+    if add_branch.strip():
+        track_branch(team, name, add_branch.strip())
     summary = fetch_extra_repo(team, name)
     return _format_fetch_summary(summary)
 
@@ -1393,52 +1412,39 @@ def list_templates(ctx: Context | None = None) -> str:
     return output
 
 
-@mcp.tool()
-@handle_errors
-@with_team_lock
-def import_template_from_odoo(
-    odoo_url: str,
-    master_pwd: str,
-    db_name: str = "",
-    template_name: str = "default",
-    without_filestore: bool = False,
-    ctx: Context | None = None,
-) -> str:
-    """
-    Import a template from a running Odoo instance via its database manager API.
-
-    Downloads a full ZIP backup or database-only PostgreSQL custom dump and
-    loads it into PostgreSQL as a template database.
-
-    Args:
-        odoo_url: Base URL of the Odoo instance (e.g. "https://my-odoo.example.com").
-        master_pwd: Odoo master password (database manager password).
-        db_name: Name of the database to back up. If empty, auto-detected (fails if multiple DBs exist).
-        template_name: Name of the template profile to create.
-        without_filestore: If true, request a database-only PostgreSQL custom dump.
-    """
-    settings = _get_settings()
-    team = _resolve_team(ctx)
-    result = system_ops.import_from_odoo(
-        settings,
-        team,
-        odoo_url=odoo_url,
-        master_pwd=master_pwd,
-        db_name=db_name,
-        template_name=template_name,
-        without_filestore=without_filestore,
-    )
-    lines = [
-        f"Template '{result['template_name']}' imported successfully!",
-        f"Source: {result['source_url']} (db: {result['source_db']})",
-        f"Odoo version: {result['odoo_version']}",
-        f"Odoo image: {result['odoo_image']}",
-        f"Template DB: {result['template_db']}",
-        "Filestore: "
-        + ("included" if result.get("includes_filestore") else "not included"),
-        f"Backup size: {result['zip_size_mb']} MB",
-        f"DB restore time: {result['restore_seconds']}s",
-    ]
+def _format_template_import_result(result: dict[str, object]) -> str:
+    """Human-readable summary shared by the MCP tool and the CLI runner."""
+    if "dump_reloaded" in result:  # s3 / local-path / refresh engine
+        verb = str(result.get("status") or "imported")
+        lines = [
+            f"Template '{result['template_name']}' {verb} successfully!",
+            f"Source: {result['source_url']} (dump: {result['source_db']})",
+            f"Odoo version: {result['odoo_version']}",
+            f"Odoo image: {result['odoo_image']}",
+            f"Template DB: {result['template_db']}",
+            "Filestore: "
+            + ("included" if result.get("includes_filestore") else "not included"),
+            f"Files: {result['downloaded_files']} fetched "
+            f"({result['downloaded_mb']} MB), {result['reused_files']} reused, "
+            f"{result['removed_files']} removed",
+            (
+                f"DB restore time: {result['restore_seconds']}s"
+                if result.get("dump_reloaded")
+                else "Database dump unchanged - template DB reload skipped."
+            ),
+        ]
+    else:
+        lines = [
+            f"Template '{result['template_name']}' imported successfully!",
+            f"Source: {result['source_url']} (db: {result['source_db']})",
+            f"Odoo version: {result['odoo_version']}",
+            f"Odoo image: {result['odoo_image']}",
+            f"Template DB: {result['template_db']}",
+            "Filestore: "
+            + ("included" if result.get("includes_filestore") else "not included"),
+            f"Backup size: {result['zip_size_mb']} MB",
+            f"DB restore time: {result['restore_seconds']}s",
+        ]
     affected = cast("list[str]", result.get("affected_envs", []))
     failures = cast("list[tuple[str, str]]", result.get("remount_failures", []))
     if affected:
@@ -1452,6 +1458,78 @@ def import_template_from_odoo(
             + "\n".join(f"- {env}: {msg}" for env, msg in failures)
         )
     return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
+@with_team_lock
+def import_template(
+    source: str = "",
+    master_pwd: str = "",
+    db_name: str = "",
+    template_name: str = "default",
+    without_filestore: bool = False,
+    overwrite: bool = False,
+    refresh: bool = False,
+    s3_endpoint: str = "",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
+    s3_region: str = "",
+    ctx: Context | None = None,
+) -> str:
+    """
+    Import a template. One tool, four source shapes:
+
+    - http(s) URL of a running Odoo: downloads a full ZIP backup or
+      database-only dump via the database manager API (master_pwd required).
+    - "s3://bucket/prefix": syncs a raw backup layout file-by-file —
+      efficient for very large databases and filestores (parallel downloads,
+      resume, no archiving on the source). Credentials: s3_* args if given,
+      else the [backup] settings when the bucket matches, else anonymous.
+    - Local path on the Oduflow host: a directory with the same raw layout
+      (files are hardlinked, near-instant on the same filesystem), or a
+      single dump file for a database-only import.
+    - No source with refresh=true: the dump/filestore were already placed
+      into the template directory by an external process (rsync, backup
+      job); reloads the template DB from them and refreshes metadata.
+
+    Raw layout for s3/local sources: a dump at the root — dump.pgdump /
+    dump.sql / dump.sql.gz / dump.pgdump.gz (hand-made db.dump / db.dump.gz
+    also accepted; canonical names win when both are present) — plus an
+    optional filestore/ tree (a one-to-one copy of the Odoo filestore, e.g.
+    `aws s3 sync`).
+
+    Args:
+        source: http(s) Odoo URL, "s3://bucket/prefix", or a local path. Empty only with refresh=true.
+        master_pwd: Odoo master password (database manager password). Required for http(s) sources only.
+        db_name: Name of the database to back up (http mode only). If empty, auto-detected (fails if multiple DBs exist).
+        template_name: Name of the template profile to create or update.
+        without_filestore: http: request a database-only dump. s3/local: skip the filestore/ tree.
+        overwrite: s3/local only: incrementally re-sync an EXISTING template — only changed files are fetched, an unchanged dump skips the DB reload. Requires explicit user permission: it replaces the template's current data.
+        refresh: Reload the template DB from files already in the template directory (no source). Requires explicit user permission: it rebuilds the template database.
+        s3_endpoint: s3 only: custom S3 endpoint URL (MinIO etc.); empty = AWS S3 or the configured [backup] endpoint.
+        s3_access_key: s3 only: access key for the source bucket (with s3_secret_key); empty = [backup] credentials or anonymous.
+        s3_secret_key: s3 only: secret key paired with s3_access_key.
+        s3_region: s3 only: region of the source bucket.
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    result = system_ops.import_template(
+        settings,
+        team,
+        source=source,
+        master_pwd=master_pwd,
+        db_name=db_name,
+        template_name=template_name,
+        without_filestore=without_filestore,
+        overwrite=overwrite,
+        refresh=refresh,
+        s3_endpoint=s3_endpoint,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        s3_region=s3_region,
+    )
+    return _format_template_import_result(result)
 
 
 @mcp.tool()
@@ -6813,25 +6891,6 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
     return _get_settings()
 
 
-def _run_reload_template(
-    settings: Settings, team: TeamSettings, template_name: str, dump_path: str = ""
-) -> None:
-    result = system_ops.reload_template(
-        settings,
-        team,
-        template_name=template_name,
-        dump_path=dump_path or None,
-    )
-    msg = f"Template DB {result['status']}.\nTemplate DB: {result['template_db']}"
-    if "restore_seconds" in result:
-        msg += f"\nDB restore time: {result['restore_seconds']}s"
-    if "tables" in result:
-        msg += f"\nTables restored: {result['tables']}"
-    if "message" in result and result["message"].strip():
-        msg += f"\nRestore output: {result['message']}"
-    print(msg)
-
-
 def _run_init_template(
     settings: Settings,
     team: TeamSettings,
@@ -6965,44 +7024,34 @@ def _run_delete_template(
 def _run_import_template(
     settings: Settings,
     team: TeamSettings,
-    odoo_url: str,
-    master_pwd: str,
+    source: str = "",
+    master_pwd: str = "",
     db_name: str = "",
     template_name: str = "",
     without_filestore: bool = False,
+    overwrite: bool = False,
+    refresh: bool = False,
+    s3_endpoint: str = "",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
+    s3_region: str = "",
 ) -> None:
-    result = system_ops.import_from_odoo(
+    result = system_ops.import_template(
         settings,
         team,
-        odoo_url=odoo_url,
+        source=source,
         master_pwd=master_pwd,
         db_name=db_name,
         template_name=template_name,
         without_filestore=without_filestore,
+        overwrite=overwrite,
+        refresh=refresh,
+        s3_endpoint=s3_endpoint,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        s3_region=s3_region,
     )
-    lines = [
-        f"Template '{result['template_name']}' imported successfully!",
-        f"Source: {result['source_url']} (db: {result['source_db']})",
-        f"Odoo version: {result['odoo_version']}",
-        f"Odoo image: {result['odoo_image']}",
-        f"Template DB: {result['template_db']}",
-        "Filestore: "
-        + ("included" if result.get("includes_filestore") else "not included"),
-        f"Backup size: {result['zip_size_mb']} MB",
-        f"DB restore time: {result['restore_seconds']}s",
-    ]
-    affected = cast("list[str]", result.get("affected_envs", []))
-    failures = cast("list[tuple[str, str]]", result.get("remount_failures", []))
-    if affected:
-        lines.append(
-            "Remounted (changes preserved) filestore overlays for: "
-            + ", ".join(affected)
-        )
-    if failures:
-        lines.append(
-            "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
-        )
-    print("\n".join(lines))
+    print(_format_template_import_result(result))
 
 
 def _run_list_templates(settings: Settings, team: TeamSettings) -> None:
@@ -7359,28 +7408,6 @@ def _run_cli() -> None:
     )
 
     # --- Template commands (need --team) ---
-    p_reload = sub.add_parser(
-        "reload-template",
-        help="Drop and re-restore a template DB from template profile",
-    )
-    p_reload.add_argument("template_name", help="Template profile name")
-    p_reload.add_argument(
-        "--dump-path",
-        default="",
-        help="Path to dump file (overrides template profile path)",
-    )
-    p_reload.add_argument(
-        "--source",
-        default="",
-        help="Sync template from s3://... or local path before reloading",
-    )
-    p_reload.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress info logging (for cron)",
-    )
-    p_reload.add_argument("--team", default="1", help="Team ID (default: 1)")
-
     p_init_tpl = sub.add_parser(
         "init-template",
         help="Generate template dump and filestore from a clean Odoo image",
@@ -7456,13 +7483,28 @@ def _run_cli() -> None:
     p_drop_tpl.add_argument("--team", default="1", help="Team ID (default: 1)")
 
     p_import = sub.add_parser(
-        "import-template", help="Import a template from a running Odoo instance"
+        "import-template",
+        help=(
+            "Import a template from a running Odoo, an S3 prefix, a local "
+            "path, or refresh it from its own files"
+        ),
     )
     p_import.add_argument(
-        "odoo_url",
-        help="Base URL of the Odoo instance (e.g. https://my-odoo.example.com)",
+        "source",
+        nargs="?",
+        default="",
+        help=(
+            "http(s) Odoo URL, s3://bucket/prefix, or a local path with "
+            "dump.* + filestore/ (a single dump file for DB-only). "
+            "Omit together with --refresh"
+        ),
     )
-    p_import.add_argument("master_pwd", help="Odoo master password")
+    p_import.add_argument(
+        "master_pwd",
+        nargs="?",
+        default="",
+        help="Odoo master password (required for http(s) sources only)",
+    )
     p_import.add_argument(
         "--db-name", default="", help="Database name (auto-detected if only one exists)"
     )
@@ -7472,7 +7514,32 @@ def _run_cli() -> None:
     p_import.add_argument(
         "--without-filestore",
         action="store_true",
-        help="Request a database-only PostgreSQL custom dump",
+        help="http: request a database-only dump; s3/local: skip the filestore/ tree",
+    )
+    p_import.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="s3/local: incrementally re-sync an existing template",
+    )
+    p_import.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "No source: reload the template DB from files already placed in "
+            "the template directory (rsync drop point) and refresh metadata"
+        ),
+    )
+    p_import.add_argument(
+        "--s3-endpoint", default="", help="s3 only: custom S3 endpoint URL (MinIO etc.)"
+    )
+    p_import.add_argument(
+        "--s3-access-key", default="", help="s3 only: source bucket access key"
+    )
+    p_import.add_argument(
+        "--s3-secret-key", default="", help="s3 only: source bucket secret key"
+    )
+    p_import.add_argument(
+        "--s3-region", default="", help="s3 only: source bucket region"
     )
     p_import.add_argument("--team", default="1", help="Team ID (default: 1)")
 
@@ -7734,34 +7801,6 @@ def _run_cli() -> None:
             sys.exit(1)
         return
 
-    if args.command == "reload-template":
-        if args.quiet:
-            logging.getLogger("oduflow").setLevel(logging.WARNING)
-        if args.source:
-            from oduflow.sync import sync_template_from_source
-
-            result = sync_template_from_source(
-                _settings,
-                _cli_team(),
-                args.template_name,
-                args.source,
-            )
-            msg = (
-                f"Template DB {result['status']}.\nTemplate DB: {result['template_db']}"
-            )
-            if "restore_seconds" in result:
-                msg += f"\nDB restore time: {result['restore_seconds']}s"
-            if not args.quiet:
-                print(msg)
-        else:
-            _run_reload_template(
-                _settings,
-                _cli_team(),
-                template_name=args.template_name,
-                dump_path=args.dump_path,
-            )
-        return
-
     if args.command == "init-template":
         _run_init_template(
             _settings,
@@ -7811,11 +7850,17 @@ def _run_cli() -> None:
         _run_import_template(
             _settings,
             _cli_team(),
-            odoo_url=args.odoo_url,
+            source=args.source,
             master_pwd=args.master_pwd,
             db_name=args.db_name,
             template_name=args.template_name,
             without_filestore=args.without_filestore,
+            overwrite=args.overwrite,
+            refresh=args.refresh,
+            s3_endpoint=args.s3_endpoint,
+            s3_access_key=args.s3_access_key,
+            s3_secret_key=args.s3_secret_key,
+            s3_region=args.s3_region,
         )
         return
 

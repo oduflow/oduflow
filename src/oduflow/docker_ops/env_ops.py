@@ -2319,7 +2319,7 @@ def _create_environment_impl(
     if template_name is not None:
         # A template DB's objects are owned by whatever role created them —
         # normally the superuser (pg_restore --no-owner), but the plain-SQL /
-        # import_template_from_odoo path (psql without --no-owner) can leave
+        # import_template path (psql without --no-owner) can leave
         # objects owned by the source env's per-env role (e.g. u_2_fs19). DDL
         # during module upgrades requires ownership; Odoo connects as the env
         # role and never SET ROLEs, so per-object ownership — not role

@@ -1401,7 +1401,23 @@ Options:
 - `--template-name <name>` — template profile name (default: `default`)
 - `--without-filestore` — request a database-only PostgreSQL custom dump without filestore files
 
-This is also available as an MCP tool (`import_template_from_odoo`) for AI agents; pass `without_filestore=true` for a database-only import.
+This is also available as an MCP tool (`import_template`) for AI agents; pass `without_filestore=true` for a database-only import.
+
+**From an S3 prefix (best for very large databases and filestores):**
+
+Building a ZIP backup of a huge production is slow and needs double disk space on the source. Instead, upload the raw artifacts as-is and point the same command at the prefix — no master password needed:
+
+```bash
+# On the source host:
+pg_dump -Fc mydb > dump.pgdump
+aws s3 cp dump.pgdump s3://mybucket/backups/mydb/
+aws s3 sync ~/.local/share/Odoo/filestore/mydb/ s3://mybucket/backups/mydb/filestore/
+
+# On the Oduflow host:
+oduflow import-template s3://mybucket/backups/mydb/ --template-name prod
+```
+
+Files are downloaded in parallel and one-to-one; an interrupted import resumes where it stopped. Re-running with `--overwrite` re-syncs an existing template incrementally: only changed filestore files are downloaded, and an unchanged dump skips the database reload entirely. Credentials come from `--s3-access-key`/`--s3-secret-key` (plus `--s3-endpoint` for MinIO and friends), or the `[backup]` settings when the bucket matches, or anonymous access for a public bucket. See [Template Management](templates.md#importing-from-an-s3-prefix) for details.
 
 If the database dump and filestore are delivered separately, import with `--without-filestore` first, then run `oduflow attach-filestore <template> <source>` when the filestore archive, local directory, or rsync/SSH source is ready. See [Database Dump and Separate Filestore](templates.md#database-dump-and-separate-filestore) for the full sequence.
 
@@ -1422,20 +1438,20 @@ cp -r filestore {data_dir}/team_{ID}/templates/myproject/
 5. Load the template into PostgreSQL:
 
 ```bash
-oduflow reload-template myproject
+oduflow import-template --template-name myproject --refresh
 ```
 
 **From another Oduflow workspace:**
 
-Simply copy the entire template directory and reload:
+Simply copy the entire template directory and refresh:
 
 ```bash
 cp -r /other/oduflow/templates/myproject {data_dir}/team_{ID}/templates/myproject
-oduflow reload-template myproject
+oduflow import-template --template-name myproject --refresh
 ```
 
 !!! warning
-    The SQL dump is loaded into the shared PostgreSQL instance by `reload-template`. Without this step, the template will appear in the list but show **DB NOT LOADED** and cannot be used to create environments.
+    The SQL dump is loaded into the shared PostgreSQL instance by the `--refresh` step. Without it, the template will appear in the list but show **DB NOT LOADED** and cannot be used to create environments.
 
 ## 🏗️ Template Evolution
 
@@ -1512,7 +1528,7 @@ Place your dump file at `{data_dir}/team_{ID}/templates/default/dump.sql` (plain
 mkdir -p /srv/oduflow/team_1/templates/default/
 cp /path/to/production.sql /srv/oduflow/team_1/templates/default/dump.sql
 cp -r /path/to/filestore/ /srv/oduflow/team_1/templates/default/filestore/
-oduflow reload-template default
+oduflow import-template --template-name default --refresh
 ```
 
 ## Saving a Branch as Template
@@ -1632,34 +1648,99 @@ oduflow attach-filestore default /backups/filestore.zip --strip-prefix none
 
 Like `template-from-env`, this is non-destructive for live overlay environments by default: Oduflow remounts them against the new template filestore while preserving their `upper` changes. Pass `--reset-env-changes` only when you intentionally want those environments reset to the new baseline. Copy-mode environments are independent copies and are not changed by attaching a new template filestore.
 
-## Reloading a Template
+## Importing from an S3 Prefix
 
-Update the template from a newer production dump without touching the filestore:
+For very large databases and filestores, skip archives entirely: upload the raw
+dump and a one-to-one filestore copy to any S3-compatible bucket and import
+straight from it. No Odoo master password, no ZIP packing on the source, no
+double disk space.
 
-```bash
-oduflow reload-template default --dump-path /path/to/new.dump
-oduflow reload-template myproject --dump-path /path/to/new.dump
+Expected layout under the prefix — a dump file (`dump.pgdump`, `dump.sql`,
+`dump.sql.gz`, `dump.pgdump.gz`; the hand-made `db.dump` / `db.dump.gz` names
+are accepted too and installed under the canonical name) plus an optional
+`filestore/` tree. If several dump candidates are present, the same
+precedence as the template directory applies: canonical names win over
+`db.dump`:
+
+```
+s3://mybucket/backups/mydb/
+├── dump.pgdump
+└── filestore/
+    ├── 60/609e7ca59cc05bf0de7233c6781a381b742a2931
+    └── ...
 ```
 
-### Syncing from S3 or Local Path
-
-Use `--source` to sync both the dump file and filestore from an external source before reloading:
-
 ```bash
-# Sync from S3
-oduflow reload-template default --source s3://mybucket/prod/
+# On the source host
+pg_dump -Fc mydb > dump.pgdump
+aws s3 cp dump.pgdump s3://mybucket/backups/mydb/
+aws s3 sync ~/.local/share/Odoo/filestore/mydb/ s3://mybucket/backups/mydb/filestore/
 
-# Sync from local path
-oduflow reload-template default --source /backups/prod-latest/
-
-# Cron-friendly (suppress info logging)
-oduflow reload-template default --source s3://mybucket/prod/ --quiet
+# On the Oduflow host (CLI, MCP tool import_template, or the dashboard)
+oduflow import-template s3://mybucket/backups/mydb/ --template-name prod
 ```
 
-The source directory should contain `dump.pgdump` (or `dump.sql`) and optionally `filestore/`. Files are synced using `aws s3 sync` (S3) or `rsync` (local), then the template DB is reloaded.
+How it behaves, in the order it matters at scale:
 
-!!! info "Non-destructive for live environments"
-    When `--source` replaces the template filestore, live overlay environments on that template are automatically unmounted and remounted against the new lower layer, **keeping their filestore changes**. `import-template` creates a new template and refuses an existing template name.
+- **Parallel + resumable.** Filestore files download on several connections;
+  an interrupted import re-run skips everything already staged. Nothing
+  touches the live template until the staged copy is complete — the final
+  swap happens under the standard overlay remount, so live environments keep
+  their filestore changes.
+- **Incremental re-sync with `--overwrite`.** Re-running against an existing
+  template downloads only new/changed filestore files (unchanged ones are
+  hardlinked from the current template), removes files deleted on S3, and —
+  if the dump's S3 ETag is unchanged since the last sync — skips the dump
+  download *and* the template DB reload. This makes a periodic
+  "pull the latest production backup into dev" job cheap.
+- **Credentials.** `--s3-access-key`/`--s3-secret-key` (with `--s3-endpoint`
+  for MinIO or other S3-compatible stores, and `--s3-region` when required)
+  win; otherwise the `[backup]` settings are reused when the bucket matches;
+  otherwise the bucket is read anonymously (public bucket).
+- **Metadata.** The Odoo version, image, and installed modules are read from
+  the restored database; `snapshot_at` records the dump's upload time, so
+  template freshness reflects the data, not the import.
+
+`--without-filestore` skips the `filestore/` tree for a database-only import.
+
+## Importing from a Local Path
+
+The same engine and layout work for a directory on the Oduflow host — useful
+when a backup job or rsync already delivers the artifacts locally:
+
+```bash
+# Directory with dump.* + filestore/ — files are hardlinked into the
+# template (near-instant on the same filesystem)
+oduflow import-template /backups/mydb/ --template-name prod
+
+# Periodic re-sync of the same template (only changed files, unchanged dump
+# skips the DB reload)
+oduflow import-template /backups/mydb/ --template-name prod --overwrite
+
+# A single dump file imports database-only (format sniffed automatically)
+oduflow import-template /backups/nightly.dump --template-name prod --overwrite
+```
+
+For a local source the dump-unchanged check uses size + mtime instead of an
+S3 ETag; everything else (staging, atomic promote, overlay remount, metadata
+refresh) behaves exactly like the S3 import.
+
+## Refreshing from the Template's Own Files
+
+If an external process writes `dump.*` and `filestore/` **straight into the
+template directory** (an rsync drop point, scp from a backup host), apply
+them with `--refresh` — no source argument:
+
+```bash
+rsync -a --delete backup-host:/srv/backups/mydb/ {data_dir}/team_{ID}/templates/prod/
+oduflow import-template --template-name prod --refresh
+```
+
+This reloads the template DB from the dump found in the directory, re-reads
+the Odoo version and module list from the restored database, fixes filestore
+ownership, recomputes sizes/overlay mode in `metadata.json`, and remounts
+live overlay environments against the updated filestore (keeping their
+changes).
 
 ## Listing and Dropping Templates
 
@@ -1720,10 +1801,10 @@ The `use_overlay` flag determines whether new environments use fuse-overlayfs (f
 | New project, no existing database | `oduflow init-template --odoo-image odoo:19.0 --template-name default` |
 | Regenerate template from scratch | `oduflow init-template --odoo-image odoo:19.0 --template-name default --force` |
 | Named template for a specific project | `oduflow init-template --odoo-image odoo:19.0 --template-name myproject` |
-| Have a production dump file | Place dump at `{data_dir}/team_{ID}/templates/default/dump.sql` and run `oduflow reload-template default` |
+| Have a production dump file | `oduflow import-template /path/to/dump.pgdump --template-name default` (or place it in the template dir and `--refresh`) |
 | Need to install modules or configure the template | Create an env, configure it, then `oduflow template-from-env my-branch --template-name default` |
-| Update the template from a newer production dump | `oduflow reload-template default --dump-path /path/to/new.dump` |
-| Sync template from S3 and reload | `oduflow reload-template default --source s3://bucket/prod/` |
+| Update the template from a newer production dump | `oduflow import-template /path/to/new.dump --template-name default --overwrite` |
+| Sync template from S3 or a local dir | `oduflow import-template s3://bucket/prod/ --template-name default --overwrite` |
 | Save a branch environment as template (keep other envs' changes) | `oduflow template-from-env my-branch --template-name default` |
 | Save a branch as template and reset all other envs | `oduflow template-from-env my-branch --template-name default --reset-env-changes` |
 | Re-apply a template's filestore to live envs | `oduflow refresh-template default` |
@@ -4048,7 +4129,7 @@ would let work in the environment.
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
-| `POST` | `/api/templates/import-from-odoo` | UI-authenticated: pull a backup from a running Odoo. Body: `odoo_url`, `master_pwd`, `template_name`, optional `db_name`, optional boolean `without_filestore` |
+| `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
 | `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
@@ -4106,7 +4187,8 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
-| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user` |
+| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names — clone/track only these; empty = all branches) |
+| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before cloning; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
@@ -4247,7 +4329,7 @@ also available via the [REST API](web-api.md).
 | `list_templates` | | List available template profiles, including the branch/commit each database snapshot was taken from |
 | `delete_template` | ✓ | ⚠️ Delete a template profile (DB + files) |
 | `rename_template` | ✓ | Rename a template (directory + PostgreSQL template DB); refused if any environment uses it |
-| `import_template_from_odoo` | ✓ | Import a template from a running Odoo instance via database manager API; optional `without_filestore` requests a database-only PostgreSQL custom dump |
+| `import_template` | ✓ | Import a template from any source: a running Odoo's database manager API (`master_pwd` required), an `s3://bucket/prefix` or local path holding a raw `dump.*` + `filestore/` copy (parallel, resumable, no master password; `overwrite=true` incrementally re-syncs an existing template), or `refresh=true` with no source to reload the template from files already placed in its directory |
 | `refresh_template` | ✓ | ⚠️ Re-apply a template's filestore to live overlay environments (preserves env changes by default; `reset_env_changes=True` discards them — destructive) |
 | `attach_filestore` | ✓ | Attach or replace a template filestore from a local directory, archive, `rsync://` URL, or SSH rsync source; normalizes wrapper paths and preserves live env changes by default |
 | **Auxiliary Services** | | |
@@ -4289,9 +4371,9 @@ also available via the [REST API](web-api.md).
 | `setup_repo_auth` | ✓ | Cache git credentials for a private repository |
 | `get_ssh_public_key` | | The team's SSH public key (generated automatically); register it with your git hosting as a deploy key or machine-user key, then use SSH repository URLs such as `git@github.com:owner/repo.git` |
 | **Extra Addons** | | |
-| `add_extra_repo` | | Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments |
+| `add_extra_repo` | | Clone an extra addons repository (e.g. Odoo Enterprise) for use with environments; optional `branches` clones/tracks only a comma-separated subset (default: all branches) |
 | `list_extra_repos` | | List all cloned extra addons repositories |
-| `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository |
+| `update_extra_repo` | | Fetch latest changes from the remote for an extra addons repository; optional `add_branch` starts tracking one more branch on a branch-subset repo |
 | `delete_extra_repo` | | Delete a cloned extra addons repository |
 | **Production Hosting** | | Requires `[production].enabled = true` |
 | `create_production` | ✓ | Provision a long-lived production with its own domain (defaults into the team `base_domain` zone when configured) plus optional `extra_domains`, on the dedicated production PostgreSQL cluster; optionally seed it from a template or promote a dev environment (`from_environment` copies its DB + filestore and inherits repo/branch/image); `allow_copy_to_dev_mcp` (default true) controls whether agents may publish new copies of it into dev |
@@ -4465,13 +4547,6 @@ oduflow refresh-template <template_name> [--reset-env-changes] [--team 1]
 # Attach or replace a template filestore from a local dir, archive, rsync://, or SSH rsync source
 oduflow attach-filestore <template_name> <source> [--strip-prefix auto|none|PREFIX] [--reset-env-changes] [--team 1]
 
-# Reload template DB from a dump file
-oduflow reload-template <template_name> [--dump-path /path/to/new.dump] [--team 1]
-
-# Sync template from S3 or local path and reload DB
-oduflow reload-template <template_name> --source s3://bucket/path/ [--quiet] [--team 1]
-oduflow reload-template <template_name> --source /backups/prod-latest/ [--team 1]
-
 # List all template profiles
 oduflow list-templates [--team 1]
 
@@ -4480,9 +4555,18 @@ oduflow delete-template <template_name> [--team 1]
 
 # Import a template from a running Odoo instance
 oduflow import-template <odoo_url> <master_pwd> --template-name myproject [--db-name <db>] [--without-filestore] [--team 1]
+
+# Import (or incrementally re-sync with --overwrite) from an S3 prefix or a
+# local path holding dump.* + filestore/; a single dump file imports DB-only
+oduflow import-template s3://bucket/backups/mydb/ --template-name myproject [--overwrite] [--team 1]
+oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [--team 1]
+
+# Reload the template DB from files already placed in the template directory
+# (an external rsync/scp drop) and refresh its metadata
+oduflow import-template --template-name myproject --refresh [--team 1]
 ```
 
-`template-from-env`, `refresh-template`, `attach-filestore`, and `reload-template --source` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. `import-template` creates a new template and refuses an existing template name.
+`template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
 
 ## Service Commands
 
@@ -5094,7 +5178,7 @@ disk_quota_gb = 0     # default: 0 (off)
 - `db_quota_gb` caps the combined size of the team's PostgreSQL databases —
   environments plus templates. It is checked before operations that create a
   *new* database (`create_environment`, `save_as_template` of a new template,
-  `import_template_from_odoo`) with a single catalog query
+  `import_template`) with a single catalog query
   (`pg_database_size()`), so there is no per-file scanning in the hot path.
   Replacement operations (refresh/reload of an existing template) are not
   gated, so a team at its quota can still shrink or refresh what it has.
@@ -5809,7 +5893,7 @@ src/oduflow/
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM
   sanitizer.py         # DB sanitization (SQL/Python scripts)
-  sync.py              # Sync template data from S3 or local path (aws s3 sync / rsync)
+  template_import.py   # Template import engine: S3 prefix / local path / in-place refresh
   licensing.py         # License verification and installation (RSA signatures)
   systemd.py           # Systemd service install/uninstall
   production_registry.py # Per-team production metadata and deploy history
