@@ -1,24 +1,103 @@
 # Changelog
 
-## Unreleased
+## v1.79.0
 
-- **Dashboard authenticator 2FA** — optional per-team TOTP for full UI login.
-  `oduflow ui-2fa setup --team 1` prints a local QR code and confirms enrollment;
-  `oduflow ui-2fa reset --team 1` provides server-side recovery. Enrollment/reset
-  revoke full UI cookies without restarting the server. Replay protection and
-  team attempt limits persist across restarts. Shared links remain accessible
-  without OTP, and MCP client authentication is unchanged.
-- **UI Basic Auth removed** — dashboard REST and WebSocket access now use UI
-  session cookies. Remote automation should use `oduflow client`; the obsolete
-  `scripts/create_env.py` and `scripts/sync_env.py` helpers are removed. Existing
-  full UI cookies require a fresh login on upgrade; sessions expire seven days
-  after login instead of being renewed by dashboard loads.
-- Support `[routing] tls = {}` for HTTPS on port 443 with Traefik’s default
-  self-signed certificate, without Let’s Encrypt or an ACME email. HTTP redirects
-  to HTTPS; generated routes omit the ACME resolver and services omit its volume.
-  Oduflow’s own probes of the URLs it hands out (`http_request_to_odoo`, the
-  environment readiness check) skip certificate verification in this mode only,
-  since the default certificate has no trust anchor to verify against.
+### Features
+
+- **Dashboard two-factor authentication; HTTP Basic auth removed** — a team can
+  enrol an authenticator app as a second factor for full dashboard login.
+  `oduflow ui-2fa setup --team N` renders the QR code locally (no external chart
+  service) and stores the secret only after a confirming code; `oduflow ui-2fa
+  reset --team N` is the server-side recovery path. Both bump the team's MFA
+  generation, revoking outstanding full-UI cookies on the next request without a
+  server restart. The last consumed step and per-team attempt counters persist in
+  `.ui_totp.json`, so replay protection and throttling survive a restart, and
+  candidate steps are derived from an explicit UTC datetime so a DST transition
+  cannot shift the window. Shared scoped links keep their own cookies and stay
+  reachable without a code; MCP client authentication is untouched. HTTP Basic
+  auth is gone from the web UI entirely — REST and WebSocket access now rely
+  solely on the session cookie, and the `scripts/create_env.py` /
+  `scripts/sync_env.py` Basic-auth helpers are replaced by `oduflow client`. On
+  upgrade, existing full-UI cookies require a fresh login, and sessions expire
+  seven days after login instead of being renewed by dashboard loads. Decision
+  record: `specs/0067-dashboard-totp.md`. (#258)
+
+- **Production WAL disk protection** — the shared production cluster is now
+  guarded against WAL-driven disk exhaustion and against silently losing archive
+  continuity. A local WAL monitor samples the real WAL filesystem (through a
+  read-only volume helper while PostgreSQL is down) and derives archive progress
+  and disk risk without touching Docker or S3 on the read path. On danger a
+  persistent circuit breaker latches: it disables Docker restart policies, stops
+  applications before PostgreSQL, and survives an Oduflow or Docker restart;
+  recovery runs PostgreSQL alone behind an HBA fence and requires confirmed new
+  archiving plus extra headroom before release. Production start and deploy now
+  pass an admission gate — an in-container WAL-G storage read/write preflight
+  plus proof that a freshly generated WAL segment reached storage — while an
+  already admitted, running production accepts a current healthy sample instead,
+  so a hung production stays restartable during a brief storage outage. Ships
+  with a dedicated production PostgreSQL image on a pinned base digest, a
+  dashboard WAL panel, `/healthz` checks and an MCP/REST surface. Decision
+  record: `specs/0066-production-wal-disk-protection.md`. (#254)
+
+- **HTTPS without Let's Encrypt** — `[routing] tls = {}` puts Traefik on :443
+  with the :80 → :443 redirect and no certificate resolver, for local and test
+  deployments that want TLS on the wire without ACME, a publicly resolvable
+  domain or an `acme_email`. Supported values stay a closed set: `true` (ACME,
+  the default), `{}` (HTTPS without ACME) and `false` (HTTP only); non-empty
+  tables are rejected. Whether the resolver is *declared* in Traefik and whether
+  managed routes *use* it are now separate concerns, so `tls = {}` with an
+  `acme_email` set declares the resolver for an operator's own drop-in routes
+  while Oduflow's own hostnames stay on Traefik's default certificate. An
+  existing certificate store is never deleted, so issued certificates and the
+  Let's Encrypt account key survive a later re-enable. In this mode only,
+  Oduflow's probes of the URLs it hands out (`http_request_to_odoo`, the
+  environment readiness check) skip certificate verification, since the default
+  self-signed certificate has no trust anchor to verify against. (#251, #252)
+
+- **Parallel filestore chunk uploads** — a first full filestore snapshot paid two
+  serial object-store round-trips per chunk (observed: 70 chunks / 210 MB in
+  ~21 minutes). Chunk HEAD, compress and PUT now run on a bounded thread pool,
+  with the revision's chunk sequence and dedup set still producer-ordered and the
+  revision file still written only after every upload succeeds. The new
+  `[backup].upload_threads` setting defaults to 16 (`1` restores the previous
+  sequential behaviour) and sizes the boto3 connection pool to match. Memory is
+  bounded on both axes: in-flight plaintext passes a byte budget rather than a
+  weak per-chunk count, and pending futures are reaped past a threshold instead
+  of accumulating one live future per chunk. Snapshot manifests and log lines now
+  record scan, upload and elapsed durations. (#255)
+
+- **Extra-addons dependencies, prod-cluster service databases, service
+  protection** — extra-addons repos contribute their own apt/pip dependency
+  descriptors, installed per repo, so a `requirements.txt` in an extra checkout
+  is honoured the same way the main repo's is. A service database can be created
+  on the production PostgreSQL cluster, taking part in the cluster-wide WAL-G
+  backups instead of the development disk quota. Services and service databases
+  can be marked protected, which blocks delete, update and restore on both the
+  MCP and REST paths. (#250)
+
+### Dashboard
+
+- **Full service editor** — the Update dialog prefills every setting (image,
+  command, exposure and routes, hostname, env vars, host mode, volumes,
+  capabilities) from the new `GET /api/services/{name}/config` and submits only
+  the fields the user actually edited, so an open dialog cannot revert a setting
+  changed concurrently over MCP. Deleting a service now offers a "Save as preset"
+  choice, and the result reports what is actually on disk afterwards rather than
+  echoing the request flag. Migration `0008-backfill-service-presets` writes
+  presets once at server start for services created before presets existed,
+  skipping services whose image or port cannot be reconstructed and filtering out
+  env vars the image itself sets. (#253)
+
+- **Production logs** moved into the shared logs modal. (#250)
+
+### Bug Fixes
+
+- **Templates with a hand-placed `db.dump`** — `get_template_sql_path` tried only
+  four canonical names and then reported the missing `dump.pgdump` fallback,
+  never looking at the `db.dump` sitting next to `filestore/` and
+  `metadata.json`. `db.dump` and `db.dump.gz` are now accepted, ordered last so a
+  dump Oduflow itself persisted keeps priority over a leftover dropped into the
+  template directory. (#256)
 
 ## v1.78.0
 
