@@ -2,7 +2,7 @@
 
 ![Agent Instructions](img/agent_instructions.png)
 
-Oduflow exposes **102 tools**. They are reachable from any MCP client (Cursor,
+Oduflow exposes **108 tools**. They are reachable from any MCP client (Cursor,
 Cline, Amp, Claude Code, …), locally with `oduflow call`, against a remote
 Oduflow server with `oduflow client`, and — for a subset — over the
 [REST API](web-api.md).
@@ -216,6 +216,17 @@ end to end.
     [`production_wal_status`](#production_wal_status)&nbsp;·
     [`control_production_wal`](#control_production_wal)&nbsp;·
     [`restore_cluster_pitr`](#restore_cluster_pitr)
+
+-   __[Production Odoo API](#production-odoo-api)__
+
+    ---
+
+    [`sync_production_mcp`](#sync_production_mcp)&nbsp;·
+    [`production_odoo_info`](#production_odoo_info)&nbsp;·
+    [`production_odoo_read`](#production_odoo_read)&nbsp;·
+    [`production_odoo_preview_change`](#production_odoo_preview_change)&nbsp;·
+    [`production_odoo_change_status`](#production_odoo_change_status)&nbsp;·
+    [`production_odoo_execute_change`](#production_odoo_execute_change)
 
 -   __[Agent Guidance & Feedback](#agent-guidance-feedback)__
 
@@ -3026,6 +3037,162 @@ Destructive and cluster-wide.
 - The cluster is lost or corrupted at the storage layer.
 - Rebuilding production on new hardware from S3 alone.
 - Rewinding every database to a point in time before a catastrophic change.
+
+## Production Odoo API
+
+Read and change production Odoo records through OduMCP, the connector addon
+Oduflow installs into the production itself. Reads are policy-bounded and
+changes go through an approval plan that a human approves in Odoo, so no
+arbitrary ORM call ever reaches a live database. Every tool here requires
+`[production].enabled = true` and — over HTTP — the `/production` endpoint with
+the team's `production_token`; see
+[Production access and rotation](production.md#separate-production-mcp-access).
+
+### `sync_production_mcp`
+
+Install or upgrade the `odumcp` addon on a production and synchronize the
+team's configured key with Odoo. An empty `name` processes every production of
+the team and reports each one separately, so a single failure does not hide the
+rest.
+
+New productions are provisioned automatically; this tool is for existing ones,
+for retrying a failed setup, and for rotating the key after `production_token`
+changes in `oduflow.toml` (change the value, restart Oduflow, then run this).
+No secret is accepted or returned. Stopped productions must be started first,
+and adding the managed addon mount recreates the container.
+
+Lock: production (each one in turn).
+{ .odu-tool-meta }
+
+**Parameters**
+
+`name`
+:   *str · default empty* — One production, or empty for every production of the team.
+
+**Use it when**
+
+- Adopting a production that predates automatic provisioning.
+- The connector reports itself unavailable after a failed setup.
+- Rotating `production_token`.
+
+### `production_odoo_info`
+
+Odoo identity, profile and the capabilities the deployed policy actually
+enables — the cheapest way to confirm the connector is reachable and what it
+will allow.
+
+**Parameters**
+
+`name`
+:   *str · required* — Production name.
+
+**Use it when**
+
+- Verifying a fresh install or a rotated key.
+- Discovering which operations the production's policy permits before planning work.
+
+### `production_odoo_read`
+
+Policy-governed reads: `models.list`, `models.describe`, `records.search`,
+`records.read`, `records.count`, `records.aggregate`, `attachments.read` and
+`reports.render`. Parameters follow the OduMCP API (`model`, `domain`,
+`fields`, `ids`, `limit`, …). There is no arbitrary ORM call.
+
+Start from `models.describe`: it reports the fields this production is willing
+to expose, which is not the full Odoo schema.
+
+**Parameters**
+
+`name`
+:   *str · required* — Production name.
+
+`operation`
+:   *str · required* — One of the read operations listed above.
+
+`params`
+:   *dict · default none* — Operation parameters as defined by the OduMCP API.
+
+**Use it when**
+
+- Answering a question about live data without copying the database into dev.
+- Rendering a production report for a customer.
+
+### `production_odoo_preview_change`
+
+Store a change plan in Odoo and return its `approval_id`. **This does not
+execute the business change.** Actions include `record.create` / `update` /
+`delete`, `method.call`, `message.post`, `activity.schedule` / `update` /
+`done` and `attachment.create`.
+
+Approval is a human act in Odoo, unless that production's own policy explicitly
+permits auto-approval. Retrying the same intent means reusing the same
+`idempotency_key`, never composing a second plan.
+
+**Parameters**
+
+`name`
+:   *str · required* — Production name.
+
+`action`
+:   *str · required* — The planned action, e.g. `record.update`.
+
+`payload`
+:   *dict · required* — Action payload as defined by the OduMCP API.
+
+`idempotency_key`
+:   *str · required* — Stable key for this intent; reuse it when retrying.
+
+`batch_key`
+:   *str · default empty* — Groups plans that must be approved and executed together.
+
+**Use it when**
+
+- A production record genuinely has to change and the change needs an audit trail.
+
+### `production_odoo_change_status`
+
+Read a plan's approval state and, once executed, its stored result.
+
+This is also the correct response to an uncertain execute: the change tools
+never retry writes on their own, so the status is what tells you whether the
+earlier call landed.
+
+**Parameters**
+
+`name`
+:   *str · required* — Production name.
+
+`approval_id`
+:   *str · required* — The ID returned by `production_odoo_preview_change`.
+
+**Use it when**
+
+- Waiting on a human approval.
+- A previous execute failed in transport and the outcome is unknown.
+
+### `production_odoo_execute_change`
+
+Execute the stored, approved plan by ID. It never grants approval and never
+substitutes a payload — the plan that runs is the plan that was approved.
+
+Check the returned state: `pending`, `expired`, `rejected` and `failed` all
+mean the change did **not** happen. After a transport failure, check the status
+before creating any new plan.
+
+Lock: production.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`name`
+:   *str · required* — Production name.
+
+`approval_id`
+:   *str · required* — The approved plan to execute.
+
+**Use it when**
+
+- A human has approved the plan in Odoo and the change should now be applied.
 
 ## Agent Guidance & Feedback
 

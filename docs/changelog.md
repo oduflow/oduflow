@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Separate production MCP access at `/production` with per-team production credentials; development credentials no longer authorize production tools.
+- Automatically install OduMCP on new Odoo 19 productions and synchronize the configured key for the Odoo administrator. Addon setup failures leave production running with a warning; Odoo tools report unavailable until setup succeeds. Existing productions, setup retries and key rotations use `sync_production_mcp`.
+- Access production records through OduMCP policies, approval plans and audit without a separate MCP server.
+
 ## v1.79.0
 
 ### Features
