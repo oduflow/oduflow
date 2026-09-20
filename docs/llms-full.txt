@@ -233,7 +233,7 @@ sanitization scripts followed by project scripts from
 
 ## Links
 
-- Repository: <https://github.com/oduist/oduflow>
+- Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
 - License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
 - Website: <https://oduflow.dev>
@@ -251,7 +251,7 @@ sanitization scripts followed by project scripts from
   <div class="odu-hero__actions">
     <a class="odu-btn odu-btn--primary" href="quick-start/">Read the Docs →</a>
     <a class="odu-btn odu-btn--changelog" href="changelog/">Changelog</a>
-    <a class="odu-btn odu-btn--ghost" href="https://github.com/oduist/oduflow">View on GitHub</a>
+    <a class="odu-btn odu-btn--ghost" href="https://github.com/oduflow/oduflow">View on GitHub</a>
   </div>
 </section>
 
@@ -741,7 +741,7 @@ After installation, the `oduflow` command is available globally.
 ### From source
 
 ```bash
-git clone https://github.com/oduist/oduflow.git
+git clone https://github.com/oduflow/oduflow.git
 cd oduflow
 uv sync          # or: python -m venv .venv && pip install -e .
 ```
@@ -4046,7 +4046,7 @@ Odoo/SQL terminals, Connect As, notes, protection, scoped MCP access,
 single-environment share links, and save-as-template actions.
 
 The header's **Feedback** action opens a prefilled issue form on
-`github.com/oduist/oduflow`. Oduflow holds no GitHub credentials and files
+`github.com/oduflow/oduflow`. Oduflow holds no GitHub credentials and files
 nothing itself: it builds the link with the description and a short
 version/platform/transport block, then the user reviews and submits it from
 their own GitHub account.
@@ -4248,7 +4248,7 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
-| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduist/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
+| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduflow/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
 | `GET` | `/api/agent-guides` | List available agent guides |
 | `GET` | `/api/agent-guides/{filename}` | Read a guide |
 
@@ -7544,7 +7544,7 @@ Build a prefilled link the user can follow to file a bug, feature request or
 feedback about **Oduflow itself** on GitHub.
 
 The tool does **not** create the issue: it returns a prefilled link to the
-`oduist/oduflow` issue form. Show the link to the user and let them submit it
+`oduflow/oduflow` issue form. Show the link to the user and let them submit it
 from their own GitHub account, so the report is attributable to them and they
 can edit it first. Oduflow version, Python version, platform, transport and
 routing mode are attached automatically.
@@ -9800,7 +9800,7 @@ suspect module's assets.
 ## Reporting a bug or sending feedback
 
 If none of the above helps — or Oduflow itself is at fault — file an issue on
-[github.com/oduist/oduflow](https://github.com/oduist/oduflow/issues).
+[github.com/oduflow/oduflow](https://github.com/oduflow/oduflow/issues).
 
 Three ways to get there, all producing a prefilled issue form:
 
@@ -9824,7 +9824,7 @@ secrets before submitting.
 
 # Licensing
 
-Oduflow is source-available under the [Business Source License 1.1](https://github.com/oduist/oduflow/blob/main/LICENSE) (BUSL-1.1).
+Oduflow is source-available under the [Business Source License 1.1](https://github.com/oduflow/oduflow/blob/main/LICENSE) (BUSL-1.1).
 
 - **Free forever for non-commercial use**: evaluation, education, academic research, personal and hobby projects, non-profits.
 - **Commercial use requires a paid license** in one of three tiers (below).

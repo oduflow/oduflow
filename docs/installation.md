@@ -88,7 +88,7 @@ After installation, the `oduflow` command is available globally.
 ### From source
 
 ```bash
-git clone https://github.com/oduist/oduflow.git
+git clone https://github.com/oduflow/oduflow.git
 cd oduflow
 uv sync          # or: python -m venv .venv && pip install -e .
 ```

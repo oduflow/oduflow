@@ -22,8 +22,8 @@ from urllib.request import Request, urlopen
 from packaging.version import InvalidVersion, Version
 
 from oduflow import feedback
+from oduflow.feedback import REPO
 
-REPO = "oduflow/oduflow"
 LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{REPO}/releases"
 TIMEOUT = 8
