@@ -4,6 +4,8 @@ Each test pins a specific vulnerability that was closed so a future refactor
 cannot silently reopen it. All are pure/unit — no Docker required.
 """
 
+import pathlib
+
 import pytest
 
 from oduflow.env_credentials import (
@@ -128,6 +130,108 @@ class TestEnsureWebUiPassword:
             server, "find_toml", lambda: (_ for _ in ()).throw(AssertionError())
         )
         assert server._ensure_web_ui_password(settings) is settings
+
+    def test_never_logs_the_generated_password(self, tmp_path, monkeypatch, caplog):
+        """The password goes to oduflow.toml, never to the log: the journal is
+        shipped off-host and retained long after the secret is still live."""
+        import logging
+
+        import oduflow.server as server
+
+        cfg = tmp_path / "oduflow.toml"
+        cfg.write_text('[team.1]\nui_password = ""\n', encoding="utf-8")
+        cfg.chmod(0o644)
+        settings = self._settings("")
+        monkeypatch.setattr(server, "find_toml", lambda: str(cfg))
+        monkeypatch.setattr(server, "_get_settings", lambda: settings)
+
+        with caplog.at_level(logging.DEBUG, logger="oduflow"):
+            server._ensure_web_ui_password(settings)
+
+        written = cfg.read_text(encoding="utf-8")
+        password = written.split('ui_password = "', 1)[1].split('"', 1)[0]
+        assert password  # a password really was provisioned
+        assert password not in caplog.text
+        # ...and the config that now holds it is no longer world-readable.
+        assert cfg.stat().st_mode & 0o077 == 0
+
+    def test_chmod_failure_still_returns_the_reloaded_settings(
+        self, tmp_path, monkeypatch
+    ):
+        """A config we can write but not chmod (owned by another user, or a
+        mount that rejects chmod) must not discard the password we just
+        persisted: returning the stale passwordless settings makes _start_http
+        fail closed and demand a ui_password the file already contains."""
+        import oduflow.server as server
+
+        cfg = tmp_path / "oduflow.toml"
+        cfg.write_text('[team.1]\nui_password = ""\n', encoding="utf-8")
+        cfg.chmod(0o644)
+        settings = self._settings("")
+        reloaded = object()
+        monkeypatch.setattr(server, "find_toml", lambda: str(cfg))
+        monkeypatch.setattr(server, "_get_settings", lambda: reloaded)
+        monkeypatch.setattr(
+            server.os,
+            "chmod",
+            lambda *a, **kw: (_ for _ in ()).throw(PermissionError()),
+        )
+
+        result = server._ensure_web_ui_password(settings)
+
+        assert result is reloaded  # not the stale, passwordless `settings`
+        assert 'ui_password = ""' not in cfg.read_text(encoding="utf-8")
+
+
+class TestBootstrapConfig:
+    """A fresh install writes its generated secrets to disk only."""
+
+    def _bootstrap(self, tmp_path, monkeypatch):
+        import oduflow.server as server
+
+        monkeypatch.setattr(
+            "oduflow.settings._resolve_etc_dir", lambda: str(tmp_path / "etc")
+        )
+        return server._bootstrap_config()
+
+    def test_secrets_are_written_to_a_private_file_and_not_logged(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+        import os
+        import re
+
+        # Pin the module logger's own level: another test in the suite may have
+        # raised it, and then caplog would see nothing and pass vacuously.
+        with caplog.at_level(logging.DEBUG, logger="oduflow"):
+            dest = self._bootstrap(tmp_path, monkeypatch)
+
+        text = pathlib.Path(dest).read_text(encoding="utf-8")
+        secrets_found = re.findall(
+            r'^\s*(?:password|auth_token|ui_password) = "([^"]+)"', text, re.M
+        )
+        # DB password, MCP auth_token and web-UI password.
+        assert len(secrets_found) == 3
+        for secret in secrets_found:
+            assert secret not in caplog.text
+        assert os.stat(dest).st_mode & 0o777 == 0o600
+        # The operator still learns where to look.
+        assert dest in caplog.text
+
+    def test_refuses_to_overwrite_an_existing_config(self, tmp_path, monkeypatch):
+        """Bootstrap may only ADD a config. find_toml() raises FileNotFoundError
+        for a missing ODUFLOW_TOML path *without* falling back, so the caller
+        would otherwise truncate a live /etc/oduflow/oduflow.toml and destroy its
+        database password, teams and tokens."""
+        from oduflow.errors import ConflictError
+
+        dest = self._bootstrap(tmp_path, monkeypatch)
+        original = pathlib.Path(dest).read_text(encoding="utf-8")
+
+        with pytest.raises(ConflictError):
+            self._bootstrap(tmp_path, monkeypatch)
+
+        assert pathlib.Path(dest).read_text(encoding="utf-8") == original
 
 
 class TestHttpRequestPathGuard:

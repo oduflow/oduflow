@@ -82,7 +82,7 @@ port_range = [50000, 50100]           # port range for Odoo containers
 
 ### First launch
 
-On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`; the MCP token and Web Dashboard password are also printed in the startup log.
+On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`. The file is created with mode `0600` and the generated secrets are never printed to the log — read them from the config file itself.
 
 ### Upgrade
 
@@ -422,7 +422,12 @@ Fresh configs include generated values for:
 - `[team.1].auth_token` — HTTP MCP Bearer token and OAuth client secret
 - `[team.1].ui_password` — Web Dashboard password
 
-The generated `auth_token` and `ui_password` are also printed in the startup log.
+The config file is created with mode `0600`. The generated secrets are never
+printed to the log — read them from the file itself:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ## Single-user mode (stdio)
 
@@ -806,8 +811,12 @@ If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
 `~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`, and
-`[team.1].ui_password`; the generated MCP token and Web Dashboard password are
-also printed in the startup log.
+`[team.1].ui_password`. The file is created with mode `0600` and the generated
+secrets are never printed to the log — read them from the config file:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ### Minimal configuration
 
@@ -5247,7 +5256,8 @@ The token is used to both authenticate and identify the team. The self-hosted
 OAuth provider also accepts it directly as a non-expiring Bearer credential.
 
 Fresh configs get a generated `auth_token` for `[team.1]` on first startup. The
-value is printed in the startup log and stored in `oduflow.toml`; use it as
+value is stored in `oduflow.toml` (created with mode `0600`) and never written to
+the log; read it from the file and use it as
 `Authorization: Bearer <auth_token>` when connecting HTTP MCP clients.
 
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
