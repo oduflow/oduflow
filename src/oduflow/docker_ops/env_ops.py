@@ -1776,7 +1776,14 @@ def _clone_repo(
         # failure: raise NotFoundError so the actionable message reaches the
         # dashboard instead of the generic ExternalCommandError banner
         # (same translation as git_ops.fetch_branch does for switch_branch).
-        if "could not find remote branch" in error_msg.lower():
+        # Depending on git version the warning line ("Could not find remote
+        # branch ... to clone") may be absent, so also match the fatal line
+        # ("Remote branch ... not found in upstream ...").
+        lowered = error_msg.lower()
+        if (
+            "could not find remote branch" in lowered
+            or "not found in upstream" in lowered
+        ):
             raise NotFoundError(
                 f"Branch '{branch}' does not exist on origin. Push it first "
                 f"(git push -u origin {branch}), then retry."
