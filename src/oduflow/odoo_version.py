@@ -82,12 +82,13 @@ def major_from_image_reference(image: str) -> int | None:
     names (``ghcr.io/acme/odoo-16``). Returns ``None`` for references that
     carry no Odoo version (``ghcr.io/acme/platform:latest``), that are not
     Odoo at all (``postgres:16``) or whose tag is some other versioning scheme
-    (``ghcr.io/acme/odoo-stack:2.0``).
+    (``ghcr.io/acme/odoo-stack:2.0``). Conflicting versions in the tag and
+    repository name also yield ``None`` so callers can probe the live binary.
     """
     if not isinstance(image, str) or not image:
         return None
 
-    # Prefer the Docker tag: this handles official and custom repositories,
+    # Parse the Docker tag: this handles official and custom repositories,
     # including registries with ports (registry:5000/acme/odoo-ee:15.0).
     reference = image.split("@", 1)[0]
     leaf = reference.rsplit("/", 1)[-1]
@@ -103,17 +104,22 @@ def major_from_image_reference(image: str) -> int | None:
         if is_odoo_image
         else None
     )
-    major = _plausible(int(match.group(1))) if match else None
-    if major is None:
-        # Also accept versioned repository names such as acme/odoo-15. Search
-        # the repository alone: the tag is fully handled above, and leaving it
-        # attached made the version terminate on the ":" separator, so
-        # acme/odoo-15:latest read as unversioned while acme/odoo-15 did not.
-        match = re.search(
-            r"odoo[-_:/]?(\d+)(?:\.\d+)?(?:$|[-_])", _image_path(repository), re.I
-        )
-        major = _plausible(int(match.group(1))) if match else None
-    return major
+    tag_major = _plausible(int(match.group(1))) if match else None
+    # Independently check versioned repository names such as acme/odoo-15.
+    # Keep the tag detached so acme/odoo-15:latest still yields version 15.
+    match = re.search(
+        r"odoo[-_:/]?(\d+)(?:\.\d+)?(?:$|[-_])", _image_path(repository), re.I
+    )
+    repository_major = _plausible(int(match.group(1))) if match else None
+    if (
+        tag_major is not None
+        and repository_major is not None
+        and tag_major != repository_major
+    ):
+        # Either number could be a custom build version. Let the caller probe
+        # instead of selecting incompatible CLI options from an arbitrary one.
+        return None
+    return tag_major if tag_major is not None else repository_major
 
 
 def major_from_version_output(text: str) -> int | None:

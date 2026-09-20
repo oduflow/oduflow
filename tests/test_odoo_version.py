@@ -26,6 +26,14 @@ LABEL = "oduflow.image"
         ("acme/odoo-15:latest", 15),
         ("ghcr.io/acme/odoo-16:latest", 16),
         ("acme/odoo_17:nightly", 17),
+        ("acme/odoo-19:19.0-custom", 19),
+        ("acme/odoo-15:15", 15),
+        # Implausible build tags leave the repository version usable.
+        ("acme/odoo-19:2.0", 19),
+        # Conflicting plausible versions must fall through to a live probe.
+        ("acme/odoo-19:15", None),
+        ("acme/odoo-15:19", None),
+        ("registry.example:5000/acme/odoo-19:15.0-custom", None),
         ("registry.example:5000/acme/odoo-ee:15.0-custom", 15),
         ("ghcr.io/acme/odoo/17.0-custom", 17),
         ("odoo:19.0@sha256:" + "0" * 64, 19),
@@ -91,9 +99,10 @@ def test_major_from_version_output(text, expected):
 
 
 class TestDetectOdooMajor:
-    def test_label_wins_without_probing_the_container(self):
+    @pytest.mark.parametrize("image", ["odoo:19.0", "acme/odoo-19:19.0-custom"])
+    def test_label_wins_without_probing_the_container(self, image):
         container = MagicMock()
-        container.labels = {LABEL: "odoo:19.0"}
+        container.labels = {LABEL: image}
 
         assert detect_odoo_major(container, LABEL) == 19
         container.exec_run.assert_not_called()
@@ -104,6 +113,26 @@ class TestDetectOdooMajor:
         container.exec_run.return_value = (0, b"Odoo Server 19.0-20260908\n")
 
         assert detect_odoo_major(container, LABEL) == 19
+        container.exec_run.assert_called_once_with("odoo --version")
+
+    @pytest.mark.parametrize(
+        "image,major",
+        [("acme/odoo-19:15", 19), ("acme/odoo-15:19", 15)],
+    )
+    def test_conflicting_image_versions_probe_the_binary(self, image, major):
+        container = MagicMock()
+        container.labels = {LABEL: image}
+        container.exec_run.return_value = (0, f"Odoo Server {major}.0\n".encode())
+
+        assert detect_odoo_major(container, LABEL) == major
+        container.exec_run.assert_called_once_with("odoo --version")
+
+    def test_conflicting_image_versions_remain_unknown_when_probe_fails(self):
+        container = MagicMock()
+        container.labels = {LABEL: "acme/odoo-19:15"}
+        container.exec_run.return_value = (127, b"odoo: not found\n")
+
+        assert detect_odoo_major(container, LABEL) is None
         container.exec_run.assert_called_once_with("odoo --version")
 
     def test_failed_probe_yields_none(self):
