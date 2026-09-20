@@ -158,8 +158,12 @@ If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
 `~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`, and
-`[team.1].ui_password`; the generated MCP token and Web Dashboard password are
-also printed in the startup log.
+`[team.1].ui_password`. The file is created with mode `0600` and the generated
+secrets are never printed to the log — read them from the config file:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ### Minimal configuration
 

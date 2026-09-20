@@ -33,7 +33,12 @@ Fresh configs include generated values for:
 - `[team.1].auth_token` — HTTP MCP Bearer token and OAuth client secret
 - `[team.1].ui_password` — Web Dashboard password
 
-The generated `auth_token` and `ui_password` are also printed in the startup log.
+The config file is created with mode `0600`. The generated secrets are never
+printed to the log — read them from the file itself:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ## Single-user mode (stdio)
 

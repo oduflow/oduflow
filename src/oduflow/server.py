@@ -56,6 +56,7 @@ from oduflow.docker_ops import (
     volume_ops,
 )
 from oduflow.errors import (
+    ConfigError,
     ConflictError,
     FlowError,
     NotFoundError,
@@ -140,11 +141,29 @@ _web_bind: tuple[str, int] | None = None
 
 
 def _get_settings() -> Settings:
+    """Load and validate oduflow.toml once, caching the result.
+
+    A broken config is an operator mistake, not a bug, so every failure mode
+    here (missing/unreadable file, TOML syntax error, failed validation) is
+    translated into a single-line ConfigError. Without it a stray ValueError
+    from validate() reaches the CLI entry point uncaught and systemd records a
+    full traceback for what is really one sentence of feedback.
+    """
     global _settings
     if _settings is None:
-        toml_path = find_toml()
-        _settings = Settings.from_toml(toml_path)
-        _settings.validate()
+        try:
+            toml_path = find_toml()
+        except FileNotFoundError as exc:
+            raise ConfigError(str(exc)) from exc
+        try:
+            settings = Settings.from_toml(toml_path)
+            settings.validate()
+        # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here too.
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
+        except OSError as exc:
+            raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
+        _settings = settings
     return _settings
 
 
@@ -7040,24 +7059,48 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
     ):
         return settings
     import pathlib
+    import tempfile
 
     try:
         cfg_path = find_toml()
-        updated, generated = _autofill_ui_passwords(
-            pathlib.Path(cfg_path).read_text(encoding="utf-8")
-        )
+        # Follow a config symlink without replacing the symlink itself.
+        cfg = pathlib.Path(cfg_path).resolve(strict=True)
+        updated, generated = _autofill_ui_passwords(cfg.read_text(encoding="utf-8"))
         if not generated:
             return settings
-        pathlib.Path(cfg_path).write_text(updated, encoding="utf-8")
+        original = cfg.stat()
+        # A chmod of the existing inode cannot revoke an already-open reader.
+        # Stage secrets privately and replace the inode, preserving ownership
+        # and any stricter owner permissions (e.g. 0400). If replacement is not
+        # supported, leave the original untouched and let HTTP fail closed.
+        fd, temporary = tempfile.mkstemp(prefix=f".{cfg.name}.", dir=cfg.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                staged = os.fstat(stream.fileno())
+                if (staged.st_uid, staged.st_gid) != (original.st_uid, original.st_gid):
+                    os.fchown(stream.fileno(), original.st_uid, original.st_gid)
+                mode = original.st_mode & 0o600
+                if staged.st_mode & 0o777 != mode:
+                    os.fchmod(stream.fileno(), mode)
+                stream.write(updated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, cfg)
+        finally:
+            pathlib.Path(temporary).unlink(missing_ok=True)
     except Exception:
         logger.exception("Could not auto-provision a web-UI password")
         return settings
-    for password in generated:
-        logger.warning(
-            "Auto-generated a web-UI password for a team that had "
-            "none, so upgrading does not serve the dashboard unauthenticated: %s",
-            password,
-        )
+    # Only the count is logged. Printing the password itself would persist it in
+    # the journal (shipped off-host, retained for months) long after it is the
+    # live dashboard credential; oduflow.toml is where it belongs.
+    logger.warning(
+        "Auto-generated a web-UI password for %d team(s) that had none, so "
+        "upgrading does not serve the dashboard unauthenticated. Read the new "
+        "ui_password value(s) from %s; they are not logged.",
+        len(generated),
+        cfg_path,
+    )
     _settings = None
     return _get_settings()
 
@@ -7544,6 +7587,57 @@ def _dispatch_client(argv: Sequence[str]) -> None:
         raise SystemExit(exit_code)
 
 
+def _bootstrap_config() -> str:
+    """Create oduflow.toml from the bundled default on a fresh install.
+
+    The copy gets a generated PostgreSQL password, MCP auth_token and web-UI
+    password, so a fresh install is authenticated by default even over HTTP
+    (#37). Returns the path it wrote.
+    """
+    import pathlib
+    import secrets
+
+    from oduflow.settings import _resolve_etc_dir
+
+    dest_dir = _resolve_etc_dir()
+    os.makedirs(dest_dir, exist_ok=True)
+    bundled = pathlib.Path(__file__).resolve().parent / "templates" / "oduflow.toml"
+    dest = os.path.join(dest_dir, "oduflow.toml")
+    rendered = _inject_db_password(
+        bundled.read_text(encoding="utf-8"), secrets.token_urlsafe(24)
+    )
+    rendered = _inject_auth_token(rendered, secrets.token_urlsafe(24))
+    rendered = _inject_ui_password(rendered, secrets.token_urlsafe(18))
+    # Create the file already private: the default umask would otherwise leave
+    # these freshly generated secrets world-readable, and the config is only
+    # ever read back by us. O_EXCL because bootstrap must only ever ADD a config:
+    # find_toml() raises FileNotFoundError for a missing ODUFLOW_TOML path
+    # *without* falling back to the default locations, so the caller would
+    # otherwise truncate an existing /etc/oduflow/oduflow.toml and destroy the
+    # live [database] password, teams and tokens. Fail loudly instead.
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise ConflictError(
+            f"Refusing to bootstrap a new config over the existing {dest}. "
+            "Oduflow could not load a config (check the ODUFLOW_TOML path if "
+            f"it is set) but {dest} is already there, and overwriting it would "
+            "destroy its database password, teams and tokens."
+        ) from None
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(rendered)
+    # The generated values are deliberately NOT logged: the journal is copied,
+    # shipped off-host and retained far longer than the secrets stay valid, so
+    # one log line turns them into a permanent leak. The config file is the one
+    # place they live.
+    logger.info(
+        "Config created: %s (auto-generated DB password, MCP auth_token and "
+        "web-UI password for team 1; read them from that file, mode 0600)",
+        dest,
+    )
+    return dest
+
+
 def _run_cli() -> None:
     """Entry point for the Oduflow MCP server."""
     # The remote client accepts flags defined by the live server's tool schemas,
@@ -7894,38 +7988,7 @@ def _run_cli() -> None:
     try:
         find_toml()
     except FileNotFoundError:
-        import pathlib
-        import secrets
-
-        from oduflow.settings import _resolve_etc_dir
-
-        dest_dir = _resolve_etc_dir()
-        os.makedirs(dest_dir, exist_ok=True)
-        bundled = pathlib.Path(__file__).resolve().parent / "templates" / "oduflow.toml"
-        dest = os.path.join(dest_dir, "oduflow.toml")
-        generated_token = secrets.token_urlsafe(24)
-        generated_ui_password = secrets.token_urlsafe(18)
-        rendered = _inject_db_password(
-            bundled.read_text(encoding="utf-8"), secrets.token_urlsafe(24)
-        )
-        rendered = _inject_auth_token(rendered, generated_token)
-        rendered = _inject_ui_password(rendered, generated_ui_password)
-        with open(dest, "w", encoding="utf-8") as f:
-            f.write(rendered)
-        logger.info(
-            "Config created: %s (auto-generated DB password, MCP auth_token and "
-            "web-UI password)",
-            dest,
-        )
-        logger.info(
-            "Generated MCP auth_token for team 1: %s "
-            "(Bearer token / OAuth client_secret; OAuth client_id is 'team_1')",
-            generated_token,
-        )
-        logger.info(
-            "Generated web-UI password for team 1: %s",
-            generated_ui_password,
-        )
+        _bootstrap_config()
 
     global _settings
     _settings = _get_settings()
