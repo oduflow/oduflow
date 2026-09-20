@@ -233,7 +233,7 @@ sanitization scripts followed by project scripts from
 
 ## Links
 
-- Repository: <https://github.com/oduist/oduflow>
+- Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
 - License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
 - Website: <https://oduflow.dev>

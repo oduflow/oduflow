@@ -144,13 +144,28 @@
   header h1 { font-size: var(--text-xl); font-weight: 600; line-height: 1.05; }
   /* Machine artifact, so mono per The Console Voice Rule — and small enough to
      sit inside the headline without competing with it. */
+  /* A button, not a label: it opens the version dialog and checks on demand. */
   .brand-version {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
     font-weight: 400;
     color: var(--text-dim);
     vertical-align: 2px;
+    background: none;
+    border: none;
+    border-bottom: 1px dotted var(--border-raised);
+    padding: 0;
+    cursor: pointer;
   }
+  .brand-version:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  /* Release check dialog */
+  .version-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .version-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .version-row dt { color: var(--text-dim); font-size: var(--text-sm); }
+  .version-row dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-sm); text-align: right; }
+  .version-status { font-size: var(--text-sm); line-height: 1.5; margin-bottom: 12px; }
+  .version-release-title { font-size: var(--text-sm); color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
+  #version-release-link { margin-right: auto; }
   .brand-byline {
     color: var(--text-dim);
     font-size: var(--text-2xs);
@@ -1336,7 +1351,14 @@
   <div class="brand-lockup">
     <img src="/logo.png" alt="Oduflow logo">
     <div class="brand-copy">
-      <h1>Oduflow <span class="brand-version">v__ODUFLOW_VERSION__</span></h1>
+      <h1>Oduflow
+        <button type="button"
+                class="brand-version"
+                id="brand-version"
+                aria-haspopup="dialog"
+                title="Check for a newer release"
+                onclick="openVersionModal()">v__ODUFLOW_VERSION__</button>
+      </h1>
       <div class="brand-byline">a product by <a href="https://oduist.com" target="_blank" rel="noopener">Oduist</a></div>
     </div>
   </div>
@@ -1578,7 +1600,7 @@
         <label for="fb-diagnostics">Attached environment</label>
         <pre id="fb-diagnostics" class="fb-diagnostics">__ODUFLOW_DIAGNOSTICS__</pre>
         <div class="hint">
-          Opens the issue form on github.com/oduist/oduflow prefilled with the
+          Opens the issue form on github.com/oduflow/oduflow prefilled with the
           text above. It is filed from your own GitHub account, and nothing is
           submitted until you review it there and press Create.
         </div>
@@ -2436,6 +2458,39 @@
       <div class="form-actions">
         <button class="btn" onclick="closeLicenseModal()">Cancel</button>
         <button class="btn-create" id="lic-submit" onclick="activateLicense()">Activate</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="version-modal" onclick="closeVersionModal(event)">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="version-modal-title">
+    <div class="modal-header">
+      <h2 id="version-modal-title">Oduflow version</h2>
+      <button class="modal-close" onclick="closeVersionModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <dl class="version-rows">
+        <div class="version-row">
+          <dt>Installed</dt>
+          <dd id="version-installed">&mdash;</dd>
+        </div>
+        <div class="version-row">
+          <dt>Latest release</dt>
+          <dd id="version-latest">&mdash;</dd>
+        </div>
+      </dl>
+      <p class="version-status" id="version-status" role="status"></p>
+      <p class="version-release-title" id="version-release-title" hidden></p>
+      <p class="modal-note" id="version-upgrade-note" hidden>
+        Upgrade the package (<code>uv tool upgrade oduflow</code> or
+        <code>pip install -U oduflow</code>), then run <code>oduflow upgrade</code>
+        to reconcile the deployed team files.
+      </p>
+      <div class="form-actions">
+        <a class="docs-link" id="version-release-link" href="https://github.com/oduflow/oduflow/releases"
+           target="_blank" rel="noopener">Release notes &#8599;</a>
+        <button class="btn" id="version-recheck" onclick="checkVersion()">Check again</button>
+        <button class="btn-create" onclick="closeVersionModal()">Close</button>
       </div>
     </div>
   </div>
@@ -7275,6 +7330,76 @@ async function doValidateCredential(host, username) {
   }
 }
 
+// --- Version: on-demand release check ---
+// The dashboard never contacts GitHub on its own. The header version is a
+// button; opening the dialog (or pressing Check again) performs exactly one
+// lookup of the latest published release, and nothing is cached between them.
+const API_VERSION = '/api/version';
+
+function formatVersionLabel(value) {
+  if (!value) return '\u2014';
+  return value === 'dev' ? 'dev (source checkout)' : 'v' + value;
+}
+
+function openVersionModal() {
+  showModal('version-modal');
+  checkVersion();
+}
+
+function closeVersionModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  hideModal('version-modal');
+}
+
+async function checkVersion() {
+  var installedEl = document.getElementById('version-installed');
+  var latestEl = document.getElementById('version-latest');
+  var statusEl = document.getElementById('version-status');
+  var titleEl = document.getElementById('version-release-title');
+  var noteEl = document.getElementById('version-upgrade-note');
+  var linkEl = document.getElementById('version-release-link');
+  var btn = document.getElementById('version-recheck');
+  latestEl.textContent = '\u2014';
+  titleEl.hidden = true;
+  noteEl.hidden = true;
+  statusEl.textContent = 'Checking github.com for the latest release...';
+  btn.disabled = true;
+  try {
+    var r = await fetch(API_VERSION);
+    var data = await readResult(r);
+    if (!data.ok) {
+      statusEl.textContent = 'Check failed: ' + (data.error || 'unknown error');
+      return;
+    }
+    var info = data.version || {};
+    installedEl.textContent = formatVersionLabel(info.current);
+    if (info.release_url) linkEl.href = info.release_url;
+    if (info.status === 'error') {
+      statusEl.textContent = 'Check failed: ' + (info.error || 'unknown error');
+      return;
+    }
+    latestEl.textContent = formatVersionLabel(info.latest);
+    if (info.release_title || info.published_at) {
+      titleEl.textContent = [info.release_title, info.published_at ? 'released ' + relTime(info.published_at) : '']
+        .filter(Boolean).join(' \u00b7 ');
+      titleEl.hidden = false;
+    }
+    if (info.status === 'update-available') {
+      statusEl.textContent = 'An update is available: ' + formatVersionLabel(info.latest) + '.';
+      noteEl.hidden = false;
+    } else if (info.status === 'up-to-date') {
+      statusEl.textContent = 'You are running the latest release.';
+    } else {
+      statusEl.textContent = 'This build is not a published release, so it cannot be compared with ' +
+        formatVersionLabel(info.latest) + '.';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Connection error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // --- Secrets (write-only named values for env vars) ---
 const API_SECRETS = '/api/secrets';
 
@@ -7726,6 +7851,7 @@ var MODAL_CLOSERS = {
   'restore-svc-modal': closeRestoreServiceModal,
   'create-vol-modal': closeCreateVolumeModal,
   'license-modal': closeLicenseModal,
+  'version-modal': closeVersionModal,
   'add-extra-repo-modal': closeAddExtraRepoModal,
   'add-credential-modal': closeAddCredentialModal,
   'secret-modal': closeSecretModal,

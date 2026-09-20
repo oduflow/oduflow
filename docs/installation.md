@@ -88,12 +88,17 @@ After installation, the `oduflow` command is available globally.
 ### From source
 
 ```bash
-git clone https://github.com/oduist/oduflow.git
+git clone https://github.com/oduflow/oduflow.git
 cd oduflow
 uv sync          # or: python -m venv .venv && pip install -e .
 ```
 
 ### Upgrade
+
+Click the version next to **Oduflow** in the dashboard header to see whether a
+newer release exists. The dialog compares the installed version with the latest
+published release, names it, and links to its release notes. The check runs only
+on that click — Oduflow never polls GitHub on its own.
 
 ```bash
 uv tool upgrade oduflow
