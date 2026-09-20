@@ -2937,7 +2937,8 @@ def upgrade_odoo_modules(
 
     Args:
         env_name: The name of the environment.
-        modules: Comma-separated list of modules to upgrade (e.g., "sale,crm,web").
+        modules: Comma-separated list of modules to upgrade (e.g., "sale,crm,web"),
+            or "all" on its own to upgrade every installed module (`odoo -u all`).
     """
     modules_list = [m.strip() for m in modules.split(",") if m.strip()]
     if not modules_list:

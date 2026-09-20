@@ -35,6 +35,11 @@ logger = logging.getLogger("oduflow")
 # arbitrary Odoo CLI options into the invocation (argument injection).
 _MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
+# Odoo's own keyword for "every installed module" in ``odoo -u``. It is not a
+# module name: nothing in ir_module_module is called "all", so an upgrade that
+# asks for it skips the installed-module check instead of failing it.
+ALL_MODULES = "all"
+
 
 def _validate_module_names(modules: "list[str] | tuple[str, ...]") -> None:
     for m in modules:
@@ -315,7 +320,14 @@ def _run_odoo_module_command(
         )
 
     if flag == "-u":
-        _require_upgradeable_modules(settings, team, env_name, modules)
+        if ALL_MODULES in modules:
+            if len(modules) > 1:
+                raise ValueError(
+                    f"'{ALL_MODULES}' already upgrades every installed module "
+                    "and cannot be combined with other module names."
+                )
+        else:
+            _require_upgradeable_modules(settings, team, env_name, modules)
 
     modules_str = ",".join(modules)
     cmd = f"/entrypoint.sh odoo -d {env_db} --stop-after-init --no-http {flag} {modules_str}"
@@ -450,6 +462,7 @@ def _require_upgradeable_modules(
 def upgrade_odoo_modules(
     settings: Settings, team: TeamSettings, env_name: str, *modules: str
 ) -> dict[str, Any]:
+    """Upgrade *modules*, or every installed module when given ``"all"``."""
     return _run_odoo_module_command(settings, team, env_name, "-u", *modules)
 
 

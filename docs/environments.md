@@ -475,6 +475,9 @@ oduflow call install_odoo_modules feature-login sale,crm,website
 
 # Upgrade modules (odoo -u)
 oduflow call upgrade_odoo_modules feature-login sale,crm
+
+# Upgrade every installed module (odoo -u all)
+oduflow call upgrade_odoo_modules feature-login all
 ```
 
 ## Running Tests
