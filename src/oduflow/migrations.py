@@ -334,6 +334,87 @@ def _migrate_traefik_yml_config(settings: Settings) -> None:
         pass
 
 
+def _chmod_private_best_effort(path: str) -> None:
+    """chmod *path* to 0600, logging instead of raising on failure.
+
+    Permission hardening is not worth blocking server startup over (a failing
+    migration step aborts every start until fixed): a file the server user
+    cannot chmod — e.g. root-owned after a backup restore — is reported for
+    the operator to chown, like migration 0004 handles per-container failures.
+    """
+    try:
+        os.chmod(path, 0o600)
+        logger.info("Restricted %s to mode 0600", path)
+    except OSError as exc:
+        logger.warning("Could not restrict %s to mode 0600: %s", path, exc)
+
+
+def _migrate_service_presets_permissions(settings: Settings) -> None:
+    """Restrict each team's ``service_presets.json`` to owner-only access.
+
+    Presets carry service env vars (historically including API keys) but were
+    written with the default umask; the credential stores are all 0600. New
+    writes already use 0600 (service_presets._save_presets); this brings the
+    files that predate that change forward. Idempotent: chmod to the same mode
+    is a no-op, and a missing file is skipped.
+    """
+    for team in settings.teams.values():
+        path = os.path.join(team.data_dir, "service_presets.json")
+        if os.path.isfile(path):
+            _chmod_private_best_effort(path)
+
+
+def _migrate_template_metadata_permissions(settings: Settings) -> None:
+    """Restrict every template ``metadata.json`` to owner-only access.
+
+    Template metadata records the source environment's env vars — the same
+    data class as service presets (migration 0006) — but was written with the
+    default umask. New writes are 0600; this brings existing files forward.
+    The templates tree is walked directly so nested template names
+    (``customer/prod``) are covered too.
+    """
+    for team in settings.teams.values():
+        templates_dir = os.path.join(team.data_dir, "templates")
+        if not os.path.isdir(templates_dir):
+            continue
+        for root, _dirs, files in os.walk(templates_dir):
+            if "metadata.json" in files:
+                _chmod_private_best_effort(os.path.join(root, "metadata.json"))
+
+
+def _migrate_backfill_service_presets(settings: Settings) -> None:
+    """Write a preset for every legacy service that has none.
+
+    Presets are the authoritative service configuration — restore, the
+    dashboard's edit dialog and update all read them first — but services
+    created before presets existed carry theirs only on the container.
+    Backfilling once here gives every reader one source of truth instead of
+    each surface re-deriving the config from container inspection. Best effort
+    per service, like migration 0004: a service whose image or port cannot be
+    reconstructed is logged and skipped (an unrestorable preset is worse than
+    none), and a rerun finds the written presets and does nothing.
+    """
+    from oduflow.docker_ops.client import get_client
+    from oduflow.docker_ops.service_ops import backfill_service_preset
+
+    client = get_client()
+    for team in settings.teams.values():
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{settings.managed_label}=true",
+                    f"{settings.team_label}={team.team_id}",
+                    "oduflow.service",
+                ]
+            },
+        )
+        for container in containers:
+            name = container.labels.get("oduflow.service")
+            if name:
+                backfill_service_preset(settings, team, name, container)
+
+
 # Append-only registry, executed in list order. Ids are recorded in
 # migrations.json once applied; reordering or renaming entries would re-run
 # or skip steps on existing installs.
@@ -377,6 +458,30 @@ MIGRATIONS: list[Migration] = [
             "(file provider rejects .json); init recreates it with oduflow.yml"
         ),
         apply=_migrate_traefik_yml_config,
+    ),
+    Migration(
+        id="0006-service-presets-0600",
+        description=(
+            "Restrict service_presets.json (holds service env vars, often "
+            "API keys) to owner-only permissions like the credential stores"
+        ),
+        apply=_migrate_service_presets_permissions,
+    ),
+    Migration(
+        id="0007-template-metadata-0600",
+        description=(
+            "Restrict template metadata.json (records source-environment env "
+            "vars) to owner-only permissions like the credential stores"
+        ),
+        apply=_migrate_template_metadata_permissions,
+    ),
+    Migration(
+        id="0008-backfill-service-presets",
+        description=(
+            "Write a service preset for every legacy service container that "
+            "predates presets, so restore/update/edit read one source of truth"
+        ),
+        apply=_migrate_backfill_service_presets,
     ),
 ]
 

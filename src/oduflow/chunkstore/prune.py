@@ -162,10 +162,20 @@ def _collect(
                 )
         if keep_revisions is not None:
             # Caller-driven retention (Oduflow keeps filestore revisions in
-            # lockstep with snapshot manifests). The newest revision is
-            # still always kept — an in-progress backup baseline.
-            keep_set = set(keep_revisions.get(snapshot_id, set()))
-            keep_set.add(revisions[-1])
+            # lockstep with snapshot manifests).
+            if snapshot_id in keep_revisions:
+                # A snapshot the caller tracks: keep the revisions its surviving
+                # manifests reference, plus the newest as an in-progress
+                # backup baseline.
+                keep_set = set(keep_revisions[snapshot_id])
+                keep_set.add(revisions[-1])
+            else:
+                # Present in storage but not tracked by the caller — e.g. a
+                # deleted production whose backups were intentionally kept. Its
+                # manifests still reference every revision, so keep them all;
+                # collapsing to the newest would strand those manifests on
+                # pruned revisions and make all but the latest unrestorable.
+                keep_set = set(revisions)
         else:
             keep_set = select_revisions_to_keep(dated, keep, now)
         for revision, _created in dated:

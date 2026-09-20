@@ -20,6 +20,10 @@ ui_password = "pass-b"
 port_range = [50050, 50100]
 ```
 
+Every team must declare a unique `hostname`. Besides routing requests, that
+hostname is the team's OAuth issuer identity when reached through a
+TLS-terminating proxy such as Traefik or Cloudflare Tunnel.
+
 Each team gets a dedicated data directory under the base `data_dir`:
 
 ```

@@ -8,6 +8,7 @@ that holds the lock and how long it has held it.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -371,6 +372,57 @@ class TestSystemLockExcludesProductions:
 
         locks.acquire_env("main", team_id="1")  # must not raise
         locks.acquire_env(service_lock_key("1", "redis"))  # must not raise
+
+
+class TestBlockingTeamAcquire:
+    """attach_filestore stages a possibly multi-gigabyte source before it needs
+    the team lock, so failing the swap instantly would discard all of it."""
+
+    def test_it_waits_for_a_running_environment_operation(self):
+        locks = LockManager()
+        locks.acquire_env("main", team_id="1", operation="restart_environment")
+
+        def release_late() -> None:
+            time.sleep(0.3)
+            locks.release_env("main")
+
+        waiter = threading.Thread(target=release_late)
+        waiter.start()
+        locks.acquire_team_blocking("1", 5.0, operation="attach_filestore", poll=0.05)
+        waiter.join(2)
+        locks.release_team("1")
+
+    def test_it_waits_for_another_team_operation(self):
+        locks = LockManager()
+        locks.acquire_team("1", operation="save_as_template")
+
+        def release_late() -> None:
+            time.sleep(0.3)
+            locks.release_team("1")
+
+        waiter = threading.Thread(target=release_late)
+        waiter.start()
+        locks.acquire_team_blocking("1", 5.0, operation="attach_filestore", poll=0.05)
+        waiter.join(2)
+        locks.release_team("1")
+
+    def test_it_gives_up_with_the_holder_named(self):
+        # Bounded: a team operation that never ends must not hold the caller
+        # open forever, and the BusyError still says who is in the way.
+        locks = LockManager()
+        locks.acquire_team("1", operation="save_as_template")
+        with pytest.raises(BusyError, match="save_as_template"):
+            locks.acquire_team_blocking(
+                "1", 0.1, operation="attach_filestore", poll=0.05
+            )
+        locks.release_team("1")
+
+    def test_the_context_manager_releases_on_the_way_out(self):
+        locks = LockManager()
+        with locks.team_lock_blocking("1", 1.0, operation="attach_filestore"):
+            with pytest.raises(BusyError):
+                locks.acquire_team("1")
+        locks.acquire_team("1")  # must not raise
 
 
 class TestKeyedMutex:

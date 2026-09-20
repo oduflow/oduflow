@@ -29,6 +29,9 @@ def make_client(backup: BackupSettings) -> Any:
         "aws_secret_access_key": backup.secret_key,
         "config": Config(
             retries={"max_attempts": 3, "mode": "standard"},
+            # Parallel chunk uploads must not starve on the connection
+            # pool (botocore's default is 10 < upload_threads).
+            max_pool_connections=max(10, backup.upload_threads + 4),
             s3={"addressing_style": "path"} if backup.endpoint else {},
         ),
     }

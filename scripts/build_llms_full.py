@@ -17,6 +17,7 @@ SOURCES = (
     "index.md",
     "quick-start.md",
     "installation.md",
+    "architecture.md",
     "use-cases.md",
     "templates.md",
     "environments.md",

@@ -120,6 +120,20 @@ def validate_service_database_name(name: str) -> str:
     return name
 
 
+_SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def validate_secret_name(name: str) -> str:
+    """Validate a team-secret name (``secret_store``) and return it unchanged."""
+    if not name or not _SECRET_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid secret name '{name}': must start with a lowercase letter "
+            "or digit and contain only lowercase letters, digits, dots, hyphens "
+            "and underscores (max 64 characters)."
+        )
+    return name
+
+
 _PG_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_.-]")
 _PG_IDENTIFIER_MAX_BYTES = 63
 _PG_DIGEST_LEN = 10
@@ -191,7 +205,11 @@ def get_service_database_role(name: str, team_id: str) -> str:
 # container names, database identifiers, filesystem paths, Traefik router
 # names and S3 key prefixes without any slugification step, so only
 # lowercase alphanumerics and dashes are allowed.
-_PROD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+# A production name also becomes a DNS label: in a base_domain team the
+# default domain is "<name>.<base_domain>", so a trailing hyphen would
+# build an FQDN validate_domain then rejects — for a domain the user
+# never typed.
+_PROD_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,29}[a-z0-9])?$")
 
 # Internal namespace prefix separating production environments from dev
 # environments in every name-derived resource (containers, databases, PG
@@ -205,10 +223,22 @@ def validate_prod_name(name: str) -> str:
     """Validate a production environment name and return it unchanged."""
     if not name or not _PROD_NAME_RE.match(name):
         raise ValueError(
-            f"Invalid production name '{name}': must start with a lowercase "
-            "letter or digit and contain only [a-z0-9-] (max 31 chars)."
+            f"Invalid production name '{name}': must start and end with a "
+            "lowercase letter or digit and contain only [a-z0-9-] "
+            "(max 31 chars)."
         )
     return name
+
+
+# One managed dev template per production, published on first use and reused
+# after that. The prefix keeps the namespace recognisable and owned by Oduflow.
+PRODUCTION_TEMPLATE_PREFIX = "prod-"
+
+
+def production_template_name(name: str) -> str:
+    """Name of the managed dev template holding a copy of production *name*."""
+    validate_prod_name(name)
+    return f"{PRODUCTION_TEMPLATE_PREFIX}{name}"
 
 
 def prod_env_name(name: str) -> str:
@@ -365,8 +395,14 @@ def split_team_hostname(hostname: str) -> tuple[str, str]:
     return prefix, parent_domain
 
 
-def get_env_hostname(env_name: str, hostname: str, route_hostname: str = "") -> str:
+def get_env_hostname(
+    env_name: str, hostname: str, route_hostname: str = "", base_domain: str = ""
+) -> str:
     short_hostname = get_env_short_hostname(env_name, route_hostname)
+    if base_domain:
+        # Team base-domain mode: every environment is a direct child of the
+        # base domain (feature.example.com), a sibling of the dashboard host.
+        return f"{short_hostname}.{base_domain}"
     if not route_hostname:
         return f"{short_hostname}.{hostname}"
     _prefix, parent_domain = split_team_hostname(hostname)
@@ -486,12 +522,21 @@ def sanitize_repo_url(url: str) -> str:
         return url
     try:
         parsed = urlparse(url)
-        if parsed.username or parsed.password:
+        # Only HTTP(S) userinfo is a credential. An SSH URL's user (git@) is
+        # part of the protocol and must survive for later clones.
+        if parsed.scheme in ("https", "http") and (parsed.username or parsed.password):
             # Strip only userinfo.  Keep the original host spelling, IPv6
             # brackets, and explicit port: this sanitized URL is also used for
             # subsequent clones, not just display.
             clean = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1])
             return urlunparse(clean)
+        if parsed.password:
+            # Non-HTTP schemes (ssh://): keep the protocol user, but an
+            # embedded password is a secret and must not reach container
+            # labels, environment info, or the dashboard.
+            host = parsed.netloc.rsplit("@", 1)[-1]
+            user = f"{parsed.username}@" if parsed.username else ""
+            return urlunparse(parsed._replace(netloc=user + host))
     except Exception:
         pass
     return url

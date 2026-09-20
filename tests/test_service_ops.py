@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from oduflow.errors import (
     FlowError,
     NotFoundError,
     PrerequisiteNotMetError,
+    ProtectedError,
 )
 from oduflow.settings import Settings, TeamSettings
 
@@ -392,6 +394,102 @@ class TestCreateService:
             "oduflow-traefik-acme": {"bind": "/etc/traefik", "mode": "ro"}
         }
 
+    @pytest.mark.parametrize("restricted", [False, True])
+    @pytest.mark.parametrize("host_mode", [False, True])
+    def test_create_self_signed_tls(self, mock_docker_client, restricted, host_mode):
+        from dataclasses import replace
+
+        # tls = {} without acme_email: HTTPS from the default certificate, no
+        # resolver declared and therefore no ACME store to mount.
+        settings = replace(TRAEFIK_SETTINGS, routing_tls_auto=False, acme_email="")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.volumes.get.side_effect = docker.errors.NotFound("nf")
+        service_ops.create_service(
+            settings,
+            TRAEFIK_TEAM,
+            "meilisearch",
+            "getmeili/meilisearch:v1.6",
+            None if restricted else 7700,
+            host_mode=host_mode,
+            routes=[{"path": "/api", "port": 7700}] if restricted else None,
+        )
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
+        prefix = "traefik.http.routers.oduflow-1-svc-meilisearch"
+        if restricted:
+            prefix += "-route-1"
+        assert kwargs["labels"][f"{prefix}.entrypoints"] == "websecure"
+        assert kwargs["labels"][f"{prefix}.tls"] == "true"
+        assert not any("certresolver" in key for key in kwargs["labels"])
+        assert settings.traefik_acme_volume not in (kwargs.get("volumes") or {})
+        assert not service_ops._needs_traefik_acme_mount(settings, MagicMock())
+        mock_docker_client.volumes.get.assert_not_called()
+
+    def test_create_manual_tls_with_acme_email(self, mock_docker_client):
+        # tls = {} with an acme_email: the resolver is declared, so the ACME
+        # store is still mounted into the service (it may be empty until the
+        # first issuance), but managed routes must not reference the resolver.
+        from dataclasses import replace
+
+        settings = replace(TRAEFIK_SETTINGS, routing_tls_auto=False)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        service_ops.create_service(
+            settings,
+            TRAEFIK_TEAM,
+            "meilisearch",
+            "getmeili/meilisearch:v1.6",
+            7700,
+        )
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
+        prefix = "traefik.http.routers.oduflow-1-svc-meilisearch"
+        assert kwargs["labels"][f"{prefix}.entrypoints"] == "websecure"
+        assert kwargs["labels"][f"{prefix}.tls"] == "true"
+        assert not any("certresolver" in key for key in kwargs["labels"])
+        assert kwargs["volumes"][settings.traefik_acme_volume] == {
+            "bind": "/etc/traefik",
+            "mode": "ro",
+        }
+
+    def test_traefik_hostname_injection_is_rejected(self, mock_docker_client):
+        # P-H10: a tenant hostname lands in a Traefik `Host(...)` rule; a value
+        # that closes the backtick and opens a second Host() would hijack another
+        # team's hostname. It must be rejected before the container is created.
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        with pytest.raises(ValueError):
+            service_ops.create_service(
+                TRAEFIK_SETTINGS,
+                TRAEFIK_TEAM,
+                "evil",
+                "redis:7",
+                6379,
+                hostname="foo`) || Host(`victim.example.com",
+            )
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_traefik_short_hostname_becomes_team_fqdn(self, mock_docker_client):
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        result = service_ops.create_service(
+            TRAEFIK_SETTINGS,
+            TRAEFIK_TEAM,
+            "kibana",
+            "kibana:8",
+            5601,
+            hostname="qa",
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        assert (
+            labels["traefik.http.routers.oduflow-1-svc-kibana.rule"]
+            == "Host(`qa.example.com`)"
+        )
+        assert result["url"] == "https://qa.example.com"
+
     def test_create_traefik_bridge_with_restricted_routes(self, mock_docker_client):
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
@@ -699,11 +797,43 @@ class TestCreateService:
 
 
 class TestDeleteService:
+    @staticmethod
+    def _presets(**overrides):
+        """Patch the preset store, defaulting to "a preset already exists"."""
+        calls = {
+            "get_preset": {"return_value": {"image": "redis:7", "port": 6379}},
+            "delete_preset": {"return_value": {"name": "redis"}},
+            "save_preset": {"return_value": {}},
+        }
+        calls.update(overrides)
+        return [
+            patch.object(service_ops.service_presets, name, **kwargs)
+            for name, kwargs in calls.items()
+        ]
+
+    @staticmethod
+    def _legacy_container():
+        """A service created before presets existed: config lives on the container."""
+        container = MagicMock()
+        container.name = "oduflow-1-svc-redis"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        container.image.tags = ["redis:7"]
+        container.image.attrs = {"Config": {"Cmd": ["redis-server"]}}
+        container.attrs = {
+            "Config": {"Env": ["REDIS_PASSWORD=secret", "PATH=/usr/bin"], "Cmd": None},
+            "HostConfig": {"CapAdd": None, "Privileged": False},
+            "NetworkSettings": {"Ports": {"6379/tcp": [{"HostPort": "6379"}]}},
+            "Mounts": [],
+        }
+        return container
+
     def test_delete(self, mock_docker_client):
         container = MagicMock()
         mock_docker_client.containers.get.return_value = container
 
-        result = service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, "redis")
+        get_preset, delete_preset, save_preset = self._presets()
+        with get_preset, delete_preset, save_preset:
+            result = service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, "redis")
 
         assert result["name"] == "redis"
         assert result["container_name"] == "oduflow-1-svc-redis"
@@ -715,6 +845,168 @@ class TestDeleteService:
 
         with pytest.raises(NotFoundError, match="Service 'redis' not found"):
             service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, "redis")
+
+    def test_delete_keeps_an_existing_preset_untouched(self, mock_docker_client):
+        mock_docker_client.containers.get.return_value = MagicMock()
+        get_preset, delete_preset, save_preset = self._presets()
+
+        with get_preset, delete_preset as delete_mock, save_preset as save_mock:
+            result = service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, "redis")
+
+        # create/update keep the preset current; delete must not rewrite it.
+        save_mock.assert_not_called()
+        delete_mock.assert_not_called()
+        assert result["preset_kept"] is True
+
+    def test_delete_reports_a_legacy_service_has_no_preset(self, mock_docker_client):
+        """Backfill is migration 0008's job; delete reports what is on disk."""
+        mock_docker_client.containers.get.return_value = self._legacy_container()
+        get_preset, delete_preset, save_preset = self._presets(
+            get_preset={"side_effect": NotFoundError("no preset")}
+        )
+
+        with get_preset, delete_preset, save_preset as save_mock:
+            result = service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, "redis")
+
+        save_mock.assert_not_called()
+        assert result["preset_kept"] is False
+
+    def test_delete_without_save_preset_removes_it(self, mock_docker_client):
+        mock_docker_client.containers.get.return_value = MagicMock()
+        get_preset, delete_preset, save_preset = self._presets()
+
+        with get_preset, delete_preset as delete_mock, save_preset as save_mock:
+            result = service_ops.delete_service(
+                TEST_SETTINGS, TEST_TEAM, "redis", save_preset=False
+            )
+
+        delete_mock.assert_called_once_with(TEST_TEAM, "redis")
+        save_mock.assert_not_called()
+        assert result["preset_kept"] is False
+
+    def test_delete_without_save_preset_tolerates_a_missing_one(
+        self, mock_docker_client
+    ):
+        container = MagicMock()
+        mock_docker_client.containers.get.return_value = container
+        get_preset, delete_preset, save_preset = self._presets(
+            delete_preset={"side_effect": NotFoundError("no preset")}
+        )
+
+        with get_preset, delete_preset, save_preset:
+            result = service_ops.delete_service(
+                TEST_SETTINGS, TEST_TEAM, "redis", save_preset=False
+            )
+
+        container.remove.assert_called_once_with(v=True)
+        assert result["preset_kept"] is False
+
+    def test_delete_reports_a_preset_that_could_not_be_removed(
+        self, mock_docker_client
+    ):
+        """The result states what is on disk, not what was asked for."""
+        mock_docker_client.containers.get.return_value = MagicMock()
+        get_preset, delete_preset, save_preset = self._presets(
+            delete_preset={"side_effect": OSError("read-only store")}
+        )
+
+        with get_preset, delete_preset, save_preset:
+            result = service_ops.delete_service(
+                TEST_SETTINGS, TEST_TEAM, "redis", save_preset=False
+            )
+
+        assert result["preset_kept"] is True
+
+
+class TestBackfillServicePreset:
+    _legacy_container = staticmethod(TestDeleteService._legacy_container)
+    _presets = staticmethod(TestDeleteService._presets)
+
+    def test_writes_a_preset_for_a_legacy_service(self, mock_docker_client):
+        get_preset, delete_preset, save_preset = self._presets(
+            get_preset={"side_effect": NotFoundError("no preset")}
+        )
+
+        with get_preset, delete_preset, save_preset as save_mock:
+            written = service_ops.backfill_service_preset(
+                TEST_SETTINGS, TEST_TEAM, "redis", self._legacy_container()
+            )
+
+        assert written is True
+        save_mock.assert_called_once()
+        args, kwargs = save_mock.call_args
+        assert args[1:] == ("redis", "redis:7", 6379)
+        assert kwargs["env_vars"] == {"REDIS_PASSWORD": "secret"}
+        # The suffix stripped here must be the one restore appends back.
+        from oduflow.domains import service_parent_domain
+
+        assert kwargs["base_hostname"] == service_parent_domain(TEST_TEAM)
+
+    def test_existing_preset_is_left_alone(self, mock_docker_client):
+        get_preset, delete_preset, save_preset = self._presets()
+
+        with get_preset, delete_preset, save_preset as save_mock:
+            written = service_ops.backfill_service_preset(
+                TEST_SETTINGS, TEST_TEAM, "redis", self._legacy_container()
+            )
+
+        assert written is True
+        save_mock.assert_not_called()
+
+    def test_image_env_defaults_are_not_frozen_into_the_preset(
+        self, mock_docker_client
+    ):
+        """restore must not pin REDIS_VERSION-style defaults over a newer image."""
+        container = self._legacy_container()
+        container.image.attrs = {
+            "Config": {"Cmd": ["redis-server"], "Env": ["REDIS_VERSION=7.0.11"]}
+        }
+        container.attrs["Config"]["Env"] = [
+            "REDIS_VERSION=7.0.11",
+            "REDIS_PASSWORD=secret",
+            "PATH=/usr/bin",
+        ]
+        get_preset, delete_preset, save_preset = self._presets(
+            get_preset={"side_effect": NotFoundError("no preset")}
+        )
+
+        with get_preset, delete_preset, save_preset as save_mock:
+            service_ops.backfill_service_preset(
+                TEST_SETTINGS, TEST_TEAM, "redis", container
+            )
+
+        assert save_mock.call_args.kwargs["env_vars"] == {"REDIS_PASSWORD": "secret"}
+
+    def test_undeterminable_port_is_skipped(self, mock_docker_client):
+        """A preset restore_service would reject (port 0) is worse than none."""
+        container = self._legacy_container()
+        container.attrs["NetworkSettings"] = {"Ports": {}}
+        get_preset, delete_preset, save_preset = self._presets(
+            get_preset={"side_effect": NotFoundError("no preset")}
+        )
+
+        with get_preset, delete_preset, save_preset as save_mock:
+            written = service_ops.backfill_service_preset(
+                TEST_SETTINGS, TEST_TEAM, "redis", container
+            )
+
+        assert written is False
+        save_mock.assert_not_called()
+
+    def test_undeterminable_image_is_skipped(self, mock_docker_client):
+        container = self._legacy_container()
+        container.image.tags = []
+        get_preset, delete_preset, save_preset = self._presets(
+            get_preset={"side_effect": NotFoundError("no preset")}
+        )
+
+        with get_preset, delete_preset, save_preset as save_mock:
+            written = service_ops.backfill_service_preset(
+                TEST_SETTINGS, TEST_TEAM, "redis", container
+            )
+
+        assert written is False
+        save_mock.assert_not_called()
 
 
 class TestListServices:
@@ -858,22 +1150,24 @@ class TestListServices:
         for sys_key in ("PATH", "HOME", "HOSTNAME", "TERM", "LANG", "LC_ALL"):
             assert sys_key not in env
 
-    def test_list_image_fallback(self, mock_docker_client):
-        """When image.tags is empty, fall back to Config.Image."""
+    @pytest.mark.parametrize("tags", [[], ["redis:latest", "redis:7-alpine"]])
+    def test_list_preserves_config_image_digest(self, mock_docker_client, tags):
+        """Tags on the resolved image cannot replace the requested digest."""
+        reference = "redis@sha256:" + "a" * 64
         container = MagicMock()
         container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
         container.name = "oduflow-1-svc-redis"
         container.status = "running"
-        container.image.tags = []
+        container.image.tags = tags
         container.attrs = {
             "NetworkSettings": {"Ports": {}},
-            "Config": {"Image": "redis:7-alpine", "Env": []},
+            "Config": {"Image": reference, "Env": []},
         }
         mock_docker_client.containers.list.return_value = [container]
 
         result = service_ops.list_services(TEST_SETTINGS, TEST_TEAM)
 
-        assert result[0]["image"] == "unknown"
+        assert result[0]["image"] == reference
 
     def test_list_port_no_mappings(self, mock_docker_client):
         """Port key exists but no host mappings."""
@@ -1133,6 +1427,53 @@ class TestUpdateService:
 
         run_kwargs = mock_docker_client.containers.run.call_args
         assert run_kwargs[1]["command"] == ["server", "/data"]
+
+    def test_update_preserves_runtime_and_shutdown_timeout(self, mock_docker_client):
+        """Replacement must retain runtime settings and drain the old service."""
+        runtime = {
+            "stop_timeout": 180,
+            "stop_signal": "SIGRTMIN+3",
+            "cgroupns": "private",
+        }
+        container = self._make_container(
+            image_tags=["minio/minio:latest"],
+            labels={
+                "oduflow.managed": "true",
+                "oduflow.service": "minio",
+                "oduflow.runtime": json.dumps(runtime),
+            },
+            attrs={"Config": {"Env": []}},
+        )
+        mock_docker_client.containers.get.side_effect = [
+            container,
+            docker.errors.NotFound("nf"),
+        ]
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        preset = {
+            "name": "minio",
+            "image": "minio/minio:latest",
+            "port": 9000,
+            "hostname": "",
+            "env_vars": {},
+            "command": ["server", "/data"],
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            service_ops.update_service(TEST_SETTINGS, TEST_TEAM, "minio")
+
+        run_kwargs = mock_docker_client.containers.run.call_args
+        container.stop.assert_called_once_with(timeout=180)
+        assert run_kwargs[1]["stop_signal"] == "SIGRTMIN+3"
+        assert run_kwargs[1]["cgroupns"] == "private"
+        # docker-py's containers.run() rejects stop_timeout; it is preserved
+        # in the label and applied when the container is stopped/restarted.
+        assert "stop_timeout" not in run_kwargs[1]
+        assert json.loads(run_kwargs[1]["labels"]["oduflow.runtime"]) == runtime
 
     def test_update_command_override_recreates_container(self, mock_docker_client):
         """A changed command recreates the container even on an unchanged digest."""
@@ -1607,6 +1948,42 @@ class TestUpdateService:
                             "mode": "rw",
                         }
                     ],
+                )
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+        mock_docker_client.images.pull.assert_not_called()
+
+    def test_update_invalid_hostname_preflight_does_not_remove_running_service(
+        self, mock_docker_client
+    ):
+        # create_service validates the Traefik hostname, but by the time it
+        # runs the old container is already removed — a rejected hostname
+        # override must fail up front and leave the running service untouched.
+        container = self._make_container(
+            image_tags=["redis:7"],
+            labels={"oduflow.managed": "true", "oduflow.service": "redis"},
+            attrs={"Config": {"Env": []}},
+        )
+        mock_docker_client.containers.get.return_value = container
+        preset = {
+            "name": "redis",
+            "image": "redis:7",
+            "port": 6379,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            with pytest.raises(ValueError, match="omain"):
+                service_ops.update_service(
+                    TRAEFIK_SETTINGS,
+                    TRAEFIK_TEAM,
+                    "redis",
+                    hostname_override="https://qa.example.com",
                 )
 
         container.stop.assert_not_called()
@@ -2271,3 +2648,416 @@ class TestDestroyBlockedByServices:
 
         with pytest.raises(ConflictError, match="Active environments/services exist"):
             system_ops.destroy_system(TEST_SETTINGS)
+
+
+class TestServiceSecrets:
+    """secret:<name> references resolve only into the container environment;
+    every persisted or displayed shape keeps the reference."""
+
+    def _team(self, tmp_path):
+        return TeamSettings(team_id="1", data_dir=str(tmp_path))
+
+    def test_create_resolves_refs_but_persists_references(
+        self, mock_docker_client, tmp_path
+    ):
+        from oduflow import secret_store
+        from oduflow.docker_ops import service_presets
+
+        team = self._team(tmp_path)
+        secret_store.set_secret(team, "master-key", "hunter2")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(
+            TEST_SETTINGS,
+            team,
+            "meili",
+            "getmeili/meilisearch:v1.6",
+            7700,
+            env_vars={"MEILI_MASTER_KEY": "secret:master-key", "MEILI_ENV": "dev"},
+        )
+
+        run_kwargs = mock_docker_client.containers.run.call_args[1]
+        assert run_kwargs["environment"] == {
+            "MEILI_MASTER_KEY": "hunter2",
+            "MEILI_ENV": "dev",
+        }
+        assert json.loads(run_kwargs["labels"]["oduflow.secret_env"]) == {
+            "MEILI_MASTER_KEY": "secret:master-key"
+        }
+        preset = service_presets.get_preset(team, "meili")
+        assert preset["env_vars"] == {
+            "MEILI_MASTER_KEY": "secret:master-key",
+            "MEILI_ENV": "dev",
+        }
+
+    def test_create_with_dangling_ref_touches_nothing(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+
+        with pytest.raises(PrerequisiteNotMetError, match="gone"):
+            service_ops.create_service(
+                TEST_SETTINGS,
+                team,
+                "meili",
+                "getmeili/meilisearch:v1.6",
+                7700,
+                env_vars={"KEY": "secret:gone"},
+            )
+
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_container_env_shows_reference_not_value(self):
+        container = MagicMock()
+        container.labels = {
+            "oduflow.secret_env": json.dumps({"KEY": "secret:master-key"})
+        }
+        container.attrs = {"Config": {"Env": ["KEY=hunter2", "OTHER=x"]}}
+
+        assert service_ops._container_env_vars(container) == {
+            "KEY": "secret:master-key",
+            "OTHER": "x",
+        }
+
+    def test_update_with_dangling_ref_keeps_the_container(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        container = MagicMock()
+        container.labels = {"oduflow.service": "meili"}
+        container.image.tags = ["getmeili/meilisearch:v1.6"]
+        mock_docker_client.containers.get.return_value = container
+
+        with (
+            patch(
+                "oduflow.docker_ops.service_ops.service_presets.get_preset",
+                return_value={
+                    "name": "meili",
+                    "image": "getmeili/meilisearch:v1.6",
+                    "port": 7700,
+                    "env_vars": {"KEY": "secret:gone"},
+                },
+            ),
+            pytest.raises(PrerequisiteNotMetError, match="gone"),
+        ):
+            service_ops.update_service(TEST_SETTINGS, team, "meili")
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+        # The reference is validated before the image pull, so a dangling one
+        # costs neither a registry round-trip nor a download.
+        mock_docker_client.images.pull.assert_not_called()
+
+    def test_update_rotated_secret_value_recreates_container(
+        self, mock_docker_client, tmp_path
+    ):
+        """The documented rotation flow (replace the value, then update_service)
+        must recreate the container even though neither the reference-form
+        config nor the image digest changed."""
+        from oduflow import secret_store
+
+        team = self._team(tmp_path)
+        secret_store.set_secret(team, "master-key", "new-value")
+        container = MagicMock()
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "meili"}
+        container.image.tags = ["getmeili/meilisearch:v1.6"]
+        container.image.id = "sha256:same"
+        container.attrs = {"Config": {"Env": ["KEY=old-value"]}}
+        mock_docker_client.containers.get.side_effect = [
+            container,
+            docker.errors.NotFound("nf"),
+        ]
+        new_image = MagicMock()
+        new_image.id = "sha256:same"
+        mock_docker_client.images.pull.return_value = new_image
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value={
+                "name": "meili",
+                "image": "getmeili/meilisearch:v1.6",
+                "port": 7700,
+                "hostname": "",
+                "env_vars": {"KEY": "secret:master-key"},
+            },
+        ):
+            result = service_ops.update_service(TEST_SETTINGS, team, "meili")
+
+        assert result["config_updated"] is True
+        container.stop.assert_called_once()
+        container.remove.assert_called_once()
+        run_kwargs = mock_docker_client.containers.run.call_args[1]
+        assert run_kwargs["environment"] == {"KEY": "new-value"}
+
+    def test_update_unrotated_secret_stays_a_noop(self, mock_docker_client, tmp_path):
+        """An unchanged secret value must not force a recreation."""
+        from oduflow import secret_store
+
+        team = self._team(tmp_path)
+        secret_store.set_secret(team, "master-key", "same-value")
+        container = MagicMock()
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "meili"}
+        container.image.tags = ["getmeili/meilisearch:v1.6"]
+        container.image.id = "sha256:same"
+        container.attrs = {"Config": {"Env": ["KEY=same-value"]}}
+        mock_docker_client.containers.get.return_value = container
+        new_image = MagicMock()
+        new_image.id = "sha256:same"
+        mock_docker_client.images.pull.return_value = new_image
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value={
+                "name": "meili",
+                "image": "getmeili/meilisearch:v1.6",
+                "port": 7700,
+                "hostname": "",
+                "env_vars": {"KEY": "secret:master-key"},
+            },
+        ):
+            result = service_ops.update_service(TEST_SETTINGS, team, "meili")
+
+        assert result["config_updated"] is False
+        assert result["image_updated"] is False
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+
+
+class TestServiceHostnamesUnderATeamZone:
+    """Short service names hang off base_domain when the team has one.
+
+    Every place that needs to know where a service answers must agree, or the
+    dashboard shows an unroutable URL and the Stack drift check recreates the
+    container on every apply.
+    """
+
+    @staticmethod
+    def _zone_team(tmp_path):
+        return TeamSettings(
+            team_id="1",
+            hostname="oduflow.demo.example.com",
+            base_domain="demo.example.com",
+            data_dir=str(tmp_path),
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+
+    @staticmethod
+    def _zone_settings(team, routing_tls=True):
+        return Settings(
+            routing_mode="traefik",
+            routing_tls=routing_tls,
+            acme_email="admin@example.com",
+            base_data_dir="/tmp/flow-test",
+            db_user="odoo",
+            db_password="odoo",
+            teams={"1": team},
+        )
+
+    def test_create_puts_a_short_name_in_the_zone(self, mock_docker_client, tmp_path):
+        team = self._zone_team(tmp_path)
+        settings = self._zone_settings(team)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        result = service_ops.create_service(settings, team, "redis", "redis:7", 6379)
+
+        assert result["url"] == "https://redis.demo.example.com"
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        rule = labels["traefik.http.routers.oduflow-1-svc-redis.rule"]
+        assert rule == "Host(`redis.demo.example.com`)"
+
+    def test_preset_stores_the_short_name_not_the_fqdn(
+        self, mock_docker_client, tmp_path
+    ):
+        """A preset pinned to the full FQDN stops following the team zone, so
+        changing base_domain would leave restores on the old domain."""
+        from oduflow.docker_ops import service_presets
+
+        team = self._zone_team(tmp_path)
+        settings = self._zone_settings(team)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(settings, team, "redis", "redis:7", 6379)
+
+        assert service_presets.get_preset(team, "redis")["hostname"] == "redis"
+
+    def test_no_change_update_reports_the_zone_url(self, mock_docker_client, tmp_path):
+        """The recreate path delegates to create_service and was already right;
+        this branch built the URL itself and kept the legacy nesting."""
+        team = self._zone_team(tmp_path)
+        # TLS off keeps the container off the implicit ACME-mount upgrade path,
+        # which would itself count as a config change and force a recreate.
+        settings = self._zone_settings(team, routing_tls=False)
+        container = MagicMock()
+        container.image.tags = ["redis:7"]
+        container.image.id = "sha256:same"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        container.attrs = {"Config": {"Env": []}}
+        mock_docker_client.containers.get.return_value = container
+        new_image = MagicMock()
+        new_image.id = "sha256:same"
+        mock_docker_client.images.pull.return_value = new_image
+        preset = {
+            "name": "redis",
+            "image": "redis:7",
+            "port": 6379,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            result = service_ops.update_service(settings, team, "redis")
+
+        assert result["image_updated"] is False
+        assert result["url"] == "https://redis.demo.example.com"
+        mock_docker_client.containers.run.assert_not_called()
+
+
+class TestServiceHostnameCollisions:
+    def test_catch_all_service_cannot_take_the_dashboard_host(
+        self, mock_docker_client, tmp_path
+    ):
+        team = TeamSettings(
+            team_id="1",
+            hostname="dev.example.com",
+            data_dir=str(tmp_path),
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+        settings = Settings(
+            routing_mode="traefik",
+            acme_email="admin@example.com",
+            base_data_dir="/tmp/flow-test",
+            db_user="odoo",
+            db_password="odoo",
+            teams={"1": team},
+        )
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(ConflictError, match="dashboard hostname"):
+            service_ops.create_service(
+                settings,
+                team,
+                "grafana",
+                "grafana:11",
+                3000,
+                hostname="dev.example.com",
+            )
+
+    def test_path_routed_service_may_share_the_dashboard_host(
+        self, mock_docker_client, tmp_path
+    ):
+        """With `routes` no catch-all router is created, only
+        Host() && PathPrefix() ones, so the dashboard keeps every other path."""
+        team = TeamSettings(
+            team_id="1",
+            hostname="dev.example.com",
+            data_dir=str(tmp_path),
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+        settings = Settings(
+            routing_mode="traefik",
+            acme_email="admin@example.com",
+            base_data_dir="/tmp/flow-test",
+            db_user="odoo",
+            db_password="odoo",
+            teams={"1": team},
+        )
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(
+            settings,
+            team,
+            "grafana",
+            "grafana:11",
+            None,
+            hostname="dev.example.com",
+            routes=[{"path": "/grafana", "port": 3000}],
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        rule = labels["traefik.http.routers.oduflow-1-svc-grafana-route-1.rule"]
+        assert "Host(`dev.example.com`)" in rule
+        assert "PathPrefix(`/grafana/`)" in rule
+        # No catch-all router that would swallow the dashboard.
+        assert "traefik.http.routers.oduflow-1-svc-grafana.rule" not in labels
+
+
+class TestServiceProtection:
+    def _team(self, tmp_path):
+        return TeamSettings(team_id="1", data_dir=str(tmp_path / "team"))
+
+    def _live_container(self):
+        container = MagicMock()
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        return container
+
+    def test_protect_requires_an_existing_service(self, mock_docker_client, tmp_path):
+        team = self._team(tmp_path)
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(NotFoundError, match="Service 'redis' not found"):
+            service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+        assert not service_ops.is_service_protected(team, "redis")
+
+    def test_unprotect_clears_a_stale_flag_without_a_container(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        mock_docker_client.containers.get.return_value = self._live_container()
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        result = service_ops.set_service_protected(TEST_SETTINGS, team, "redis", False)
+
+        assert result == {"name": "redis", "protected": False}
+        assert not service_ops.is_service_protected(team, "redis")
+
+    def test_protected_service_blocks_delete_update_and_restore(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        container = self._live_container()
+        mock_docker_client.containers.get.return_value = container
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+        assert service_ops.is_service_protected(team, "redis")
+
+        with pytest.raises(ProtectedError, match="deleting"):
+            service_ops.delete_service(TEST_SETTINGS, team, "redis")
+        with pytest.raises(ProtectedError, match="updating"):
+            service_ops.update_service(TEST_SETTINGS, team, "redis")
+        with pytest.raises(ProtectedError, match="restoring"):
+            service_ops.assert_service_not_protected(team, "redis", "restoring")
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", False)
+        result = service_ops.delete_service(TEST_SETTINGS, team, "redis")
+        assert result["name"] == "redis"
+        container.stop.assert_called_once()
+
+    def test_list_services_reports_the_protected_flag(
+        self, mock_docker_client, tmp_path
+    ):
+        team = self._team(tmp_path)
+        container = self._live_container()
+        container.name = "oduflow-1-svc-redis"
+        container.status = "running"
+        container.image.tags = ["redis:7"]
+        container.image.attrs = {"Config": {"Env": []}}
+        container.attrs = {"NetworkSettings": {"Ports": {}}, "Config": {"Env": []}}
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.containers.list.return_value = [container]
+        service_ops.set_service_protected(TEST_SETTINGS, team, "redis", True)
+
+        rows = service_ops.list_services(TEST_SETTINGS, team)
+
+        assert rows[0]["name"] == "redis"
+        assert rows[0]["protected"] is True

@@ -9,7 +9,10 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock
 
+import pytest
+
 from oduflow.docker_ops import env_ops
+from oduflow.errors import PrerequisiteNotMetError
 
 
 def _write(path: str, content: str = "# pkg\n") -> None:
@@ -106,6 +109,68 @@ class TestInstallPipRequirements:
         assert log == ""
         assert _pip_cmd(container) is None
 
+    def test_container_base_points_into_extra_mount(self, tmp_path):
+        # An extra-addons checkout is mounted at /mnt/extra-addons-{name}; its
+        # requirements must be read from inside that mount, not the main repo's.
+        repo = str(tmp_path)
+        _write(os.path.join(repo, ".oduflow", "requirements.txt"), "paramiko\n")
+        container = _mock_container()
+
+        installed, _ = env_ops._install_pip_requirements(
+            container, repo, restart=False, container_base="/mnt/extra-addons-acme"
+        )
+
+        assert installed is True
+        assert "/mnt/extra-addons-acme/.oduflow/requirements.txt" in _pip_cmd(container)
+
+
+class TestInstallRepoDependencies:
+    def test_installs_main_then_extra_repos(self, tmp_path):
+        main = tmp_path / "main"
+        extra = tmp_path / "extra"
+        _write(str(main / ".oduflow" / "apt_packages.txt"), "git\n")
+        _write(str(main / ".oduflow" / "requirements.txt"), "phonenumbers\n")
+        _write(str(extra / ".oduflow" / "apt_packages.txt"), "aapt\n")
+        _write(str(extra / ".oduflow" / "requirements.txt"), "paramiko\n")
+        container = _mock_container()
+
+        exit_code, pip_installed, logs = env_ops._install_repo_dependencies(
+            container,
+            [
+                (str(main), "/mnt/extra-addons"),
+                (str(extra), "/mnt/extra-addons-acme"),
+            ],
+        )
+
+        assert exit_code == 0
+        assert pip_installed is True
+        joined = "\n".join(logs)
+        assert "git" in joined and "aapt" in joined
+        pip_cmds = [
+            call.args[0]
+            for call in container.exec_run.call_args_list
+            if call.args and "pip3 install" in call.args[0]
+        ]
+        assert any("/mnt/extra-addons/.oduflow/requirements.txt" in c for c in pip_cmds)
+        assert any(
+            "/mnt/extra-addons-acme/.oduflow/requirements.txt" in c for c in pip_cmds
+        )
+        container.restart.assert_not_called()
+
+    def test_extra_repo_failure_sets_exit_code(self, tmp_path):
+        extra = tmp_path / "extra"
+        _write(str(extra / ".oduflow" / "requirements.txt"), "broken\n")
+        container = _mock_container()
+        container.exec_run.return_value = (1, b"boom")
+
+        exit_code, pip_installed, logs = env_ops._install_repo_dependencies(
+            container, [(str(extra), "/mnt/extra-addons-acme")]
+        )
+
+        assert exit_code == 1
+        assert pip_installed is False
+        assert any("FAILED" in log for log in logs)
+
 
 def _chown_cmds(container) -> list[str]:
     """All ``chown`` commands passed to exec_run."""
@@ -152,3 +217,102 @@ class TestEnsureUserSitePackages:
         # Both pip --user dirs are chowned (recursively is fine — no filestore).
         assert any("/var/lib/odoo/.local/lib" in c for c in chowns), chowns
         assert any("/var/lib/odoo/.local/bin" in c for c in chowns), chowns
+
+
+class TestConfigureServingEnvironment:
+    """Ordering guard: the serving container boots before Oduflow can exec into
+    it, so it always starts with the image's stock conf and without the repo's
+    pip packages. Setup must therefore end with exactly one restart that picks
+    up both — and it must happen even when the repo ships no requirements.txt,
+    which previously left an ``.oduflow/odoo.conf`` unapplied. The restart is
+    then gated on a readiness probe, because neutralization execs a second Odoo
+    process that must not race the reloading registry.
+    """
+
+    def _run(
+        self,
+        monkeypatch,
+        repo_path,
+        container,
+        *,
+        odoo_conf="/tmp/odoo.conf",
+        stub_pip=True,
+        ready=True,
+    ):
+        events: list[str] = []
+        monkeypatch.setattr(
+            env_ops,
+            "_copy_file_to_container",
+            lambda *a, **kw: events.append("conf"),
+        )
+        monkeypatch.setattr(
+            env_ops,
+            "_install_apt_packages",
+            lambda *a, **kw: events.append("apt") or "",
+        )
+
+        if stub_pip:
+
+            def _pip(_container, _repo, *, restart=True, container_base=None):
+                events.append(f"pip(restart={restart})")
+                return False, ""
+
+            monkeypatch.setattr(env_ops, "_install_pip_requirements", _pip)
+
+        def _wait(_container, _env_db, timeout=120):
+            events.append("wait")
+            return env_ops._OdooReadinessResult(
+                ready, 1.0, 1, timeout, "" if ready else "URLError: connection refused"
+            )
+
+        monkeypatch.setattr(env_ops, "_wait_for_container_odoo_ready", _wait)
+        monkeypatch.setattr(
+            env_ops, "_recent_container_logs", lambda *a, **kw: "(no logs)"
+        )
+        container.restart.side_effect = lambda *a, **kw: events.append("restart")
+
+        env_ops._configure_serving_environment(
+            MagicMock(),  # client
+            MagicMock(),  # settings
+            MagicMock(),  # team
+            container,
+            repo_path,
+            "oduflow_1_dev",
+            "dev",
+            None,  # template_name
+            False,  # sanitize
+            None,  # auto_install_modules
+            odoo_conf,
+        )
+        return events
+
+    def test_conf_and_deps_land_before_a_single_restart(self, monkeypatch, tmp_path):
+        container = _mock_container()
+        events = self._run(monkeypatch, str(tmp_path), container)
+
+        assert events == ["conf", "apt", "pip(restart=False)", "restart", "wait"]
+
+    def test_restarts_without_pip_requirements(self, monkeypatch, tmp_path):
+        # Repo ships an odoo.conf but no requirements.txt: the conf is useless
+        # until the container restarts, so the restart must not be conditional
+        # on pip having installed something. The real _install_pip_requirements
+        # runs here, so the "nothing to install" branch is the one under test.
+        repo = str(tmp_path)
+        _write(os.path.join(repo, ".oduflow", "odoo.conf"), "[options]\n")
+        container = _mock_container()
+
+        events = self._run(monkeypatch, repo, container, stub_pip=False)
+
+        assert _pip_cmd(container) is None, "there is no requirements.txt to install"
+        assert events == ["conf", "apt", "restart", "wait"]
+
+    def test_unready_odoo_after_the_setup_restart_is_fatal(self, monkeypatch, tmp_path):
+        # Without this gate, neutralize_environment execs a second Odoo process
+        # into a container whose registry is still reloading, and only logs a
+        # warning when that collides — handing back an unsanitized environment.
+        container = _mock_container()
+
+        with pytest.raises(PrerequisiteNotMetError) as exc_info:
+            self._run(monkeypatch, str(tmp_path), container, ready=False)
+
+        assert "Environment setup did not complete" in str(exc_info.value)

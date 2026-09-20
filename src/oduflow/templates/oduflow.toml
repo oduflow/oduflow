@@ -1,6 +1,6 @@
 # ── Server ────────────────────────────────────────────
 [server]
-host = "0.0.0.0"
+bind = "0.0.0.0"                 # listener address; legacy key "host" is still accepted
 port = 8000
 allow_local_path = true        # trusted single-user local development; disable on hosted/multi-user servers
 # allow_insecure_http = false  # serve HTTP /mcp with NO auth (only behind your own proxy)
@@ -9,11 +9,19 @@ allow_local_path = true        # trusted single-user local development; disable 
 # ── Routing ───────────────────────────────────────────
 [routing]
 mode = "port"                   # "port" | "traefik"
-# acme_email = "admin@example.com"  # required for traefik (when tls = true)
-# hostname = "localhost"           # port mode only: default host for teams without their own
-                                   # (traefik requires each team to set its own hostname)
+# acme_email = "admin@example.com"  # required for traefik when tls = true; optional
+#                                  # with tls = {} (see below)
 # tls = true                       # traefik only. true: Traefik terminates TLS
-#                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt).
+#                                  # (:443, HTTP->HTTPS redirect, Let's Encrypt on
+#                                  # every Oduflow-managed route).
+#                                  # {}: same listener and redirect, but managed routes
+#                                  # get no certificate resolver — Traefik serves its
+#                                  # default (self-signed) certificate; for local/test
+#                                  # setups. acme_email is optional here: set it and the
+#                                  # Let's Encrypt resolver is still declared (with its
+#                                  # certificate store), for use by your own drop-in
+#                                  # Traefik dynamic-config routes only; leave it empty
+#                                  # and there is no resolver and no store at all.
 #                                  # false: plain HTTP on :80 only, no redirect/ACME —
 #                                  # for a TLS-terminating upstream (e.g. Cloudflare
 #                                  # tunnel). Public URLs stay https:// either way.
@@ -26,6 +34,9 @@ mode = "port"                   # "port" | "traefik"
 #                                  # "http" with tls = false when NOTHING terminates
 #                                  # TLS in front, so the links are reachable (this
 #                                  # also stops Traefik trusting X-Forwarded-* on :80).
+#                                  # Can be overridden per team ([team.X] public_scheme)
+#                                  # to mix a plain-HTTP LAN team with a team behind a
+#                                  # TLS-terminating upstream (e.g. Cloudflare tunnel).
 
 # ── Extra routes (traefik only) ───────────────────────
 # Forward an external hostname to an arbitrary upstream URL for a service that
@@ -55,6 +66,7 @@ overlay_threshold_mb = 50         # filestore size limit for overlay vs copy
 [lifecycle]
 auto_stop_hours = 48              # stop idle environments after N hours (non-destructive)
 auto_delete_hours = 0             # delete stopped environments after N hours (DESTRUCTIVE; opt-in)
+prod_purge_hours = 0              # purge DB/files kept by a production deletion after N hours (DESTRUCTIVE; opt-in)
 
 # ── Coding agent ──────────────────────────────────────
 # One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven
@@ -66,26 +78,10 @@ auto_delete_hours = 0             # delete stopped environments after N hours (D
 # deployment-wide bits; changes apply on server restart (the agent container
 # is recreated automatically when its config changed).
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.1"
 # claude_model = ""                # optional model override; empty = CLI default
 # codex_model = ""                 # optional model override; empty = CLI default
 # opencode_model = ""              # optional provider/model; empty = OpenCode default
-
-# ── OAuth (optional) ──────────────────────────────────
-# In traefik mode the self-hosted OAuth Authorization Server is enabled
-# automatically and each team's OAuth flow runs on its OWN hostname (the issuer
-# is derived per-request), so you do NOT need oauth_base_url. Endpoints:
-#   /.well-known/oauth-authorization-server   /authorize   /token
-# For each team, claude.ai (and any OAuth-based MCP client) is configured with:
-#   client_id = team_<id>  (for [team.1], use team_1)
-#   client_secret = team.<id>.auth_token
-# After the OAuth flow the issued access_token is also auth_token, so plain
-# Bearer-token clients keep working.
-#
-# oauth_base_url is only needed to pin a fixed central issuer, or in PORT mode
-# (no per-team TLS host): set it to this instance's public https URL.
-# [oauth]
-# oauth_base_url = "https://oduflow.example.com"
 
 # ── Production hosting ────────────────────────────────
 # Productions (long-lived customer environments with their own domain and a
@@ -95,8 +91,19 @@ auto_delete_hours = 0             # delete stopped environments after N hours (D
 # enabled flag, then restart Oduflow. See https://docs.oduflow.dev/production/
 # [production]
 # enabled = true
-# postgres_image = ""             # default: [database].image
+# postgres_image = ""             # managed PG15 with CA; inherits custom [database].image
 # workers_cap = 8                 # upper bound for auto-tuned Odoo workers
+
+# Production WAL safety (always active while production hosting is enabled).
+# [production.wal]
+# upload_timeout = 120           # seconds per wal-push; then TERM / KILL
+# warn_after = 120               # seconds without archive progress with a queue
+# stall_after = 300
+# stop_free_gb = 2                # GiB available to postgres, excluding root reserve
+# resume_free_gb = 4              # must exceed stop_free_gb
+# stop_within = 300               # stop if estimated time to reserve is this short
+# warn_queue_gb = 2               # warn on queued unarchived WAL size (GiB)
+# stop_queue_gb = 8               # stop production; must exceed warn_queue_gb
 
 # S3 backups for productions: continuous WAL archiving (WAL-G), scheduled
 # snapshots (pg_dump + deduplicated filestore) and retention. Presence of
@@ -112,21 +119,28 @@ auto_delete_hours = 0             # delete stopped environments after N hours (D
 # basebackup_time = "03:30"       # daily WAL-G base backup
 # keep = ["30:180", "7:30", "1:7"]  # snapshot retention: "interval_days:age_days"
 # walg_keep_full = 7              # WAL-G base backups retained
+# upload_threads = 16             # parallel filestore chunk uploads (1 = sequential);
+#                                 # buffers up to max(64 MiB, threads x 4 MiB) in RAM
 
 # ── Teams ─────────────────────────────────────────────
 # Each team gets isolated workspaces, templates, credentials and services.
 # At least one [team.*] section is required.
 
 [team.1]
-hostname = "localhost"            # port: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
+hostname = "localhost"            # required and unique; OAuth issuer host for this team
+                                   # port: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
 environment_slots = 20            # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                # maximum managed auxiliary services; 0 = unlimited
-auth_token = ""                   # MCP bearer token / OAuth client_id+secret (auto-generated on first run; HTTP refuses to start if empty)
+production_token = ""             # separate 32+ character Bearer key for /production; synchronized to odumcp
+auth_token = ""                   # MCP bearer token / OAuth client_secret (auto-generated on first run; HTTP refuses to start if empty)
 ui_password = ""                  # Web UI password (auto-generated on first run; HTTP refuses to start if empty unless allow_insecure_http)
 port_range = [50000, 50100]       # port range for Odoo containers
 # db_quota_gb = 50                # combined size cap for the team's PostgreSQL DBs (environments + templates); 0 = off
 # disk_quota_gb = 0               # cap on team files + databases via XFS project quotas (needs data dir on XFS with prjquota)
+# public_scheme = ""              # per-team override of [routing] public_scheme ("http" | "https");
+#                                  # empty = the global value. Lets one deployment serve a LAN team
+#                                  # over http and a Cloudflare-tunnel team over https at once.
 # agent_enabled = false           # per-team coding agent (dashboard Agent Chat / Agent CLI); off by default
 #                                  # Agent UI is hidden for local_path live-mount environments.
 # agent_default = "claude"        # "claude" | "codex" | "opencode" — default agent

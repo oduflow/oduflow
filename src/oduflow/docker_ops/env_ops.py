@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import activity, env_share, settings
+from oduflow import activity, env_share, secret_store, settings
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -38,6 +39,7 @@ from oduflow.docker_ops.system_ops import (
     pg_clone_strategy_clause,
     reassign_db_ownership,
 )
+from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
 from oduflow.env_tokens import MCP_TOKEN_LABEL, generate_token, invalidate_cache
 from oduflow.errors import (
@@ -66,7 +68,6 @@ from oduflow.naming import (
     get_agent_upload_dir,
     get_agent_workspace_volume_name,
     get_db_name,
-    get_env_hostname,
     get_env_short_hostname,
     get_filestore_paths,
     get_repo_path,
@@ -254,6 +255,58 @@ def _active_environment_names(
     return active_envs
 
 
+def _team_parent_domain(team: TeamSettings) -> str:
+    """The domain environment/service hostnames are allocated under: the
+    team's base_domain when set, else the parent of the team hostname
+    (slots/custom-hostname legacy layout)."""
+    if team.base_domain:
+        return team.base_domain
+    _prefix, parent_domain = split_team_hostname(team.hostname)
+    return parent_domain
+
+
+def _assert_env_hostname_available(
+    settings: Settings, team: TeamSettings, env_name: str, route_hostname: str
+) -> None:
+    """Refuse an environment hostname already claimed elsewhere in the global
+    Host() namespace (dashboard hostnames, production domains, static routes,
+    other teams' zones, live environment and service containers)."""
+    if settings.routing_mode != "traefik":
+        return
+    from oduflow.domains import assert_public_hostname_free
+
+    fqdn = env_hostname(team, env_name, route_hostname)
+    assert_public_hostname_free(
+        settings,
+        fqdn,
+        own_team=team.team_id,
+        # update_environment re-runs this while the environment's own
+        # container still carries its Host() rule; it must not collide
+        # with itself.
+        exclude_env=env_name,
+        purpose=f"the hostname of environment '{env_name}'",
+    )
+
+
+def container_route_host(container: Any) -> str:
+    """The FQDN a container's Traefik router rule actually matches, or ''.
+
+    Traefik labels are frozen at container creation, so this — not a recompute
+    from current settings — is what an existing environment really answers on.
+    It matters after ``base_domain`` is turned on for a team that already has
+    environments: ADR 0064 deliberately performs no migration, so those keep
+    their old nested hostname until their next ``update_environment``.
+    """
+    from oduflow.domains import _HOST_RULE_RE
+
+    for key, value in (container.labels or {}).items():
+        if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
+            found = _HOST_RULE_RE.findall(value)
+            if found:
+                return str(found[0]).lower()
+    return ""
+
+
 def _environment_hostname_usage(
     client: DockerClient,
     settings: Settings,
@@ -269,8 +322,7 @@ def _environment_hostname_usage(
     """
     active_envs: set[str] = set()
     used_hostnames: set[str] = set()
-    _hostname_prefix, parent_domain = split_team_hostname(team.hostname)
-    suffix = f".{parent_domain}"
+    suffix = f".{_team_parent_domain(team)}"
     for configured_team in settings.teams.values():
         if configured_team.hostname.endswith(suffix):
             used_hostnames.add(configured_team.hostname[: -len(suffix)])
@@ -1192,7 +1244,11 @@ def _ensure_user_site_packages(container: Any) -> None:
 
 
 def _install_pip_requirements(
-    container: Any, repo_path: str, *, restart: bool = True
+    container: Any,
+    repo_path: str,
+    *,
+    restart: bool = True,
+    container_base: str = "/mnt/extra-addons",
 ) -> tuple[bool, str]:
     """Install pip requirements from repo.
 
@@ -1201,15 +1257,19 @@ def _install_pip_requirements(
 
     When *restart* is False the caller is responsible for restarting the
     container after all setup steps are done.
+
+    ``container_base`` is where *repo_path* is mounted inside the container:
+    ``/mnt/extra-addons`` for the main repo, ``/mnt/extra-addons-{name}`` for
+    an extra-addons checkout.
     """
     # Prefer .oduflow/requirements.txt; fall back to the repo root for
     # compatibility with conventions used elsewhere (e.g. odoo.sh).
     oduflow_req = os.path.join(repo_path, ".oduflow", "requirements.txt")
     root_req = os.path.join(repo_path, "requirements.txt")
     if os.path.isfile(oduflow_req):
-        container_req = "/mnt/extra-addons/.oduflow/requirements.txt"
+        container_req = f"{container_base}/.oduflow/requirements.txt"
     elif os.path.isfile(root_req):
-        container_req = "/mnt/extra-addons/requirements.txt"
+        container_req = f"{container_base}/requirements.txt"
     else:
         logger.debug("No requirements.txt in repo, skipping pip install")
         return False, ""
@@ -1237,6 +1297,38 @@ def _install_pip_requirements(
             container.restart()
             logger.info("Container restarted after pip install")
         return True, f"[PIP] Requirements installed successfully:\n{output_str}"
+
+
+def _install_repo_dependencies(
+    container: Any, dep_paths: list[tuple[str, str]]
+) -> tuple[int, bool, list[str]]:
+    """Install apt + pip dependencies for each ``(host_path, container_base)``.
+
+    The main repo comes first, then extra-addons checkouts, apt before pip
+    within each repo (same order as before extra-repo deps existed). Never
+    restarts — callers restart once after all setup steps.
+
+    Returns ``(exit_code, pip_installed_any, logs)`` where *exit_code* is 1 if
+    any apt or pip step failed.
+    """
+    exit_code = 0
+    pip_installed_any = False
+    logs: list[str] = []
+    for host_path, container_base in dep_paths:
+        apt_log = _install_apt_packages(container, host_path)
+        if apt_log:
+            logs.append(apt_log)
+            if "FAILED" in apt_log:
+                exit_code = 1
+        installed, pip_log = _install_pip_requirements(
+            container, host_path, restart=False, container_base=container_base
+        )
+        pip_installed_any = pip_installed_any or installed
+        if pip_log:
+            logs.append(pip_log)
+            if not installed:  # log present but not installed => FAILED
+                exit_code = 1
+    return exit_code, pip_installed_any, logs
 
 
 def _odoo_registry_probe(env_db: str) -> list[str]:
@@ -1426,18 +1518,38 @@ def _configure_serving_environment(
     sanitize: bool,
     auto_install_modules: list[str] | None,
     odoo_conf_to_copy: str | None,
+    extra_mount_paths: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Run required post-start setup before the environment is declared ready."""
     setup_logs: list[str] = []
     if odoo_conf_to_copy:
         _copy_file_to_container(container, odoo_conf_to_copy, "/etc/odoo")
 
-    apt_log = _install_apt_packages(container, repo_path)
-    if apt_log:
-        setup_logs.append(apt_log)
-    _, pip_log = _install_pip_requirements(container, repo_path)
-    if pip_log:
-        setup_logs.append(pip_log)
+    # No restart here: the unconditional one below is the single gated restart
+    # that picks up both the conf and the freshly installed packages.
+    dep_paths = [(repo_path, "/mnt/extra-addons")] + list(extra_mount_paths or [])
+    _, _, dep_logs = _install_repo_dependencies(container, dep_paths)
+    setup_logs.extend(dep_logs)
+
+    # Odoo is PID1 and has already booted — with the image's stock conf and
+    # without the repo's pip packages. One restart here picks up both, in the
+    # same order as production's _run_odoo_container. Unconditional on purpose:
+    # restarting only when pip installed something left a repo that ships an
+    # .oduflow/odoo.conf but no requirements.txt serving on the stock
+    # addons_path and worker settings until some later restart.
+    container.restart()
+    logger.info(
+        "Waiting for serving Odoo after the setup restart",
+        extra={"env_name": env_name},
+    )
+    readiness = _wait_for_container_odoo_ready(container, env_db)
+    if not readiness.ready:
+        raise _readiness_error(
+            container,
+            env_db,
+            readiness,
+            action="Environment setup did not complete",
+        )
 
     # Install first so neutralization includes SQL shipped by the new modules.
     if auto_install_modules:
@@ -1629,7 +1741,7 @@ def _clone_repo(
     passes ``depth=0`` for a full clone — commit history is the point there
     (rollback targets, deploy history display).
     """
-    git_env = git_env_for_team(team.git_credentials_file())
+    git_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     from oduflow.git_ops import inject_credential_user
 
@@ -1661,6 +1773,17 @@ def _clone_repo(
             e.stderr.decode("utf-8") if e.stderr else str(e)
         )
         if any(kw.lower() in error_msg.lower() for kw in auth_keywords):
+            from oduflow.git_ops import is_ssh_url
+
+            # SSH and HTTPS remotes have different remedies: pointing an SSH
+            # failure at setup_repo_auth (the PAT flow) is a dead end.
+            if is_ssh_url(repo_url):
+                raise RepoAuthError(
+                    f"Git authentication failed for {sanitize_repo_url(repo_url)}. "
+                    "The remote uses SSH: register the team deploy key "
+                    "(get_ssh_public_key) with the git host, or use an "
+                    "HTTPS URL with setup_repo_auth."
+                )
             raise RepoAuthError(
                 f"Git authentication failed for {sanitize_repo_url(repo_url)}. "
                 f"Call 'setup_repo_auth' first to cache credentials."
@@ -1694,7 +1817,7 @@ def build_env_traefik_labels(
         return {}
     slug = slugify_branch(env_name)
     router = f"oduflow-{team.team_id}-{slug}"
-    host = get_env_hostname(env_name, team.hostname, route_hostname)
+    host = env_hostname(team, env_name, route_hostname)
     labels: dict[str, str] = {
         "traefik.enable": "true",
         f"traefik.http.routers.{router}.rule": f"Host(`{host}`)",
@@ -1704,12 +1827,13 @@ def build_env_traefik_labels(
     if settings.routing_tls:
         labels[f"traefik.http.routers.{router}.entrypoints"] = "websecure"
         labels[f"traefik.http.routers.{router}.tls"] = "true"
-        labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
+        if settings.uses_acme:
+            labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
     else:
         # Upstream (e.g. Cloudflare tunnel) terminates TLS; Traefik routes plain
-        # HTTP on the web entrypoint. Public URLs use settings.public_scheme
-        # (the upstream's scheme, https unless overridden), not this
-        # entrypoint's.
+        # HTTP on the web entrypoint. Public URLs use the team's resolved
+        # public scheme (the upstream's scheme, https unless overridden), not
+        # this entrypoint's.
         labels[f"traefik.http.routers.{router}.entrypoints"] = "web"
     return labels
 
@@ -1764,15 +1888,11 @@ def adopt_existing_environment(
         start_environment(settings, env_name, team)
         container.reload()
 
-    if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}"
-    else:
-        ports = container.ports.get("8069/tcp")
-        url = (
-            f"{settings.public_scheme}://{team.hostname}:{ports[0]['HostPort']}"
-            if ports
-            else ""
-        )
+    try:
+        url = get_env_base_url(settings, team, env_name, container)[0]
+    except NotFoundError:
+        # Port mode with no published port (container stopped mid-start).
+        url = ""
 
     return {
         "env_name": env_name,
@@ -1983,14 +2103,13 @@ def _create_environment_impl(
         existing = client.containers.get(odoo_container_name)
         if existing.status == "running":
             existing.reload()
-            if settings.routing_mode == "traefik":
-                url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, existing.labels.get(ENV_HOSTNAME_LABEL, ''))}"
-            else:
-                ports = existing.ports.get("8069/tcp")
-                existing_port = ports[0]["HostPort"] if ports else "?"
-                url = f"{settings.public_scheme}://{team.hostname}:{existing_port}"
+            try:
+                url = get_env_base_url(settings, team, env_name, existing)[0]
+            except NotFoundError:
+                url = ""
             raise ConflictError(
-                f"Environment '{env_name}' already exists and is running at {url}."
+                f"Environment '{env_name}' already exists and is running"
+                + (f" at {url}." if url else ".")
             )
         raise ConflictError(
             f"Environment '{env_name}' already exists (status: {existing.status})."
@@ -2021,6 +2140,12 @@ def _create_environment_impl(
                 f"is already used by environment '{other_branch}'. Choose a name "
                 "that does not normalise to the same database."
             )
+
+    # Claim the public name before anything is provisioned or destroyed: the
+    # cleanup below drops a leftover database, role and workspace, and the
+    # credential move writes to the team store, so a name rejected further
+    # down would still have had side effects.
+    _assert_env_hostname_available(settings, team, env_name, hostname)
 
     est_db_bytes = estimate_new_db_bytes(client, settings, team, template_name)
     check_db_quota(client, settings, team, estimated_new_db_bytes=est_db_bytes)
@@ -2062,6 +2187,11 @@ def _create_environment_impl(
         repo_url, git_user = _move_inline_repo_credentials(
             repo_url, team.git_credentials_file(), git_user
         )
+
+    # Fail fast on dangling secret references, before any database, checkout
+    # or container work. The oduflow.env_vars label below keeps the references;
+    # only the container environment receives the resolved values.
+    resolved_env_vars = secret_store.resolve_env_secrets(team, env_vars)
 
     labels = {
         settings.managed_label: "true",
@@ -2143,14 +2273,21 @@ def _create_environment_impl(
 
     # --- Shared immutable extra-addons checkouts ---
     extra_mount_paths: list[tuple[str, str]] = []
+    extra_conf_paths: list[str] = []
     extra_revisions: dict[str, str] = {}
     if extra_addons:
-        from oduflow.extra_addons import ensure_shared_checkout
+        from oduflow.extra_addons import (
+            ensure_shared_checkout,
+            resolve_extra_addons_path,
+        )
 
         for repo_name, addon_branch in extra_addons.items():
             checkout = ensure_shared_checkout(team, repo_name, addon_branch)
             container_path = f"/mnt/extra-addons-{repo_name}"
             extra_mount_paths.append((checkout["path"], container_path))
+            extra_conf_paths.append(
+                resolve_extra_addons_path(str(checkout["path"]), repo_name)
+            )
             extra_revisions[repo_name] = checkout["revision"]
         labels["oduflow.extra_addons_revisions"] = json.dumps(extra_revisions)
 
@@ -2198,7 +2335,7 @@ def _create_environment_impl(
         "HOST": settings.shared_db_container,
         "USER": env_creds["pg_user"],
         "PASSWORD": env_creds["pg_password"],
-        **(env_vars or {}),
+        **(resolved_env_vars or {}),
     }
     odoo_volumes = {repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}}
 
@@ -2219,9 +2356,7 @@ def _create_environment_impl(
         from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
 
         generated_conf = os.path.join(workspace_path, "odoo.conf")
-        extra_container_paths = (
-            [cp for _, cp in extra_mount_paths] if extra_mount_paths else []
-        )
+        extra_container_paths = extra_conf_paths
         main_addons_path = resolve_main_addons_path(repo_path)
         generate_odoo_conf(
             base_conf_path,
@@ -2352,6 +2487,7 @@ def _create_environment_impl(
                 sanitize,
                 auto_install_modules,
                 odoo_conf_to_copy,
+                extra_mount_paths,
             )
         )
     except Exception:
@@ -2363,9 +2499,9 @@ def _create_environment_impl(
         raise
 
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{env_hostname(team, env_name, hostname)}"
     else:
-        url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
     logger.info(
         "Environment created",
         extra={"env_name": env_name, "url": url, "container": odoo_container_name},
@@ -2474,15 +2610,12 @@ def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> 
     The scoped ``/mcp/<env>`` endpoint + per-environment token (ADR 0028) is
     the only Oduflow access the agent gets — the team ``auth_token`` never
     enters the agent container. In Traefik mode agents use the team's public
-    TLS endpoint, matching the dashboard's MCP Access URL. Port mode uses an
-    explicitly configured public OAuth base when available, otherwise it falls
-    back to the Docker host gateway for local deployments."""
+    TLS endpoint, matching the dashboard's MCP Access URL. In port mode they use
+    the Docker host gateway and do not hairpin through an external tunnel."""
     from urllib.parse import quote
 
     if settings.routing_mode == "traefik":
-        base = f"{settings.public_scheme}://{team.hostname}"
-    elif settings.oauth_base_url:
-        base = settings.oauth_base_url.rstrip("/")
+        base = f"{settings.public_scheme_for(team)}://{team.hostname}"
     else:
         base = f"http://host.docker.internal:{settings.port}"
     return f"{base}/mcp/{quote(env_name, safe='/')}"
@@ -2572,23 +2705,28 @@ def _agent_container_config(
 
 
 def _agent_config_hash(
-    container_config: dict[str, Any], has_git_credentials: bool
+    container_config: dict[str, Any],
+    has_git_credentials: bool,
+    ssh_key_fingerprint: str = "",
 ) -> str:
     """Fingerprint of the config the agent container was created with.
 
     Stored as a container label; a mismatch on ensure means the image, injected
     config, or Docker run specification changed, so the container is recreated.
-    HOME and /workspace are volumes — nothing is lost. Git credentials are
-    copied into HOME by the volume init step at container creation, so their
-    presence is also part of the fingerprint: a container created before
-    setup_repo_auth would otherwise keep matching forever and never pick up the
-    file."""
+    HOME and /workspace are volumes — nothing is lost. Git credentials and the
+    team SSH key are copied into HOME by the volume init step at container
+    creation, so their presence is also part of the fingerprint: a container
+    created before setup_repo_auth (or before the key existed) would otherwise
+    keep matching forever and never pick up the file. The SSH part is the key's
+    fingerprint, not a boolean, so a regenerated key also recreates the
+    container."""
     import hashlib
 
     payload = json.dumps(
         {
             "container": container_config,
             "has_git_credentials": has_git_credentials,
+            "ssh_key_fingerprint": ssh_key_fingerprint,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -2602,14 +2740,16 @@ def _prepare_agent_volumes(
     home_volume: str,
     workspace_volume: str,
     cred_file: str | None,
+    ssh_key_file: str | None = None,
 ) -> None:
     """Make persistent agent data usable by the unprivileged image user.
 
     Older coder images mounted HOME at ``/root`` and consequently left both
     named volumes root-owned. A short-lived, networkless init container runs
     as root only to migrate that existing data and copy the host credential
-    store; the long-lived container and every agent exec run as ``agent``.
-    Marker files avoid recursively walking large checkouts after migration.
+    store and team SSH deploy key; the long-lived container and every agent
+    exec run as ``agent``. Marker files avoid recursively walking large
+    checkouts after migration.
     """
     volumes: dict[str, dict[str, str]] = {
         home_volume: {"bind": AGENT_HOME, "mode": "rw"},
@@ -2618,6 +2758,11 @@ def _prepare_agent_volumes(
     if cred_file:
         volumes[cred_file] = {
             "bind": "/run/oduflow/git-credentials",
+            "mode": "ro",
+        }
+    if ssh_key_file:
+        volumes[ssh_key_file] = {
+            "bind": "/run/oduflow/ssh-key",
             "mode": "ro",
         }
 
@@ -2640,6 +2785,28 @@ fi
 if [ -f /run/oduflow/git-credentials ]; then
     install -m 600 -o agent -g agent \
         /run/oduflow/git-credentials /home/agent/.git-credentials
+fi
+if [ -f /run/oduflow/ssh-key ]; then
+    install -d -m 700 -o agent -g agent /home/agent/.ssh
+    install -m 600 -o agent -g agent \
+        /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
+    # Oduflow's SSH policy lives in its own file, rewritten on every
+    # container creation so policy changes reach existing (persistent) homes;
+    # the user-editable config only carries the Include. Mirrors the
+    # server-side team_ssh_command options.
+    printf '%s\\n' 'Host *' '  IdentitiesOnly yes' '  BatchMode yes' \
+        '  StrictHostKeyChecking accept-new' > /home/agent/.ssh/oduflow_config
+    chown agent:agent /home/agent/.ssh/oduflow_config
+    chmod 600 /home/agent/.ssh/oduflow_config
+    if [ ! -f /home/agent/.ssh/config ]; then
+        printf 'Include oduflow_config\\n' > /home/agent/.ssh/config
+    elif ! grep -q 'Include oduflow_config' /home/agent/.ssh/config; then
+        { printf 'Include oduflow_config\\n'; \
+          cat /home/agent/.ssh/config; } > /home/agent/.ssh/config.tmp
+        mv /home/agent/.ssh/config.tmp /home/agent/.ssh/config
+    fi
+    chown agent:agent /home/agent/.ssh/config
+    chmod 600 /home/agent/.ssh/config
 fi
 """
     client.containers.run(
@@ -2697,8 +2864,14 @@ def _ensure_agent_container(
         agent_env = dict(_agent_env_vars(settings, team))
         cred_file = team.git_credentials_file()
         has_git_credentials = os.path.isfile(cred_file)
+        from oduflow import git_ops
+
+        ssh_key_file = git_ops.ssh_key_path(team.ssh_dir())
+        ssh_fingerprint = git_ops.ssh_key_fingerprint(team.ssh_dir())
         container_config = _agent_container_config(settings, team, agent_env)
-        config_hash = _agent_config_hash(container_config, has_git_credentials)
+        config_hash = _agent_config_hash(
+            container_config, has_git_credentials, ssh_fingerprint
+        )
 
         container_name = get_agent_container_name(team.team_id, settings.prefix)
         existing_container = None
@@ -2762,6 +2935,9 @@ def _ensure_agent_container(
             home_volume,
             workspace_volume,
             cred_file if has_git_credentials else None,
+            # Gate the mount on the key file itself; the fingerprint only
+            # feeds the config hash and may be "" while the key is usable.
+            ssh_key_file if os.path.isfile(ssh_key_file) else None,
         )
         client.containers.run(
             name=container_name,
@@ -3252,21 +3428,14 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
         }
 
         if "-odoo" in container.name:
-            if settings.routing_mode == "traefik":
+            try:
                 envs[env_name]["url"] = (
-                    f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                    get_env_base_url(settings, team, env_name, container)[0]
+                    + "/web?debug=1"
                 )
-            else:
-                ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-                if ports:
-                    mappings = ports.get("8069/tcp")
-                    if mappings:
-                        host_port = mappings[0].get("HostPort")
-                        if host_port:
-                            envs[env_name]["url"] = (
-                                f"{settings.public_scheme}://{team.hostname}"
-                                f":{host_port}/web?debug=1"
-                            )
+            except NotFoundError:
+                # Port mode with no published port: leave the URL unset.
+                pass
 
         envs[env_name]["containers"].append(container_info)
 
@@ -3306,10 +3475,11 @@ def wait_for_odoo_ready(
         return False
 
     url = f"{base_url}/web/health"
+    context = public_url_ssl_context(settings)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
+            with urllib.request.urlopen(url, timeout=5, context=context) as resp:
                 if resp.status == 200:
                     return True
         except Exception:
@@ -3410,6 +3580,59 @@ def stop_environment(
     return {"odoo_container": odoo_container_name, "stopped": [odoo_container_name]}
 
 
+def _container_image(container: Any, settings: Settings) -> str:
+    """Best-effort image reference for a container (label first, then tag)."""
+    image = container.labels.get(settings.image_label, "")
+    if image:
+        return str(image)
+    try:
+        if container.image.tags:
+            return str(container.image.tags[0])
+    except Exception:
+        pass
+    return str(container.attrs.get("Config", {}).get("Image", ""))
+
+
+def ensure_overlay_mounted(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    labels: dict[str, str],
+    odoo_image: str,
+) -> bool:
+    """Re-mount an overlay-mode env's filestore if the mount is missing or stale.
+
+    fuse-overlayfs mounts do not survive a host reboot, so a container started
+    (or auto-restarted) afterwards would serve an *empty* filestore directory —
+    attachments 404 and Odoo scribbles assets into the raw merged dir that a
+    later remount then shadows. Returns True if a remount was performed. Only
+    overlay-mode envs (an existing ``upper`` dir) are touched; copy-mode and
+    already-alive mounts are left alone.
+    """
+    paths = get_filestore_paths(env_name, team.workspaces_dir)
+    if not os.path.isdir(paths["upper"]):
+        return False  # copy-mode env: nothing to overlay-mount
+    if overlay_mount_state(paths["merged"]) == MOUNT_ALIVE:
+        return False
+    template_name = labels.get("oduflow.template", "none")
+    if not template_name or template_name == "none":
+        return False
+    _mount_filestore(
+        client,
+        settings,
+        team,
+        env_name,
+        get_db_name(env_name, team.team_id),
+        odoo_image,
+        {},
+        template_name=template_name,
+        force_overlay=True,
+    )
+    logger.info("Re-mounted filestore overlay", extra={"env_name": env_name})
+    return True
+
+
 def start_environment(
     settings: Settings, env_name: str, team: TeamSettings
 ) -> dict[str, Any]:
@@ -3436,11 +3659,53 @@ def start_environment(
             f"Environment '{env_name}' does not exist. Use create_environment first."
         )
     _assert_team_owns(odoo_container, settings, team, env_name)
+
+    # A stopped env's overlay may be gone (host reboot) — remount before start,
+    # or the container comes up on an empty filestore. A failed remount must
+    # abort the start: running on the raw merged directory loses attachments,
+    # and writes made there are hidden by a later successful remount
+    # (reconcile_overlay_mounts likewise leaves such containers stopped).
+    try:
+        ensure_overlay_mounted(
+            client,
+            settings,
+            team,
+            env_name,
+            odoo_container.labels,
+            _container_image(odoo_container, settings),
+        )
+    except Exception as exc:
+        raise PrerequisiteNotMetError(
+            f"Cannot start '{env_name}': its filestore overlay could not be "
+            f"re-mounted ({exc}). Starting without it would run Odoo on an "
+            "empty filestore and hide any files written there."
+        ) from exc
+
     odoo_container.start()
     started.append(odoo_container_name)
 
     logger.info("Environment started", extra={"env_name": env_name})
     return {"odoo_container": odoo_container_name, "started": started}
+
+
+def public_url_ssl_context(settings: Settings) -> ssl.SSLContext | None:
+    """Verification policy for Oduflow's own HTTPS calls to a URL it hands out.
+
+    ``None`` means "use the default verifying context". With ``tls = {}``
+    Traefik terminates HTTPS using its default certificate, which is
+    self-signed unless the operator supplied one — there is no trust anchor a
+    verifying client could succeed against, so every internal probe would fail
+    the handshake and report the environment as unreachable. These calls only
+    ever target Oduflow's own Traefik, and choosing that mode is already an
+    acceptance of its certificate, so verification is disabled there. Every
+    other mode keeps full verification.
+    """
+    if not settings.uses_default_tls_cert:
+        return None
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 def get_env_base_url(
@@ -3452,11 +3717,14 @@ def get_env_base_url(
     """Return ``(base_url, cookie_domain)`` for an environment's Odoo web UI.
 
     ``base_url`` is scheme + host (+ published port) with no path; ``cookie_domain``
-    is the bare host an Odoo ``session_id`` cookie must be scoped to. Mirrors the
-    URL logic in :func:`get_environment_info` (traefik subdomain vs. published
-    host port) so a single source computes both the browsable URL and the cookie
-    domain — used by ``connect_as_user`` to hand back a cookie a browser will
-    actually send.
+    is the bare host an Odoo ``session_id`` cookie must be scoped to. This is
+    the single source of the URL rule (traefik subdomain vs. published host
+    port): ``adopt_existing_environment``, ``create_environment``,
+    ``list_environments``, ``get_environment_info`` and ``connect_as_user`` all
+    build their URLs from it. Pass ``container`` when it is already in hand to
+    skip the Docker lookup. ``update_environment`` is the one deliberate
+    exception: right after recreating the container it builds the URL from its
+    own authoritative locals instead of re-reading fresh container attrs.
     """
     if settings.routing_mode == "traefik":
         if container is None:
@@ -3469,10 +3737,14 @@ def get_env_base_url(
                 raise NotFoundError(
                     f"Environment '{env_name}' does not exist. Use create_environment first."
                 )
-        host = get_env_hostname(
-            env_name, team.hostname, container.labels.get(ENV_HOSTNAME_LABEL, "")
+        # The container's own router rule wins over a recompute from current
+        # settings: an environment created before the team gained a
+        # base_domain still routes on its old nested name, and reporting the
+        # zone name would hand out a URL Traefik does not serve.
+        host = container_route_host(container) or env_hostname(
+            team, env_name, container.labels.get(ENV_HOSTNAME_LABEL, "")
         )
-        return f"{settings.public_scheme}://{host}", host
+        return f"{settings.public_scheme_for(team)}://{host}", host
 
     # Port routing: read the container's published 8069 port. Cookies are not
     # port-scoped, so the domain is just the host.
@@ -3494,7 +3766,10 @@ def get_env_base_url(
             f"Environment '{env_name}' has no published HTTP port; "
             "is the environment running?"
         )
-    return f"{settings.public_scheme}://{team.hostname}:{host_port}", team.hostname
+    return (
+        f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}",
+        team.hostname,
+    )
 
 
 def get_environment_info(
@@ -3552,21 +3827,14 @@ def get_environment_info(
             env_name, labels.get(ENV_HOSTNAME_LABEL, "")
         )
 
-        if settings.routing_mode == "traefik":
+        try:
             result["url"] = (
-                f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, labels.get(ENV_HOSTNAME_LABEL, ''))}/web?debug=1"
+                get_env_base_url(settings, team, env_name, odoo_container)[0]
+                + "/web?debug=1"
             )
-        else:
-            ports = odoo_container.attrs.get("NetworkSettings", {}).get("Ports", {})
-            if ports:
-                mappings = ports.get("8069/tcp")
-                if mappings:
-                    host_port = mappings[0].get("HostPort")
-                    if host_port:
-                        result["url"] = (
-                            f"{settings.public_scheme}://{team.hostname}"
-                            f":{host_port}/web?debug=1"
-                        )
+        except NotFoundError:
+            # Port mode with no published port: leave the URL unset.
+            pass
 
         stats = _get_one_container_stats(odoo_container)
         if stats:
@@ -3744,13 +4012,20 @@ def _reapply_odoo_conf(
     else:
         return False
 
-    from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
+    from oduflow.extra_addons import (
+        generate_odoo_conf,
+        resolve_extra_addons_path,
+        resolve_main_addons_path,
+    )
 
     extra_addons_json = (container.labels or {}).get("oduflow.extra_addons", "")
     extra_container_paths: list[str] = []
     if extra_addons_json:
         extra_dict = _normalize_extra_addons(json.loads(extra_addons_json))
-        extra_container_paths = [f"/mnt/extra-addons-{rn}" for rn in extra_dict]
+        sources = _extra_checkout_sources(container, iter(extra_dict))
+        extra_container_paths = [
+            resolve_extra_addons_path(sources.get(rn, ""), rn) for rn in extra_dict
+        ]
     generated_conf = os.path.join(workspace_path, "odoo.conf")
     main_addons_path = resolve_main_addons_path(repo_path)
     generate_odoo_conf(
@@ -3777,35 +4052,27 @@ def _apply_actions(
     changed_files: list[str],
     do_refresh: bool = False,
     config_changed: bool = False,
-    deps_changed: bool = False,
-    repo_path: str = "",
+    dep_units: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Run install/upgrade/restart and build the result dict (shared by the
-    explicit and auto paths of :func:`pull_environment`)."""
+    explicit and auto paths of :func:`pull_environment`).
+
+    ``dep_units`` lists the ``(host_path, container_base)`` repos whose
+    dependency descriptors changed and need an apt/pip reinstall."""
     from oduflow.docker_ops.odoo_ops import (
         install_odoo_modules,
         upgrade_odoo_modules,
     )
 
+    deps_changed = bool(dep_units)
     # Reinstall apt/pip deps up front so a subsequent module install/upgrade can
     # import newly-added libs (same apt-then-pip order as create/update). Never
     # restart here — a single restart happens in the branches below.
     dep_logs: list[str] = []
     dep_exit = 0
-    if deps_changed and repo_path:
+    if dep_units:
         dep_container = client.containers.get(odoo_container_name)
-        apt_log = _install_apt_packages(dep_container, repo_path)
-        if apt_log:
-            dep_logs.append(apt_log)
-            if "FAILED" in apt_log:
-                dep_exit = 1
-        pip_installed, pip_log = _install_pip_requirements(
-            dep_container, repo_path, restart=False
-        )
-        if pip_log:
-            dep_logs.append(pip_log)
-        if (not pip_installed) and pip_log:  # log present but not installed => FAILED
-            dep_exit = 1
+        dep_exit, _, dep_logs = _install_repo_dependencies(dep_container, dep_units)
 
     if to_install or to_upgrade:
         messages: list[str] = []
@@ -3987,8 +4254,8 @@ def pull_environment(
         classify_units.append((repo_path, old_head, changed_files))
 
         all_changed = changed_files
-        # Dependency reinstall keys off the MAIN repo only: the pip/apt install
-        # helpers read only the main repo_path, never extra-addons checkouts.
+        # Main-repo files for the per-repo dependency check below (extra-addons
+        # checkouts contribute their own units via extra_dep_candidates).
         main_changed_files = changed_files
 
     try:
@@ -3999,6 +4266,9 @@ def pull_environment(
         extra_addons = {}
 
     extra_changed_files: list[str] = []
+    # (host_path, container_base, changed_files) per extra repo, for the
+    # per-repo dependency-descriptor check below.
+    extra_dep_candidates: list[tuple[str, str, list[str]]] = []
     if extra_addons:
         is_production = container_obj.labels.get("oduflow.prod") == "true"
         if is_production:
@@ -4019,6 +4289,9 @@ def pull_environment(
                 extra_changed_files.extend(extra_files)
                 if extra_files:
                     classify_units.append((wt_path, extra_old, extra_files))
+                    extra_dep_candidates.append(
+                        (wt_path, f"/mnt/extra-addons-{repo_name}", extra_files)
+                    )
         else:
             from oduflow.extra_addons import checkout_revision, ensure_shared_checkout
 
@@ -4055,6 +4328,9 @@ def pull_environment(
                     classify_units.append(
                         (checkout_path, current_revision or None, extra_files)
                     )
+                    extra_dep_candidates.append(
+                        (checkout_path, f"/mnt/extra-addons-{repo_name}", extra_files)
+                    )
 
     all_changed = all_changed + extra_changed_files
 
@@ -4078,11 +4354,17 @@ def pull_environment(
     # container before any restart (a plain restart reuses the stale copy).
     details = recommended.get("details")
     config_changed = isinstance(details, dict) and bool(details.get("restart_required"))
-    # A changed dependency descriptor (requirements.txt / apt_packages.txt) in the
-    # MAIN repo must reinstall apt/pip deps into the running container and restart.
-    # Scoped to the main repo because the install helpers only read its repo_path;
+    # A changed dependency descriptor (requirements.txt / apt_packages.txt) in
+    # the main repo or an extra-addons repo must reinstall apt/pip deps into
+    # the running container and restart. Checked per repo — the "active" rule
+    # (.oduflow/ shadows the repo root) applies within each repo separately;
     # applies to both explicit and auto modes (a prerequisite, not an agent action).
-    deps_changed = any(_is_active_dep_file(f, repo_path) for f in main_changed_files)
+    dep_units: list[tuple[str, str]] = []
+    if any(_is_active_dep_file(f, repo_path) for f in main_changed_files):
+        dep_units.append((repo_path, "/mnt/extra-addons"))
+    for dep_host, dep_base, dep_files in extra_dep_candidates:
+        if any(_is_active_dep_file(f, dep_host) for f in dep_files):
+            dep_units.append((dep_host, dep_base))
 
     warnings: list[str] = []
     do_refresh = False
@@ -4108,6 +4390,12 @@ def pull_environment(
     else:
         if not all_changed:
             if extra_mount_switch_needed:
+                # install_dependencies is on because this recreates the
+                # container, and pip --user packages live in the container
+                # filesystem (/var/lib/odoo/.local/lib), not in a volume — a
+                # recreate destroys them. update_environment reinstalls apt +
+                # pip for the main repo and every extra checkout from the new
+                # mount sources, which is exactly the recovery needed here.
                 update_environment(
                     settings,
                     team,
@@ -4115,7 +4403,7 @@ def pull_environment(
                     extra_checkout_overrides=pending_extra_checkouts,
                     extra_revision_overrides=pending_extra_revisions,
                     pull_image=False,
-                    install_dependencies=False,
+                    install_dependencies=True,
                 )
                 _cleanup_legacy_extra_worktrees(
                     team, env_name, iter(pending_extra_checkouts)
@@ -4144,6 +4432,10 @@ def pull_environment(
     # The checkout itself was prepared off to the side and is safe to cache even
     # when strict mode blocks without touching the running container.
     if extra_mount_switch_needed:
+        # See the note on the early-return recreate above: the container is
+        # replaced, so its pip --user packages go with it and have to be
+        # reinstalled unconditionally, not just for the repos whose dependency
+        # descriptor happens to be in this diff.
         update_environment(
             settings,
             team,
@@ -4151,7 +4443,7 @@ def pull_environment(
             extra_checkout_overrides=pending_extra_checkouts,
             extra_revision_overrides=pending_extra_revisions,
             pull_image=False,
-            install_dependencies=False,
+            install_dependencies=True,
         )
         _cleanup_legacy_extra_worktrees(team, env_name, iter(pending_extra_checkouts))
 
@@ -4167,73 +4459,13 @@ def pull_environment(
         do_refresh=do_refresh,
         changed_files=all_changed,
         config_changed=config_changed,
-        deps_changed=deps_changed,
-        repo_path=repo_path,
+        dep_units=dep_units,
     )
     if warnings:
         result["warnings"] = warnings
     if is_local and int(result.get("exit_code", 0)) == 0:
         _write_local_snapshot(repo_path, env_name, team)
     return result
-
-
-# Module directories come from a git tree, so they are already tame — but the
-# preflight interpolates them into a SQL IN(...) list, so only accept names that
-# Odoo itself would accept as a module.
-_MODULE_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
-
-
-def _dropped_module_warnings(
-    settings: Settings,
-    team: TeamSettings,
-    env_name: str,
-    repo_path: str,
-    target_ref: str,
-) -> list[str]:
-    """Warn when a target branch drops a module this database has installed.
-
-    The failure mode reuse introduces and a fresh environment cannot have: the
-    database outlives the code. Switching to a branch that never carried module
-    X leaves X installed with nothing to load it from.
-
-    Advisory on purpose. A module can legitimately come from extra-addons or
-    the image, the query needs a reachable database, and neither is worth
-    turning a routine switch into a hard failure — so this reports and only
-    ``strict`` refuses. An unanswerable question yields no warning.
-    """
-    from oduflow.git_ops import tree_modules
-
-    try:
-        dropped = tree_modules(repo_path, "HEAD") - tree_modules(repo_path, target_ref)
-    except FlowError as exc:
-        logger.info("Skipping dropped-module preflight for '%s': %s", env_name, exc)
-        return []
-
-    candidates = tuple(sorted(name for name in dropped if _MODULE_NAME_RE.match(name)))
-    if not candidates:
-        return []
-
-    from oduflow.docker_ops.odoo_ops import _get_module_states
-
-    try:
-        states = _get_module_states(settings, team, env_name, candidates)
-    except Exception as exc:
-        logger.info(
-            "Could not read module states for '%s' during branch switch: %s",
-            env_name,
-            exc,
-        )
-        return []
-
-    installed = [name for name in candidates if states.get(name) == "installed"]
-    if not installed:
-        return []
-    return [
-        "The target branch does not provide these modules, which are installed "
-        f"in the database: {', '.join(installed)}. Odoo will start without their "
-        "code. Uninstall them first, or create a separate environment for this "
-        "branch."
-    ]
 
 
 def switch_environment_branch(
@@ -4262,21 +4494,19 @@ def switch_environment_branch(
 
     1. Fetch the target branch. A branch that was never pushed fails here, with
        nothing mutated.
-    2. Preflight the database against the target tree (see
-       :func:`_dropped_module_warnings`); ``strict`` refuses instead of warning.
-    3. Flip the ``oduflow.git_branch`` label — deliberately *before* the
+    2. Flip the ``oduflow.git_branch`` label — deliberately *before* the
        checkout. Labels are frozen at container creation, so this recreates the
        container; if it fails, the environment is still on the old branch in
        both label and tree. The reverse order would leave a switched tree that
        the next pull silently resets back to the old branch.
-    4. Check out the branch and hand the resulting diff to
+    3. Check out the branch and hand the resulting diff to
        :func:`pull_environment`, so the switch shares one implementation of
        classification, the guardrail, extra-addons mounts and apply.
 
     ``new_name`` optionally renames the environment along the way, so a slot
     whose name still echoes a finished branch can be relabelled instead of
     re-provisioned. It rides on the same container recreate as the label flip
-    (step 3), which keeps the whole switch at one recreate; everything after
+    (step 2), which keeps the whole switch at one recreate; everything after
     that point works under the new name.
     """
     from oduflow.git_ops import checkout_branch, fetch_branch, is_git_repository
@@ -4406,28 +4636,7 @@ def switch_environment_branch(
         )
         return result
 
-    target_sha = fetch_branch(repo_path, branch, cred_file=team.git_credentials_file())
-    warnings = _dropped_module_warnings(settings, team, env_name, repo_path, target_sha)
-    if strict and warnings:
-        blocked_message = (
-            f"Guardrail (strict) blocked the switch to '{branch}': it does not "
-            "carry every module installed in this database. Uninstall them, "
-            "use a separate environment for this branch, or pass "
-            "strict=False to switch anyway."
-        )
-        if rename_to:
-            # "Blocked" has to mean nothing changed — the name included.
-            blocked_message += f" The rename to '{rename_to}' was not applied."
-        return {
-            "action": "blocked",
-            "warnings": warnings,
-            "branch": current_branch,
-            "requested_branch": branch,
-            "branch_switched": False,
-            "env_name": env_name,
-            "changed_files": [],
-            "message": blocked_message,
-        }
+    fetch_branch(repo_path, branch, cred_file=team.git_credentials_file())
 
     label_overrides = {"oduflow.git_branch": branch}
     if extra_override is not None:
@@ -4521,8 +4730,6 @@ def switch_environment_branch(
     result["old_head"] = old_head
     result["new_head"] = new_head
     result["message"] = f"{switched} {tail}".strip()
-    if warnings:
-        result["warnings"] = warnings + list(result.get("warnings") or [])
     return result
 
 
@@ -4746,6 +4953,7 @@ def update_environment(
     *,
     env_override: dict[str, str] | None = None,
     image_override: str | None = None,
+    hostname_override: str | None = None,
     extra_checkout_overrides: dict[str, str] | None = None,
     extra_revision_overrides: dict[str, str] | None = None,
     pull_image: bool = True,
@@ -4766,6 +4974,10 @@ def update_environment(
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
     and image-baked env comes from the image itself.
 
+    ``hostname_override`` changes the short public hostname in Traefik mode.
+    Empty or omitted values keep the current hostname policy. Conflicts are
+    rejected before stopping the current container.
+
     ``rename_to`` additionally moves the environment onto another name. The
     container has to be re-created for that anyway — it carries the name in its
     own name, its labels and its bind mounts — so the rename rides on the same
@@ -4777,6 +4989,14 @@ def update_environment(
     switch_branch refreshes that checkout itself once it is on the target
     branch, and clone-env.sh is too expensive to run twice.
     """
+    requested_hostname = (hostname_override or "").strip()
+    if requested_hostname:
+        requested_hostname = validate_env_hostname(requested_hostname)
+        if settings.routing_mode != "traefik":
+            raise ValueError(
+                "hostname is supported only when routing.mode = 'traefik'."
+            )
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -4841,6 +5061,11 @@ def update_environment(
     else:
         user_env = json.loads(labels.get("oduflow.env_vars", "{}"))
 
+    # Resolve secret references while the old container is still intact — a
+    # dangling reference must fail the update here, not after the removal. The
+    # label keeps the references; only the container env gets real values.
+    resolved_user_env = secret_store.resolve_env_secrets(team, user_env) or {}
+
     # Volumes / bind mounts – parse "host:container:mode" strings
     raw_binds = container.attrs.get("HostConfig", {}).get("Binds") or []
     volumes: dict[str, dict[str, str]] = {}
@@ -4898,9 +5123,28 @@ def update_environment(
                     "locally; leaving the existing environment untouched."
                 ) from exc
 
-    clear_hostname_after_update = _reconcile_environment_hostname_for_update(
-        client, settings, team, env_name, labels
-    )
+    if requested_hostname:
+        hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
+        active_envs, used_hostnames = _environment_hostname_usage(
+            client, settings, team, exclude_env=env_name
+        )
+        # Reserve before stopping: conflicts leave the current container intact.
+        # A simultaneous rename moves this reservation with the environment.
+        labels[ENV_HOSTNAME_LABEL] = allocate_hostname(
+            _hostname_registry_path(team),
+            env_name,
+            0,  # An update does not consume a new environment slot.
+            requested_hostname=requested_hostname,
+            hostname_prefix=hostname_prefix,
+            active_envs=active_envs,
+            used_hostnames=used_hostnames,
+        )
+        labels[ENV_HOSTNAME_SOURCE_LABEL] = HOSTNAME_SOURCE_CUSTOM
+        clear_hostname_after_update = False
+    else:
+        clear_hostname_after_update = _reconcile_environment_hostname_for_update(
+            client, settings, team, env_name, labels
+        )
 
     logger.info(
         "Updating environment – stopping old container",
@@ -5013,7 +5257,7 @@ def update_environment(
         "HOST": settings.shared_db_container,
         "USER": creds["pg_user"],
         "PASSWORD": creds["pg_password"],
-        **user_env,
+        **resolved_user_env,
     }
     labels[settings.image_label] = odoo_image
     if user_env:
@@ -5028,6 +5272,7 @@ def update_environment(
     # traefik→port switch drops them and a renamed router does not linger.
     labels = {k: v for k, v in labels.items() if not k.startswith("traefik.")}
     route_hostname = labels.get(ENV_HOSTNAME_LABEL, "")
+    _assert_env_hostname_available(settings, team, env_name, route_hostname)
     labels.update(build_env_traefik_labels(settings, team, env_name, route_hostname))
     if settings.routing_mode == "traefik":
         # No published port in traefik mode; drop any stale reservation left from
@@ -5119,19 +5364,43 @@ def update_environment(
     repo_path = labels.get("oduflow.local_path") or get_repo_path(
         env_name, team.workspaces_dir
     )
-    _reapply_odoo_conf(settings, team, env_name, new_container)
+    conf_applied = _reapply_odoo_conf(settings, team, env_name, new_container)
 
     # ------------------------------------------------------------------
     # 5. Re-install apt packages and pip requirements
     # ------------------------------------------------------------------
     setup_logs: list[str] = []
+    deps_installed = False
     if install_dependencies:
-        apt_log = _install_apt_packages(new_container, repo_path)
-        if apt_log:
-            setup_logs.append(apt_log)
-        _, pip_log = _install_pip_requirements(new_container, repo_path)
-        if pip_log:
-            setup_logs.append(pip_log)
+        dep_paths = [(repo_path, "/mnt/extra-addons")]
+        try:
+            extra_dict = _normalize_extra_addons(
+                json.loads(labels.get("oduflow.extra_addons", "{}"))
+            )
+        except (json.JSONDecodeError, TypeError):
+            extra_dict = {}
+        if extra_dict:
+            sources = _extra_checkout_sources(new_container, iter(extra_dict))
+            dep_paths.extend(
+                (sources[rn], f"/mnt/extra-addons-{rn}")
+                for rn in extra_dict
+                if sources.get(rn)
+            )
+        _, pip_installed, dep_logs = _install_repo_dependencies(
+            new_container, dep_paths
+        )
+        setup_logs.extend(dep_logs)
+        # A log from any repo means apt or pip did something worth restarting
+        # for. This over-approximates only when a pip step failed outright, and
+        # an extra restart is the harmless side of that trade.
+        deps_installed = pip_installed or bool(dep_logs)
+
+    # The recreated container booted Odoo before the conf was reapplied and the
+    # dependencies reinstalled; one restart picks up both (same order as create).
+    # Skipped when neither landed — nothing inside the fresh container changed
+    # since it started, so a restart would only cost a registry reload.
+    if conf_applied or deps_installed:
+        new_container.restart()
 
     # ------------------------------------------------------------------
     # 5b. Point the agent checkout at the renamed environment
@@ -5157,9 +5426,9 @@ def update_environment(
     # 6. Build URL and return result
     # ------------------------------------------------------------------
     if settings.routing_mode == "traefik":
-        url = f"{settings.public_scheme}://{get_env_hostname(env_name, team.hostname, route_hostname)}"
+        url = f"{settings.public_scheme_for(team)}://{env_hostname(team, env_name, route_hostname)}"
     else:
-        url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
 
     env_db = get_db_name(env_name, team.team_id)
     workspace = get_workspace_path(env_name, team.workspaces_dir)

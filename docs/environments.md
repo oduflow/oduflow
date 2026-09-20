@@ -57,15 +57,61 @@ When creating an environment, Oduflow:
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
 8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
 
-### Private repository authentication
+### Creating an Environment from Production
 
-For private repos, configure credentials first:
+`from_production` builds a development environment out of a [production](production.md)'s real data — database, filestore, and the production's code origin (repo, image, extra addons):
 
 ```bash
-oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git
+oduflow call create_environment '{"branch":"bugfix-invoice","from_production":"erp"}'
 ```
 
-Credentials are stored in the git credential store. Subsequent `create_environment` calls can use the clean URL without credentials.
+It is mutually exclusive with `template_name` and `local_path`: the production supplies all of them.
+
+The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
+
+Refresh the copy when it gets stale — the next `from_production` call then reuses the fresh snapshot:
+
+```bash
+oduflow call save_production_as_template '{"prod_name":"erp","template_name":"prod-erp","overwrite":true}'
+```
+
+The environment is [sanitized](#database-sanitization) on creation like any other template-based environment (`sanitize=false` to skip it — with real production data, do so deliberately). The `prod-<name>` template itself holds **unsanitized** production data; see [Create a Template from Production](templates.md#create-a-template-from-production).
+
+An administrator can disable production→dev copies over MCP per production; publishing a new copy then refuses, while an already published `prod-<name>` template stays usable with `sanitize=true` only. See [Copying production data to dev](production.md#copying-production-data-to-dev).
+
+### Private repository authentication
+
+For private repos, store an access token first:
+
+```bash
+oduflow call setup_repo_auth '{"repo_url": "https://github.com/owner/private-repo.git", "token": "ghp_..."}'
+```
+
+The token is stored in the team's git credential store, keyed by host, so one
+token covers every repository on that host. `create_environment` then uses the
+plain URL without credentials. The legacy inline form
+`oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git`
+still works.
+
+#### SSH deploy key
+
+Alternatively, use SSH instead of a token. Oduflow keeps one SSH deploy key
+per team (an ed25519 keypair generated automatically at server start; the
+dashboard, API and MCP tools expose only the public key). Copy the public key from the
+dashboard's **Credentials** tab (SSH deploy key section) — or fetch it with
+`oduflow call get_ssh_public_key` — and register it with your git hosting as
+a repository **deploy key** (read access is enough) or on a machine-user
+account. After that, SSH repository URLs work everywhere a repository URL is
+accepted:
+
+```bash
+oduflow call create_environment '{"branch": "feature-x", "repo_url": "git@github.com:owner/private-repo.git"}'
+```
+
+Note: GitHub allows a given deploy key on **one** repository only; to reach
+several repositories with the same key, attach it to a machine-user account
+instead. Regenerating the key (dashboard, *Regenerate*) invalidates the old
+one everywhere it was registered.
 
 ### Auto-dependency installation
 
@@ -90,6 +136,13 @@ libfontconfig1
 libxrender1
 xfonts-75dpi
 ```
+
+Both files are also read from every mounted [extra addons](extra-addons.md)
+repository, with the same lookup rules — declare an extra module's
+dependencies in its own repo and they are installed alongside the main
+repo's. A change to any of these files (main repo or extra repo) picked up
+by `pull_and_apply` / `update_production` reinstalls the dependencies and
+restarts the container.
 
 ## Database Sanitization
 
@@ -197,9 +250,20 @@ oduflow call update_environment feature-login "WORKERS=4,LIMIT_TIME_CPU=900" odo
 # Rename it (keeps database, filestore and a pooled or explicit hostname)
 oduflow call update_environment '{"env_name": "feature-login", "new_name": "login"}'
 
+# Change the public Traefik hostname
+oduflow call update_environment '{"env_name": "feature-login", "hostname": "qa"}'
+
 # Tear down everything (container, database, filestore, workspace)
 oduflow call delete_environment feature-login
 ```
+
+The `hostname` parameter of `update_environment` accepts the same short hostname
+as `create_environment`: for team `dev.example.com`, `qa` routes to
+`qa.example.com`. It requires Traefik mode. Empty or omitted values keep the
+current hostname policy. Conflicting addresses are rejected before stopping the
+container. The database and filestore are preserved. You can also edit Hostname
+in the dashboard's **Update environment** dialog; leaving the field unchanged
+preserves the current policy, including name-derived routing during a rename.
 
 ### Reusing an Environment for the Next Branch
 
@@ -271,13 +335,12 @@ to let Oduflow classify the difference:
 oduflow call switch_branch '{"env_name": "dev1", "branch": "feature/next-task", "upgrade": "sale_custom"}'
 ```
 
-Since the database is kept, it can outlive the code that created it. If the
-target branch never carried a module that is installed in this database, the
-response says so, and `strict: true` refuses the switch instead of warning:
-
-```bash
-oduflow call switch_branch '{"env_name": "dev1", "branch": "hotfix/19.0", "strict": true}'
-```
+Since the database is kept, it can outlive the code that created it.
+`switch_branch` deliberately does not inspect installed module state before it
+moves the branch. It applies the requested action and returns any real failure
+from install, upgrade or restart; incompatibilities that only surface at runtime
+remain visible in the normal Odoo logs. `strict: true` still refuses an explicit
+action that looks incomplete for the detected file changes.
 
 Two limits are worth knowing:
 
@@ -387,7 +450,12 @@ Configure (or disable with `0`) in `oduflow.toml`:
 [lifecycle]
 auto_stop_hours = 48    # stop after N hours without work; 0 disables
 auto_delete_hours = 0   # delete N hours after stop; 0 disables (opt-in; DESTRUCTIVE)
+prod_purge_hours = 0    # purge leftovers of deleted productions after N hours; 0 disables
 ```
+
+`prod_purge_hours` concerns [productions](production.md#deleting-a-production),
+not dev environments: it reclaims the database and files that
+`delete_production` keeps on disk.
 
 ## Viewing Logs
 
@@ -407,6 +475,9 @@ oduflow call install_odoo_modules feature-login sale,crm,website
 
 # Upgrade modules (odoo -u)
 oduflow call upgrade_odoo_modules feature-login sale,crm
+
+# Upgrade every installed module (odoo -u all)
+oduflow call upgrade_odoo_modules feature-login all
 ```
 
 ## Running Tests
@@ -432,9 +503,12 @@ This runs `odoo --test-enable --stop-after-init --workers 0 --http-port 8089 --g
 tests"). Because `--no-http` has no effect under `--test-enable` (tests require a live HTTP
 server), the test server's HTTP and gevent ports are moved off the defaults (8069/8072) — already
 held by the running Odoo container — to avoid a port conflict. On Odoo 15.0 and earlier the port
-flag is `--longpolling-port` instead (Odoo 16.0 renamed it to `--gevent-port`); Oduflow detects the
-environment's Odoo version and uses the right one automatically. `--workers 0` makes the run
-deterministic (Odoo recommends single-worker mode for unit tests).
+flag is `--longpolling-port` instead: 16.0 renamed it to `--gevent-port` and kept the old name as a
+deprecated alias, and 18.0 removed that alias for good. Oduflow detects the environment's Odoo
+version — from the image reference, falling back to `odoo --version` inside the container for
+custom images — and uses the right flag automatically; when the version cannot be determined it
+assumes `--gevent-port`. `--workers 0` makes the run deterministic (Odoo recommends single-worker
+mode for unit tests).
 
 ## Smart Pull — Intelligent Change Detection
 

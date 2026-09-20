@@ -30,6 +30,21 @@ GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,63}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
+# odoo.conf [options] keys managed via container env vars (HOST, USER, ...).
+# Stripped from generated confs and refused as per-production overrides; kept
+# in one place so the two sites cannot drift.
+DB_CONN_CONF_KEYS = ("db_host", "db_port", "db_user", "db_password")
+
+
+def validate_extra_repo_name(name: str) -> None:
+    """Reject repo names unsafe as path components (used under workspaces)."""
+    if not _NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid repo name '{name}': only [a-zA-Z0-9_-] allowed, "
+            "no dots or slashes, max 63 chars."
+        )
+
+
 _REPO_LOCKS_GUARD = threading.Lock()
 _REPO_LOCKS: dict[str, threading.RLock] = {}
 
@@ -62,11 +77,7 @@ def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
 def clone_extra_repo(
     team: TeamSettings, name: str, repo_url: str, git_user: str = ""
 ) -> dict[str, Any]:
-    if not _NAME_RE.match(name):
-        raise ValueError(
-            f"Invalid repo name '{name}': only [a-zA-Z0-9_-] allowed, "
-            "no dots or slashes, max 63 chars."
-        )
+    validate_extra_repo_name(name)
 
     target = os.path.join(team.shared_repos_dir, name)
     if os.path.exists(target):
@@ -77,7 +88,7 @@ def clone_extra_repo(
     from oduflow.git_ops import inject_credential_user
 
     clone_url = inject_credential_user(repo_url, git_user)
-    cred_env = git_env_for_team(team.git_credentials_file())
+    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     try:
         # Shallow clone (--depth 1): drop history so large repos like Odoo
@@ -105,6 +116,15 @@ def clone_extra_repo(
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
         if any(kw in stderr for kw in _AUTH_ERROR_KEYWORDS):
+            from oduflow.git_ops import is_ssh_url
+
+            if is_ssh_url(repo_url):
+                raise RepoAuthError(
+                    f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
+                    "The remote uses SSH: register the team deploy key "
+                    "(get_ssh_public_key) with the git host, or use an "
+                    "HTTPS URL with setup_repo_auth."
+                )
             raise RepoAuthError(
                 f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
                 "Use setup_repo_auth to configure credentials first."
@@ -148,11 +168,7 @@ def create_local_repo(
     that the repo has no origin; :func:`fetch_extra_repo` short-circuits on it,
     so worktree creation and pulls never attempt a (non-existent) fetch.
     """
-    if not _NAME_RE.match(name):
-        raise ValueError(
-            f"Invalid repo name '{name}': only [a-zA-Z0-9_-] allowed, "
-            "no dots or slashes, max 63 chars."
-        )
+    validate_extra_repo_name(name)
     if not branch:
         raise ValueError("A branch name is required for a local extra repo.")
 
@@ -469,7 +485,7 @@ def _fetch_extra_repo_unlocked(
         pass  # best-effort; fetch will still run
 
     refs_before = _get_branch_refs(path)
-    cred_env = git_env_for_team(team.git_credentials_file())
+    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     if branch:
         # Targeted single-branch fetch: pull only the requested branch's tip so
@@ -918,6 +934,21 @@ def resolve_main_addons_path(repo_path: str) -> str:
     return "/mnt/extra-addons"
 
 
+def resolve_extra_addons_path(checkout_path: str, repo_name: str) -> str:
+    """Container addons path for an extra-addons checkout.
+
+    The extra-repo counterpart of :func:`resolve_main_addons_path`: the
+    checkout is always mounted at ``/mnt/extra-addons-{name}``, but when the
+    repo keeps its modules in a top-level ``addons/`` directory the addons_path
+    entry must point at that subdirectory of the mount, not the mount root.
+    An unknown/missing host path falls back to the mount root.
+    """
+    base = f"/mnt/extra-addons-{repo_name}"
+    if checkout_path and os.path.isdir(os.path.join(checkout_path, "addons")):
+        return f"{base}/addons"
+    return base
+
+
 # Values Odoo 19's boolean parser accepts for without_demo; anything else in
 # the conf is the pre-19 module-list form and must be normalized for 19+.
 _BOOL_LITERALS = frozenset(("true", "false", "1", "0", "yes", "no", "on", "off"))
@@ -969,8 +1000,11 @@ def generate_odoo_conf(
     # Strip DB connection keys — these are managed via container env vars
     # (HOST, USER, PASSWORD).  If left in the conf file the Odoo entrypoint
     # uses them instead of the env vars, breaking per-environment credentials.
-    for key in ("db_host", "db_port", "db_user", "db_password"):
-        parser.remove_option("options", key)
+    # Case-insensitive: Odoo lowercases option names on read, so a DB_HOST in
+    # the conf would still override the env vars.
+    for key in list(parser.options("options")):
+        if key.lower() in DB_CONN_CONF_KEYS:
+            parser.remove_option("options", key)
 
     with open(output_path, "w") as f:
         parser.write(f)

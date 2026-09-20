@@ -125,7 +125,7 @@ def _deploy_in_background(
     settings: Settings, team: TeamSettings, locks: LockManager, name: str
 ) -> None:
     from oduflow.docker_ops import production_ops
-    from oduflow.server import prod_lock_key
+    from oduflow.locking import prod_lock_key
 
     key = prod_lock_key(team.team_id, name)
     pending_key = f"{team.team_id}/{name}"

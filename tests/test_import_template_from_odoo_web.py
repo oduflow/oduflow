@@ -9,7 +9,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from oduflow.errors import ConflictError
-from oduflow.locking import LockManager
+from oduflow.locking import LockManager, template_lock_key
 from oduflow.settings import Settings, TeamSettings
 from oduflow.web_ui import mount_web_ui
 
@@ -119,11 +119,15 @@ def test_import_from_odoo_surfaces_backend_conflict(tmp_path):
     assert response.json() == {"ok": False, "error": "Template already exists"}
 
 
-def test_import_from_odoo_returns_busy_for_team_operation(tmp_path):
+def test_import_from_odoo_is_not_blocked_by_a_team_operation(tmp_path):
+    """An import builds a brand-new template, so it remounts nothing and has no
+    reason to queue behind a publish or a refresh elsewhere in the team."""
     client, _settings, _team, locks = _client_with_locks(tmp_path)
     locks.acquire_team("1")
     try:
-        with patch("oduflow.web_ui.system_ops.import_from_odoo") as import_from_odoo:
+        with patch(
+            "oduflow.web_ui.system_ops.import_from_odoo", return_value=_result()
+        ) as import_from_odoo:
             response = client.post(
                 "/api/templates/import-from-odoo",
                 json=_payload(),
@@ -131,9 +135,44 @@ def test_import_from_odoo_returns_busy_for_team_operation(tmp_path):
     finally:
         locks.release_team("1")
 
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    import_from_odoo.assert_called_once()
+
+
+def test_import_from_odoo_returns_busy_for_the_same_template(tmp_path):
+    client, _settings, _team, locks = _client_with_locks(tmp_path)
+    locks.acquire_env(template_lock_key("1", "production-copy"))
+    try:
+        with patch("oduflow.web_ui.system_ops.import_from_odoo") as import_from_odoo:
+            response = client.post(
+                "/api/templates/import-from-odoo",
+                json=_payload(),
+            )
+    finally:
+        locks.release_env(template_lock_key("1", "production-copy"))
+
     assert response.status_code == 409
     assert response.json()["ok"] is False
     import_from_odoo.assert_not_called()
+
+
+def test_import_from_odoo_ignores_another_template_s_lock(tmp_path):
+    client, _settings, _team, locks = _client_with_locks(tmp_path)
+    locks.acquire_env(template_lock_key("1", "unrelated"))
+    try:
+        with patch(
+            "oduflow.web_ui.system_ops.import_from_odoo", return_value=_result()
+        ) as import_from_odoo:
+            response = client.post(
+                "/api/templates/import-from-odoo",
+                json=_payload(),
+            )
+    finally:
+        locks.release_env(template_lock_key("1", "unrelated"))
+
+    assert response.status_code == 200
+    import_from_odoo.assert_called_once()
 
 
 def test_import_from_odoo_does_not_block_dashboard_reads(tmp_path):

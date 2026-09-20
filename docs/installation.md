@@ -88,12 +88,33 @@ After installation, the `oduflow` command is available globally.
 ### From source
 
 ```bash
-git clone https://github.com/oduist/oduflow.git
+git clone https://github.com/oduflow/oduflow.git
 cd oduflow
 uv sync          # or: python -m venv .venv && pip install -e .
 ```
 
 ### Upgrade
+
+Click the version next to **Oduflow** in the dashboard header to see whether a
+newer release exists. The dialog compares the installed version with the latest
+published release, names it, and links to its release notes. The check runs only
+on that click — Oduflow never polls GitHub on its own.
+
+The one-command path chains everything below and restarts the service:
+
+```bash
+oduflow self-update
+```
+
+It detects how Oduflow was installed and uses that installer (`uv tool upgrade`
+or `pip install --upgrade`), then reconciles bundled files and restarts the
+systemd service. It exits with an error inside a Docker container — a package
+upgraded inside the container would revert on the next recreate; pull the new
+image and recreate the container instead (see [Docker](docker.md)). Source
+checkouts, editable installs, and `uvx` runs are likewise refused with an
+explanation. See [CLI reference](cli.md#system-commands) for details.
+
+The manual steps, equivalent to what `self-update` runs:
 
 ```bash
 uv tool upgrade oduflow
@@ -153,8 +174,12 @@ If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
 `~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`, and
-`[team.1].ui_password`; the generated MCP token and Web Dashboard password are
-also printed in the startup log.
+`[team.1].ui_password`. The file is created with mode `0600` and the generated
+secrets are never printed to the log — read them from the config file:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ### Minimal configuration
 
@@ -168,7 +193,7 @@ hostname = "localhost"
 ```toml
 # ── Server ────────────────────────────────────────────
 [server]
-host = "0.0.0.0"           # HTTP server bind address
+bind = "0.0.0.0"           # HTTP listener address; legacy "host" is accepted
 port = 8000                 # HTTP server port
 allow_local_path = true     # trusted single-user local development; disable on hosted/multi-user servers
 # allow_insecure_http = false  # serve /mcp over HTTP with NO auth (only behind your own proxy)
@@ -179,26 +204,15 @@ allow_local_path = true     # trusted single-user local development; disable on 
 [routing]
 mode = "port"               # "port" (direct host port) | "traefik" (reverse proxy with auto-HTTPS)
 # acme_email = "admin@example.com"  # required when mode = "traefik" and tls = true
-# tls = true                # traefik only. false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)
+# tls = true                # traefik only. {} = HTTPS without ACME (self-signed by default); false = plain HTTP on :80, no ACME (behind a Cloudflare tunnel / TLS proxy)
 # public_scheme = "https"   # scheme of the URLs Oduflow hands out. Default: https (traefik) / http (port).
-                            # Set "http" with tls = false when nothing terminates TLS in front
-# hostname = "localhost"    # port mode only: default host for teams without their own
-                            # (traefik requires each team to set its own hostname)
+                            # Set "http" with tls = false when nothing terminates TLS in front.
+                            # Overridable per team ([team.X] public_scheme) for mixed deployments
 
 # ── Extra routes (Traefik only) ───────────────────────
 # [route.legacy-api]
 # host = "api.example.com"
 # url = "http://127.0.0.1:3000"
-
-# ── OAuth (optional) ──────────────────────────────────
-# In traefik mode the self-hosted OAuth 2.1 Authorization Server is enabled
-# automatically and runs on each team's own hostname (issuer derived per-request),
-# so oauth_base_url is NOT needed. Set it only to pin a fixed issuer, or in port
-# mode: the public URL of this instance (for Claude.ai and other OAuth MCP
-# clients). OAuth client_id = team_<id> (non-secret); auth_token = client_secret.
-# OAuth mints independent expiring access tokens; auth_token also works as Bearer.
-[oauth]
-# oauth_base_url = "https://oduflow.example.com"
 
 # ── Database ──────────────────────────────────────────
 [database]
@@ -215,13 +229,14 @@ overlay_threshold_mb = 50            # template filestore size threshold (MB) �
 [lifecycle]
 auto_stop_hours = 48        # auto-stop environments idle for N hours (no MCP/dashboard work); 0 disables
 auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 disables (opt-in; DESTRUCTIVE, protected envs exempt)
+prod_purge_hours = 0        # purge DB/files kept by a production deletion after N hours; 0 disables (opt-in; DESTRUCTIVE)
 
 # ── Coding agent (optional) ───────────────────────────
 # One agent container per team (Claude Code + OpenAI Codex + OpenCode), driven
 # from the dashboard (Agent Chat / Agent CLI). Opt-in per team via
 # agent_enabled below.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.1"
 # claude_model = ""         # optional Claude model override; empty = CLI default
 # codex_model = ""          # optional Codex model override; empty = CLI default
 # opencode_model = ""       # optional provider/model override; empty = OpenCode default
@@ -229,7 +244,7 @@ auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 di
 # ── Production hosting (optional) ─────────────────────
 # [production]
 # enabled = true            # opt in; requires routing.mode = "traefik"
-# postgres_image = ""       # empty = [database].image
+# postgres_image = ""       # managed PG15 with CA; inherits custom [database].image
 # walg_version = ""         # empty = Oduflow's pinned WAL-G version
 # workers_cap = 8           # upper bound for auto-tuned Odoo workers
 
@@ -244,13 +259,17 @@ auto_delete_hours = 0       # auto-delete environments stopped for N hours; 0 di
 # basebackup_time = "03:30"
 # keep = ["30:180", "7:30", "1:7"]
 # walg_keep_full = 7
+# upload_threads = 16
 
 # ── Teams ─────────────────────────────────────────────
 # Each team gets isolated workspaces, templates, credentials, and services.
 # At least one [team.*] section is required.
 
 [team.1]
-hostname = "localhost"               # port mode: http://{hostname}:{port}, traefik mode: https://{slug}.{hostname}
+hostname = "localhost"               # required and unique; OAuth issuer host for this team
+                                     # port mode: http://{hostname}:{port}, traefik: https://{slug}.{hostname}
+# base_domain = "demo.example.com"   # team DNS zone (traefik mode): envs/services live at {name}.{base_domain},
+                                     # hostname defaults to oduflow.{base_domain}, productions default into the zone
 environment_slots = 20               # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                   # maximum managed auxiliary services; 0 = unlimited
@@ -282,7 +301,8 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 
 | Key | Default | Description |
 |---|---|---|
-| `[server].host` | `0.0.0.0` | HTTP server bind address |
+| `[server].bind` | `0.0.0.0` | HTTP server listener address. The legacy key `[server].host` remains accepted with a deprecation warning; if both are present they must have the same value |
+| `[server].host` | *(legacy)* | Deprecated alias for `[server].bind` |
 | `[server].port` | `8000` | HTTP server port |
 | `[server].allow_local_path` | `true` | Allow trusted local-development live-mounts that bind a host checkout read/write. Set `false` on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required |
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
@@ -295,15 +315,8 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 |---|---|---|
 | `[routing].mode` | `port` | `port` — direct host port mapping; `traefik` — reverse proxy with auto-HTTPS |
 | `[routing].acme_email` | *(empty)* | Let's Encrypt email for TLS certificates. Required when `mode = "traefik"` and `tls = true` |
-| `[routing].tls` | `true` | Traefik only. `true`: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). `false`: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay `https://` either way unless `public_scheme` says otherwise |
-| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 |
-| `[routing].hostname` | `localhost` | Default hostname for teams that don't set their own `hostname` |
-
-### OAuth settings
-
-| Key | Default | Description |
-|---|---|---|
-| `[oauth].oauth_base_url` | *(empty)* | Public URL of this Oduflow instance used as the OAuth issuer. Oduflow runs a self-hosted OAuth 2.1 Authorization Server (exposes `/.well-known/oauth-authorization-server`, `/authorize`, `/token`) so OAuth-based MCP clients like Claude.ai can connect; the OAuth `client_id` is the non-secret `team_<id>` (e.g. `team_1`) and each team's `auth_token` is the `client_secret`. OAuth mints independent expiring access tokens; `auth_token` also works directly as a Bearer token. **In traefik mode this is enabled automatically and the issuer is derived per-request from each team's own hostname — leave empty.** Set it to pin a fixed issuer, or in port mode. Empty + port mode = plain Bearer-token auth only. See [Authentication & Security](security.md) |
+| `[routing].tls` | `true` | Traefik only. `true`: Traefik terminates TLS (:443, HTTP→HTTPS redirect, Let's Encrypt). `{}`: HTTPS on :443 with the default certificate (self-signed unless supplied), redirect, no ACME/email requirement. `false`: plain HTTP on :80 only, no redirect/ACME — for a TLS-terminating upstream (e.g. a Cloudflare tunnel). Public URLs stay `https://` either way unless `public_scheme` says otherwise |
+| `[routing].public_scheme` | *(derived)* | Scheme of every URL Oduflow hands out (dashboard links, MCP endpoints, share links, reported environment/service URLs). Derived by default: `https` in traefik mode, `http` in port mode. Set to `http` alongside `tls = false` when **nothing** terminates TLS in front — this also stops Traefik trusting inbound `X-Forwarded-*` on :80 (unless a per-team override still resolves to `https`). Overridable per team with `[team.X] public_scheme` |
 
 ### Database settings
 
@@ -321,6 +334,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
+| `[lifecycle].prod_purge_hours` | `0` | Purge the database and workspace kept by `delete_production` N hours after the deletion (tombstoned leftovers only; a re-created production is never purged). Default `0` = **disabled** — leftovers are kept forever; `oduflow cleanup --purge-deleted-productions --force` purges them immediately |
 
 ### Agent settings
 
@@ -328,7 +342,7 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 
 | Key | Default | Description |
 |---|---|---|
-| `[agent].image` | `oduist/oduflow-coder:0.3.0` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
+| `[agent].image` | `oduist/oduflow-coder:0.3.1` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
 | `[agent].claude_model` | *(empty)* | Optional Claude model override for the agent; empty = CLI default |
 | `[agent].codex_model` | *(empty)* | Optional Codex model override for the agent; empty = CLI default |
 | `[agent].opencode_model` | *(empty)* | Optional OpenCode model override in `provider/model` format; empty = OpenCode default |
@@ -336,15 +350,28 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 ### Production settings
 
 Production hosting is opt-in and is documented in detail in
-[Production Hosting](production.md). Production routes and the dashboard tab
-are registered only when `[production].enabled = true`.
+[Production Hosting](production.md). Production dashboard REST routes and the dashboard tab
+are registered only when `[production].enabled = true`. The `/production` MCP
+surface remains discoverable with a production credential and reports disabled
+hosting at call time.
 
 | Key | Default | Description |
 |---|---|---|
 | `[production].enabled` | `false` | Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing |
-| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty inherits `[database].image` |
+| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty uses `oduist/oduflow-postgres:15-bookworm-1` with CA certificates when `[database].image` is the default `postgres:15`; custom database images/majors are inherited |
 | `[production].walg_version` | *(empty)* | WAL-G release override. Empty uses the version pinned by Oduflow |
+| `[production].odumcp_repo_url` | `https://github.com/oduflow/oduflow-client-addons.git` | Fallback source for automatic OduMCP installation when production repositories do not provide the addon |
+| `[production].odumcp_ref` | `19.0` | Connector branch or tag; must contain Odoo 19 addon version 19.0.1.1.0 or later with managed-key support |
 | `[production].workers_cap` | `8` | Upper bound for automatically calculated Odoo workers; must be at least `1` |
+| `[production].wal` | *(defaults below)* | Nested `[production.wal]` table for cluster-wide WAL timeouts and disk protection; active whenever production hosting is enabled |
+| `[production.wal].upload_timeout` | `120` | Seconds per WAL upload before termination; forced kill follows after 5 seconds |
+| `[production.wal].warn_after` | `120` | Seconds without archive progress while a queue exists before warning |
+| `[production.wal].stall_after` | `300` | Seconds without progress before error; must be at least `warn_after` |
+| `[production.wal].stop_free_gb` | `2` | GiB available to postgres, excluding root reserve, at which production is stopped |
+| `[production.wal].resume_free_gb` | `4` | Required GiB before recovery/release; must exceed `stop_free_gb` |
+| `[production.wal].stop_within` | `300` | Stop early if measured disk consumption predicts reaching the reserve within this many seconds |
+| `[production.wal].warn_queue_gb` | `2` | Warn when unarchived WAL reaches this size in GiB; recovery release requires a smaller queue |
+| `[production.wal].stop_queue_gb` | `8` | Stop production at this queued WAL size in GiB, even with ample free disk; must exceed `warn_queue_gb` |
 
 ### Backup settings
 
@@ -363,6 +390,7 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | `[backup].basebackup_time` | `03:30` | Daily WAL-G base-backup time in server-local `HH:MM` |
 | `[backup].keep` | `["30:180", "7:30", "1:7"]` | Snapshot retention tiers as `interval_days:age_days` pairs |
 | `[backup].walg_keep_full` | `7` | Number of WAL-G full base backups to retain; must be at least `1` |
+| `[backup].upload_threads` | `16` | Concurrent filestore chunk uploads per snapshot; `1` uploads sequentially. A running snapshot buffers up to `max(64 MiB, threads x 4 MiB)` of chunk data in memory, so lower it on small-RAM hosts |
 
 ### Per-team settings
 
@@ -370,10 +398,12 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 
 | Key | Default | Description |
 |---|---|---|
-| `hostname` | `localhost` | Team hostname. In port mode: `http://{hostname}:{port}`. In traefik mode: `https://{slug}.{hostname}` |
+| `hostname` | *(required)* | Unique team hostname and host-relative OAuth identity. In port mode environment URLs use `http://{hostname}:{port}`; in traefik mode they use `https://{slug}.{hostname}`. Behind Cloudflare Tunnel, publish this same hostname and use split DNS for direct LAN access when needed |
+| `base_domain` | *(empty — legacy layout)* | The team's DNS zone (traefik mode only), e.g. `demo.example.com`. When set, environments and services get hostnames directly under it (`feature.demo.example.com`), `hostname` defaults to `oduflow.{base_domain}` (the dashboard), and production domains must be the zone apex or a subdomain of it (the apex is the default for the team's first production; client-owned domains go in a production's `extra_domains`). The zone is exclusive: another team's hostname or base_domain may not live inside it. Requires `*.{base_domain}` DNS pointing at this server. Existing environments move into the zone on their next update |
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
+| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token |
 | `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
 | `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
 | `port_range` | `[50000, 50100]` | Port range for Odoo containers `[start, end)` — supports up to 100 concurrent environments |
@@ -381,6 +411,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
 | `db_quota_gb` | `50` | Combined size cap for the team's environment and template PostgreSQL databases. `0` disables the check |
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
+| `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` or `tls = {}` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
 | `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
 

@@ -7,6 +7,11 @@ chunk references are copied over; only new/changed files enter the CDC
 stream. Deduplication is lock-free: a chunk is uploaded only if its
 content-derived ID does not already exist in the storage (existence check),
 with the previous revision's chunk IDs cached to skip even those checks.
+Per-chunk storage round-trips (existence check + put) run on a bounded
+thread pool (``upload_threads``) so object-store latency is not paid
+serially per chunk; the plaintext queued for those uploads is capped by a
+byte budget (see ``_ChunkSink``), so a large first snapshot cannot grow the
+server's resident memory without bound.
 
 Packing: changed files are concatenated into one continuous stream (small
 files share chunks). The stream is cut (``Chunker.flush``) whenever an
@@ -21,7 +26,10 @@ import json
 import logging
 import os
 import stat as stat_module
+import threading
+import time
 from bisect import bisect_right
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +52,17 @@ logger = logging.getLogger("oduflow")
 
 _READ_BLOCK = 1024 * 1024
 
+# Floor for the in-flight plaintext budget (see _ChunkSink). Chunk count
+# alone is a weak bound — chunks range from min_size to max_size — so the
+# producer blocks on queued *bytes* instead. The effective budget scales
+# with upload_threads, so raising the knob still keeps every worker fed.
+_INFLIGHT_BYTES_FLOOR = 64 * 1024 * 1024
+
+# Finished futures are reaped from the pending list once it grows past this
+# many entries, so the list stays O(upload_threads) rather than growing with
+# the number of chunks in the revision (~125k for a 500 GB first snapshot).
+_FUTURE_REAP_THRESHOLD = 512
+
 
 @dataclass
 class BackupResult:
@@ -55,19 +74,76 @@ class BackupResult:
     new_chunks: int
     uploaded_bytes: int
     unchanged_files: int
+    scan_seconds: float = 0.0
+    # Aggregate wall time spent inside storage exists+encode+put, summed
+    # across upload threads (can exceed elapsed_seconds when parallel).
+    upload_seconds: float = 0.0
+    elapsed_seconds: float = 0.0
+
+
+class _ByteBudget:
+    """Blocks the producer once in-flight plaintext exceeds *limit* bytes.
+
+    A chunk larger than the whole budget is still admitted when nothing
+    else is in flight, so the producer can never deadlock on it.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, limit)
+        self._used = 0
+        self._cond = threading.Condition()
+
+    def acquire(self, size: int) -> None:
+        with self._cond:
+            while self._used and self._used + size > self._limit:
+                self._cond.wait()
+            self._used += size
+
+    def release(self, size: int) -> None:
+        with self._cond:
+            self._used -= size
+            self._cond.notify_all()
 
 
 @dataclass
 class _ChunkSink:
-    """Accumulates the revision's chunk sequence and uploads new chunks."""
+    """Accumulates the revision's chunk sequence and uploads new chunks.
+
+    With ``upload_threads > 1`` the per-chunk storage round-trips
+    (existence check + compress + put) run on a bounded thread pool; the
+    revision's chunk *sequence* (``hashes``/``lengths``) and the dedup set
+    stay producer-ordered because they are appended before submission.
+    Two bounds keep memory flat over a long backup: a semaphore of
+    ``2 × threads`` caps how many chunks are queued, and a byte budget of
+    ``max(64 MiB, threads × avg_size)`` caps how much plaintext they hold;
+    finished futures are reaped as they accumulate. Callers must ``wait()``
+    (which re-raises the first upload error) before committing the revision
+    file, and ``close()`` when done.
+    """
 
     storage: Storage
     config: StoreConfig
     known_ids: set[str]
+    upload_threads: int = 1
     hashes: list[str] = field(default_factory=list)
     lengths: list[int] = field(default_factory=list)
     new_chunks: int = 0
     uploaded_bytes: int = 0
+    upload_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+        self._error: BaseException | None = None
+        self._futures: list[Future[None]] = []
+        self._executor: ThreadPoolExecutor | None = None
+        if self.upload_threads > 1:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self.upload_threads, thread_name_prefix="chunk-upload"
+            )
+            self._slots = threading.BoundedSemaphore(self.upload_threads * 2)
+            self._budget = _ByteBudget(
+                max(_INFLIGHT_BYTES_FLOOR, self.upload_threads * self.config.avg_size)
+            )
 
     def emit_new(self, plaintext: bytes) -> None:
         chunk_hash = self.config.chunk_hash(plaintext)
@@ -78,12 +154,67 @@ class _ChunkSink:
             return
         self.known_ids.add(chunk_id)
         key = chunk_key(chunk_id)
-        if self.storage.exists(key):
+        if self._executor is None:
+            self._store(key, plaintext)
             return
-        blob = encode_chunk(plaintext)
-        self.storage.put(key, blob)
-        self.new_chunks += 1
-        self.uploaded_bytes += len(blob)
+        if self._error is not None:
+            self.wait()  # fail fast: re-raises the recorded error
+        if len(self._futures) >= _FUTURE_REAP_THRESHOLD:
+            self._reap()
+        self._slots.acquire()
+        self._budget.acquire(len(plaintext))
+        self._futures.append(
+            self._executor.submit(self._store_in_thread, key, plaintext)
+        )
+
+    def _store_in_thread(self, key: str, plaintext: bytes) -> None:
+        try:
+            self._store(key, plaintext)
+        except BaseException as exc:
+            with self._lock:
+                if self._error is None:
+                    self._error = exc
+            raise
+        finally:
+            self._budget.release(len(plaintext))
+            self._slots.release()
+
+    def _store(self, key: str, plaintext: bytes) -> None:
+        start = time.monotonic()
+        try:
+            if self.storage.exists(key):
+                return
+            blob = encode_chunk(plaintext)
+            self.storage.put(key, blob)
+            with self._lock:
+                self.new_chunks += 1
+                self.uploaded_bytes += len(blob)
+        finally:
+            with self._lock:
+                self.upload_seconds += time.monotonic() - start
+
+    def _reap(self) -> None:
+        """Drop finished futures; re-raise the first upload error.
+
+        Called from the producer thread only, so ``_futures`` needs no lock.
+        """
+        pending: list[Future[None]] = []
+        for future in self._futures:
+            if future.done():
+                future.result()  # re-raises a failed upload
+            else:
+                pending.append(future)
+        self._futures = pending
+
+    def wait(self) -> None:
+        """Drain in-flight uploads; re-raise the first upload error."""
+        futures, self._futures = self._futures, []
+        for future in futures:
+            future.result()
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
 
     def emit_preserved(self, chunk_hash: str, length: int) -> None:
         # The chunk provably exists (it is referenced by the previous
@@ -266,15 +397,20 @@ def backup(
     snapshot_id: str,
     *,
     prev_revision: int | None = None,
+    upload_threads: int = 16,
 ) -> BackupResult:
     """Create a new revision of *source_dir* under *snapshot_id*.
 
     Caller contract: backups and prunes against one storage are serialized
     (Oduflow runs them under the team's `prod-backups:` lock / a single
-    scheduler thread).
+    scheduler thread). *upload_threads* bounds concurrent chunk uploads
+    (1 = sequential); it also sets the in-flight plaintext budget
+    (``max(64 MiB, threads × avg chunk size)``), which is the memory this
+    call adds to the server process.
     """
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"source_dir does not exist: {source_dir}")
+    started = time.monotonic()
     config = ensure_config(storage)
 
     revisions = list_revisions(storage, snapshot_id)
@@ -304,7 +440,12 @@ def backup(
             )
             prev_files = {}
 
-    sink = _ChunkSink(storage=storage, config=config, known_ids=known_ids)
+    sink = _ChunkSink(
+        storage=storage,
+        config=config,
+        known_ids=known_ids,
+        upload_threads=max(1, upload_threads),
+    )
     stream = _Stream(
         Chunker(
             config.seed,
@@ -326,85 +467,100 @@ def backup(
     file_count = 0
     unchanged_count = 0
 
-    for rel, st, kind in _scan_tree(source_dir):
-        full = os.path.join(source_dir, rel)
-        if kind == "dir":
-            entries.append(
-                {"path": rel, "kind": "dir", "mode": stat_module.S_IMODE(st.st_mode)}
-            )
-            continue
-        if kind == "link":
-            try:
-                target = os.readlink(full)
-            except OSError:
+    scan_started = time.monotonic()
+    tree = _scan_tree(source_dir)
+    scan_seconds = time.monotonic() - scan_started
+
+    try:
+        for rel, st, kind in tree:
+            full = os.path.join(source_dir, rel)
+            if kind == "dir":
+                entries.append(
+                    {
+                        "path": rel,
+                        "kind": "dir",
+                        "mode": stat_module.S_IMODE(st.st_mode),
+                    }
+                )
                 continue
-            entries.append({"path": rel, "kind": "link", "target": target})
-            continue
+            if kind == "link":
+                try:
+                    target = os.readlink(full)
+                except OSError:
+                    continue
+                entries.append({"path": rel, "kind": "link", "target": target})
+                continue
 
-        entry: dict[str, Any] = {
-            "path": rel,
-            "kind": "file",
-            "size": st.st_size,
-            "mtime_ns": st.st_mtime_ns,
-            "mode": stat_module.S_IMODE(st.st_mode),
-        }
-        file_count += 1
-        total_bytes += st.st_size
+            entry: dict[str, Any] = {
+                "path": rel,
+                "kind": "file",
+                "size": st.st_size,
+                "mtime_ns": st.st_mtime_ns,
+                "mode": stat_module.S_IMODE(st.st_mode),
+            }
+            file_count += 1
+            total_bytes += st.st_size
 
-        prev_entry = prev_files.get(rel)
-        unchanged = (
-            prev_entry is not None
-            and prev_entry.get("size") == st.st_size
-            and prev_entry.get("mtime_ns") == st.st_mtime_ns
-            and "sc" in prev_entry
-        )
-        if unchanged and st.st_size > 0:
-            assert prev_entry is not None
-            # Splice the previous revision's chunks in: cut the new stream
-            # first so chunks never mix new bytes and preserved refs.
-            stream.flush()
-            sc, ec = int(prev_entry["sc"]), int(prev_entry["ec"])
-            share_first = (
-                preserved_tail is not None
-                and preserved_tail[0] == sc
-                and preserved_tail[1] == len(sink.hashes) - 1
+            prev_entry = prev_files.get(rel)
+            unchanged = (
+                prev_entry is not None
+                and prev_entry.get("size") == st.st_size
+                and prev_entry.get("mtime_ns") == st.st_mtime_ns
+                and "sc" in prev_entry
             )
-            if share_first:
-                new_sc = len(sink.hashes) - 1
-                emit_from = sc + 1
-            else:
-                new_sc = len(sink.hashes)
-                emit_from = sc
-            for idx in range(emit_from, ec + 1):
-                sink.emit_preserved(prev_hashes[idx], prev_lengths[idx])
-            new_ec = new_sc + (ec - sc)
-            preserved_tail = (ec, new_ec)
-            entry.update(
-                {
-                    "sc": new_sc,
-                    "so": prev_entry["so"],
-                    "ec": new_ec,
-                    "eo": prev_entry["eo"],
-                }
-            )
-            entries.append(entry)
-            unchanged_count += 1
-            continue
-        if st.st_size == 0:
-            entry.update({"sc": 0, "so": 0, "ec": 0, "eo": 0})
-            entries.append(entry)
-            if unchanged:
+            if unchanged and st.st_size > 0:
+                assert prev_entry is not None
+                # Splice the previous revision's chunks in: cut the new stream
+                # first so chunks never mix new bytes and preserved refs.
+                stream.flush()
+                sc, ec = int(prev_entry["sc"]), int(prev_entry["ec"])
+                share_first = (
+                    preserved_tail is not None
+                    and preserved_tail[0] == sc
+                    and preserved_tail[1] == len(sink.hashes) - 1
+                )
+                if share_first:
+                    new_sc = len(sink.hashes) - 1
+                    emit_from = sc + 1
+                else:
+                    new_sc = len(sink.hashes)
+                    emit_from = sc
+                for idx in range(emit_from, ec + 1):
+                    sink.emit_preserved(prev_hashes[idx], prev_lengths[idx])
+                new_ec = new_sc + (ec - sc)
+                preserved_tail = (ec, new_ec)
+                entry.update(
+                    {
+                        "sc": new_sc,
+                        "so": prev_entry["so"],
+                        "ec": new_ec,
+                        "eo": prev_entry["eo"],
+                    }
+                )
+                entries.append(entry)
                 unchanged_count += 1
-            continue
+                continue
+            if st.st_size == 0:
+                entry.update({"sc": 0, "so": 0, "ec": 0, "eo": 0})
+                entries.append(entry)
+                if unchanged:
+                    unchanged_count += 1
+                continue
 
-        entries.append(entry)
-        stream.add_file(entry, full)
+            entries.append(entry)
+            stream.add_file(entry, full)
 
-    stream.flush()
+        stream.flush()
 
-    files_meta = _write_meta_sequence(dump_json_lines(entries), config, sink)
-    hashes_meta = _write_meta_sequence(dump_json_lines(sink.hashes), config, sink)
-    lengths_meta = _write_meta_sequence(dump_json_lines(sink.lengths), config, sink)
+        files_meta = _write_meta_sequence(dump_json_lines(entries), config, sink)
+        hashes_meta = _write_meta_sequence(dump_json_lines(sink.hashes), config, sink)
+        lengths_meta = _write_meta_sequence(dump_json_lines(sink.lengths), config, sink)
+
+        # All chunk uploads must have succeeded before the revision file
+        # (written below) makes them reachable.
+        sink.wait()
+    finally:
+        sink.close()
 
     revision = (revisions[-1] + 1) if revisions else 1
     meta = {
@@ -425,9 +581,11 @@ def backup(
         revision_key(snapshot_id, revision),
         json.dumps(meta, indent=2).encode("utf-8"),
     )
+    elapsed = time.monotonic() - started
     logger.info(
         "chunkstore backup %s/%d: %d files (%d unchanged), %d chunks "
-        "(%d new, %d bytes uploaded)",
+        "(%d new, %d bytes uploaded) in %.1fs "
+        "(scan %.1fs, storage %.1fs across %d threads)",
         snapshot_id,
         revision,
         file_count,
@@ -435,6 +593,10 @@ def backup(
         len(sink.hashes),
         sink.new_chunks,
         sink.uploaded_bytes,
+        elapsed,
+        scan_seconds,
+        sink.upload_seconds,
+        max(1, upload_threads),
     )
     return BackupResult(
         snapshot_id=snapshot_id,
@@ -445,4 +607,7 @@ def backup(
         new_chunks=sink.new_chunks,
         uploaded_bytes=sink.uploaded_bytes,
         unchanged_files=unchanged_count,
+        scan_seconds=round(scan_seconds, 3),
+        upload_seconds=round(sink.upload_seconds, 3),
+        elapsed_seconds=round(elapsed, 3),
     )

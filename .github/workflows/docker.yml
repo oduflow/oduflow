@@ -19,6 +19,12 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
+      - name: Verify production PostgreSQL image is published
+        run: |
+          image="$(sed -n 's/^DEFAULT_PROD_POSTGRES_IMAGE = "\([^"]*\)"/\1/p' src/oduflow/settings.py)"
+          test -n "$image"
+          docker manifest inspect "$image" >/dev/null
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

@@ -3,31 +3,50 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import posixpath
 import re
 from typing import Any
 
 import docker
+from oduflow import secret_store
 from oduflow.docker_ops import service_presets, volume_ops
 from oduflow.docker_ops.client import (
     docker_error_detail,
     docker_operation_error,
     get_client,
 )
+from oduflow.domains import (
+    assert_public_hostname_free,
+    service_hostname,
+    service_parent_domain,
+)
 from oduflow.errors import (
     ConflictError,
     FlowError,
     NotFoundError,
     PrerequisiteNotMetError,
+    ProtectedError,
 )
+from oduflow.fsutil import atomic_write_private_text
 from oduflow.locking import keyed_mutex, service_registry_key
-from oduflow.naming import get_service_container_name
+from oduflow.naming import get_service_container_name, validate_domain
+from oduflow.service_runtime import (
+    RUNTIME_LABEL,
+    inspect_runtime,
+    normalize_runtime,
+    stop_kwargs,
+)
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
 _TRAEFIK_ACME_MOUNT_PATH = "/etc/traefik"
 _HTTP_ROUTES_LABEL = "oduflow.http_routes"
+# KEY -> "secret:<name>" for env vars whose configured value is a secret
+# reference. Lives on the container (not only in the preset) so read surfaces
+# keep showing the reference even if the preset is deleted.
+_SECRET_ENV_LABEL = "oduflow.secret_env"
 
 _SYSTEM_ENV_KEYS = {
     "PATH",
@@ -234,14 +253,17 @@ def _resolve_service_volume_binds(
     """Resolve user mounts and add the implicit Traefik ACME mount.
 
     The ACME store is platform-owned rather than part of the user-supplied
-    service configuration. Every service created while Oduflow terminates TLS
-    through Traefik sees the exact store at ``/etc/traefik`` read-only.
+    service configuration. Every service created while the ACME resolver is
+    declared (acme_enabled) sees the exact store at ``/etc/traefik``
+    read-only. The store may not contain ``acme.json`` yet — it appears only
+    after the first certificate issuance — so services must tolerate its
+    absence.
     """
     volume_binds: dict[str, dict[str, str]] = volume_ops.resolve_volume_binds(
         team, volumes or []
     )
 
-    if settings.routing_mode != "traefik" or not settings.routing_tls:
+    if not settings.acme_enabled:
         return volume_binds
 
     for mount in volumes or []:
@@ -273,7 +295,7 @@ def _resolve_service_volume_binds(
 
 def _needs_traefik_acme_mount(settings: Settings, container: Any) -> bool:
     """Whether a Traefik TLS service is missing the implicit ACME mount."""
-    if settings.routing_mode != "traefik" or not settings.routing_tls:
+    if not settings.acme_enabled:
         return False
 
     for mount in container.attrs.get("Mounts", []):
@@ -344,11 +366,26 @@ def create_service(
     privileged: bool = False,
     routes: list[dict[str, object]] | None = None,
     command: list[str] | None = None,
+    runtime: dict[str, Any] | None = None,
     stack_labels: dict[str, str] | None = None,
+    _resolved_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    runtime = normalize_runtime(runtime)
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
     routes = normalize_http_routes(routes)
     _validate_service_exposure(settings, port, routes)
+    # A dangling secret reference must abort before any Docker resource is
+    # touched. Only the container environment receives the resolved values;
+    # the preset and the label below keep the references. update_service
+    # passes the mapping it already resolved (_resolved_env) so its
+    # validate-then-recreate window cannot see a concurrently deleted secret
+    # after the old container is gone.
+    resolved_env = (
+        _resolved_env
+        if _resolved_env is not None
+        else secret_store.resolve_env_secrets(team, env_vars)
+    )
+    secret_env = secret_store.secret_env_refs(env_vars)
     client = get_client()
 
     # Check for existing container
@@ -386,6 +423,10 @@ def create_service(
         "oduflow.service": name,
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    if secret_env:
+        labels[_SECRET_ENV_LABEL] = json.dumps(secret_env, sort_keys=True)
+    if runtime:
+        labels[RUNTIME_LABEL] = json.dumps(runtime, sort_keys=True)
     if stack_labels:
         labels.update(stack_labels)
 
@@ -397,6 +438,10 @@ def create_service(
         "restart_policy": {"Name": "unless-stopped"},
     }
 
+    # stop_timeout is not a containers.run() argument in docker-py; it is
+    # honored at stop/restart/replacement time via stop_kwargs().
+    run_kwargs.update({k: v for k, v in runtime.items() if k != "stop_timeout"})
+
     if host_mode:
         run_kwargs["network_mode"] = "host"
         labels["oduflow.host_mode"] = "true"
@@ -404,10 +449,30 @@ def create_service(
         run_kwargs["network"] = team_network
 
     if settings.routing_mode == "traefik":
-        if not hostname:
-            hostname = f"{name}.{team.hostname}"
-        elif "." not in hostname:
-            hostname = f"{hostname}.{team.hostname}"
+        # Short names attach to the team zone (base_domain) when configured,
+        # else legacy-nest under the team hostname; a dotted value is a full
+        # FQDN used as-is. Either way the final name must be free in the
+        # global Host() namespace.
+        hostname = service_hostname(team, name, hostname)
+        # The hostname lands verbatim in a Traefik `Host(...)` router rule.
+        # Without this a tenant value like `foo`) || Host(`victim.example.com`
+        # would inject a second rule and hijack another team's hostname. Reject
+        # anything that is not a plain FQDN (same policy as production domains).
+        # update_service recreates via create_service, so this also guards
+        # hostname_override.
+        hostname = validate_domain(hostname)
+        assert_public_hostname_free(
+            settings,
+            hostname,
+            own_team=team.team_id,
+            # With `routes` no catch-all router is created, only
+            # Host() && PathPrefix() ones, so a path-routed service may share
+            # the team dashboard host — that is the documented way to publish
+            # a URL prefix next to the dashboard.
+            allow_own_team_host=bool(routes),
+            exclude_service=name,
+            purpose=f"the hostname of service '{name}'",
+        )
         labels["traefik.enable"] = "true"
         if routes:
             labels[_HTTP_ROUTES_LABEL] = json.dumps(
@@ -423,7 +488,9 @@ def create_service(
                 labels[f"{router_prefix}.service"] = route_name
                 if settings.routing_tls:
                     labels[f"{router_prefix}.entrypoints"] = "websecure"
-                    labels[f"{router_prefix}.tls.certresolver"] = "letsencrypt"
+                    labels[f"{router_prefix}.tls"] = "true"
+                    if settings.uses_acme:
+                        labels[f"{router_prefix}.tls.certresolver"] = "letsencrypt"
                 else:
                     labels[f"{router_prefix}.entrypoints"] = "web"
                 if host_mode:
@@ -450,13 +517,15 @@ def create_service(
                 labels[f"traefik.http.routers.{container_name}.entrypoints"] = (
                     "websecure"
                 )
-                labels[f"traefik.http.routers.{container_name}.tls.certresolver"] = (
-                    "letsencrypt"
-                )
+                labels[f"traefik.http.routers.{container_name}.tls"] = "true"
+                if settings.uses_acme:
+                    labels[
+                        f"traefik.http.routers.{container_name}.tls.certresolver"
+                    ] = "letsencrypt"
             else:
                 # Upstream terminates TLS (e.g. Cloudflare tunnel): plain HTTP on
                 # the web entrypoint. The public URL below keeps the upstream's
-                # scheme (settings.public_scheme), not this entrypoint's.
+                # scheme (settings.public_scheme_for(team)), not this entrypoint's.
                 labels[f"traefik.http.routers.{container_name}.entrypoints"] = "web"
             if host_mode:
                 labels[
@@ -467,14 +536,14 @@ def create_service(
                     f"traefik.http.services.{container_name}.loadbalancer.server.port"
                 ] = str(port)
                 labels["traefik.docker.network"] = team_network
-        url = f"{settings.public_scheme}://{hostname}"
+        url = f"{settings.public_scheme_for(team)}://{hostname}"
     else:
         if not host_mode:
             run_kwargs["ports"] = {f"{port}/tcp": port}
-        url = f"{settings.public_scheme}://{team.hostname}:{port}"
+        url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"
 
-    if env_vars:
-        run_kwargs["environment"] = env_vars
+    if resolved_env:
+        run_kwargs["environment"] = resolved_env
 
     if command:
         run_kwargs["command"] = list(command)
@@ -527,13 +596,14 @@ def create_service(
             port,
             hostname=hostname,
             env_vars=env_vars,
-            base_hostname=team.hostname,
+            base_hostname=service_parent_domain(team),
             host_mode=host_mode,
             volumes=volumes,
             cap_add=cap_add,
             privileged=privileged,
             routes=routes,
             command=command,
+            runtime=runtime,
         )
     except Exception:
         logger.warning("Failed to save service preset for %s", name, exc_info=True)
@@ -545,7 +615,7 @@ def create_service(
         "url": url,
         "host_mode": host_mode,
         "command": list(command or []),
-        "routes": _routes_with_urls(routes, hostname, settings.public_scheme),
+        "routes": _routes_with_urls(routes, hostname, settings.public_scheme_for(team)),
     }
 
 
@@ -574,6 +644,75 @@ def _remove_stale_service_container(client: Any, container_name: str) -> None:
         )
 
 
+def _protection_path(team: TeamSettings) -> str:
+    return os.path.join(team.data_dir, "protected_services.json")
+
+
+def _load_protected_services(team: TeamSettings) -> set[str]:
+    path = _protection_path(team)
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Corrupt protected-services file at %s", path)
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {entry for entry in data if isinstance(entry, str)}
+
+
+def is_service_protected(team: TeamSettings, name: str) -> bool:
+    return name in _load_protected_services(team)
+
+
+def assert_service_not_protected(team: TeamSettings, name: str, action: str) -> None:
+    if is_service_protected(team, name):
+        raise ProtectedError(
+            f"Service '{name}' is protected. Unprotect it in the Oduflow "
+            f"dashboard before {action}."
+        )
+
+
+def set_service_protected(
+    settings: Settings, team: TeamSettings, name: str, protected: bool
+) -> dict[str, Any]:
+    """Toggle protection for a service. Protecting requires a live container.
+
+    The flag lives outside the container (a per-team JSON registry) so it
+    survives Docker-level drift; it blocks delete, update and restore.
+    """
+    if protected:
+        # Only existing services can be protected; unprotect always works so
+        # a stale entry can be cleared even after the container is gone.
+        client = get_client()
+        container_name = get_service_container_name(name, settings.prefix, team.team_id)
+        try:
+            container = client.containers.get(container_name)
+        except docker.errors.NotFound:
+            raise NotFoundError(f"Service '{name}' not found")
+        if not container.labels.get("oduflow.service"):
+            raise NotFoundError(f"Service '{name}' not found")
+    with keyed_mutex(service_registry_key(team.team_id)):
+        names = _load_protected_services(team)
+        if protected:
+            names.add(name)
+        else:
+            names.discard(name)
+        os.makedirs(team.data_dir, exist_ok=True)
+        atomic_write_private_text(
+            _protection_path(team), json.dumps(sorted(names), indent=2) + "\n"
+        )
+    logger.info(
+        "Service '%s' for team '%s' %s",
+        name,
+        team.team_id,
+        "protected" if protected else "unprotected",
+    )
+    return {"name": name, "protected": protected}
+
+
 def restart_service(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, str]:
@@ -592,7 +731,7 @@ def restart_service(
     except Exception:
         pass
     try:
-        container.restart()
+        container.restart(**stop_kwargs(container))
     except docker.errors.DockerException as exc:
         _raise_service_start_error(
             name, port, exc, retry_with="update_service with a new port"
@@ -605,7 +744,76 @@ def restart_service(
     }
 
 
-def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[str, str]:
+def backfill_service_preset(
+    settings: Settings, team: TeamSettings, name: str, container: Any
+) -> bool:
+    """Write a preset for *name* if it has none; True when one exists after.
+
+    Every service created or updated through Oduflow already carries a preset
+    that is kept current; this covers the legacy ones created before presets
+    existed. Run from migration 0008 at startup, so every reader — restore,
+    the edit dialog, delete — sees the preset store as the single source of
+    truth. A service whose image or port cannot be reconstructed from the
+    container is skipped with a warning: a preset ``restore_service`` would
+    reject (image "" or port 0) is worse than none at all.
+    """
+    try:
+        service_presets.get_preset(team, name)
+        return True
+    except NotFoundError:
+        pass
+    except Exception:
+        logger.warning("Failed to read service preset for %s", name, exc_info=True)
+        return False
+
+    try:
+        config = _effective_service_config(settings, team, name, container)
+        image = _container_image_reference(container)
+        if not image:
+            logger.warning(
+                "Skipping preset backfill for %s: cannot determine its image", name
+            )
+            return False
+        if config["port"] is None and not config["routes"]:
+            logger.warning(
+                "Skipping preset backfill for %s: cannot determine its port", name
+            )
+            return False
+        service_presets.save_preset(
+            team,
+            name,
+            image,
+            config["port"],
+            hostname=config["hostname"],
+            env_vars=config["env_vars"],
+            base_hostname=service_parent_domain(team),
+            host_mode=config["host_mode"],
+            volumes=config["volumes"],
+            cap_add=config["cap_add"],
+            privileged=config["privileged"],
+            routes=config["routes"],
+            command=config["command"],
+            runtime=inspect_runtime(container),
+        )
+        return True
+    except Exception:
+        logger.warning("Failed to save service preset for %s", name, exc_info=True)
+        return False
+
+
+def delete_service(
+    settings: Settings, team: TeamSettings, name: str, save_preset: bool = True
+) -> dict[str, Any]:
+    """Remove a service container, keeping or dropping its saved preset.
+
+    With ``save_preset`` the configuration stays behind for ``restore_service``
+    (the default, and what deleting a service has always done); without it the
+    preset goes away with the container, so the service leaves nothing behind.
+    ``preset_kept`` in the result reports what is actually on disk afterwards,
+    not the intent: a legacy service migration 0008 could not backfill has no
+    preset to keep, and a failed preset delete leaves one behind.
+    """
+    assert_service_not_protected(team, name, "deleting")
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
 
@@ -614,13 +822,36 @@ def delete_service(settings: Settings, team: TeamSettings, name: str) -> dict[st
     except docker.errors.NotFound:
         raise NotFoundError(f"Service '{name}' not found")
 
-    container.stop()
+    container.stop(**stop_kwargs(container))
     container.remove(v=True)
     logger.info("Deleted service container %s", container_name)
+
+    if save_preset:
+        try:
+            service_presets.get_preset(team, name)
+            preset_kept = True
+        except Exception:
+            # No preset (a legacy service migration 0008 could not backfill),
+            # or the store is unreadable: either way restore cannot be promised.
+            preset_kept = False
+    else:
+        try:
+            service_presets.delete_preset(team, name)
+            preset_kept = False
+        except NotFoundError:
+            preset_kept = False
+        except Exception:
+            # The container is already gone; a stale preset is worth a warning,
+            # not an error that makes the delete itself look failed.
+            logger.warning(
+                "Failed to delete service preset for %s", name, exc_info=True
+            )
+            preset_kept = True
 
     return {
         "name": name,
         "container_name": container_name,
+        "preset_kept": preset_kept,
     }
 
 
@@ -638,15 +869,77 @@ def _traefik_label_by_suffix(labels: dict[str, str], suffix: str) -> str:
     return ""
 
 
-def _container_env_vars(container: Any) -> dict[str, str]:
-    """Env of a service container without the keys every image sets anyway."""
+def _secret_env_refs(container: Any) -> dict[str, str]:
+    """KEY -> "secret:<name>" recorded on the container at creation time."""
+    raw = (container.labels or {}).get(_SECRET_ENV_LABEL, "")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _raw_container_env(container: Any) -> dict[str, str]:
+    """Config.Env of a container as a dict — the values it actually runs with."""
     env_vars: dict[str, str] = {}
     for entry in container.attrs.get("Config", {}).get("Env", []) or []:
         if "=" in entry:
             key, value = entry.split("=", 1)
-            if key not in _SYSTEM_ENV_KEYS:
-                env_vars[key] = value
+            env_vars[key] = value
     return env_vars
+
+
+def _image_env_vars(container: Any) -> dict[str, str]:
+    """Env baked into the container's image, minus the keys every image sets.
+
+    Empty when the image record is no longer available (e.g. after a prune).
+    """
+    try:
+        raw_image_env = container.image.attrs.get("Config", {}).get("Env", [])
+    except Exception:
+        raw_image_env = []
+    image_env: dict[str, str] = {}
+    if isinstance(raw_image_env, list):
+        for entry in raw_image_env:
+            if isinstance(entry, str) and "=" in entry:
+                key, value = entry.split("=", 1)
+                if key not in _SYSTEM_ENV_KEYS:
+                    image_env[key] = value
+    return image_env
+
+
+def _container_env_vars(container: Any) -> dict[str, str]:
+    """Env of a service container without the keys every image sets anyway.
+
+    Keys configured as secret references come back as the reference, not the
+    resolved value the container actually runs with: every read surface built
+    on container inspection (get_service_info, list_services, the legacy
+    no-preset update path) must never expose a secret value.
+    """
+    env_vars = {
+        key: value
+        for key, value in _raw_container_env(container).items()
+        if key not in _SYSTEM_ENV_KEYS
+    }
+    for key, ref in _secret_env_refs(container).items():
+        if key in env_vars:
+            env_vars[key] = ref
+    return env_vars
+
+
+def _container_image_reference(container: Any) -> str | None:
+    """Keep the image reference used at creation, including immutable digests."""
+    reference = container.attrs.get("Config", {}).get("Image")
+    if isinstance(reference, str) and reference:
+        return reference
+    try:
+        return container.image.tags[0] if container.image.tags else None
+    except Exception:
+        # The image record can be gone (docker rmi); the caller decides what
+        # an unknown image means instead of a raw SDK error surfacing.
+        return None
 
 
 def _describe_service_container(
@@ -658,22 +951,11 @@ def _describe_service_container(
     """
     svc_name = container.labels.get("oduflow.service")
     container_name = container.name
-    image = container.image.tags[0] if container.image.tags else "unknown"
+    image = _container_image_reference(container) or "unknown"
     status = container.status
 
     env_vars = _container_env_vars(container)
-
-    image_env_vars: dict[str, str] = {}
-    try:
-        raw_image_env = container.image.attrs.get("Config", {}).get("Env", [])
-    except Exception:
-        raw_image_env = []
-    if isinstance(raw_image_env, list):
-        for entry in raw_image_env:
-            if isinstance(entry, str) and "=" in entry:
-                key, value = entry.split("=", 1)
-                if key not in _SYSTEM_ENV_KEYS:
-                    image_env_vars[key] = value
+    image_env_vars = _image_env_vars(container)
 
     port_num: int | None = None
     url: str | None = None
@@ -686,7 +968,7 @@ def _describe_service_container(
         match = re.search(r"Host\(`([^`]+)`\)", rule_value)
         if match:
             hostname = match.group(1)
-            url = f"{settings.public_scheme}://{hostname}"
+            url = f"{settings.public_scheme_for(team)}://{hostname}"
 
         if routes:
             port_num = None
@@ -713,7 +995,7 @@ def _describe_service_container(
             except Exception:
                 pass
             if port_num:
-                url = f"{settings.public_scheme}://{team.hostname}:{port_num}"
+                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port_num}"
         else:
             ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
             if ports_dict:
@@ -725,7 +1007,7 @@ def _describe_service_container(
                         for mapping in mappings:
                             host_port = mapping.get("HostPort")
                             if host_port:
-                                url = f"{settings.public_scheme}://{team.hostname}:{host_port}"
+                                url = f"{settings.public_scheme_for(team)}://{team.hostname}:{host_port}"
                                 break
                     break  # only process first port entry
 
@@ -762,13 +1044,14 @@ def _describe_service_container(
         "port": port_num,
         "hostname": hostname,
         "url": url,
-        "routes": _routes_with_urls(routes, hostname, settings.public_scheme),
+        "routes": _routes_with_urls(routes, hostname, settings.public_scheme_for(team)),
         "env_vars": env_vars,
         "image_env_vars": image_env_vars,
         "host_mode": is_host_mode,
         "volumes": svc_volumes,
         "cap_add": svc_cap_add,
         "privileged": svc_privileged,
+        "runtime": inspect_runtime(container),
         "command": svc_command,
         "image_command": svc_image_command,
         "created_at": container.labels.get("oduflow.created_at", "")
@@ -791,11 +1074,14 @@ def list_services(settings: Settings, team: TeamSettings) -> list[dict[str, Any]
         },
     )
 
+    protected_names = _load_protected_services(team)
     result = []
     for container in containers:
         if not container.labels.get("oduflow.service"):
             continue
-        result.append(_describe_service_container(settings, team, container))
+        info = _describe_service_container(settings, team, container)
+        info["protected"] = info["name"] in protected_names
+        result.append(info)
 
     return result
 
@@ -822,6 +1108,7 @@ def get_service_info(
 
     info = _describe_service_container(settings, team, container)
 
+    info["protected"] = is_service_protected(team, name)
     info["image_digest"] = container.image.id
 
     state = container.attrs.get("State", {}) or {}
@@ -841,87 +1128,27 @@ def get_service_info(
     return info
 
 
-def get_service_env_vars(
-    settings: Settings, team: TeamSettings, name: str
-) -> dict[str, str]:
-    """Return the env vars ``update_service`` keeps when nothing overrides them.
-
-    The saved preset is authoritative and is what an update reuses, so it is
-    also what an edit dialog must prefill; the container's own environment
-    additionally carries the image defaults, which are not part of the service
-    configuration. Only legacy services created before presets existed fall
-    back to inspecting the container — a preset that exists but cannot be read
-    raises instead, because prefilling from the container in that case would
-    offer the image defaults for editing and bake them into the preset on the
-    first save.
-    """
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
-
-    if not container.labels.get("oduflow.service"):
-        raise NotFoundError(f"Service '{name}' not found")
-
-    try:
-        preset = service_presets.get_preset(team, name)
-    except NotFoundError:
-        return _container_env_vars(container)
-
-    return dict(preset.get("env_vars") or {})
-
-
-def update_service(
-    settings: Settings,
-    team: TeamSettings,
-    name: str,
-    *,
-    env_override: dict[str, str] | None = None,
-    image_override: str | None = None,
-    port_override: int | None = None,
-    hostname_override: str | None = None,
-    host_mode_override: bool | None = None,
-    volume_override: list[dict[str, str]] | None = None,
-    cap_add_override: list[str] | None = None,
-    privileged_override: bool | None = None,
-    routes_override: list[dict[str, object]] | None = None,
-    command_override: list[str] | None = None,
-    stack_labels: dict[str, str] | None = None,
+def _effective_service_config(
+    settings: Settings, team: TeamSettings, name: str, container: Any
 ) -> dict[str, Any]:
-    """Pull the latest image for a service and re-create it with the same settings.
+    """The configuration ``update_service`` keeps when nothing overrides it.
 
-    Optional overrides replace the corresponding setting from the saved preset.
-    When any override differs from the current config the container is recreated
-    even if the image digest has not changed.
+    The saved preset is authoritative; only legacy services created before
+    presets existed fall back to inspecting the container. ``update_service``
+    and the dashboard's edit dialog read through this one function, so the form
+    can never offer a different "current" value than the update would keep.
+
+    A preset that exists but cannot be read raises instead of falling back:
+    the container inspection is a reconstruction, and silently substituting it
+    would let the next update or dialog submit overwrite the real preset with
+    guessed values.
     """
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
-
-    # Capture current image name
-    old_image = container.image.tags[0] if container.image.tags else None
-    if not old_image:
-        # Fall back to Config.Image (may be a digest reference)
-        old_image = container.attrs.get("Config", {}).get("Image")
-    if not old_image:
-        raise NotFoundError(
-            f"Cannot determine image for service '{name}'. "
-            "The container has no image tag or Config.Image."
-        )
-
     # Read service options from saved preset (authoritative source).
     # Fall back to container inspection for legacy services without a preset.
     preset = None
     try:
         preset = service_presets.get_preset(team, name)
-    except Exception:
+    except NotFoundError:
         pass
 
     # Declared once so the preset and legacy-fallback branches agree on a type.
@@ -939,8 +1166,16 @@ def update_service(
         routes = normalize_http_routes(preset.get("routes"))
         command = list(preset.get("command") or [])
     else:
-        # Legacy fallback: extract from running container
-        env_vars = _container_env_vars(container)
+        # Legacy fallback: extract from running container. Values the image
+        # itself sets are not service configuration — freezing them into a
+        # preset would override a newer image's own defaults later — so only
+        # the vars that differ from the image's are kept.
+        image_env = _image_env_vars(container)
+        env_vars = {
+            key: value
+            for key, value in _container_env_vars(container).items()
+            if image_env.get(key) != value
+        }
 
         is_host_mode = container.labels.get("oduflow.host_mode") == "true"
         routes = _routes_from_labels(container.labels)
@@ -1007,6 +1242,106 @@ def update_service(
 
         env_vars = env_vars or None
 
+    return {
+        "port": port,
+        "hostname": hostname,
+        "env_vars": env_vars,
+        "host_mode": is_host_mode,
+        "volumes": old_volumes,
+        "cap_add": cap_add,
+        "privileged": privileged,
+        "routes": routes,
+        "command": command,
+    }
+
+
+def get_service_config(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, Any]:
+    """Return the current settings of a service in ``update_service`` terms.
+
+    This is what an edit dialog must prefill: every value is the one an update
+    would preserve, and env values configured as team secrets come back as
+    their ``secret:<name>`` reference, never as the resolved value.
+    """
+    client = get_client()
+    container_name = get_service_container_name(name, settings.prefix, team.team_id)
+
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Service '{name}' not found")
+
+    if not container.labels.get("oduflow.service"):
+        raise NotFoundError(f"Service '{name}' not found")
+
+    config = _effective_service_config(settings, team, name, container)
+    config["name"] = name
+    config["image"] = _container_image_reference(container) or ""
+    return config
+
+
+def update_service(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    *,
+    env_override: dict[str, str] | None = None,
+    image_override: str | None = None,
+    port_override: int | None = None,
+    hostname_override: str | None = None,
+    host_mode_override: bool | None = None,
+    volume_override: list[dict[str, str]] | None = None,
+    cap_add_override: list[str] | None = None,
+    privileged_override: bool | None = None,
+    routes_override: list[dict[str, object]] | None = None,
+    command_override: list[str] | None = None,
+    runtime_override: dict[str, Any] | None = None,
+    stack_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Pull the latest image for a service and re-create it with the same settings.
+
+    Optional overrides replace the corresponding setting from the saved preset.
+    When any override differs from the current config the container is recreated
+    even if the image digest has not changed. A rotated team secret also counts
+    as a config change: the resolved value of every ``secret:<name>`` reference
+    is compared against what the container actually runs with, so the
+    documented rotation flow (replace the value, then update) takes effect.
+    """
+    # An update recreates the container, so protection covers it like delete.
+    assert_service_not_protected(team, name, "updating")
+    client = get_client()
+    container_name = get_service_container_name(name, settings.prefix, team.team_id)
+
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Service '{name}' not found")
+
+    # Capture current image name
+    old_image = _container_image_reference(container)
+    if not old_image:
+        raise NotFoundError(
+            f"Cannot determine image for service '{name}'. "
+            "The container has no image tag or Config.Image."
+        )
+
+    runtime = inspect_runtime(container)
+    candidate_runtime = (
+        normalize_runtime(runtime_override) if runtime_override is not None else runtime
+    )
+
+    current = _effective_service_config(settings, team, name, container)
+    port: int | None = current["port"]
+    hostname: str | None = current["hostname"]
+    env_vars: dict[str, str] | None = current["env_vars"]
+    is_host_mode: bool = current["host_mode"]
+    old_volumes: list[dict[str, str]] | None = current["volumes"]
+    cap_add: list[str] | None = current["cap_add"]
+    privileged: bool = current["privileged"]
+    routes: list[dict[str, object]] | None = current["routes"]
+    command: list[str] = current["command"]
+
     if (
         port is None
         and not routes
@@ -1019,7 +1354,10 @@ def update_service(
     # Services created before the implicit ACME mount was introduced are
     # brought forward by an ordinary update, even when the image digest and
     # user-controlled settings are otherwise unchanged.
-    config_changed = _needs_traefik_acme_mount(settings, container)
+    config_changed = (
+        _needs_traefik_acme_mount(settings, container) or candidate_runtime != runtime
+    )
+    runtime = candidate_runtime
     persisted_stack_labels = {
         key: value
         for key, value in container.labels.items()
@@ -1081,6 +1419,13 @@ def update_service(
 
     _validate_service_exposure(settings, port, routes)
 
+    # Validate the candidate hostname before any destructive action.
+    # create_service re-validates, but it only runs after the old container is
+    # stopped and removed below — a rejected hostname there would leave the
+    # service deleted instead of unchanged. Same resolution as create_service.
+    if settings.routing_mode == "traefik":
+        validate_domain(service_hostname(team, name, hostname))
+
     # Determine the image to pull (override or current)
     target_image = image_override if image_override else old_image
     if image_override and image_override != old_image:
@@ -1090,6 +1435,25 @@ def update_service(
     # destructive action. In particular, a missing/reserved volume override
     # must not stop and remove the currently running service.
     _resolve_service_volume_binds(settings, team, old_volumes or None, client=client)
+
+    # Resolve secret references once, up front: a dangling reference must fail
+    # before the (possibly large) image pull and before the destructive
+    # stop/remove below, and the same resolved mapping is handed to
+    # create_service so a secret deleted concurrently with this update cannot
+    # fail the re-create after the old container is already gone.
+    resolved_env = secret_store.resolve_env_secrets(team, env_vars)
+
+    # A rotated secret value changes neither the reference-form config nor the
+    # image digest, so the documented rotation flow (replace the value in the
+    # dashboard, then update_service) hinges on this check: compare the values
+    # the container actually runs with against the freshly resolved ones for
+    # every reference-configured key.
+    if not config_changed:
+        live_env = _raw_container_env(container)
+        for key in secret_store.secret_env_refs(env_vars):
+            if live_env.get(key) != (resolved_env or {}).get(key):
+                config_changed = True
+                break
 
     # Capture old image digest
     old_digest = container.image.id  # e.g. sha256:abc...
@@ -1106,12 +1470,10 @@ def update_service(
         logger.info("No changes for service %s: %s", name, new_digest[:19])
         # Compute URL for return
         if settings.routing_mode == "traefik":
-            h = hostname or f"{name}.{team.hostname}"
-            if "." not in h:
-                h = f"{h}.{team.hostname}"
-            url = f"{settings.public_scheme}://{h}"
+            h = service_hostname(team, name, hostname)
+            url = f"{settings.public_scheme_for(team)}://{h}"
         else:
-            url = f"{settings.public_scheme}://{team.hostname}:{port}"
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port}"
         return {
             "name": name,
             "container_name": container_name,
@@ -1126,7 +1488,7 @@ def update_service(
             "routes": _routes_with_urls(
                 routes,
                 h if settings.routing_mode == "traefik" else None,
-                settings.public_scheme,
+                settings.public_scheme_for(team),
             ),
         }
 
@@ -1146,7 +1508,7 @@ def update_service(
     # reopen the very race it exists to close.
     with keyed_mutex(service_registry_key(team.team_id)):
         # Stop and remove the old container
-        container.stop()
+        container.stop(**stop_kwargs(container))
         container.remove(v=True)
         logger.info("Removed old container %s for update", container_name)
 
@@ -1165,7 +1527,9 @@ def update_service(
             privileged=privileged,
             routes=routes,
             command=command or None,
+            runtime=runtime,
             stack_labels=effective_stack_labels,
+            _resolved_env=resolved_env,
         )
 
     result["image_updated"] = image_updated

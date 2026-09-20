@@ -1,3 +1,4 @@
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,7 +12,11 @@ from oduflow.settings import BackupSettings, Settings, TeamSettings
 def _clear_cache():
     health._cache["result"] = None
     health._cache["at"] = 0.0
-    yield
+    with patch(
+        "oduflow.wal_monitor.status",
+        return_value={"status": "ok", "detail": "WAL healthy"},
+    ):
+        yield
     health._cache["result"] = None
 
 
@@ -46,6 +51,37 @@ def _client(running: dict[str, bool]):
 
 
 class TestCollectHealth:
+    def test_walg_tls_error_degrades_even_when_host_s3_works(self, settings):
+        settings = replace(
+            settings, backup=BackupSettings(bucket="b", access_key="a", secret_key="s")
+        )
+        client = _client(
+            {"oduflow-db": True, "oduflow-prod-db": True, "oduflow-traefik": True}
+        )
+        with (
+            patch("oduflow.docker_ops.client.get_client", return_value=client),
+            patch("oduflow.s3_client.check_s3", return_value={"ok": True}),
+            patch(
+                "oduflow.wal_monitor.status",
+                return_value={"status": "error", "detail": "TLS verification failed"},
+            ) as probe,
+        ):
+            result = health.collect_health(settings, force=True)
+        probe.assert_called_with(settings)
+        assert result["checks"]["s3"]["status"] == "ok"
+        assert result["checks"]["walg"]["status"] == "error"
+        assert result["ok"] is False
+
+    @pytest.mark.parametrize("pg_status", ["off", "error"])
+    def test_no_walg_probe_when_pg_unavailable(self, settings, pg_status):
+        settings = replace(
+            settings, backup=BackupSettings(bucket="b", access_key="a", secret_key="s")
+        )
+        with patch("oduflow.walg.storage_status") as probe:
+            result = health._check_walg(MagicMock(), settings, {"status": pg_status})
+        assert result["status"] == pg_status
+        probe.assert_not_called()
+
     def test_all_ok(self, settings):
         client = _client(
             {"oduflow-db": True, "oduflow-prod-db": True, "oduflow-traefik": True}

@@ -169,7 +169,7 @@ def _run_snapshot_job(
     fire: datetime.datetime,
 ) -> None:
     from oduflow import backup_ops
-    from oduflow.server import prod_lock_key
+    from oduflow.locking import prod_lock_key
 
     key = prod_lock_key(team.team_id, name)
     backups_key = prod_backups_lock_key(team.team_id)
@@ -350,6 +350,10 @@ def _run_prune_job(
 def tick(settings: Settings, locks: LockManager) -> None:
     """One scheduler pass. Cheap when nothing is due."""
     if not settings.prod_enabled:
+        return
+    from oduflow.wal_monitor import state as wal_guard_state
+
+    if wal_guard_state(settings).get("latched"):
         return
     backup = settings.backup
     if backup is None:

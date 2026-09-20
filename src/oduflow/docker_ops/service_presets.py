@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 from oduflow.errors import NotFoundError
+from oduflow.fsutil import atomic_write_private_json
 from oduflow.settings import TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -46,12 +47,10 @@ def _save_presets(team: TeamSettings, data: dict[str, Any]) -> None:
     """
     path = _presets_path(team)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    # Presets carry service env vars, which historically include API keys, so
+    # they get the same owner-only mode as the credential stores (migration
+    # 0006 brings pre-existing files forward).
+    atomic_write_private_json(path, data, sort_keys=False)
 
 
 def save_preset(
@@ -68,6 +67,7 @@ def save_preset(
     privileged: bool = False,
     routes: list[dict[str, object]] | None = None,
     command: list[str] | None = None,
+    runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Save (or overwrite) a single service preset and return it."""
     short_hostname = hostname or ""
@@ -91,6 +91,8 @@ def save_preset(
         preset["privileged"] = True
     if routes:
         preset["routes"] = routes
+    if runtime:
+        preset["runtime"] = runtime
     if command:
         preset["command"] = list(command)
     data = _load_presets(team)

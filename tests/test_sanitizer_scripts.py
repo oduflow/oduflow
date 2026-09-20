@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import docker as _docker
 from oduflow import sanitizer
+from oduflow.env_credentials import MissingCredentialsError
 
 
 def _settings() -> MagicMock:
@@ -55,6 +56,15 @@ def _run(tmp_path, scripts_dir, *, container=None, label="system"):
     )
 
 
+# The environment's scoped, non-superuser PostgreSQL role. Sanitize scripts run
+# as this role, never as settings.db_user (the shared-cluster superuser).
+_CREDS = {"pg_user": "u1", "pg_password": "s3cret"}
+
+
+def _patch_creds():
+    return patch.object(sanitizer, "load_credentials", return_value=dict(_CREDS))
+
+
 class TestMissingDirectory:
     def test_absent_directory_is_a_no_op(self, tmp_path):
         with patch.object(sanitizer, "_exec_sql") as exec_sql:
@@ -80,12 +90,14 @@ class TestSqlScripts:
         scripts.mkdir()
         (scripts / "10_wipe.sql").write_text("DELETE FROM res_partner;\n")
 
-        with patch.object(sanitizer, "_exec_sql") as exec_sql:
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
             logs = _run(tmp_path, scripts)
 
         assert exec_sql.call_count == 1
         assert exec_sql.call_args.args[2] == "DELETE FROM res_partner;"
         assert exec_sql.call_args.kwargs["db"] == "oduflow_1_main"
+        # Runs as the scoped role, never the shared-cluster superuser (P-H9).
+        assert exec_sql.call_args.kwargs["user"] == "u1"
         assert logs == ["[SANITIZE:system] Executed 10_wipe.sql"]
 
     def test_scripts_run_in_alphabetical_order(self, tmp_path):
@@ -94,7 +106,7 @@ class TestSqlScripts:
         for name in ("30_c.sql", "10_a.sql", "20_b.sql"):
             (scripts / name).write_text(f"SELECT '{name}';")
 
-        with patch.object(sanitizer, "_exec_sql") as exec_sql:
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
             logs = _run(tmp_path, scripts)
 
         executed = [call.args[2] for call in exec_sql.call_args_list]
@@ -109,12 +121,35 @@ class TestSqlScripts:
             "[SANITIZE:system] Executed 30_c.sql",
         ]
 
+    def test_psql_metacommands_are_rejected(self, tmp_path):
+        # The scoped role confines SQL, but psql interprets `\! cmd` client-side
+        # and runs a shell inside the shared PostgreSQL container — a script
+        # with any backslash-metacommand line must be skipped, not executed.
+        scripts = tmp_path / "sanitize"
+        scripts.mkdir()
+        (scripts / "10_evil.sql").write_text("\\! id\n")
+        (scripts / "20_mixed.sql").write_text("DELETE FROM res_partner;\n  \\! id\n")
+        (scripts / "30_ok.sql").write_text("DELETE FROM res_users_log;\n")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = _run(tmp_path, scripts)
+
+        assert exec_sql.call_count == 1
+        assert exec_sql.call_args.args[2] == "DELETE FROM res_users_log;"
+        assert logs == [
+            "[SANITIZE:system] WARNING: 10_evil.sql skipped: psql backslash "
+            "metacommands are not allowed in sanitize scripts",
+            "[SANITIZE:system] WARNING: 20_mixed.sql skipped: psql backslash "
+            "metacommands are not allowed in sanitize scripts",
+            "[SANITIZE:system] Executed 30_ok.sql",
+        ]
+
     def test_blank_script_is_skipped_without_a_log_line(self, tmp_path):
         scripts = tmp_path / "sanitize"
         scripts.mkdir()
         (scripts / "empty.sql").write_text("   \n\n")
 
-        with patch.object(sanitizer, "_exec_sql") as exec_sql:
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
             logs = _run(tmp_path, scripts)
 
         exec_sql.assert_not_called()
@@ -126,12 +161,13 @@ class TestSqlScripts:
         (scripts / "10_bad.sql").write_text("BOOM;")
         (scripts / "20_good.sql").write_text("SELECT 1;")
 
-        def _exec(client, settings, sql, db=None):
+        def _exec(client, settings, sql, db=None, user=None):
             if "BOOM" in sql:
                 raise RuntimeError("syntax error")
 
         with (
             caplog.at_level(logging.WARNING, logger="oduflow"),
+            _patch_creds(),
             patch.object(sanitizer, "_exec_sql", side_effect=_exec),
         ):
             logs = _run(tmp_path, scripts)
@@ -229,7 +265,7 @@ class TestPyScripts:
         (scripts / "10_first.sql").write_text("SELECT 1;")
         (scripts / "20_second.py").write_text("pass")
 
-        with patch.object(sanitizer, "_exec_sql") as exec_sql:
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
             logs = _run(tmp_path, scripts, container=None)
 
         assert exec_sql.call_count == 1
@@ -269,10 +305,56 @@ class TestPyScripts:
         scripts.mkdir()
         (scripts / "a.sql").write_text("SELECT 1;")
 
-        with patch.object(sanitizer, "_exec_sql"):
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql"):
             logs = _run(tmp_path, scripts, label="repo-legacy")
 
         assert logs == ["[SANITIZE:repo-legacy] Executed a.sql"]
+
+
+class TestScopedCredentials:
+    """P-H9: sanitize scripts must never run as the shared-cluster superuser."""
+
+    def test_missing_scoped_creds_skips_all_scripts(self, tmp_path, caplog):
+        scripts = tmp_path / "sanitize"
+        scripts.mkdir()
+        (scripts / "10_wipe.sql").write_text("DELETE FROM res_partner;")
+        (scripts / "20_anon.py").write_text("pass")
+        container = MagicMock()
+
+        # No scoped credentials file -> load_credentials(allow_fallback=False)
+        # raises. The runner must skip everything, not fall back to the superuser.
+        with (
+            caplog.at_level(logging.WARNING, logger="oduflow"),
+            patch.object(
+                sanitizer,
+                "load_credentials",
+                side_effect=MissingCredentialsError("no creds"),
+            ),
+            patch.object(sanitizer, "_exec_sql") as exec_sql,
+        ):
+            logs = _run(tmp_path, scripts, container=container)
+
+        exec_sql.assert_not_called()
+        container.exec_run.assert_not_called()
+        assert len(logs) == 1
+        assert "no scoped database credentials" in logs[0]
+        assert "skipping sanitize scripts" in logs[0]
+
+    def test_scoped_creds_requested_without_superuser_fallback(self, tmp_path):
+        scripts = tmp_path / "sanitize"
+        scripts.mkdir()
+        (scripts / "10_wipe.sql").write_text("SELECT 1;")
+
+        with (
+            patch.object(
+                sanitizer, "load_credentials", return_value=dict(_CREDS)
+            ) as load_creds,
+            patch.object(sanitizer, "_exec_sql"),
+        ):
+            _run(tmp_path, scripts)
+
+        # allow_fallback=False is what denies the superuser to legacy envs.
+        assert load_creds.call_args.kwargs.get("allow_fallback") is False
 
 
 class TestDetectOdooMajor:

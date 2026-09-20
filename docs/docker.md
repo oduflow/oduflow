@@ -91,13 +91,13 @@ Key configuration settings in `oduflow.toml`:
 
 ```toml
 [server]
-host = "0.0.0.0"
+bind = "0.0.0.0"
 port = 8000
 
 [team.1]
 hostname = "localhost"
 auth_token = "your-secret-token"   # MCP Bearer token
-ui_password = "your-ui-password"   # Web UI password for user admin
+ui_password = "your-ui-password"   # Web UI login password
 ```
 
 HTTP mode refuses empty MCP or dashboard credentials unless

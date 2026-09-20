@@ -10,8 +10,9 @@ Oduflow can manage sidecar containers for auxiliary services your Odoo instance 
 # Redis
 oduflow call create_service redis redis:7 6379
 
-# Meilisearch with environment variables
-oduflow call create_service meilisearch getmeili/meilisearch:v1.6 7700 "" "MEILI_MASTER_KEY=abc123,MEILI_ENV=production"
+# Meilisearch with environment variables. A value "secret:<name>" references a
+# write-only team secret set in the dashboard — see Security → Secrets.
+oduflow call create_service meilisearch getmeili/meilisearch:v1.6 7700 "" "MEILI_MASTER_KEY=secret:meili-master-key,MEILI_ENV=production"
 
 # Elasticsearch
 oduflow call create_service elasticsearch docker.elastic.co/elasticsearch/elasticsearch:8.11.0 9200 "" "discovery.type=single-node,ES_JAVA_OPTS=-Xms512m -Xmx512m"
@@ -179,8 +180,11 @@ oduflow call update_service '{"name":"meilisearch","image":"getmeili/meilisearch
 oduflow call update_service '{"name":"wireguard","net_admin":true}'
 oduflow call update_service '{"name":"wireguard","privileged":true}'
 
-# Delete a service
+# Delete a service (its preset is kept, so restore_service can bring it back)
 oduflow call delete_service redis
+
+# Delete a service and its saved preset, leaving nothing behind
+oduflow call delete_service '{"name":"redis","save_preset":false}'
 
 # Execute a command inside a service container
 oduflow call run_service_command redis "redis-cli ping"
@@ -190,9 +194,18 @@ oduflow call run_service_command redis "redis-cli ping"
 
 `update_service` is the preferred way to change **any** setting of a running service — image, env vars, port/routes, hostname, `host_mode`, `command`, `volumes`, `privileged`, or `net_admin`. It recreates the container automatically and preserves every setting you do not override, so you rarely need to delete and recreate a service by hand. Passing `routes` fully replaces the route list. To return to a single catch-all port, pass `routes=[]` and the replacement `port` in the same call.
 
-In the dashboard, **Update** on a service card opens a dialog prefilled with the service's current environment variables (from its preset, or from the container for a service created before presets). Edit them and confirm to apply the change and pull the latest image in one go; leave the field untouched to just pull and recreate, or clear it to remove every variable. The other settings are changed over MCP or the CLI.
+In the dashboard, **Update** on a service card opens the same editor as the MCP tool: image, command, exposure (a single port or restricted path routes), hostname, environment variables, host network mode, volumes and capabilities, all prefilled with the service's current configuration (from its preset, or from the container for a service created before presets). Confirm to apply the changes and pull the latest image in one go; confirm without editing anything to just pull and recreate. Only the fields you actually edited are sent, so an open dialog cannot revert a setting changed concurrently over MCP. Clearing the env or volumes field removes every variable or unmounts every volume; clearing the command falls back to the image `CMD`. An empty hostname keeps the current one. Only `runtime` has no form field — change it over MCP or the CLI.
 
 If you do recreate a service manually (e.g. to rename it), call `get_service_info` first and reuse its fields in the new `create_service` call. The returned dict carries the full configuration (`image`, `port` or `routes`, `hostname`, `env_vars`, `host_mode`, `command`, `volumes`, `cap_add`, `privileged`) so you do not lose anything that `list_services` truncates or that lived only inside the preset.
+
+### Protecting a Service
+
+A service can be **protected** from the dashboard (the **Protect** button on its
+card). While protected, `delete_service`, `update_service`, and
+`restore_service` are refused — over MCP, the CLI, and the dashboard alike —
+so an agent cannot recreate or remove a service that backs something
+important. Restart and logs remain available. Protection can only be toggled
+in the dashboard; there is no MCP tool for it, so an agent cannot lift it.
 
 ## Service Update Flow
 
@@ -211,7 +224,15 @@ Overrides are optional: calling `update_service` with only `name` pulls the curr
 
 ## Service Presets
 
-Every time a service is created, its configuration (image, port or routes, hostname, environment variables, volumes, `host_mode`, `command`, `cap_add`, `privileged`) is automatically saved as a **preset** in `{team_data_dir}/service_presets.json`. This allows you to restore a service after deletion without re-entering its configuration.
+Every time a service is created or updated, its configuration (image, port or routes, hostname, environment variables, volumes, `host_mode`, `command`, `cap_add`, `privileged`) is automatically saved as a **preset** in `{team_data_dir}/service_presets.json`. This allows you to restore a service after deletion without re-entering its configuration.
+
+Deleting a service keeps its preset by default — `delete_service` takes
+`save_preset` (the dashboard's delete dialog has a **Save as preset** checkbox,
+ticked by default). Pass `save_preset=false` to drop the preset together with
+the container. Services created before presets existed get theirs backfilled
+once at server start (migration `0008-backfill-service-presets`), so old and
+new services read from the same store; the delete result reports whether a
+preset actually remains on disk.
 
 ```bash
 # List saved presets
@@ -223,3 +244,31 @@ oduflow call restore_service redis
 # Remove a saved preset
 oduflow call delete_service_preset redis
 ```
+
+## Container lifecycle settings
+
+MCP/REST `create_service` and `update_service` accept a `runtime` mapping.
+It is also available on Stack services. Supported keys are `tmpfs` (only `/run`,
+`/run/lock`, `/tmp`), `cgroupns: private`, `stop_signal` (`SIGTERM` or
+`SIGRTMIN+3`) and `stop_timeout` (1–3600 seconds). For example:
+
+```json
+{
+  "tmpfs": {"/run": "rw,nosuid,nodev,mode=755", "/tmp": "rw,nosuid,nodev,mode=1777"},
+  "cgroupns": "private",
+  "stop_signal": "SIGRTMIN+3",
+  "stop_timeout": 240
+}
+```
+
+In Stack manifests the keys follow the manifest-wide camelCase convention
+(`stopSignal`, `stopTimeout`); the snake_case spellings shown above are also
+accepted there.
+
+Updates preserve these settings when omitted; `{}` clears the explicit overrides.
+Presets and stack planning retain them. Stop/restart/replacement honors the old
+container's timeout so changing an image does not truncate its shutdown grace
+period. These settings do not grant privileges or make a systemd image healthy: an
+image must implement its own readiness check, and its cgroup/capability requirements
+must be verified on the deployment host. The `runtime` field does not accept
+arbitrary Docker options or bind mounts from the host.

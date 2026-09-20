@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Oduflow — Import from Odoo.sh</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { height: 1100px; overflow: hidden; }
+  .scrim { align-items: flex-start; padding-top: 48px; }
+  .steps { display: flex; align-items: center; gap: 0.75rem; }
+  .step { display: flex; align-items: center; gap: 0.5rem; font-size: var(--text-2xs); color: var(--muted-foreground); }
+  .step .num { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 11px; }
+  .step.done .num { background: rgb(52 211 153 / 0.15); border-color: var(--emerald); color: var(--emerald); }
+  .step.on { color: var(--foreground); }
+  .step.on .num { border-color: var(--primary); color: var(--primary); box-shadow: 0 0 0 3px oklch(0.6 0.2 260 / 0.25); }
+  .step-sep { width: 32px; height: 1px; background: var(--border); }
+  .cmdbox { position: relative; }
+  .cmdbox .copybtn { position: absolute; top: 8px; right: 8px; }
+  .lic { border: 1px solid rgb(251 191 36 / 0.35); background: rgb(251 191 36 / 0.08); border-radius: var(--r-md); padding: 0.75rem 0.875rem; display: flex; gap: 0.625rem; align-items: flex-start; font-size: var(--text-2xs); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-copy"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+    <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+  </defs>
+</svg>
+
+<header class="hdr">
+  <div class="brand">
+    <span class="dot"></span>
+    <span class="word">oduflow</span>
+    <span class="ver">v1.68.1</span>
+    <span class="ver">team velesagro</span>
+  </div>
+  <div class="hdr-right">
+    <div class="health">
+      <span class="h-item"><span class="h-dot"></span>pg-dev</span>
+      <span class="h-item"><span class="h-dot"></span>pg-prod</span>
+      <span class="h-item"><span class="h-dot"></span>traefik</span>
+      <span class="h-item"><span class="h-dot"></span>s3</span>
+      <span class="h-item"><span class="h-dot warn"></span>disk 71%</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab">Environments <span class="n">5</span></div>
+  <div class="tab active">Templates <span class="n">4</span></div>
+  <div class="tab">Services <span class="n">3</span></div>
+  <div class="tab">Volumes <span class="n">2</span></div>
+  <div class="tab">Repos <span class="n">3</span></div>
+  <div class="tab">Credentials <span class="n">2</span></div>
+  <div class="tab">Productions <span class="n">1</span></div>
+  <div class="tab">Usage</div>
+  <div class="tab">Guides <span class="n">6</span></div>
+</nav>
+
+<main>
+  <div class="page-head"><h1>Templates</h1><span class="count">4 templates</span></div>
+</main>
+
+<div class="scrim">
+  <div class="modal" style="width:760px">
+    <div class="modal-h">
+      <span class="t">Import template from Odoo.sh</span>
+      <span class="spacer"></span>
+      <span class="x"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-x"/></svg></span>
+    </div>
+    <div class="modal-b">
+      <div class="steps">
+        <span class="step done"><span class="num">1</span>Name</span>
+        <span class="step-sep"></span>
+        <span class="step on"><span class="num">2</span>Run command in Odoo.sh</span>
+        <span class="step-sep"></span>
+        <span class="step"><span class="num">3</span>Import</span>
+      </div>
+
+      <div class="form-row">
+        <div class="field">
+          <span class="lbl">Template name</span>
+          <input class="input mono" value="prod-mirror">
+        </div>
+        <div class="field">
+          <span class="lbl">Source</span>
+          <div class="select"><span style="font-size:var(--text-2xs)">Daily backup — production branch</span></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="lbl">One-time command — run in the Odoo.sh production shell</span>
+        <div class="cmdbox">
+          <div class="termbox" style="border-radius:var(--r-md)">curl -sfL https://velesagro.oduflow.dev/import/t8f3aa41 | sh</div>
+          <button class="btn copybtn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-copy"/></svg>Copy</button>
+        </div>
+        <span class="hint">Import token expires in <span style="font-family:var(--font-mono);color:var(--amber)">14:32</span>. Streams the daily backup: database + filestore.</span>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Also import</span>
+        <label class="check-row"><span class="cbx checked"></span>Enterprise addons</label>
+        <label class="check-row"><span class="cbx checked"></span>Themes</label>
+        <label class="check-row"><span class="cbx checked"></span>Other extra addons</label>
+      </div>
+
+      <div class="lic">
+        <span class="cbx" style="margin-top:2px"></span>
+        <span><b style="color:var(--amber)">Proprietary addons.</b> Enterprise addons and Themes are licensed by Odoo S.A. Confirm your subscription covers using these addons in development environments before importing.</span>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Detected repositories</span>
+        <div class="panel">
+          <table class="table">
+            <tr><th>repo</th><th>access</th><th>will be saved as</th></tr>
+            <tr><td>github.com/velesagro/prod</td><td><span class="badge running" style="font-size:11px">reachable</span></td><td class="dim">updatable remote</td></tr>
+            <tr><td>github.com/odoo/enterprise</td><td><span class="badge stopped" style="font-size:11px">no access</span></td><td class="dim">local copy</td></tr>
+            <tr><td>github.com/odoo/design-themes</td><td><span class="badge stopped" style="font-size:11px">no access</span></td><td class="dim">local copy</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">Cancel</button>
+      <button class="btn primary" disabled>Start import</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

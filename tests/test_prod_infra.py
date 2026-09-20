@@ -258,3 +258,56 @@ class TestProdPgConf:
             f.write("# KEEP\ncustom")
         system_ops._ensure_prod_pg_conf(settings)
         assert open(path).read() == "# KEEP\ncustom"
+
+
+class TestStaleDeployFlags:
+    """deploy_in_progress recovery belongs to startup, and only to startup.
+
+    ensure_prod_infra(force=True) is also reached at runtime — create_production,
+    start_production, and creating a prod-cluster service database — none of
+    which hold the team lock. Clearing the flag there would silently cancel a
+    concurrent deploy's status and defeat the "deploy in progress" conflict
+    guard that stack_production relies on.
+    """
+
+    @staticmethod
+    def _deploying(settings):
+        team = settings.teams["1"]
+        production_registry.create_production(team, "erp", {"deploy_in_progress": True})
+        return team
+
+    def test_ensure_prod_infra_leaves_live_deploy_flag_alone(self, settings):
+        team = self._deploying(settings)
+        client = _client_without_prod()
+
+        with (
+            patch("oduflow.walg.ensure_walg"),
+            patch.object(system_ops, "_wait_pg_ready"),
+            patch.object(system_ops, "ensure_team_network"),
+            patch.object(system_ops, "_reconcile_pg_hba"),
+            patch("oduflow.walg.apply_archive_command"),
+        ):
+            system_ops.ensure_prod_infra(client, settings, force=True)
+
+        record = production_registry.get_production(team, "erp")
+        assert record["deploy_in_progress"] is True
+
+    def test_init_system_clears_stale_deploy_flag(self, settings):
+        team = self._deploying(settings)
+
+        with (
+            patch.object(system_ops, "get_client", return_value=MagicMock()),
+            patch.object(system_ops, "_ensure_iptables_accept"),
+            patch.object(system_ops, "_ensure_traefik"),
+            patch.object(system_ops, "_ensure_pg_container"),
+            patch.object(system_ops, "_wait_pg_ready"),
+            patch.object(system_ops, "ensure_team_network"),
+            patch.object(system_ops, "_reconcile_pg_hba"),
+            patch.object(system_ops, "reconcile_prod_workloads"),
+            patch("oduflow.docker_ops.env_ops._ensure_agent_container"),
+            patch("oduflow.docker_ops.env_ops._remove_agent_container"),
+        ):
+            system_ops.init_system(settings)
+
+        record = production_registry.get_production(team, "erp")
+        assert record["deploy_in_progress"] is False

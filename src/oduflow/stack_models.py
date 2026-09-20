@@ -17,10 +17,13 @@ from pydantic import (
 
 from oduflow.naming import (
     parse_service_command,
+    validate_domain,
     validate_env_hostname,
     validate_env_name,
+    validate_prod_name,
     validate_template_name,
 )
+from oduflow.service_runtime import ServiceRuntime, to_camel
 
 STACK_API_VERSION = "oduflow.dev/v1alpha1"
 STACK_KIND = "Stack"
@@ -52,16 +55,11 @@ CommandArgument = Annotated[
 ]
 
 
-def _to_camel(value: str) -> str:
-    head, *tail = value.split("_")
-    return head + "".join(part.capitalize() for part in tail)
-
-
 class StackModel(BaseModel):
     """Strict base model with a YAML-friendly camelCase public shape."""
 
     model_config = ConfigDict(
-        alias_generator=_to_camel,
+        alias_generator=to_camel,
         populate_by_name=True,
         extra="forbid",
         str_strip_whitespace=True,
@@ -78,6 +76,7 @@ class ValueFrom(StackModel):
 
     from_env: str | None = None
     environment_field: Literal["url", "token"] | None = None
+    production_field: Literal["url", "containerName", "database"] | None = None
     database: ServiceDatabaseName | None = None
     database_field: (
         Literal["url", "host", "port", "database", "username", "password"] | None
@@ -87,11 +86,16 @@ class ValueFrom(StackModel):
     def exactly_one_source(self) -> ValueFrom:
         sources = sum(
             value is not None
-            for value in (self.from_env, self.environment_field, self.database)
+            for value in (
+                self.from_env,
+                self.environment_field,
+                self.production_field,
+                self.database,
+            )
         )
         if sources != 1:
             raise ValueError(
-                "set exactly one of fromEnv, environmentField, or database"
+                "set exactly one of fromEnv, environmentField, productionField, or database"
             )
         if (self.database is None) != (self.database_field is None):
             raise ValueError("database and databaseField must be set together")
@@ -163,6 +167,52 @@ class Environment(StackModel):
         return self
 
 
+class Production(StackModel):
+    """A long-lived production target, mutually exclusive with a dev environment."""
+
+    name: str
+    domain: NonEmptyString
+    repo_url: NonEmptyString
+    branch: NonEmptyString
+    odoo_image: NonEmptyString
+    git_user: str = ""
+    env: dict[EnvironmentVariableName, EnvValue] = Field(default_factory=dict)
+    auto_update: bool = False
+    allow_copy_to_dev_mcp: bool = True
+    odoo_conf: dict[str, str] = Field(default_factory=dict)
+    template: str | None = None
+    adopt_existing: bool = False
+
+    _name = field_validator("name")(validate_prod_name)
+    _domain = field_validator("domain")(validate_domain)
+
+    @field_validator("template", mode="before")
+    @classmethod
+    def valid_template(cls, value: object) -> object:
+        if value in (None, "", "none"):
+            return None
+        return validate_template_name(value) if isinstance(value, str) else value
+
+    @field_validator("odoo_conf")
+    @classmethod
+    def valid_odoo_conf(cls, value: dict[str, str]) -> dict[str, str]:
+        from oduflow.docker_ops.production_ops import RESERVED_ODOO_CONF_KEYS
+
+        normalized = {}
+        for key, option in value.items():
+            key = key.lower()
+            if key in normalized:
+                raise ValueError(f"Duplicate odoo.conf option: {key}")
+            if key in RESERVED_ODOO_CONF_KEYS or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+", key
+            ):
+                raise ValueError(f"Invalid or reserved odoo.conf option: {key}")
+            if "\n" in option or "\r" in option:
+                raise ValueError(f"odoo.conf option must be a single line: {key}")
+            normalized[key] = option
+        return normalized
+
+
 class Volume(StackModel):
     description: str = ""
 
@@ -230,6 +280,7 @@ class ServiceRoute(StackModel):
 
 
 class Service(StackModel):
+    runtime: ServiceRuntime = Field(default_factory=ServiceRuntime)
     image: NonEmptyString
     port: int | None = Field(default=None, ge=1, le=65535)
     hostname: NonEmptyString | None = None
@@ -269,7 +320,29 @@ class Service(StackModel):
 
 
 class StackSpec(StackModel):
-    environment: Environment
+    model_config = ConfigDict(
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "required": ["environment"],
+                    "properties": {
+                        "environment": {"not": {"type": "null"}},
+                        "production": {"type": "null"},
+                    },
+                },
+                {
+                    "required": ["production"],
+                    "properties": {
+                        "production": {"not": {"type": "null"}},
+                        "environment": {"type": "null"},
+                    },
+                },
+            ]
+        }
+    )
+
+    environment: Environment | None = None
+    production: Production | None = None
     extra_repositories: dict[ExtraRepositoryName, ExtraRepository] = Field(
         default_factory=dict
     )
@@ -280,6 +353,25 @@ class StackSpec(StackModel):
 
     @model_validator(mode="after")
     def references_exist(self) -> StackSpec:
+        if (self.environment is None) == (self.production is None):
+            raise ValueError("set exactly one of environment or production")
+        odoo_target = self.environment or self.production
+        assert odoo_target is not None
+        for value in odoo_target.env.values():
+            if isinstance(value, ValueFrom) and (
+                value.environment_field is not None
+                or value.production_field is not None
+            ):
+                raise ValueError(
+                    "target env cannot reference environmentField or productionField"
+                )
+        for service in self.services.values():
+            for value in service.env.values():
+                if isinstance(value, ValueFrom):
+                    if value.environment_field is not None and self.environment is None:
+                        raise ValueError("environmentField requires spec.environment")
+                    if value.production_field is not None and self.production is None:
+                        raise ValueError("productionField requires spec.production")
         targets: set[tuple[str, str]] = set()
         for item in self.files:
             if item.volume not in self.volumes:
@@ -311,7 +403,7 @@ class StackSpec(StackModel):
                             f"service '{service_name}' env '{key}' references "
                             f"undeclared database '{value.database}'"
                         )
-        for key, value in self.environment.env.items():
+        for key, value in odoo_target.env.items():
             if isinstance(value, ValueFrom) and value.database is not None:
                 raise ValueError(
                     f"environment env '{key}' cannot reference a managed database; "

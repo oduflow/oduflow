@@ -41,15 +41,12 @@ Common configuration (complete reference:
 
 ```toml
 [server]
-host = "0.0.0.0"                     # HTTP bind address
+bind = "0.0.0.0"                     # HTTP listener; legacy "host" is accepted
 port = 8000                           # HTTP port
 
 [routing]
 mode = "port"                         # "port" | "traefik" (auto-HTTPS)
 # acme_email = "admin@example.com"    # required for traefik mode
-
-[oauth]
-# oauth_base_url = "https://oduflow.example.com"  # OAuth issuer; NOT needed in traefik (auto, per-team host). Set to pin an issuer or in port mode. OAuth client_id = team_<id> (non-secret); auth_token = client_secret and also works as a Bearer token
 
 [database]
 user = "odoo"
@@ -66,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.1"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -85,7 +82,7 @@ port_range = [50000, 50100]           # port range for Odoo containers
 
 ### First launch
 
-On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`; the MCP token and Web Dashboard password are also printed in the startup log.
+On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`. The file is created with mode `0600` and the generated secrets are never printed to the log — read them from the config file itself.
 
 ### Upgrade
 
@@ -158,7 +155,7 @@ Same JSON format in `claude_desktop_config.json` or `.amp/settings.json`.
 
 ### Claude.ai (self-hosted OAuth)
 
-For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAuth 2.1 Authorization Server (no external IdP). In **traefik mode** it is enabled automatically and runs on each team's own hostname (issuer derived per-request) — no `oauth_base_url` needed. In **port mode**, set `[oauth].oauth_base_url` to this instance's public URL. In Claude.ai add a custom MCP at `https://<team-hostname>/mcp` and enter `Client ID = team_<id>` (e.g. `team_1`, non-secret) and `Client Secret = the team's auth_token`. The OAuth flow issues an independent expiring access token; the configured `auth_token` also works directly as a plain Bearer token.
+For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAuth 2.1 Authorization Server (no external IdP). It is enabled automatically whenever a team has an `auth_token` and always derives the issuer from that team's incoming hostname. Behind Cloudflare Tunnel, publish the same hostname configured under `[team.*]`; use split DNS for direct LAN access if needed. In Claude.ai add a custom MCP at `https://<team-hostname>/mcp` and enter `Client ID = team_<id>` (e.g. `team_1`, non-secret) and `Client Secret = the team's auth_token`. The OAuth flow issues an independent expiring access token; the configured `auth_token` also works directly as a plain Bearer token.
 
 ## Core MCP Tools
 
@@ -166,7 +163,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `delete_environment` — tear down an environment
 - `start_environment` / `stop_environment` / `restart_environment` — lifecycle control
 - Idle environments auto-stop after 48h without work (`[lifecycle].auto_stop_hours`). Auto-delete of long-stopped environments is opt-in and off by default (`auto_delete_hours = 0`; set a positive value to enable — destructive; protected environments are exempt). Container-level tools (pull_and_apply, shell/tests/installs/file ops) wake a stopped environment automatically and note it in the response
-- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `env_vars` replaces container environment variables)
+- `update_environment` — re-create the container preserving DB and filestore (optional `odoo_image` switches image, `hostname` changes the public Traefik hostname, `env_vars` replaces container environment variables)
 - `install_odoo_modules` — install Odoo modules
 - `upgrade_odoo_modules` — upgrade Odoo modules
 - `export_module_translations` — export a module's .pot/.po translation catalogue
@@ -236,7 +233,7 @@ sanitization scripts followed by project scripts from
 
 ## Links
 
-- Repository: <https://github.com/oduist/oduflow>
+- Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
 - License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
 - Website: <https://oduflow.dev>

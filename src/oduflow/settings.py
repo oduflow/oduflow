@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 try:
     import tomllib
@@ -17,13 +18,25 @@ logger = logging.getLogger("oduflow")
 
 TRACE: bool = False
 
-DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.1"
+DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.2"
+DEFAULT_PROD_POSTGRES_IMAGE = "oduist/oduflow-postgres:15-bookworm-1"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 
 # Active MCP transport for the running server ("stdio" | "http").
 # Set in server.main() before the server starts. Mostly informational;
 # local_path is gated by the allow_local_path setting.
 TRANSPORT: str = "stdio"
+
+
+def secret_matches(stored: str, candidate: str) -> bool:
+    """Constant-time secret comparison that tolerates any caller-supplied text.
+
+    ``hmac.compare_digest`` rejects ``str`` arguments outside ASCII with a
+    ``TypeError``. These comparisons run on raw request input (Bearer headers,
+    UI passwords), so a non-ASCII value must be an ordinary mismatch, not a
+    500 from the credential lookup.
+    """
+    return hmac.compare_digest(stored.encode("utf-8"), candidate.encode("utf-8"))
 
 
 def _normalize_agent_image(value: object) -> str:
@@ -79,7 +92,15 @@ class TeamSettings:
 
     team_id: str
     hostname: str = "localhost"
+    # The team's DNS zone (e.g. "demo.example.com"). When set, environments
+    # and services live directly under it (feature.demo.example.com), the
+    # dashboard hostname defaults to "oduflow.<base_domain>", and production
+    # domains must be the base domain itself (apex) or a subdomain of it —
+    # extra_domains cover arbitrary client-owned names. Empty = legacy layout:
+    # environments/services nest under the team hostname.
+    base_domain: str = ""
     auth_token: str = ""
+    production_token: str = field(default="", repr=False)
     ui_password: str = ""
     port_range_start: int = 50000
     port_range_end: int = 50100
@@ -114,6 +135,12 @@ class TeamSettings:
     # Container image building ([team.X.image_registry]); None = the image
     # build/publish MCP tools are unavailable for this team.
     image_registry: ImageRegistrySettings | None = None
+    # Raw per-team ``public_scheme`` override; empty falls back to the global
+    # [routing] value. Read the resolved scheme via
+    # :meth:`Settings.public_scheme_for`, not this field. Lets one deployment
+    # mix teams reached over plain HTTP (e.g. LAN) with teams fronted by an
+    # upstream TLS terminator such as a Cloudflare tunnel (https).
+    public_scheme_setting: str = ""
 
     @property
     def workspaces_dir(self) -> str:
@@ -138,7 +165,19 @@ class TeamSettings:
 
     def get_template_sql_path(self, template_name: str) -> str:
         tpl_dir = self.get_template_dir(template_name)
-        for name in ("dump.pgdump", "dump.sql", "dump.pgdump.gz", "dump.sql.gz"):
+        # Canonical names first, then the ``db.dump`` names a hand-placed dump
+        # may carry. Oduflow only ever writes the canonical four, so a dump it
+        # persisted always wins over a leftover the operator dropped in here.
+        # Format is detected from the file's contents, not its name; only the
+        # ``.gz`` suffix has to be right.
+        for name in (
+            "dump.pgdump",
+            "dump.sql",
+            "dump.pgdump.gz",
+            "dump.sql.gz",
+            "db.dump",
+            "db.dump.gz",
+        ):
             path = os.path.join(tpl_dir, name)
             if os.path.isfile(path):
                 return path
@@ -174,6 +213,14 @@ class TeamSettings:
     def git_credentials_file(self) -> str:
         return os.path.join(self.data_dir, ".git-credentials")
 
+    def ssh_dir(self) -> str:
+        """Team SSH deploy key directory (keypair + known_hosts).
+
+        git_ops derives this path from the credential file's directory, so it
+        must stay a sibling of :meth:`git_credentials_file`.
+        """
+        return os.path.join(self.data_dir, "ssh")
+
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _KEEP_PAIR_RE = re.compile(r"^\d+:\d+$")
@@ -208,6 +255,11 @@ class BackupSettings:
     keep: tuple[str, ...] = ("30:180", "7:30", "1:7")
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
+    # Concurrent chunk uploads (HEAD+PUT) during filestore snapshots;
+    # 1 = sequential. Also sets the snapshot's in-flight plaintext budget
+    # (max(64 MiB, threads x 4 MiB average chunk)), i.e. the extra memory a
+    # running snapshot costs the server process.
+    upload_threads: int = 16
 
 
 @dataclass(frozen=True)
@@ -227,7 +279,7 @@ class Settings:
     """Global settings + per-team isolation."""
 
     # Server
-    host: str = "0.0.0.0"
+    bind_host: str = "0.0.0.0"
     port: int = 8000
     trace: bool = False
     disable_telemetry: bool = False
@@ -246,12 +298,18 @@ class Settings:
     routing_mode: str = "port"
     acme_email: str = ""
     # Whether Traefik terminates TLS itself. True (default): Traefik listens on
-    # :443, redirects HTTP->HTTPS and obtains Let's Encrypt certificates. False:
+    # :443 and redirects HTTP->HTTPS; routing_tls_auto selects certificate issuance. False:
     # Traefik listens on plain HTTP :80 only, no redirect and no ACME — for
     # running behind a TLS-terminating upstream (e.g. a Cloudflare tunnel) that
     # already serves HTTPS. Public URLs stay https:// (the upstream provides the
     # certificate) unless ``public_scheme`` says otherwise. Ignored in port mode.
     routing_tls: bool = True
+    # True only for ``tls = true``: every Oduflow-managed route automatically
+    # gets the Let's Encrypt resolver. False for ``tls = {}``: the resolver is
+    # still declared when ``acme_email`` is set (see :attr:`acme_enabled`), but
+    # only routes that reference it explicitly (operator drop-in dynamic
+    # config) use it; managed routes serve Traefik's default certificate.
+    routing_tls_auto: bool = True
     # Raw ``[routing] public_scheme`` value; read the resolved
     # :attr:`public_scheme` property instead of this field. Empty (default)
     # derives the scheme from the routing mode: ``https`` in traefik mode
@@ -295,6 +353,12 @@ class Settings:
     # non-destructive and enabled by default.
     auto_stop_hours: int = 48
     auto_delete_hours: int = 0
+    # Purge the kept leftovers (database, workspace) of a soft-deleted
+    # production N hours after its deletion, unless it was re-created in the
+    # meantime. DESTRUCTIVE and opt-in (defaults to 0 = keep forever); an
+    # immediate purge is always available via
+    # `oduflow cleanup --purge-deleted-productions --force`.
+    prod_purge_hours: int = 0
 
     # Shared Docker resource names
     shared_network: str = "oduflow-net"
@@ -309,11 +373,22 @@ class Settings:
     # PostgreSQL cluster is physically separate from the dev one and is
     # provisioned lazily (first production or existing container).
     prod_enabled: bool = False
+    prod_odumcp_repo_url: str = "https://github.com/oduflow/oduflow-client-addons.git"
+    prod_odumcp_ref: str = "19.0"
     prod_db_container: str = "oduflow-prod-db"
     prod_db_volume: str = "oduflow-prod-db-data"
-    prod_postgres_image: str = ""  # empty = [database].image
+    prod_postgres_image: str = ""  # empty = managed PG15, or custom [database].image
     prod_walg_version: str = ""  # empty = version pinned in walg.py
     prod_workers_cap: int = 8  # upper bound for auto-tuned Odoo workers
+    # [production.wal]: cluster-wide disk protection, independent of backups.
+    wal_upload_timeout: int = 120
+    wal_warn_after: int = 120
+    wal_stall_after: int = 300
+    wal_stop_free_gb: float = 2.0
+    wal_resume_free_gb: float = 4.0
+    wal_stop_within: int = 300
+    wal_warn_queue_gb: float = 2.0
+    wal_stop_queue_gb: float = 8.0
 
     # Backup subsystem ([backup] TOML section); None = backups disabled.
     backup: BackupSettings | None = None
@@ -327,22 +402,21 @@ class Settings:
     repo_label: str = "oduflow.repo"
     image_label: str = "oduflow.image"
 
-    # OAuth (self-hosted Authorization Server). Public base URL of this server,
-    # used as the OAuth issuer and to advertise authorize/token endpoints.
-    # When set, Oduflow exposes /.well-known/oauth-authorization-server,
-    # /authorize, and /token. Each team's client_id is public (team_<id>), while
-    # auth_token is the client_secret and also works directly as a Bearer token.
-    # In traefik mode this is optional: the issuer is derived per-request from
-    # the team's own hostname (already TLS-terminated), so OAuth works without a
-    # central host. Set it only to pin a fixed issuer or in port mode.
-    oauth_base_url: str = ""
-
     # Config location
     etc_dir: str = ""
     toml_path: str = ""
 
     # Teams
     teams: dict[str, TeamSettings] = field(default_factory=dict)
+
+    @property
+    def production_pg_image(self) -> str:
+        # Keep existing non-default PostgreSQL majors/custom images compatible.
+        return self.prod_postgres_image or (
+            DEFAULT_PROD_POSTGRES_IMAGE
+            if self.postgres_image == "postgres:15"
+            else self.postgres_image
+        )
 
     def get_team(self, team_id: str) -> TeamSettings:
         if team_id not in self.teams:
@@ -353,18 +427,84 @@ class Settings:
         if not token:
             return None
         for team in self.teams.values():
-            if team.auth_token and hmac.compare_digest(team.auth_token, token):
+            if team.auth_token and secret_matches(team.auth_token, token):
                 return team
+        return None
+
+    def get_team_by_production_token(self, token: str) -> TeamSettings | None:
+        if token:
+            for team in self.teams.values():
+                if team.production_token and secret_matches(
+                    team.production_token, token
+                ):
+                    return team
         return None
 
     def get_team_by_hostname(self, hostname: str) -> TeamSettings | None:
         if not hostname:
             return None
-        hostname = hostname.split(":")[0]  # Strip port
+        try:
+            authority = urlsplit(f"//{hostname.strip()}")
+            # Reading .port validates malformed or out-of-range port values.
+            _ = authority.port
+        except ValueError:
+            return None
+        if (
+            authority.username is not None
+            or authority.password is not None
+            or authority.path
+            or authority.query
+            or authority.fragment
+            or authority.hostname is None
+        ):
+            return None
+        hostname = authority.hostname.lower()
         for team in self.teams.values():
-            if team.hostname == hostname:
+            if team.hostname.lower() == hostname:
                 return team
         return None
+
+    @property
+    def acme_enabled(self) -> bool:
+        """Whether the Let's Encrypt resolver is declared in Traefik at all.
+
+        This only says the resolver (and its certificate store) exists — with
+        ``tls = {}`` nothing assigns it to managed routes, so a declared
+        resolver does not mean any particular domain got a trusted
+        certificate. Route auto-assignment is :attr:`uses_acme`.
+        """
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and bool(self.acme_email.strip())
+        )
+
+    @property
+    def uses_acme(self) -> bool:
+        """Whether managed routes automatically request Let's Encrypt certs."""
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and self.routing_tls_auto
+        )
+
+    @property
+    def uses_default_tls_cert(self) -> bool:
+        """Whether Traefik serves HTTPS with its built-in default certificate.
+
+        True for ``tls = {}``: TLS is on but managed routes never reference a
+        resolver — even when one is declared (:attr:`acme_enabled`) it only
+        serves routes the operator wired up explicitly — so unless the
+        operator supplies a certificate through Traefik's own dynamic config
+        the served certificate is Traefik's self-signed default. Oduflow's
+        internal probes of its own public URLs consult this to decide whether
+        certificate verification can succeed at all.
+        """
+        return (
+            self.routing_mode == "traefik"
+            and self.routing_tls
+            and not self.routing_tls_auto
+        )
 
     @property
     def public_scheme(self) -> str:
@@ -376,33 +516,73 @@ class Settings:
         and a ``tls = false`` deployment is normally fronted by an upstream
         terminator (e.g. a Cloudflare tunnel) that still serves https. An
         operator who runs plain HTTP end to end sets ``[routing]
-        public_scheme = "http"`` to override the derived default.
+        public_scheme = "http"`` to override the derived default. Team-scoped
+        URLs go through :meth:`public_scheme_for`, which lets a ``[team.X]
+        public_scheme`` override this deployment-wide value.
         """
         if self.public_scheme_setting:
             return self.public_scheme_setting
         return "https" if self.routing_mode == "traefik" else "http"
 
+    def public_scheme_for(self, team: TeamSettings) -> str:
+        """Resolved URL scheme for one team's public URLs.
+
+        A ``[team.X] public_scheme`` overrides the global ``[routing]`` value,
+        so one deployment can hand out http:// links for a LAN-only team and
+        https:// links for a team fronted by an upstream TLS terminator (e.g. a
+        Cloudflare tunnel) at the same time.
+        """
+        return team.public_scheme_setting or self.public_scheme
+
+    @property
+    def any_public_scheme_https(self) -> bool:
+        """Whether any team's resolved public scheme is https.
+
+        Derived from the resolved per-team values only (``validate`` guarantees
+        at least one team, and a team without an override already resolves to
+        the global value). The raw global default must not vote on its own:
+        when every team overrides to http, no URL Oduflow hands out is https
+        and forwarded-header trust must stay off.
+        """
+        return any(self.public_scheme_for(t) == "https" for t in self.teams.values())
+
     @property
     def oauth_enabled(self) -> bool:
-        # Self-hosted OAuth is served whenever an explicit issuer is configured
-        # (oauth_base_url) or we run behind Traefik, where each team's own
-        # TLS-terminated hostname is used as a per-request issuer — no central
-        # oauth_base_url needed. Port mode still requires an explicit issuer.
-        # It also requires a team auth_token (which doubles as the OAuth client
-        # credential): without one nothing is actually served, so the flag stays
-        # False rather than reporting "OAuth ON" for a tokenless deployment.
-        has_token = any(t.auth_token for t in self.teams.values())
-        return has_token and (
-            bool(self.oauth_base_url) or self.routing_mode == "traefik"
-        )
+        # Every authenticated HTTP deployment serves OAuth on the hostname of
+        # the team reached by the request.
+        return any(t.auth_token for t in self.teams.values())
 
     def get_team_by_ui_password(self, password: str) -> TeamSettings | None:
         if not password:
             return None
         for team in self.teams.values():
-            if team.ui_password and hmac.compare_digest(team.ui_password, password):
+            if team.ui_password and secret_matches(team.ui_password, password):
                 return team
         return None
+
+    def _validate_public_scheme(self, value: str, prefix: str = "") -> None:
+        """The wire-reality rules for a public_scheme value (global or team).
+
+        The scheme must match what actually answers on the wire: with Traefik
+        terminating TLS, :80 redirects to :443, so http:// links would bounce
+        (POSTs drop body/Authorization) and leak tokens on the first plaintext
+        hop; in port mode nothing can terminate TLS on the published
+        per-environment ports, so https:// links (and the internal probes built
+        from them) would fail the handshake outright.
+        """
+        if value not in ("", "http", "https"):
+            raise ValueError(f"{prefix}public_scheme must be 'http' or 'https'")
+        if value == "http" and self.routing_mode == "traefik" and self.routing_tls:
+            raise ValueError(
+                f"{prefix}public_scheme = 'http' requires tls = false: with "
+                "TLS enabled Traefik redirects :80 to :443, so http:// links "
+                "would not work"
+            )
+        if value == "https" and self.routing_mode == "port":
+            raise ValueError(
+                f"{prefix}public_scheme = 'https' is not supported in port "
+                "mode: published environment ports serve plain HTTP"
+            )
 
     def validate(self) -> None:
         if not self.teams:
@@ -414,44 +594,53 @@ class Settings:
         if self.routing_mode not in ("port", "traefik"):
             raise ValueError("routing_mode must be 'port' or 'traefik'")
 
-        if self.public_scheme_setting not in ("", "http", "https"):
-            raise ValueError("public_scheme must be 'http' or 'https'")
+        self._validate_public_scheme(self.public_scheme_setting)
 
-        # public_scheme must match what actually answers on the wire: with
-        # Traefik terminating TLS, :80 redirects to :443, so http:// links would
-        # bounce (POSTs drop body/Authorization) and leak tokens on the first
-        # plaintext hop; in port mode nothing can terminate TLS on the published
-        # per-environment ports, so https:// links (and the internal probes
-        # built from them) would fail the handshake outright.
-        if (
-            self.public_scheme_setting == "http"
-            and self.routing_mode == "traefik"
-            and self.routing_tls
-        ):
-            raise ValueError(
-                "public_scheme = 'http' requires tls = false: with tls = true "
-                "Traefik redirects :80 to :443, so http:// links would not work"
-            )
-        if self.public_scheme_setting == "https" and self.routing_mode == "port":
-            raise ValueError(
-                "public_scheme = 'https' is not supported in port mode: "
-                "published environment ports serve plain HTTP"
-            )
-
-        if self.routing_mode == "traefik" and self.routing_tls:
+        if self.uses_acme:
             if not self.acme_email:
                 raise ValueError(
                     "acme_email must be set when routing_mode=traefik and "
-                    "routing tls is enabled"
+                    "routing tls = true (ACME) is enabled"
                 )
 
-        # Validate per-team settings
+        # A hostname is the stable routing and OAuth identity of a team in every
+        # mode. Requiring it explicitly avoids a hidden global fallback and makes
+        # host-relative OAuth safe to enable behind any TLS-terminating proxy.
+        seen_team_hosts: dict[str, str] = {}
         for team in self.teams.values():
-            if self.routing_mode == "traefik" and not team.hostname:
+            if not team.hostname:
                 raise ValueError(
-                    f"Team '{team.team_id}': hostname must be set "
-                    "when routing_mode=traefik"
+                    f"Team '{team.team_id}': hostname must be set explicitly."
                 )
+            if team.base_domain:
+                if self.routing_mode != "traefik":
+                    raise ValueError(
+                        f"Team '{team.team_id}': base_domain requires "
+                        "routing_mode=traefik"
+                    )
+                from oduflow.naming import validate_domain
+
+                try:
+                    validate_domain(team.base_domain)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Team '{team.team_id}': invalid base_domain: {exc}"
+                    ) from exc
+            normalized_host = team.hostname.lower()
+            if normalized_host in seen_team_hosts:
+                raise ValueError(
+                    f"Teams '{seen_team_hosts[normalized_host]}' and "
+                    f"'{team.team_id}' have duplicate hostname "
+                    f"'{team.hostname}'."
+                )
+            seen_team_hosts[normalized_host] = team.team_id
+            # Per-team public_scheme obeys the same wire-reality rules as the
+            # global one: it changes only the URLs handed out, not what Traefik
+            # serves, so it must still match what actually answers on that
+            # hostname.
+            self._validate_public_scheme(
+                team.public_scheme_setting, prefix=f"Team '{team.team_id}': "
+            )
             if team.port_range_start >= team.port_range_end:
                 raise ValueError(
                     f"Team '{team.team_id}': invalid port range "
@@ -496,13 +685,47 @@ class Settings:
                         "requires a hostname such as 'dev.example.com'"
                     ) from exc
 
+        # Base domains are exclusive team zones: environment, service and
+        # production names are allocated inside them, so no duplicates, and
+        # no other team may place its hostname or base domain in the zone —
+        # that is how one team is prevented from squatting names that would
+        # route into another team's zone.
+        # Local import: domains.py imports Settings, and the zone-containment
+        # rule must have exactly one definition or config-time validation and
+        # run-time claim checks can disagree.
+        from oduflow.domains import in_zone
+
+        zones: dict[str, str] = {}
+        for team in self.teams.values():
+            if not team.base_domain:
+                continue
+            if team.base_domain in zones:
+                raise ValueError(
+                    f"Teams '{zones[team.base_domain]}' and '{team.team_id}' "
+                    f"have duplicate base_domain '{team.base_domain}'."
+                )
+            zones[team.base_domain] = team.team_id
+        for team in self.teams.values():
+            for zone, owner in zones.items():
+                if owner == team.team_id:
+                    continue
+                for label, value in (
+                    ("hostname", team.hostname.lower()),
+                    ("base_domain", team.base_domain),
+                ):
+                    if value and in_zone(value, zone):
+                        raise ValueError(
+                            f"Team '{team.team_id}': {label} '{value}' lies "
+                            f"inside team '{owner}' base_domain '{zone}'."
+                        )
+
         # Validate static extra routes ([route.*]). They only make sense in
         # traefik mode (port mode has no shared reverse proxy) and must forward
         # a real hostname to an http(s) upstream. Hostnames must be unique
         # across routes and team hostnames so a Host rule never routes two ways.
         if self.extra_routes and self.routing_mode != "traefik":
             raise ValueError("[route.*] sections require routing.mode = 'traefik'.")
-        seen_hosts = {t.hostname for t in self.teams.values() if t.hostname}
+        seen_hosts = {t.hostname.lower() for t in self.teams.values()}
         for route in self.extra_routes:
             if not route.host:
                 raise ValueError(f"Route '{route.name}': host must be set.")
@@ -521,12 +744,13 @@ class Settings:
                     f"Route '{route.name}': url must start with http:// or https:// "
                     f"(got {route.url!r})."
                 )
-            if route.host in seen_hosts:
+            normalized_route_host = route.host.lower()
+            if normalized_route_host in seen_hosts:
                 raise ValueError(
                     f"Route '{route.name}': host '{route.host}' collides with "
                     "another route or team hostname."
                 )
-            seen_hosts.add(route.host)
+            seen_hosts.add(normalized_route_host)
 
         # Validate that team port ranges do not overlap. The default range is
         # identical for every team, so two teams that never set an explicit
@@ -553,19 +777,28 @@ class Settings:
         if len(tokens) != len(set(tokens)):
             raise ValueError("Duplicate auth_token values across teams.")
 
+        production_tokens = [
+            t.production_token for t in self.teams.values() if t.production_token
+        ]
+        if any(
+            len(token) < 32
+            or len(token) > 512
+            or not token.isascii()
+            or any(c.isspace() for c in token)
+            for token in production_tokens
+        ):
+            raise ValueError(
+                "production_token must be 32..512 ASCII characters without whitespace."
+            )
+        if len(set(tokens + production_tokens)) != len(tokens + production_tokens):
+            raise ValueError(
+                "production_token must be distinct from all dev and production tokens."
+            )
+
         # Validate uniqueness of UI passwords
         passwords = [t.ui_password for t in self.teams.values() if t.ui_password]
         if len(passwords) != len(set(passwords)):
             raise ValueError("Duplicate ui_password values across teams.")
-
-        # Validate OAuth: when oauth_base_url is set, at least one team must
-        # have a non-empty auth_token (used as OAuth client_secret/access token).
-        if self.oauth_base_url and not any(t.auth_token for t in self.teams.values()):
-            raise ValueError(
-                "oauth_base_url is set but no team has an auth_token. "
-                "Self-hosted OAuth requires at least one [team.*] section "
-                "with a non-empty auth_token."
-            )
 
         if self.prod_workers_cap < 1:
             raise ValueError("[production] workers_cap must be >= 1")
@@ -594,18 +827,93 @@ class Settings:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
 
+        for section in (
+            "server",
+            "routing",
+            "database",
+            "storage",
+            "lifecycle",
+            "agent",
+            "production",
+            "backup",
+            "team",
+            "route",
+        ):
+            if section in raw and not isinstance(raw[section], dict):
+                raise ValueError(f"[{section}] must be a table")
+
         server = raw.get("server", {})
         routing = raw.get("routing", {})
+        tls = routing.get("tls", True)
+        if not isinstance(tls, bool) and not (isinstance(tls, dict) and not tls):
+            raise ValueError("[routing].tls must be true, false, or {}")
         database = raw.get("database", {})
         storage = raw.get("storage", {})
         lifecycle = raw.get("lifecycle", {})
         agent = raw.get("agent", {})
         production = raw.get("production", {})
+        wal = production.get("wal", {})
+        if not isinstance(wal, dict):
+            raise ValueError("[production.wal] must be a table")
+        wal_values = {
+            "wal_upload_timeout": int(wal.get("upload_timeout", 120)),
+            "wal_warn_after": int(wal.get("warn_after", 120)),
+            "wal_stall_after": int(wal.get("stall_after", 300)),
+            "wal_stop_free_gb": float(wal.get("stop_free_gb", 2)),
+            "wal_resume_free_gb": float(wal.get("resume_free_gb", 4)),
+            "wal_stop_within": int(wal.get("stop_within", 300)),
+            "wal_warn_queue_gb": float(wal.get("warn_queue_gb", 2)),
+            "wal_stop_queue_gb": float(wal.get("stop_queue_gb", 8)),
+        }
+        if any(not 0 < value < 1e9 for value in wal_values.values()):
+            raise ValueError("[production.wal] thresholds must be positive and finite")
+        if wal_values["wal_stop_queue_gb"] <= wal_values["wal_warn_queue_gb"]:
+            raise ValueError("[production.wal] stop_queue_gb must exceed warn_queue_gb")
+        if wal_values["wal_resume_free_gb"] <= wal_values["wal_stop_free_gb"]:
+            raise ValueError("[production.wal] resume_free_gb must exceed stop_free_gb")
+        if wal_values["wal_stall_after"] < wal_values["wal_warn_after"]:
+            raise ValueError("[production.wal] stall_after must be >= warn_after")
         prod_enabled = production.get("enabled", False)
         if not isinstance(prod_enabled, bool):
             raise ValueError("[production] enabled must be true or false")
-        oauth = raw.get("oauth", server)  # [oauth] section or fall back to [server]
+        if "oauth" in raw:
+            raise ValueError(
+                "[oauth] has been removed; OAuth is enabled automatically from "
+                "each [team.*] hostname and auth_token."
+            )
+        if "oauth_base_url" in server:
+            raise ValueError(
+                "[server].oauth_base_url has been removed; OAuth is enabled "
+                "automatically from each [team.*] hostname and auth_token."
+            )
         routing_mode = str(routing.get("mode", "port")).strip().lower()
+        if "hostname" in routing:
+            logger.warning(
+                "[routing].hostname is ignored; set hostname explicitly in "
+                "every [team.*] section."
+            )
+
+        bind_value = server.get("bind")
+        legacy_host = server.get("host")
+        if bind_value is not None and legacy_host is not None:
+            bind_text = str(bind_value).strip()
+            legacy_text = str(legacy_host).strip()
+            if bind_text != legacy_text:
+                raise ValueError(
+                    "[server].bind and legacy [server].host disagree; keep only "
+                    "bind or set both to the same value."
+                )
+        if legacy_host is not None:
+            logger.warning("[server].host is deprecated; use [server].bind instead.")
+        bind_host = str(
+            bind_value
+            if bind_value is not None
+            else legacy_host
+            if legacy_host is not None
+            else "0.0.0.0"
+        ).strip()
+        if not bind_host:
+            raise ValueError("[server].bind must not be empty.")
         backup = _parse_backup_section(raw.get("backup", {}))
 
         etc_dir = _resolve_etc_dir()
@@ -622,6 +930,8 @@ class Settings:
         teams: dict[str, TeamSettings] = {}
         for team_id_raw, team_cfg in teams_raw.items():
             team_id = str(team_id_raw)
+            if not isinstance(team_cfg, dict):
+                raise ValueError(f"[team.{team_id}] must be a table")
             team_data_dir = os.path.join(base_data_dir, f"team_{team_id}")
 
             port_range = team_cfg.get("port_range")
@@ -641,16 +951,17 @@ class Settings:
                     f"got {port_range!r}"
                 )
 
-            # [routing].hostname is a fallback only in port mode. In traefik
-            # mode the validator requires every team to set its own hostname;
-            # silently inheriting one shared default would make two such teams
-            # collide in get_team_by_hostname, so leave it empty and let
-            # validate() report the misconfiguration.
-            default_hostname = (
-                routing.get("hostname", "localhost") if routing_mode == "port" else ""
+            raw_base_domain = str(team_cfg.get("base_domain", ""))
+            base_domain = (
+                re.sub(r"^https?://", "", raw_base_domain).strip().lower().rstrip(".")
             )
-            raw_hostname = str(team_cfg.get("hostname", default_hostname))
+
+            raw_hostname = str(team_cfg.get("hostname", ""))
             hostname = re.sub(r"^https?://", "", raw_hostname).strip()
+            if not hostname and base_domain:
+                # The dashboard's default home in a team zone. An explicit
+                # hostname still wins.
+                hostname = f"oduflow.{base_domain}"
 
             agent_env_raw = team_cfg.get("agent_env", {})
             if not isinstance(agent_env_raw, dict):
@@ -670,7 +981,9 @@ class Settings:
             teams[team_id] = TeamSettings(
                 team_id=team_id,
                 hostname=hostname,
+                base_domain=base_domain,
                 auth_token=str(team_cfg.get("auth_token", "")),
+                production_token=str(team_cfg.get("production_token", "")),
                 ui_password=str(team_cfg.get("ui_password", "")),
                 port_range_start=port_start,
                 port_range_end=port_end,
@@ -694,6 +1007,9 @@ class Settings:
                 or "claude",
                 agent_env={str(k): str(v) for k, v in agent_env_raw.items()},
                 image_registry=image_registry,
+                public_scheme_setting=str(team_cfg.get("public_scheme", ""))
+                .strip()
+                .lower(),
             )
 
         # Parse static extra routes ([route.<name>] → host + upstream url).
@@ -725,7 +1041,7 @@ class Settings:
         TRACE = trace
 
         return Settings(
-            host=str(server.get("host", "0.0.0.0")),
+            bind_host=bind_host,
             port=int(server.get("port", 8000)),
             trace=trace,
             disable_telemetry=bool(server.get("disable_telemetry", False)),
@@ -734,7 +1050,8 @@ class Settings:
             allow_insecure_http=bool(server.get("allow_insecure_http", False)),
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
-            routing_tls=bool(routing.get("tls", True)),
+            routing_tls=tls is not False,
+            routing_tls_auto=tls is True,
             public_scheme_setting=str(routing.get("public_scheme", "")).strip().lower(),
             extra_routes=tuple(extra_routes),
             db_user=str(database.get("user", "odoo")),
@@ -748,11 +1065,26 @@ class Settings:
             agent_opencode_model=str(agent.get("opencode_model", "")).strip(),
             auto_stop_hours=int(lifecycle.get("auto_stop_hours", 48)),
             auto_delete_hours=int(lifecycle.get("auto_delete_hours", 0)),
-            oauth_base_url=str(oauth.get("oauth_base_url", "")).strip(),
+            prod_purge_hours=int(lifecycle.get("prod_purge_hours", 0)),
             prod_enabled=prod_enabled,
+            prod_odumcp_repo_url=str(
+                production.get(
+                    "odumcp_repo_url",
+                    "https://github.com/oduflow/oduflow-client-addons.git",
+                )
+            ),
+            prod_odumcp_ref=str(production.get("odumcp_ref", "19.0")),
             prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),
             prod_workers_cap=int(production.get("workers_cap", 8)),
+            wal_upload_timeout=int(wal_values["wal_upload_timeout"]),
+            wal_warn_after=int(wal_values["wal_warn_after"]),
+            wal_stall_after=int(wal_values["wal_stall_after"]),
+            wal_stop_free_gb=wal_values["wal_stop_free_gb"],
+            wal_resume_free_gb=wal_values["wal_resume_free_gb"],
+            wal_stop_within=int(wal_values["wal_stop_within"]),
+            wal_warn_queue_gb=wal_values["wal_warn_queue_gb"],
+            wal_stop_queue_gb=wal_values["wal_stop_queue_gb"],
             backup=backup,
             etc_dir=etc_dir,
             toml_path=path,
@@ -863,6 +1195,7 @@ def _parse_backup_section(backup_raw: dict[str, object]) -> BackupSettings | Non
         basebackup_time=str(backup_raw.get("basebackup_time", "03:30")).strip(),
         keep=tuple(str(p).strip() for p in keep_raw),
         walg_keep_full=int(str(backup_raw.get("walg_keep_full", 7))),
+        upload_threads=max(1, int(str(backup_raw.get("upload_threads", 16)))),
     )
 
 

@@ -33,7 +33,12 @@ Fresh configs include generated values for:
 - `[team.1].auth_token` — HTTP MCP Bearer token and OAuth client secret
 - `[team.1].ui_password` — Web Dashboard password
 
-The generated `auth_token` and `ui_password` are also printed in the startup log.
+The config file is created with mode `0600`. The generated secrets are never
+printed to the log — read them from the file itself:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ## Single-user mode (stdio)
 
@@ -95,7 +100,7 @@ generated password for the Web Dashboard. Read them from `oduflow.toml`:
 [team.1]
 hostname = "localhost"
 auth_token = "..."     # Bearer token for MCP clients
-ui_password = "..."    # Web Dashboard password for user admin
+ui_password = "..."    # Web Dashboard login password
 ```
 
 To sign in to the Web Dashboard, open `http://<host>:8000/`, use username
@@ -107,18 +112,19 @@ Authorization: Bearer <auth_token>
 ```
 
 MCP auth and Web Dashboard auth are independent — they use different credentials
-and different mechanisms (Bearer vs form/Basic auth).
+and different mechanisms (Bearer vs form/session auth).
 
 ### Self-hosted OAuth (Claude.ai)
 
-Some MCP clients (e.g. Claude.ai Remote MCP) require an OAuth flow instead of a static Bearer token. Oduflow can act as its own OAuth 2.1 Authorization Server — no external identity provider needed. In [traefik mode](traefik.md) it's enabled automatically and runs on each team's own hostname, so no extra config is required. In port mode, set the public URL of this instance in `oduflow.toml`:
+Some MCP clients (e.g. Claude.ai Remote MCP) require an OAuth flow instead of a static Bearer token. Oduflow can act as its own OAuth 2.1 Authorization Server — no external identity provider needed. It is enabled automatically whenever a team has an `auth_token` and runs on that team's own hostname in both port and [traefik mode](traefik.md), so no separate OAuth URL is normally required:
 
 ```toml
-[oauth]
-oauth_base_url = "https://oduflow.example.com"
+[team.1]
+hostname = "oduflow.example.com"
+auth_token = "..."
 ```
 
-The OAuth `client_id` is the non-secret `team_<id>` (e.g. `team_1`); each team's `auth_token` is the `client_secret`, and OAuth mints an independent expiring access token. See [Authentication & Security](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) for the full setup and how to connect from Claude.ai.
+Behind Cloudflare Tunnel, publish that same hostname and forward it to port 8000; use split DNS if LAN clients should reach it directly. The OAuth `client_id` is the non-secret `team_<id>` (e.g. `team_1`); each team's `auth_token` is the `client_secret`, and OAuth mints an independent expiring access token. See [Authentication & Security](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients) for the full setup and how to connect from Claude.ai.
 
 ### MCP client configuration
 
@@ -153,6 +159,100 @@ If the server is behind a reverse proxy with HTTPS (see [Traefik Routing](traefi
   }
 }
 ```
+
+### Claude Desktop (remote server via `mcp-remote`)
+
+Claude Desktop only launches MCP servers as local processes — it cannot call a
+remote HTTP endpoint with a custom `Authorization` header on its own. Use the
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge: Claude Desktop
+starts it over stdio, and it forwards everything to Oduflow's `/mcp` endpoint
+with the Bearer token attached. Node.js (which provides `npx`) must be installed.
+
+Edit `claude_desktop_config.json` — **Settings → Developer → Edit Config** opens
+it directly:
+
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+=== "Windows"
+
+    ```json
+    {
+      "mcpServers": {
+        "oduflow": {
+          "command": "cmd.exe",
+          "args": [
+            "/c",
+            "npx",
+            "-y",
+            "mcp-remote",
+            "https://your.oduflow.server/mcp",
+            "--header",
+            "Authorization:${AUTH_HEADER}",
+            "--transport",
+            "http-only"
+          ],
+          "env": {
+            "AUTH_HEADER": "Bearer TOKEN"
+          }
+        }
+      }
+    }
+    ```
+
+=== "macOS / Linux"
+
+    ```json
+    {
+      "mcpServers": {
+        "oduflow": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "mcp-remote",
+            "https://your.oduflow.server/mcp",
+            "--header",
+            "Authorization:${AUTH_HEADER}",
+            "--transport",
+            "http-only"
+          ],
+          "env": {
+            "AUTH_HEADER": "Bearer TOKEN"
+          }
+        }
+      }
+    }
+    ```
+
+Replace:
+
+- `https://your.oduflow.server/mcp` — your Oduflow MCP endpoint (in
+  [traefik mode](traefik.md), the team's own hostname; in port mode,
+  `http://<host>:8000/mcp`).
+- `TOKEN` — the team's `auth_token` from `oduflow.toml`. Keep the `Bearer `
+  prefix: the header value must read `Bearer <auth_token>`.
+
+!!! note "Why the token lives in `env`"
+
+    `mcp-remote` substitutes `${AUTH_HEADER}` into the `--header` value at
+    startup. Keeping the secret in `env` instead of inline in `args` avoids
+    both the shell-quoting problems of a space inside an argument and leaking
+    the token into process listings and logs.
+
+`--transport http-only` pins the bridge to Streamable HTTP, which is what
+Oduflow serves; without it `mcp-remote` first probes for an SSE endpoint and the
+connection can fail. Do **not** use the OAuth setup from
+[Authentication & Security](security.md#self-hosted-oauth-for-claudeai-and-other-mcp-clients)
+here — that flow is for Claude.ai custom connectors; Claude Desktop authenticates
+with the static Bearer token above.
+
+To scope the connection to a single environment, point the URL at
+`https://your.oduflow.server/mcp/<env>` and use that environment's Secret Key as
+the token instead — see
+[Scoped single-environment access](security.md#scoped-single-environment-access-mcpenv).
+
+After saving the file, quit Claude Desktop completely (not just close the
+window) and start it again. The Oduflow tools then appear in the tools menu.
 
 ### Web Dashboard
 

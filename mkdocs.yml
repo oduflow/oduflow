@@ -3,8 +3,8 @@ site_url: https://docs.oduflow.dev
 site_description: AI-first Odoo development and CI tool with reusable database templates, powered by MCP
 site_author: Oduist
 copyright: Copyright &copy; Oduist — Oduflow
-repo_url: https://github.com/oduist/oduflow
-repo_name: oduist/oduflow
+repo_url: https://github.com/oduflow/oduflow
+repo_name: oduflow/oduflow
 
 theme:
   name: material
@@ -59,7 +59,11 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
@@ -74,7 +78,7 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/oduist/oduflow
+      link: https://github.com/oduflow/oduflow
       name: Oduflow on GitHub
     - icon: fontawesome/solid/globe
       link: https://docs.oduflow.dev
@@ -89,6 +93,7 @@ nav:
       - Quick Start: quick-start.md
       - Installation & Configuration: installation.md
   - Core Concepts:
+      - Architecture: architecture.md
       - Use Cases & Workflows: use-cases.md
       - Template Management: templates.md
       - Environment Management: environments.md

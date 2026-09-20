@@ -12,16 +12,20 @@ Each team can have its own auth token:
 
 ```toml
 [team.1]
+hostname = "team-a.example.com"
 auth_token = "secret-token-team-1"
 
 [team.2]
+hostname = "team-b.example.com"
 auth_token = "secret-token-team-2"
 ```
 
-The token is used to both authenticate and identify the team. This is implemented via FastMCP's `StaticTokenVerifier`.
+The token is used to both authenticate and identify the team. The self-hosted
+OAuth provider also accepts it directly as a non-expiring Bearer credential.
 
 Fresh configs get a generated `auth_token` for `[team.1]` on first startup. The
-value is printed in the startup log and stored in `oduflow.toml`; use it as
+value is stored in `oduflow.toml` (created with mode `0600`) and never written to
+the log; read it from the file and use it as
 `Authorization: Bearer <auth_token>` when connecting HTTP MCP clients.
 
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
@@ -32,7 +36,11 @@ The team's OAuth **`client_id`** is a non-secret identifier, `team_<id>` (e.g. `
 
 ### Setup
 
-**In [traefik mode](traefik.md) it's automatic.** The Authorization Server is enabled out of the box and runs on **each team's own hostname** — the OAuth issuer is derived per request from the incoming host (which already has a Let's Encrypt certificate). Just give each team an `auth_token`; no `oauth_base_url` is needed:
+The Authorization Server is enabled automatically whenever a team has an
+`auth_token`. It runs on **each team's own hostname** in both port and
+[traefik mode](traefik.md): the OAuth issuer is derived per request from the
+incoming host after validating it against configured team hostnames. No
+separate OAuth configuration is needed:
 
 ```toml
 [routing]
@@ -44,15 +52,19 @@ hostname = "team-a.example.com"
 auth_token = "secret-token-team-1"
 ```
 
-**In port mode** (no per-team TLS host), set `oauth_base_url` to the public https URL where this instance is reachable, so the issuer is a fixed, reachable endpoint:
+In port mode behind Cloudflare Tunnel or another TLS proxy, publish the same
+hostname configured for the team and forward it to the HTTP listener:
 
 ```toml
-[oauth]
-oauth_base_url = "https://your-server.com"
-
 [team.1]
+hostname = "oduflow.example.com"
 auth_token = "secret-token-team-1"
 ```
+
+For direct LAN access while retaining that public hostname, use split DNS so
+`oduflow.example.com` resolves to the server's LAN address internally. Local
+Bearer clients may also connect by IP; OAuth discovery is intentionally served
+only for a recognized team hostname.
 
 Either way, Oduflow exposes:
 
@@ -78,6 +90,14 @@ Dynamic Client Registration (`/register`) is **disabled** — clients must use t
 
 The issued access token is an independent, expiring token bound to that team (not the `auth_token`), so each team's claude.ai connector ends up scoped to its own workspaces, templates, and credentials while Claude never stores the master secret. Claude.ai transparently uses its refresh token to obtain a new access token when the old one expires; the connection also survives an Oduflow restart because minted tokens are persisted.
 
+### Connecting from Claude Desktop
+
+Claude Desktop does **not** use this OAuth flow — it can only start MCP servers
+as local processes. Connect it through the `mcp-remote` stdio bridge with the
+team's `auth_token` as a plain Bearer header; the full
+`claude_desktop_config.json` example is in
+[Quick Start → Claude Desktop](quick-start.md#claude-desktop-remote-server-via-mcp-remote).
+
 ### Bearer-only mode (CLI / automation)
 
 For curl, IDE clients, or anything that doesn't need OAuth, simply send the `auth_token` as a Bearer header:
@@ -86,7 +106,7 @@ For curl, IDE clients, or anything that doesn't need OAuth, simply send the `aut
 Authorization: Bearer secret-token-team-1
 ```
 
-This works whether or not `oauth_base_url` is configured.
+This uses the same team identity as the OAuth flow.
 
 The built-in remote CLI uses the same Bearer authentication and live MCP tool
 schemas:
@@ -200,21 +220,90 @@ share; renaming one carries it over.
 
 ## Web Dashboard Auth
 
-The browser login form creates a signed, seven-day HTTP-only session cookie.
-The REST API also accepts HTTP Basic authentication. Both use a **separate**
-password:
+The browser login form checks the team's `ui_password` and, when enabled, its
+TOTP authenticator code. It creates a signed, seven-day HTTP-only session cookie
+for the dashboard, UI REST API, and WebSocket handshakes. Opening the dashboard
+does not extend that expiry. HTTP Basic authentication is no longer accepted.
 
-- **Username**: `admin`
-- **Password**: value of `ui_password` from `oduflow.toml`
-
-This is independent from the MCP Bearer token (`auth_token`). Credentials are
-compared using `hmac.compare_digest` to prevent timing attacks. State-changing
-cookie-auth requests and WebSocket handshakes are additionally checked for a
-same-origin `Origin`/`Referer` to prevent CSRF.
+The UI password is independent from the MCP Bearer token (`auth_token`). Use
+`oduflow client` for remote automation; it does not need the UI password or TOTP.
+Password comparisons use `hmac.compare_digest`. State-changing cookie-auth
+requests and WebSocket handshakes have a same-origin `Origin`/`Referer` check;
+the login POST also rejects cross-origin submissions.
 
 Fresh configs get a generated `ui_password` for `[team.1]` on first startup.
 Older HTTP configs with an empty `ui_password` are also auto-filled on startup
 and written back to `oduflow.toml`, so an upgrade does not expose the dashboard.
+
+### Enable authenticator-app 2FA
+
+UI 2FA is optional and uses standard six-digit TOTP codes from Google
+Authenticator, Microsoft Authenticator, or another compatible app. It protects
+the **full operator UI**. Shared environment links keep their separate,
+restricted access without OTP; MCP clients and import/webhook authentication
+are unchanged. Odoo's own login is separate.
+
+1. On the Oduflow server, run the command as the **same OS user as the Oduflow
+   service**, with its existing configuration and persistent data directory:
+
+   ```bash
+   oduflow ui-2fa setup --team 1
+   # For a non-default configuration:
+   ODUFLOW_TOML=/path/to/oduflow.toml oduflow ui-2fa setup --team 1
+   ```
+
+   For Docker installations, run the command inside the running Oduflow
+   container using an interactive terminal (`docker exec -it <container> ...`).
+
+2. Scan the QR code printed in the terminal with your authenticator. A manual
+   setup key is printed as a fallback. Both contain the secret: do not put them
+   in logs, tickets, screenshots, or source control. QR generation is local.
+3. Enter the current authenticator code in the CLI. Only a correct code enables
+   2FA. A failed or cancelled setup leaves the previous state unchanged.
+4. Wait for the next code, then sign in to the dashboard with the existing
+   password and the **Authenticator code** field. The setup code is already
+   consumed. If 2FA is disabled, leave that field empty.
+
+No server restart is needed. Enabling 2FA revokes existing full UI cookies;
+shared-link cookies are unaffected. One secret belongs to the **team**, matching
+its existing shared UI password; this is not a personal-user account system.
+A code can be accepted only once, including simultaneous requests. Keep the
+server and phone clocks synchronized; verification tolerates one 30-second
+step in either direction. Failed logins are limited by IP, and ten failed TOTP
+attempts within five minutes lock further attempts for the team until that
+window clears. Team attempts and consumed time steps survive server restarts.
+
+### Lost phone or replacing an authenticator
+
+Use the local server CLI (over SSH if necessary):
+
+```bash
+oduflow ui-2fa reset --team 1
+oduflow ui-2fa setup --team 1
+```
+
+Reset asks for confirmation, disables the factor, and revokes full UI cookies.
+Until setup completes again, the UI accepts the team password alone. There is
+no web or MCP reset endpoint and no recovery-code system in this version.
+Revocation is checked on subsequent HTTP requests and new WebSocket handshakes;
+it does not disconnect an already established terminal connection.
+
+The secret, revocation generation, replay counter, and failed attempts live in
+`<team-data-dir>/.ui_totp.json` (permissions `0600`). Updates are locked across
+processes and atomically replaced. Keep this file on the persistent data volume
+and protect backups as credentials. An unreadable or malformed file blocks full
+UI authentication; restore it or use CLI reset. Do not delete the file to reset
+2FA: absence represents a team that has never enrolled, whereas CLI reset keeps
+a fresh generation so old cookies remain revoked.
+
+### Migrating scripts from HTTP Basic
+
+Use `oduflow client create_environment ...` and `oduflow client pull_and_apply ...`
+instead of the removed `scripts/create_env.py` and `scripts/sync_env.py` helpers.
+Other scripts using Basic against `/api/` must migrate to the corresponding MCP
+tools. The browser continues to use these API routes with its session cookie.
+The session format change signs out existing operators once on upgrade, even
+for teams without 2FA; shared links keep working.
 
 ## When auth is disabled
 
@@ -236,10 +325,8 @@ deployments, `auth_token` and `ui_password` are generated automatically and
 startup logs show auth as enabled:
 
 ```
-INFO  [team.1] http://localhost:8000/ (MCP token ON, OAuth OFF, UI auth ON)
+INFO  [team.1] http://localhost:8000/ (MCP token ON, OAuth ON (self-hosted), UI auth ON)
 ```
-
-When OAuth is enabled the status reads `OAuth ON (self-hosted)`.
 
 ## Git Credentials
 
@@ -250,11 +337,22 @@ Private repository credentials are stored in the git credential store at `{team_
 ### Managing credentials via MCP
 
 ```bash
-# Store credentials for a private repository
+# Store a personal access token for a git host (verified with git ls-remote against repo_url)
+oduflow call setup_repo_auth '{"repo_url": "https://github.com/owner/private-repo.git", "token": "ghp_..."}'
+
+# Host only — verified against the provider API (GitHub, GitLab, Bitbucket)
+oduflow call setup_repo_auth '{"host": "github.com", "token": "ghp_..."}'
+
+# Legacy inline form
 oduflow call setup_repo_auth https://user:PAT@github.com/owner/private-repo.git
 ```
 
-The tool parses the URL, stores the credentials, and verifies access by running `git ls-remote`.
+Git matches stored credentials by host and username, not by repository, so a
+single token covers every repository on that host. `username` is optional (it
+defaults to `x-access-token`; GitHub, GitLab and Azure DevOps accept any name
+with a token) and only has to be the real account name for Bitbucket app
+passwords. Use different usernames to keep several tokens for one host; storing
+again with the same username replaces the token.
 
 ### Managing credentials via REST API and Web Dashboard
 
@@ -263,11 +361,59 @@ The Web Dashboard and REST API provide full credential lifecycle management:
 | Action | REST API |
 |---|---|
 | **List** all stored credentials | `GET /api/credentials` |
-| **Add** credentials for a repository | `POST /api/credentials/add` (body: `repo_url`) |
+| **Add** a credential for a git host | `POST /api/credentials/add` (body: `token`, `host` = `github.com`, optional `username`, optional `repo_url` to verify against; legacy: `repo_url` with inline `user:PAT@`) |
 | **Delete** a stored credential | `POST /api/credentials/delete` (body: `host`, `username`) |
 | **Validate** a credential against the provider | `POST /api/credentials/validate` (body: `host`, `username`) |
 
 Validation checks the credential against the provider's API (GitHub, GitLab, Bitbucket). For other hosts, it reports `"valid"` if the credential exists. Tokens are always masked in API responses (e.g. `ghp_****`).
+
+### SSH deploy key
+
+As an alternative to tokens, each team has an SSH deploy key: an ed25519
+keypair generated automatically at server start and stored at
+`{team_data_dir}/ssh/id_ed25519` with owner-only permissions. The dashboard's
+**Credentials** tab, `GET /api/ssh-key`, and the `get_ssh_public_key` MCP tool
+expose only the public key. Register it with your git hosting (repository
+deploy key or machine-user key) and SSH repository URLs
+(`git@github.com:owner/repo.git`) work for environments, extra addon repos and
+productions.
+
+Like the team's git credential store, the private key is also provisioned
+into the team's coding-agent container so agent-side clones work over SSH.
+Anyone who can drive that agent — including a visitor holding a scoped
+environment share link, via Agent Chat — can therefore read it. Treat the
+deploy key as a team-level credential: prefer registering it read-only and
+per-repository, and regenerate it when a share should no longer grant repo
+access.
+
+Git runs SSH with `BatchMode=yes` (it can never block on a prompt) and
+`StrictHostKeyChecking=accept-new` with a per-team `known_hosts` file, so a
+host key is pinned on first contact and a later change is refused.
+`POST /api/ssh-key/generate` with `{"force": true}` regenerates the keypair;
+the old key stops working everywhere it was registered.
+
+## Secrets for Environment Variables
+
+Environment variables on services and environments are visible to coding agents through `get_service_info`, `list_services`, `get_environment_info` and the dashboard — so putting a password or API key directly into `env_vars` leaks it into every agent conversation that inspects the resource.
+
+**Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
+
+To use one, set the env-var value to a reference:
+
+```bash
+oduflow call create_service '{
+  "name": "meili",
+  "image": "getmeili/meilisearch:v1.6",
+  "port": 7700,
+  "env_vars": "MEILI_MASTER_KEY=secret:meili-master-key,MEILI_ENV=production"
+}'
+```
+
+The real value is substituted only into the container's environment at creation time. Everything that stores or displays the configuration — the service preset, the environment's Docker label, template metadata, `get_service_info`/`get_environment_info` output — keeps the `secret:<name>` reference. Because only the reference travels, secrets migrate automatically when a service is restored from a preset, an environment is renamed, or an environment is saved as a template and new environments are created from it.
+
+A dangling reference (secret deleted or never created) fails the create/update with a clear error before anything is touched; running containers keep their resolved value until recreated. After replacing a secret's value, recreate the services/environments that use it (`update_service` / `update_environment`): a rotated value counts as a config change, so `update_service` recreates the container even when the image and every other setting are unchanged.
+
+The store lives at `{team_data_dir}/secrets.json` with owner-only (0600) file permissions, like the other credential stores. Note the boundary: code running *inside* a container can always read its own environment — secrets protect the MCP/REST/dashboard read surfaces, not the container itself.
 
 ## iptables rule
 
@@ -278,7 +424,7 @@ On startup, an `iptables ACCEPT` rule is automatically added for the `oduflow-ne
 The bundled `odoo.conf` template includes these security settings:
 
 - `list_db = False` (hides database selector)
-- `without_demo = all` (no demo data)
+- `without_demo = True` (no demo data)
 - `max_cron_threads = 0` (disables cron in dev environments)
 
 A repository that ships its own `.oduflow/odoo.conf` replaces the template

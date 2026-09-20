@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="preload" href="/static/outfit-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/static/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/source-sans-3-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/source-code-pro-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="/favicon.ico" sizes="16x16 32x32">
 <link rel="icon" href="/static/icon.png" type="image/png" sizes="32x32">
 <link rel="apple-touch-icon" href="/static/apple-icon.png">
@@ -26,19 +26,19 @@
 </script>
 <style>
   @font-face {
-    font-family: "Outfit";
+    font-family: "Source Sans 3";
     font-style: normal;
     font-weight: 400 700;
     font-display: swap;
-    src: url("/static/outfit-latin.woff2") format("woff2");
+    src: url("/static/source-sans-3-latin.woff2") format("woff2");
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
   }
   @font-face {
-    font-family: "Geist Mono";
+    font-family: "Source Code Pro";
     font-style: normal;
-    font-weight: 400 600;
+    font-weight: 400 700;
     font-display: swap;
-    src: url("/static/geist-mono-latin.woff2") format("woff2");
+    src: url("/static/source-code-pro-latin.woff2") format("woff2");
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
   }
   :root {
@@ -68,8 +68,8 @@
     --shadow-bar: 0 8px 24px rgba(0,0,0,0.4);
     --shadow-menu: 0 16px 48px rgba(0,0,0,0.5);
     --shadow-modal: 0 24px 64px rgba(0,0,0,0.65);
-    --font-sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-    --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+    --font-sans: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "Source Code Pro", ui-monospace, SFMono-Regular, Consolas, monospace;
     /* Type scale — semantic rem tokens (see DESIGN.md §3) */
     --text-2xs: 0.8125rem;  /* 13px — micro labels: byline, badges, ports */
     --text-xs:  0.875rem;   /* 14px — secondary UI: meta, labels, buttons, inputs, hints, mono meta */
@@ -144,13 +144,28 @@
   header h1 { font-size: var(--text-xl); font-weight: 600; line-height: 1.05; }
   /* Machine artifact, so mono per The Console Voice Rule — and small enough to
      sit inside the headline without competing with it. */
+  /* A button, not a label: it opens the version dialog and checks on demand. */
   .brand-version {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
     font-weight: 400;
     color: var(--text-dim);
     vertical-align: 2px;
+    background: none;
+    border: none;
+    border-bottom: 1px dotted var(--border-raised);
+    padding: 0;
+    cursor: pointer;
   }
+  .brand-version:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  /* Release check dialog */
+  .version-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .version-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .version-row dt { color: var(--text-dim); font-size: var(--text-sm); }
+  .version-row dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-sm); text-align: right; }
+  .version-status { font-size: var(--text-sm); line-height: 1.5; margin-bottom: 12px; }
+  .version-release-title { font-size: var(--text-sm); color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
+  #version-release-link { margin-right: auto; }
   .brand-byline {
     color: var(--text-dim);
     font-size: var(--text-2xs);
@@ -272,6 +287,7 @@
   .badge-stopped { background: color-mix(in oklab, var(--yellow) 15%, transparent); color: var(--yellow); }
   .badge-exited  { background: color-mix(in oklab, var(--red) 15%, transparent); color: var(--red); }
   .badge-protected { background: color-mix(in oklab, var(--yellow) 15%, transparent); color: var(--yellow); }
+  .badge-cluster-prod { background: color-mix(in oklab, var(--cyan) 15%, transparent); color: var(--cyan); }
   .bulk-bar {
     position: sticky;
     top: 8px;
@@ -332,6 +348,8 @@
     font-size: var(--text-sm);
   }
   .prod-mono { font-family: var(--font-mono); color: var(--text-dim); }
+  .prod-domain { font-size: var(--text-sm); text-decoration: none; }
+  .prod-domain:hover { text-decoration: underline; color: var(--accent); }
   .prod-section {
     border-top: 1px solid var(--border);
     margin-top: 12px;
@@ -346,17 +364,6 @@
     font-size: var(--text-xs);
   }
   .prod-section th { color: var(--text-dim); font-weight: 600; }
-  .prod-logs-pre {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 10px;
-    max-height: 320px;
-    overflow: auto;
-    white-space: pre-wrap;
-  }
   /* Health chips (system bar) — status is always textual, never color-only */
   .health-chip {
     display: inline-flex;
@@ -492,6 +499,7 @@
   .menu button.danger:hover { background: color-mix(in oklab, var(--red) 10%, transparent); }
   .btn:hover { border-color: var(--accent); color: var(--accent); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  input:disabled, select:disabled, textarea:disabled { opacity: 0.4; cursor: not-allowed; }
   /* Semantic color appears on intent (hover/focus), not at rest:
      status badges own the resting color story of the screen. */
   .btn-start:hover, .btn-start:focus-visible { border-color: var(--green); color: var(--green); background: color-mix(in oklab, var(--green) 10%, transparent); }
@@ -831,6 +839,7 @@
   .module-row .module-name { font-family: var(--font-mono); }
   .module-row .module-version { margin-left: auto; font-size: var(--text-xs); color: var(--text-dim); font-family: var(--font-mono); }
   .module-picker-status { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-xs); color: var(--text-dim); margin-top: 6px; }
+  .module-picker-actions, .check-list-actions { display: flex; gap: 6px; margin-bottom: 6px; }
   .toast {
     position: fixed;
     bottom: 24px;
@@ -1218,6 +1227,12 @@
   /* Long repo URLs truncate instead of scrolling the row sideways. */
   .form-group .check-item > .hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .section-subtitle { font-size: var(--text-md); font-weight: 600; margin-bottom: 10px; color: var(--text-dim); }
+  .section-toggle {
+    background: none; border: none; padding: 0; cursor: pointer;
+    font: inherit; color: inherit; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .section-toggle:hover, .section-toggle:focus-visible { color: var(--text); }
+  .section-chevron { font-size: var(--text-xs); }
   .modal-note { font-size: var(--text-sm); color: var(--text-dim); margin-bottom: 16px; }
   .modal-note a { color: var(--accent); }
   .mono-input { font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -1279,6 +1294,9 @@
     color: var(--text-dim);
   }
   .scoped-chip strong { font-family: var(--font-mono); color: var(--text); font-weight: 500; }
+  /* The display rule above would otherwise beat the UA stylesheet's
+     [hidden] { display: none }, leaving an empty chip in the header. */
+  .scoped-chip[hidden] { display: none; }
 
   @media (max-width: 880px) {
     body { padding: 16px; padding-bottom: 96px; }
@@ -1328,13 +1346,20 @@
   }
 </style>
 </head>
-<body data-scoped-env="__SCOPED_ENV__">
+<body data-scoped-env="__SCOPED_ENV__" data-team-base-domain="__TEAM_BASE_DOMAIN__">
 
 <header>
   <div class="brand-lockup">
     <img src="/logo.png" alt="Oduflow logo">
     <div class="brand-copy">
-      <h1>Oduflow <span class="brand-version">v__ODUFLOW_VERSION__</span></h1>
+      <h1>Oduflow
+        <button type="button"
+                class="brand-version"
+                id="brand-version"
+                aria-haspopup="dialog"
+                title="Check for a newer release"
+                onclick="openVersionModal()">v__ODUFLOW_VERSION__</button>
+      </h1>
       <div class="brand-byline">a product by <a href="https://oduist.com" target="_blank" rel="noopener">Oduist</a></div>
     </div>
   </div>
@@ -1387,6 +1412,7 @@
     <button class="btn" onclick="copyToClipboard(document.getElementById('prod-webhook-url').textContent, 'Webhook URL copied')">Copy URL</button>
     <button class="btn" onclick="copyToClipboard(_prodWebhookSecret, 'Webhook secret copied')">Copy secret</button>
   </div>
+  <div id="prod-wal" class="env-card" aria-live="polite">Loading PostgreSQL WAL status…</div>
   <div id="prod-list"></div>
 </div>
 
@@ -1405,8 +1431,12 @@
   </div>
   <div id="svc-list"></div>
   <div id="svc-presets-section" style="display:none;margin-top:24px;">
-    <h2 class="section-subtitle">Saved Presets</h2>
-    <div id="svc-presets-list"></div>
+    <h2 class="section-subtitle">
+      <button type="button" class="section-toggle" id="svc-presets-toggle" aria-expanded="false" aria-controls="svc-presets-list" onclick="togglePresetsList()">
+        <span class="section-chevron" aria-hidden="true">&#9656;</span> Saved Presets <span id="svc-presets-count"></span>
+      </button>
+    </h2>
+    <div id="svc-presets-list" style="display:none;"></div>
   </div>
 </div>
 
@@ -1434,8 +1464,19 @@
 <div id="tab-credentials" class="tab-content">
   <div class="tab-toolbar">
     <button class="btn-create" onclick="openAddCredentialModal()">+ Add Credential</button>
+    <button class="btn-create" onclick="openSecretModal()">+ Add Secret</button>
   </div>
   <div id="credentials-list"></div>
+  <div id="ssh-key-section" style="margin-top:24px;">
+    <h2 class="section-subtitle">SSH deploy key</h2>
+    <div class="hint">The team's SSH public key, generated and kept by Oduflow (only the public key is shown here). Add it to your git hosting as a repository deploy key (read access is enough) or to a machine-user account, then use SSH repository URLs such as <code>git@github.com:owner/repo.git</code>. Note: GitHub allows a deploy key on one repository only — use a machine user to cover several.</div>
+    <div id="ssh-key-body"></div>
+  </div>
+  <div id="secrets-section" style="margin-top:24px;">
+    <h2 class="section-subtitle">Secrets</h2>
+    <div class="hint">Named values for environment variables. Reference one as <code>KEY=secret:&lt;name&gt;</code> in any service or environment. Values are write-only: agents and the API can only see the name, never the value.</div>
+    <div id="secrets-list"></div>
+  </div>
 </div>
 
 <div id="tab-agent-guides" class="tab-content">
@@ -1471,6 +1512,11 @@
     </div>
     <div class="modal-body">
       <div class="form-error" id="create-error"></div>
+      <div class="form-group" id="cr-from-prod-group" style="display:none">
+        <label>Source production</label>
+        <div class="prod-mono" id="cr-from-prod-name"></div>
+        <div class="hint">A copy of this production's database and filestore, through the managed template <code id="cr-from-prod-template"></code> (published on first use, reused afterwards). Repository, image and extra addons come from the production. The database is sanitized on creation. Refresh the copy with the production's <em>Save as template</em> action.</div>
+      </div>
       <div class="form-group">
         <label for="cr-branch">Branch name</label>
         <input type="text" id="cr-branch" placeholder="e.g. feature/my-branch">
@@ -1499,13 +1545,19 @@
         <label for="cr-image">Odoo image</label>
         <input type="text" id="cr-image" placeholder="e.g. odoo:19.0">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="cr-template-group">
         <label for="cr-template">Template</label>
         <select id="cr-template">
         </select>
       </div>
       <div class="form-group">
         <label>Extra Addons Repos</label>
+        <div class="check-list-actions">
+          <button class="btn btn-sm" type="button" id="cr-extra-select-all"
+                  onclick="setAllExtraRepos('.cr-extra-cb', true)">Select all</button>
+          <button class="btn btn-sm" type="button" id="cr-extra-clear"
+                  onclick="setAllExtraRepos('.cr-extra-cb', false)">Clear</button>
+        </div>
         <div id="cr-extra-addons-checkboxes" class="check-list"></div>
         <div class="hint">Select repos to mount in this environment</div>
       </div>
@@ -1517,7 +1569,7 @@
       <div class="form-group">
         <label for="cr-env-vars">Environment variables</label>
         <textarea id="cr-env-vars" rows="3" spellcheck="false" placeholder="WORKERS=2&#10;LIMIT_TIME_CPU=600"></textarea>
-        <div class="hint" id="cr-env-vars-hint">One KEY=VALUE per line, injected into the Odoo container. A value may contain commas.</div>
+        <div class="hint" id="cr-env-vars-hint">One KEY=VALUE per line, injected into the Odoo container. A value may contain commas. Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
       </div>
 
       <div class="form-actions">
@@ -1555,7 +1607,7 @@
         <label for="fb-diagnostics">Attached environment</label>
         <pre id="fb-diagnostics" class="fb-diagnostics">__ODUFLOW_DIAGNOSTICS__</pre>
         <div class="hint">
-          Opens the issue form on github.com/oduist/oduflow prefilled with the
+          Opens the issue form on github.com/oduflow/oduflow prefilled with the
           text above. It is filed from your own GitHub account, and nothing is
           submitted until you review it there and press Create.
         </div>
@@ -1597,27 +1649,82 @@
   <div class="modal modal-md">
     <div class="modal-header">
       <h2 id="svc-info-title">Environment</h2>
-      <button class="modal-close" onclick="closeServiceInfo()" aria-label="Close">&times;</button>
+      <div class="modal-header-actions">
+        <button class="btn" id="svc-info-copy" disabled onclick="copyToClipboard(document.getElementById('svc-info-content').textContent, 'Environment variables copied')" title="Copy environment variables to clipboard">Copy</button>
+        <button class="modal-close" onclick="closeServiceInfo()" aria-label="Close">&times;</button>
+      </div>
     </div>
     <div class="modal-body"><pre id="svc-info-content"></pre></div>
   </div>
 </div>
 <div class="modal-overlay" id="svc-update-modal" onclick="closeUpdateService(event)">
-  <div class="modal modal-sm">
+  <div class="modal modal-routes">
     <div class="modal-header">
       <h2 id="svc-update-title">Update service</h2>
       <button class="modal-close" onclick="closeUpdateService()" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Pull the latest image for <strong id="svc-update-name"></strong> and re-create its container. Volumes are kept.</p>
+      <p class="modal-note">Applies these settings to <strong id="svc-update-name"></strong> and pulls the latest image in one go. The container is re-created; volumes and their data are kept.</p>
+      <div class="form-error" id="upd-svc-error"></div>
       <div class="form-group">
-        <label for="svc-update-env-vars">Environment variables</label>
-        <textarea id="svc-update-env-vars" rows="6" spellcheck="false" placeholder="MEILI_ENV=production&#10;MEILI_MASTER_KEY=..."></textarea>
-        <p class="modal-note">One KEY=VALUE per line. Clear the field to remove all variables; leave it untouched to keep them.</p>
+        <label for="upd-svc-image">Docker image</label>
+        <input type="text" id="upd-svc-image" placeholder="e.g. redis:7, getmeili/meilisearch:v1.6">
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-command">Command <span class="label-hint">— overrides the image CMD</span></label>
+        <input type="text" id="upd-svc-command" placeholder="e.g. server /data --console-address :9001">
+        <div class="hint">Clear the field to fall back to the image CMD.</div>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-exposure">Public exposure</label>
+        <select id="upd-svc-exposure" onchange="toggleServiceExposure('upd-svc')">
+          <option value="port">Single port (all paths)</option>
+          <option value="routes">Restricted path routes (Traefik)</option>
+        </select>
+      </div>
+      <div class="form-group" id="upd-svc-port-group">
+        <label for="upd-svc-port">Container port</label>
+        <input type="number" id="upd-svc-port" placeholder="e.g. 6379" min="1" max="65535">
+      </div>
+      <div class="form-group" id="upd-svc-routes-group" style="display:none;">
+        <label>Allowed path routes</label>
+        <div class="route-hint">Each prefix reaches a port on this service. Unknown paths return 404. “Strip” removes the prefix before proxying.</div>
+        <button class="btn btn-sm" type="button" id="upd-svc-add-route" onclick="addServiceRoute('upd-svc')">Add route</button>
+        <div class="route-list" id="upd-svc-routes"></div>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-hostname">Hostname (traefik mode)</label>
+        <input type="text" id="upd-svc-hostname" placeholder="e.g. redis">
+        <div class="hint">A name without a dot gets the team domain appended. Leave empty to keep the current hostname.</div>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-envvars">Environment variables</label>
+        <textarea id="upd-svc-envvars" rows="6" spellcheck="false" placeholder="KEY1=val1&#10;KEY2=val2"></textarea>
+        <div class="hint">One KEY=VALUE per line. Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab). Clear the field to remove every variable.</div>
+      </div>
+      <div class="form-group check-row">
+        <input type="checkbox" id="upd-svc-host-mode">
+        <label for="upd-svc-host-mode" >Host network mode</label>
+      </div>
+      <div class="form-group">
+        <label for="upd-svc-volumes">Volumes</label>
+        <textarea id="upd-svc-volumes" rows="3" placeholder="volume_name:/container/path&#10;volume_name:/container/path:ro"></textarea>
+        <div class="hint">Clear the field to unmount every volume. The volumes themselves keep their data.</div>
+      </div>
+      <div class="form-group">
+        <label>Capabilities</label>
+        <div class="check-row" style="margin-top:4px;">
+          <input type="checkbox" id="upd-svc-privileged">
+          <label for="upd-svc-privileged" >Privileged <span class="label-hint">— full host access (use with care)</span></label>
+        </div>
+        <div class="check-row" style="margin-top:6px;">
+          <input type="checkbox" id="upd-svc-net-admin">
+          <label for="upd-svc-net-admin" >NET_ADMIN <span class="label-hint">— VPN / tun / iptables</span></label>
+        </div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeUpdateService()">Cancel</button>
-        <button class="btn-create" onclick="confirmUpdateService()">Update service</button>
+        <button class="btn-create" id="upd-svc-submit" onclick="confirmUpdateService()">Update service</button>
       </div>
     </div>
   </div>
@@ -1634,6 +1741,13 @@
       <div class="form-group">
         <label for="database-name">Database resource name</label>
         <input type="text" id="database-name" placeholder="e.g. worker-data" maxlength="31" autocomplete="off">
+      </div>
+      <div class="form-group" id="database-cluster-group">
+        <label for="database-cluster">PostgreSQL cluster</label>
+        <select id="database-cluster">
+          <option value="dev" selected>Development (shared dev cluster)</option>
+          <option value="prod">Production (dedicated cluster, WAL-G backups)</option>
+        </select>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeCreateDatabaseModal()">Cancel</button>
@@ -1758,6 +1872,7 @@
       <div class="form-group">
         <label for="svc-envvars">Environment variables (optional)</label>
         <textarea id="svc-envvars" rows="5" placeholder="KEY1=val1&#10;KEY2=val2"></textarea>
+        <div class="hint">One KEY=VALUE per line. Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
       </div>
       <div class="form-group check-row">
         <input type="checkbox" id="svc-host-mode">
@@ -1835,6 +1950,7 @@
       <div class="form-group">
         <label for="restore-svc-envvars">Environment variables (optional)</label>
         <textarea id="restore-svc-envvars" rows="4" placeholder="KEY1=val1&#10;KEY2=val2"></textarea>
+        <div class="hint">One KEY=VALUE per line. <code>secret:&lt;name&gt;</code> values are resolved from the team secrets at restore time.</div>
       </div>
       <div class="form-group check-row">
         <input type="checkbox" id="restore-svc-host-mode">
@@ -2017,6 +2133,12 @@
         </div>
         <div class="form-group">
           <label>Extra addons repos</label>
+          <div class="check-list-actions">
+            <button class="btn btn-sm" type="button" id="tset-extra-select-all"
+                    onclick="setAllExtraRepos('.tset-extra-cb', true)">Select all</button>
+            <button class="btn btn-sm" type="button" id="tset-extra-clear"
+                    onclick="setAllExtraRepos('.tset-extra-cb', false)">Clear</button>
+          </div>
           <div id="tset-extra-addons" class="check-list"></div>
           <div class="hint">Checked repos are mounted into environments created from this template. Each one needs a branch.</div>
         </div>
@@ -2120,6 +2242,10 @@
     </div>
     <div class="modal-body">
       <p class="modal-note" id="confirm-message"></p>
+      <div class="form-group check-row" id="confirm-check-row" style="display:none;">
+        <input type="checkbox" id="confirm-check">
+        <label for="confirm-check" id="confirm-check-label"></label>
+      </div>
       <div class="form-actions">
         <button class="btn" id="confirm-cancel" onclick="cancelConfirm()">Cancel</button>
         <button class="btn-create" id="confirm-ok" onclick="acceptConfirm()">Confirm</button>
@@ -2181,8 +2307,14 @@
         <div class="hint">Change it to rename this environment. The database and filestore move with it; a pooled or explicit hostname is kept, a hostname derived from the environment name follows the new one. Its MCP endpoint becomes /mcp/&lt;new name&gt; — re-point any MCP client configured against the old path</div>
       </div>
       <div class="form-group">
+        <label for="update-env-hostname">Hostname (Traefik mode)</label>
+        <input type="text" id="update-env-hostname" spellcheck="false" placeholder="qa">
+        <div class="hint">Short hostname, as when creating an environment. Changing it changes the public URL. Leave unchanged or empty to keep the current hostname policy.</div>
+      </div>
+      <div class="form-group">
         <label for="update-env-vars">Environment variables</label>
         <textarea id="update-env-vars" rows="5" spellcheck="false" placeholder="WORKERS=2&#10;LIMIT_TIME_CPU=600"></textarea>
+        <div class="hint">Use <code>secret:&lt;name&gt;</code> as a value to reference a team secret (Credentials tab).</div>
         <p class="modal-note">One KEY=VALUE per line, injected into the Odoo container on top of the database connection variables. Clear the field to remove all custom variables; leave it untouched to keep them.</p>
       </div>
       <div class="form-actions">
@@ -2220,12 +2352,18 @@
       <button class="modal-close" onclick="closeUpgradeModules()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Runs <code>odoo -u</code> for the modules you pick and restarts the container when it succeeds. Only installed modules are listed; filtering never clears a selection.</p>
+      <p class="modal-note">Runs <code>odoo -u</code> for the modules you pick and restarts the container when it succeeds. Only installed modules are listed; filtering never clears a selection. <strong>Select all</strong> takes every installed module, filtered or not, and upgrades them with <code>odoo -u all</code>.</p>
       <div class="form-group">
         <label for="upgrade-modules-filter">Filter</label>
         <input id="upgrade-modules-filter" class="mono-input" type="text" placeholder="Type to filter, e.g. sale"
                oninput="renderUpgradeModules()"
                onkeydown="if (event.key === 'Enter') { event.preventDefault(); confirmUpgradeModules(); }">
+      </div>
+      <div class="module-picker-actions">
+        <button class="btn btn-sm" type="button" id="upgrade-modules-select-all"
+                onclick="selectAllUpgradeModules()">Select all</button>
+        <button class="btn btn-sm" type="button" id="upgrade-modules-clear"
+                onclick="clearUpgradeModules()">Clear</button>
       </div>
       <div class="module-picker" id="upgrade-modules-list"></div>
       <div class="module-picker-status">
@@ -2343,6 +2481,39 @@
     </div>
   </div>
 </div>
+<div class="modal-overlay" id="version-modal" onclick="closeVersionModal(event)">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="version-modal-title">
+    <div class="modal-header">
+      <h2 id="version-modal-title">Oduflow version</h2>
+      <button class="modal-close" onclick="closeVersionModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <dl class="version-rows">
+        <div class="version-row">
+          <dt>Installed</dt>
+          <dd id="version-installed">&mdash;</dd>
+        </div>
+        <div class="version-row">
+          <dt>Latest release</dt>
+          <dd id="version-latest">&mdash;</dd>
+        </div>
+      </dl>
+      <p class="version-status" id="version-status" role="status"></p>
+      <p class="version-release-title" id="version-release-title" hidden></p>
+      <p class="modal-note" id="version-upgrade-note" hidden>
+        Upgrade the package (<code>uv tool upgrade oduflow</code> or
+        <code>pip install -U oduflow</code>), then run <code>oduflow upgrade</code>
+        to reconcile the deployed team files.
+      </p>
+      <div class="form-actions">
+        <a class="docs-link" id="version-release-link" href="https://github.com/oduflow/oduflow/releases"
+           target="_blank" rel="noopener">Release notes &#8599;</a>
+        <button class="btn" id="version-recheck" onclick="checkVersion()">Check again</button>
+        <button class="btn-create" onclick="closeVersionModal()">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="add-extra-repo-modal" onclick="closeAddExtraRepoModal(event)">
   <div class="modal modal-md">
     <div class="modal-header">
@@ -2381,12 +2552,52 @@
     <div class="modal-body">
       <div class="form-error" id="add-credential-error"></div>
       <div class="form-group">
-        <label for="credential-url">Repository URL with credentials</label>
-        <input type="text" id="credential-url" placeholder="https://user:PAT@github.com/owner/repo.git">
+        <label for="credential-token">Access token</label>
+        <input type="password" id="credential-token" autocomplete="off" spellcheck="false" placeholder="ghp_… / glpat-… / app password">
+        <div class="hint">Personal access token with read access to the repositories. One token covers every repository on the host.</div>
+      </div>
+      <div class="form-group">
+        <label for="credential-host">Git host</label>
+        <input type="text" id="credential-host" value="github.com" spellcheck="false" placeholder="github.com">
+      </div>
+      <div class="form-group">
+        <label for="credential-username">Username <span class="label-hint">(optional)</span></label>
+        <input type="text" id="credential-username" spellcheck="false" placeholder="x-access-token">
+        <div class="hint">GitHub, GitLab and Azure DevOps accept any name with a token. Bitbucket app passwords need the real account name. Use different names to keep several tokens for one host; the same name replaces the stored token.</div>
+      </div>
+      <div class="form-group">
+        <label for="credential-url">Repository URL to verify <span class="label-hint">(optional)</span></label>
+        <input type="text" id="credential-url" spellcheck="false" placeholder="https://github.com/owner/repo.git">
+        <div class="hint">Runs git ls-remote with the token. Without it, the token is checked against the provider API (GitHub, GitLab, Bitbucket); other hosts are saved unverified.</div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeAddCredentialModal()">Cancel</button>
         <button class="btn-create" id="credential-submit" onclick="submitAddCredential()">Save &amp; Verify</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="secret-modal" onclick="closeSecretModal(event)">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <h2 id="secret-modal-title">Add Secret</h2>
+      <button class="modal-close" onclick="closeSecretModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="secret-error"></div>
+      <div class="form-group">
+        <label for="secret-name">Name</label>
+        <input type="text" id="secret-name" placeholder="openai-api-key" autocomplete="off">
+        <div class="hint">Lowercase letters, digits, dots, hyphens, underscores. Referenced from env vars as <code>KEY=secret:&lt;name&gt;</code>.</div>
+      </div>
+      <div class="form-group">
+        <label for="secret-value">Value</label>
+        <input type="password" id="secret-value" placeholder="" autocomplete="new-password">
+        <div class="hint">Write-only: the stored value can be replaced here, but never read back.</div>
+      </div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeSecretModal()">Cancel</button>
+        <button class="btn-create" id="secret-submit" onclick="submitSecret()">Save</button>
       </div>
     </div>
   </div>
@@ -2397,6 +2608,22 @@
 // server enforces the scope in oduflow/ui_scope.py; everything this flag does
 // on the page is presentation — hiding controls whose endpoints are denied.
 var SCOPED_ENV = document.body.getAttribute('data-scoped-env') || '';
+// Ships with the page so the create-production modal knows the team zone
+// no matter which tab opened it; loadProductions refreshes it later.
+window._teamBaseDomain = document.body.getAttribute('data-team-base-domain') || '';
+
+// Whether the Promote-to-Production feature is enabled for this page. The
+// server substitutes the production-tab placeholder (see
+// web_ui._render_dashboard) with '' (enabled) or 'hidden' — both in the tab
+// button's markup and in the string literal below, so this flag is the
+// authoritative client-side signal rather than sniffing the button's
+// presentation. The tab button's hidden state and _prodEnabled() both derive
+// from it.
+var PROD_ENABLED = '__PRODUCTION_TAB_HIDDEN__' !== 'hidden';
+(function () {
+  var tab = document.querySelector('.tab-btn[data-tab="production"]');
+  if (tab) tab.hidden = !PROD_ENABLED;
+})();
 
 // Path of the scoped page itself. Environment names may contain slashes
 // (feature/x), which stay separators in the URL.
@@ -2600,15 +2827,26 @@ document.querySelectorAll('.modal-overlay').forEach(function(overlay) {
 
 // --- Confirm dialog: in-system replacement for window.confirm() ---
 var _confirmResolve = null;
+var _confirmOpts = null;
 
+// The promise always resolves a boolean, so every `if (!(await
+// confirmDialog(...)))` caller keeps working. opts.checkbox = {label, checked}
+// adds one option to the dialog; on confirm the user's answer is written back
+// into the caller's own opts.checkbox.checked.
 function confirmDialog(opts) {
   return new Promise(function(resolve) {
     _confirmResolve = resolve;
+    _confirmOpts = opts;
     document.getElementById('confirm-title').textContent = opts.title || 'Confirm';
     document.getElementById('confirm-message').textContent = opts.message || '';
     var ok = document.getElementById('confirm-ok');
     ok.textContent = opts.confirmLabel || 'Confirm';
     ok.classList.toggle('danger', !!opts.danger);
+    document.getElementById('confirm-check-row').style.display = opts.checkbox ? '' : 'none';
+    if (opts.checkbox) {
+      document.getElementById('confirm-check-label').textContent = opts.checkbox.label || '';
+      document.getElementById('confirm-check').checked = opts.checkbox.checked !== false;
+    }
     showModal('confirm-modal');
     // Destructive confirms focus Cancel so a buffered Enter cannot delete.
     if (opts.danger) document.getElementById('confirm-cancel').focus();
@@ -2620,6 +2858,7 @@ function _settleConfirm(value) {
   if (!_confirmResolve) return;
   var resolve = _confirmResolve;
   _confirmResolve = null;
+  _confirmOpts = null;
   hideModal('confirm-modal');
   resolve(value);
 }
@@ -2629,7 +2868,12 @@ function cancelConfirm(event) {
   _settleConfirm(false);
 }
 
-function acceptConfirm() { _settleConfirm(true); }
+function acceptConfirm() {
+  if (_confirmOpts && _confirmOpts.checkbox) {
+    _confirmOpts.checkbox.checked = document.getElementById('confirm-check').checked;
+  }
+  _settleConfirm(true);
+}
 
 // --- Tabs: tablist semantics + arrow-key navigation ---
 (function initTabs() {
@@ -2966,6 +3210,7 @@ function renderEnvironments(envs, force) {
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
+              '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
               (showAgent
                 ? '<button role="menuitem" title="Structured chat with the coding agent for this environment" onclick="openChat(\'' + escAttr(env.branch) + '\')">Agent Chat</button>'
                 : '') +
@@ -2999,6 +3244,10 @@ function renderEnvironments(envs, force) {
                   (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>' +
                 '<button role="menuitem" onclick="doNewTemplate(\'' + escAttr(env.branch) + '\')" ' + dis +
                   'title="Save this environment (DB + filestore) as a new template">New Template</button>' +
+                (_prodEnabled()
+                  ? '<button role="menuitem" onclick="openCreateProductionModal(\'' + escAttr(env.branch) + '\')" ' +
+                      'title="Create a production from a copy of this environment (database + filestore); the environment itself is not changed">Promote to Production</button>'
+                  : '') +
                 '<button role="menuitem" class="danger" onclick="doDelete(\'' + escAttr(env.branch) + '\')" ' + dis +
                   (env.protected ? 'disabled title="Environment is protected"' : '') + '>Delete</button>') +
             '</div>' +
@@ -3713,6 +3962,7 @@ async function confirmSwitchBranch() {
 
 var _updateEnv = '';
 var _updateEnvInitial = '';
+var _updateEnvHostnameInitial = '';
 // Bumped on every open and every close, so a prefill response can be matched
 // against the dialog that started it — the Docker-backed lookup is slow enough
 // to outlive a cancel-and-reopen, and answering into the wrong environment
@@ -3805,6 +4055,7 @@ async function openUpgradeModules(branch) {
     '<div class="module-picker-empty">Loading installed modules&hellip;</div>';
   document.getElementById('upgrade-modules-count').textContent = 'No modules selected';
   document.getElementById('upgrade-modules-shown').textContent = '';
+  _disableUpgradePickerActions();
   showModal('upgrade-modules-modal');
   document.getElementById('upgrade-modules-filter').focus();
   try {
@@ -3867,6 +4118,28 @@ function renderUpgradeModules() {
   updateUpgradeCount();
 }
 
+function selectAllUpgradeModules() {
+  _upgradeModules.forEach(function(m) { _upgradeSelected.add(m.name); });
+  renderUpgradeModules();
+}
+
+function clearUpgradeModules() {
+  _upgradeSelected = new Set();
+  renderUpgradeModules();
+}
+
+function _upgradeSelectionIsEverything() {
+  return _upgradeModules.length > 0 &&
+    _upgradeSelected.size === _upgradeModules.length;
+}
+
+function _disableUpgradePickerActions() {
+  var selectAll = document.getElementById('upgrade-modules-select-all');
+  if (selectAll) selectAll.disabled = true;
+  var clear = document.getElementById('upgrade-modules-clear');
+  if (clear) clear.disabled = true;
+}
+
 function toggleUpgradeModule(input) {
   if (input.checked) _upgradeSelected.add(input.value);
   else _upgradeSelected.delete(input.value);
@@ -3875,13 +4148,24 @@ function toggleUpgradeModule(input) {
 
 function updateUpgradeCount() {
   var n = _upgradeSelected.size;
+  var everything = _upgradeSelectionIsEverything();
   document.getElementById('upgrade-modules-count').textContent =
-    n === 0 ? 'No modules selected' : n + (n === 1 ? ' module selected' : ' modules selected');
+    n === 0 ? 'No modules selected'
+      : everything ? 'All ' + n + ' modules selected \u2014 runs odoo -u all'
+      : n + (n === 1 ? ' module selected' : ' modules selected');
+  var selectAll = document.getElementById('upgrade-modules-select-all');
+  if (selectAll) selectAll.disabled = !_upgradeModules.length || everything;
+  var clear = document.getElementById('upgrade-modules-clear');
+  if (clear) clear.disabled = n === 0;
 }
 
 async function confirmUpgradeModules() {
   if (!_upgradeSelected.size) { showToast('Select at least one module', true); return; }
-  var modules = Array.from(_upgradeSelected).join(',');
+  // Everything selected is exactly Odoo's own `-u all`, so send the keyword
+  // instead of a command line carrying every installed module name.
+  var modules = _upgradeSelectionIsEverything()
+    ? 'all'
+    : Array.from(_upgradeSelected).join(',');
   var branch = _upgradeModulesEnv;
   closeUpgradeModules();
   await applyModules(branch, 'upgrade', modules);
@@ -3915,6 +4199,9 @@ async function doUpdate(branch) {
   document.getElementById('update-env-title').textContent = 'Update environment — ' + branch;
   document.getElementById('update-env-name').textContent = branch;
   document.getElementById('update-env-newname').value = branch;
+  var env = cachedEnvs.find(function(e) { return e.branch === branch; });
+  _updateEnvHostnameInitial = (env && env.hostname) || '';
+  document.getElementById('update-env-hostname').value = _updateEnvHostnameInitial;
   var ta = document.getElementById('update-env-vars');
   ta.value = '';
   ta.disabled = true;
@@ -3961,6 +4248,8 @@ async function confirmUpdateEnv() {
   // Send a mapping, not the raw blob: the server must not re-split values.
   if (raw.trim() !== _updateEnvInitial.trim()) payload.env_vars = parseEnvLines(raw);
   if (newName && newName !== branch) payload.new_name = newName;
+  var hostname = document.getElementById('update-env-hostname').value.trim();
+  if (hostname && hostname !== _updateEnvHostnameInitial) payload.hostname = hostname;
   _updateEnvSeq++;
   hideModal('update-env-modal');
   setBusy(branch, payload.new_name ? 'Renaming' : 'Updating');
@@ -4054,7 +4343,7 @@ async function doProtect(branch, isProtected) {
   await loadEnvironments(true);
 }
 
-var _logsState = { branch: '', lines: [], type: 'env', serviceName: '' };
+var _logsState = { branch: '', lines: [], type: 'env', serviceName: '', prodName: '' };
 
 async function showLogs(branch) {
   _dropChip('logs-modal');   // reopening replaces any minimized logs window
@@ -4090,6 +4379,8 @@ async function fetchLogs() {
     var url;
     if (_logsState.type === 'service') {
       url = API_SERVICES + '/' + encodeURIComponent(_logsState.serviceName) + '/logs?n=' + n;
+    } else if (_logsState.type === 'prod') {
+      url = API_PRODUCTIONS + '/' + encodeURIComponent(_logsState.prodName) + '/logs?lines=' + n;
     } else {
       url = API + '/' + encodeURIComponent(_logsState.branch) + '/logs?n=' + n;
       var cont = document.getElementById('logs-container').value;
@@ -4221,7 +4512,7 @@ function switchTab(name) {
   if (name === 'volumes') loadVolumes();
   if (name === 'agent-guides') loadAgentGuides();
   if (name === 'extra-addons') loadExtraRepos();
-  if (name === 'credentials') loadCredentials();
+  if (name === 'credentials') { loadCredentials(); loadSshKey(); loadSecrets(); }
 }
 
 async function loadTemplates() {
@@ -4513,6 +4804,21 @@ function _tsetBranchOptions(branches) {
   return out;
 }
 
+// The create-environment modal and the template settings form both render the
+// extra addon repos as a plain checkbox list, so one pair of helpers drives
+// either of them. Ticking every repo still leaves each branch to be filled in:
+// a repo without a branch cannot be mounted, and only the user knows which one.
+function setAllExtraRepos(selector, checked) {
+  document.querySelectorAll(selector).forEach(function(cb) { cb.checked = checked; });
+}
+
+function setExtraRepoActionsEnabled(prefix, enabled) {
+  ['-select-all', '-clear'].forEach(function(suffix) {
+    var button = document.getElementById(prefix + suffix);
+    if (button) button.disabled = !enabled;
+  });
+}
+
 function _tsetExtraRow(name, repoUrl, branches, extras, idx, missing) {
   var checked = Object.prototype.hasOwnProperty.call(extras, name);
   var branch = checked ? (extras[name] || '') : '';
@@ -4548,6 +4854,7 @@ function _tsetRenderExtraAddons(extras) {
   container.innerHTML = rows.length
     ? rows.join('')
     : '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+  setExtraRepoActionsEnabled('tset-extra', rows.length > 0);
 }
 
 function _tsetRenderCredentials(current) {
@@ -5061,6 +5368,7 @@ function populateTemplateSelect() {
 
 function openCreateFromTemplate(templateName) {
   var tpl = cachedTemplates.find(function(t) { return t.template_name === templateName; });
+  setCreateSourceProduction('');  // a template source clears any production source
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
@@ -5086,10 +5394,14 @@ function openCreateFromTemplate(templateName) {
     });
     if (tpl && tpl.git_user) sel.value = tpl.git_user;
   });
+  // The repo list arrives asynchronously; until it does there is nothing to
+  // tick, and a stale state from the previous opening would be misleading.
+  setExtraRepoActionsEnabled('cr-extra', false);
   loadExtraRepos().then(function() {
     var container = document.getElementById('cr-extra-addons-checkboxes');
     if (cachedExtraRepos.length === 0) {
       container.innerHTML = '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+      setExtraRepoActionsEnabled('cr-extra', false);
       return;
     }
     var tplExtras = (tpl && tpl.extra_addons) ? tpl.extra_addons : {};
@@ -5103,12 +5415,29 @@ function openCreateFromTemplate(templateName) {
         ' placeholder="branch" value="' + escAttr(defaultBranch) + '">' +
       '</label>';
     }).join('');
+    setExtraRepoActionsEnabled('cr-extra', true);
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
 }
 
-function openCreateModal() {
+// Set when the create modal was opened from a production card: the environment
+// is then built from a dev copy of that production instead of a template.
+var _createFromProduction = '';
+
+function setCreateSourceProduction(name) {
+  _createFromProduction = name || '';
+  // The source is either a production or a template, never both.
+  document.getElementById('cr-from-prod-group').style.display = _createFromProduction ? '' : 'none';
+  document.getElementById('cr-template-group').style.display = _createFromProduction ? 'none' : '';
+  if (_createFromProduction) {
+    document.getElementById('cr-from-prod-name').textContent = _createFromProduction;
+    document.getElementById('cr-from-prod-template').textContent = 'prod-' + _createFromProduction;
+  }
+}
+
+function openCreateModal(fromProduction) {
+  setCreateSourceProduction(fromProduction);
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
@@ -5130,10 +5459,14 @@ function openCreateModal() {
       sel.innerHTML += '<option value="' + escAttr(c.username) + '">' + esc(c.username) + ' (' + esc(c.host) + ')</option>';
     });
   });
+  // The repo list arrives asynchronously; until it does there is nothing to
+  // tick, and a stale state from the previous opening would be misleading.
+  setExtraRepoActionsEnabled('cr-extra', false);
   loadExtraRepos().then(function() {
     var container = document.getElementById('cr-extra-addons-checkboxes');
     if (cachedExtraRepos.length === 0) {
       container.innerHTML = '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+      setExtraRepoActionsEnabled('cr-extra', false);
       return;
     }
     container.innerHTML = cachedExtraRepos.map(function(r) {
@@ -5144,6 +5477,7 @@ function openCreateModal() {
         ' placeholder="branch" value="">' +
       '</label>';
     }).join('');
+    setExtraRepoActionsEnabled('cr-extra', true);
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
@@ -5263,7 +5597,10 @@ async function submitCreate() {
       hostname: hostname,
       repo_url: repo,
       odoo_image: image,
-      template_name: template,
+      // A production source replaces the template: the server resolves (and
+      // publishes on first use) the managed prod-<name> template itself.
+      template_name: _createFromProduction ? '' : template,
+      from_production: _createFromProduction,
       git_user: gitUser,
       extra_addons: extraAddonsObj,
       auto_install_modules: autoInstall,
@@ -5277,8 +5614,14 @@ async function submitCreate() {
     var data = await readResult(r);
     if (r.ok && data.ok) {
       closeCreateModal();
-      showToast('Environment "' + (envName || branch) + '" created');
-      await loadEnvironments(true);
+      showToast('Environment "' + (envName || branch) + '" created' +
+        (data.from_production
+          ? ' from production "' + data.from_production + '" (template "' + data.template_name + '")'
+          : ''));
+      await Promise.all([
+        data.from_production ? loadTemplates() : Promise.resolve(),
+        loadEnvironments(true)
+      ]);
     } else {
       errEl.textContent = data.error || ('Creation failed (HTTP ' + r.status + ')');
       errEl.style.display = 'block';
@@ -5326,7 +5669,13 @@ function resetTimers() {
     loadStats();
     loadHealth();
     var prodTab = document.getElementById('tab-production');
-    if (prodTab && prodTab.classList.contains('active')) loadProductions();
+    // Skip the periodic re-render while a production Settings form has unsaved
+    // edits or focus — re-rendering would silently discard them. Manual loads
+    // (tab switch, explicit actions) still refresh normally.
+    if (prodTab && prodTab.classList.contains('active')) {
+      if (_prodSettingsEditing()) loadWalStatus();
+      else loadProductions();
+    }
   }, ms);
 }
 
@@ -5384,10 +5733,16 @@ function renderServiceDatabases(databases) {
       '<div class="svc-header"><div class="left">' +
         '<span class="svc-name">' + esc(db.name) + '</span>' +
         '<span class="badge ' + (ready ? 'badge-running' : 'badge-partial') + '">' + esc(db.status) + '</span>' +
+        (db.cluster === 'prod' ? '<span class="badge badge-cluster-prod" title="Lives on the dedicated production PostgreSQL cluster">production</span>' : '') +
+        (db.protected ? '<span class="badge badge-protected" title="Deletion is disabled">protected</span>' : '') +
       '</div><div class="svc-actions">' +
         '<button class="btn" onclick="showDatabaseCredentials(\'' + escAttr(db.name) + '\')">Credentials</button>' +
         '<button class="btn btn-update" onclick="rotateDatabasePassword(\'' + escAttr(db.name) + '\')">Rotate Password</button>' +
-        '<button class="btn btn-delete" onclick="deleteServiceDatabase(\'' + escAttr(db.name) + '\')">Delete</button>' +
+        '<button class="btn btn-protect" title="' + (db.protected ? 'Allow deleting this database again' : 'Disable deleting this database') + '" ' +
+          'onclick="doProtectServiceDatabase(\'' + escAttr(db.name) + '\',' + (db.protected ? 'true' : 'false') + ')">' +
+          (db.protected ? 'Unprotect' : 'Protect') + '</button>' +
+        '<button class="btn btn-delete" onclick="deleteServiceDatabase(\'' + escAttr(db.name) + '\')" ' +
+          (db.protected ? 'disabled title="Database is protected"' : '') + '>Delete</button>' +
       '</div></div>' +
       '<div class="svc-meta">' +
         '<span>Database: <strong>' + esc(db.database || 'metadata unavailable') + '</strong></span>' +
@@ -5401,6 +5756,8 @@ function renderServiceDatabases(databases) {
 
 function openCreateDatabaseModal() {
   document.getElementById('database-name').value = '';
+  document.getElementById('database-cluster').value = 'dev';
+  document.getElementById('database-cluster-group').style.display = PROD_ENABLED ? '' : 'none';
   document.getElementById('create-database-error').textContent = '';
   showModal('create-database-modal');
   document.getElementById('database-name').focus();
@@ -5420,8 +5777,9 @@ async function submitCreateDatabase() {
   button.disabled = true;
   button.textContent = 'Creating…';
   try {
+    var cluster = PROD_ENABLED ? document.getElementById('database-cluster').value : 'dev';
     var r = await fetch(API_SERVICE_DATABASES + '/create', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name})
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name, cluster: cluster})
     });
     var data = await readResult(r);
     if (!data.ok) throw new Error(data.error || 'Database creation failed');
@@ -5480,6 +5838,27 @@ async function rotateDatabasePassword(name) {
   } catch (e) {
     showToast(e.message, true);
   }
+}
+
+async function doProtectServiceDatabase(name, isProtected) {
+  var action = isProtected ? 'unprotect' : 'protect';
+  if (isProtected && !(await confirmDialog({
+    title: 'Remove protection',
+    message: 'Allow deleting the service database "' + name + '" again?',
+    confirmLabel: 'Remove protection'
+  }))) return;
+  try {
+    var r = await fetch(API_SERVICE_DATABASES + '/' + encodeURIComponent(name) + '/' + action, { method: 'POST' });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(name + ': ' + (isProtected ? 'unprotected' : 'protected'));
+    } else {
+      showToast(data.error || action + ' failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+  await loadServiceDatabases();
 }
 
 async function deleteServiceDatabase(name) {
@@ -5611,14 +5990,20 @@ function renderServices(services) {
         '<div class="left">' +
           '<span class="svc-name">' + esc(svc.name) + '</span>' +
           '<span class="badge ' + badgeClass(svc.status) + '">' + esc(svc.status) + '</span>' +
+          (svc.protected ? '<span class="badge badge-protected" title="Update, Restore and Delete are disabled">protected</span>' : '') +
           capBadges +
         '</div>' +
         '<div class="svc-actions">' +
           '<button class="btn" onclick="showServiceInfo(\'' + escAttr(svc.name) + '\')">Info</button>' +
-          '<button class="btn btn-update" onclick="doUpdateService(\'' + escAttr(svc.name) + '\')">Update</button>' +
+          '<button class="btn btn-update" onclick="doUpdateService(\'' + escAttr(svc.name) + '\')" ' +
+            (svc.protected ? 'disabled title="Service is protected"' : '') + '>Update</button>' +
           '<button class="btn btn-restart" onclick="doRestartService(\'' + escAttr(svc.name) + '\')">Restart</button>' +
           '<button class="btn btn-logs" onclick="showServiceLogs(\'' + escAttr(svc.name) + '\')">Logs</button>' +
-          '<button class="btn btn-delete" onclick="doDeleteService(\'' + escAttr(svc.name) + '\')">Delete</button>' +
+          '<button class="btn btn-protect" title="' + (svc.protected ? 'Allow Update, Restore and Delete again' : 'Disable Update, Restore and Delete') + '" ' +
+            'onclick="doProtectService(\'' + escAttr(svc.name) + '\',' + (svc.protected ? 'true' : 'false') + ')">' +
+            (svc.protected ? 'Unprotect' : 'Protect') + '</button>' +
+          '<button class="btn btn-delete" onclick="doDeleteService(\'' + escAttr(svc.name) + '\')" ' +
+            (svc.protected ? 'disabled title="Service is protected"' : '') + '>Delete</button>' +
         '</div>' +
       '</div>' +
       '<div class="svc-meta">' +
@@ -5654,7 +6039,29 @@ function showServiceInfo(name) {
   document.getElementById('svc-info-content').textContent = keys.length
     ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
     : 'No environment variables.';
+  document.getElementById('svc-info-copy').disabled = keys.length === 0;
   showModal('svc-info-modal');
+}
+
+async function showEnvInfo(branch) {
+  try {
+    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/env-vars');
+    const data = await readResult(r);
+    if (!data.ok) {
+      showToast(data.error || 'Could not load the environment variables', true);
+      return;
+    }
+    var vars = data.env_vars || {};
+    var keys = Object.keys(vars);
+    document.getElementById('svc-info-title').textContent = 'Environment — ' + branch;
+    document.getElementById('svc-info-content').textContent = keys.length
+      ? keys.map(function(k) { return k + '=' + vars[k]; }).join('\n')
+      : 'No environment variables.';
+    document.getElementById('svc-info-copy').disabled = keys.length === 0;
+    showModal('svc-info-modal');
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
 }
 
 function closeServiceInfo(event) {
@@ -5663,62 +6070,170 @@ function closeServiceInfo(event) {
 }
 
 var _updateSvc = '';
-var _updateSvcInitial = '';
+// The /config snapshot the dialog was prefilled from; null until it lands.
+// Submit sends only the fields whose widget differs from this snapshot, so an
+// unedited field cannot revert a concurrent change made elsewhere.
+var _updateSvcCfg = null;
 // Bumped on every open and every close — see _updateEnvSeq: a slow prefill
 // must not land in a dialog reopened for another service and get submitted
 // there.
 var _updateSvcSeq = 0;
 
+// The fields the Restore and Update dialogs share. A saved preset and a live
+// service config carry the same shape, so both prefill through one function.
+function fillServiceFields(prefix, p) {
+  document.getElementById(prefix + '-image').value = p.image || '';
+  document.getElementById(prefix + '-command').value = shellJoin(p.command);
+  document.getElementById(prefix + '-port').value = p.routes && p.routes.length ? '' : (p.port || '');
+  document.getElementById(prefix + '-exposure').value = p.routes && p.routes.length ? 'routes' : 'port';
+  setServiceRoutes(prefix, p.routes || []);
+  toggleServiceExposure(prefix);
+  document.getElementById(prefix + '-hostname').value = p.hostname || '';
+  document.getElementById(prefix + '-envvars').value = formatEnvLines(p.env_vars);
+  document.getElementById(prefix + '-host-mode').checked = !!p.host_mode;
+  document.getElementById(prefix + '-volumes').value = (p.volumes || []).map(function(v) {
+    return v.volume + ':' + v.mount_path + (v.mode === 'ro' ? ':ro' : '');
+  }).join('\n');
+  document.getElementById(prefix + '-privileged').checked = !!p.privileged;
+  document.getElementById(prefix + '-net-admin').checked = !!(p.cap_add && p.cap_add.indexOf('NET_ADMIN') !== -1);
+}
+
+function _setUpdateServiceEnabled(enabled) {
+  // By container, not by id list, so dynamically added route rows and any
+  // future field are covered. Cancel and the close button stay usable.
+  var modal = document.getElementById('svc-update-modal');
+  modal.querySelectorAll('.modal-body input, .modal-body select, .modal-body textarea')
+    .forEach(function(el) { el.disabled = !enabled; });
+  modal.querySelectorAll('#upd-svc-routes button, #upd-svc-add-route, #upd-svc-submit')
+    .forEach(function(el) { el.disabled = !enabled; });
+}
+
 async function doUpdateService(name) {
   var seq = ++_updateSvcSeq;
   _updateSvc = name;
-  _updateSvcInitial = '';
+  _updateSvcCfg = null;
   document.getElementById('svc-update-title').textContent = 'Update service — ' + name;
   document.getElementById('svc-update-name').textContent = name;
-  var ta = document.getElementById('svc-update-env-vars');
-  ta.value = '';
-  ta.disabled = true;
+  var errEl = document.getElementById('upd-svc-error');
+  errEl.style.display = 'none';
+  errEl.textContent = '';
+  // Blank and disabled until the current config lands: an empty form reads as
+  // "no command, no volumes", and submitting it would apply exactly that.
+  fillServiceFields('upd-svc', {});
+  _setUpdateServiceEnabled(false);
   showModal('svc-update-modal');
   try {
-    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/env-vars');
+    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/config');
     var data = await readResult(r);
     if (seq !== _updateSvcSeq) return;
-    if (data.ok) {
-      var vars = data.env_vars || {};
-      _updateSvcInitial = Object.keys(vars).map(function(k) { return k + '=' + vars[k]; }).join('\n');
-      ta.value = _updateSvcInitial;
-      // parseEnvLines trims each line, and a line cannot hold a line break at
-      // all, so a value with either would come back mangled. Show the field
-      // read-only rather than let an edit rewrite a secret it cannot represent.
-      if (Object.keys(vars).some(function(k) {
-        return /[\r\n]/.test(vars[k]) || vars[k] !== vars[k].trim();
-      })) {
-        showToast('A variable value has line breaks or leading/trailing spaces — edit it over MCP', true);
-      } else {
-        ta.disabled = false;
-      }
-    } else {
-      // Keep the field disabled: an empty editable field would look like
-      // "no variables" and the first edit would replace the real ones.
-      showToast(data.error || 'Could not load the current environment variables', true);
+    if (!data.ok) {
+      // Without the current config the dialog cannot do anything safely; a
+      // blank disabled form with no way out is worse than closing.
+      showToast(data.error || 'Could not load the current service configuration', true);
+      closeUpdateService();
+      return;
+    }
+    var cfg = data.config || {};
+    fillServiceFields('upd-svc', cfg);
+    _setUpdateServiceEnabled(true);
+    _updateSvcCfg = cfg;
+    // parseEnvLines trims each line, and a line cannot hold a line break at
+    // all, so a value with either would come back mangled. That one field goes
+    // read-only rather than let an edit rewrite a secret it cannot represent.
+    var vars = cfg.env_vars || {};
+    var envEditable = !Object.keys(vars).some(function(k) {
+      return /[\r\n]/.test(vars[k]) || vars[k] !== vars[k].trim();
+    });
+    if (!envEditable) {
+      document.getElementById('upd-svc-envvars').disabled = true;
+      showToast('A variable value has line breaks or leading/trailing spaces — edit it over MCP', true);
     }
   } catch (e) {
-    showToast('Could not load the current environment variables', true);
+    if (seq !== _updateSvcSeq) return;
+    showToast('Could not load the current service configuration', true);
+    closeUpdateService();
   }
 }
 
 function closeUpdateService(event) {
   if (event && event.target !== event.currentTarget) return;
   _updateSvcSeq++;
+  _updateSvcCfg = null;
   hideModal('svc-update-modal');
+}
+
+function _serviceRoutesEqual(a, b) {
+  a = a || []; b = b || [];
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].path !== b[i].path || a[i].port !== b[i].port ||
+        !a[i].strip_prefix !== !b[i].strip_prefix) return false;
+  }
+  return true;
 }
 
 async function confirmUpdateService() {
   var name = _updateSvc;
-  var raw = document.getElementById('svc-update-env-vars').value;
+  var cfg = _updateSvcCfg;
+  if (!cfg) return;   // submit stays disabled until the prefill landed
+  var errEl = document.getElementById('upd-svc-error');
+  var routeMode = document.getElementById('upd-svc-exposure').value === 'routes';
+  var image = document.getElementById('upd-svc-image').value.trim();
+  var port = document.getElementById('upd-svc-port').value.trim();
+  if (!image || (!routeMode && !port)) {
+    errEl.textContent = 'Docker image and exposure are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  // Absent key = keep. Each field is sent only when it differs from the
+  // prefill snapshot, so an untouched field cannot revert a change made
+  // elsewhere while the dialog was open. An unedited submit posts {} and
+  // still pulls the latest image.
   var payload = {};
+  if (image !== (cfg.image || '')) payload.image = image;
+  var command = document.getElementById('upd-svc-command').value.trim();
+  if (command !== shellJoin(cfg.command)) payload.command = command;
+  var volumes = document.getElementById('upd-svc-volumes').value.trim();
+  var initialVolumes = (cfg.volumes || []).map(function(v) {
+    return v.volume + ':' + v.mount_path + (v.mode === 'ro' ? ':ro' : '');
+  }).join('\n');
+  if (volumes !== initialVolumes) payload.volumes = volumes;
+  var hostMode = document.getElementById('upd-svc-host-mode').checked;
+  if (hostMode !== !!cfg.host_mode) payload.host_mode = hostMode;
+  var privileged = document.getElementById('upd-svc-privileged').checked;
+  if (privileged !== !!cfg.privileged) payload.privileged = privileged;
+  var netAdmin = document.getElementById('upd-svc-net-admin').checked;
+  var hadNetAdmin = !!(cfg.cap_add && cfg.cap_add.indexOf('NET_ADMIN') !== -1);
+  if (netAdmin !== hadNetAdmin) payload.net_admin = netAdmin;
+  var hostname = document.getElementById('upd-svc-hostname').value.trim();
+  // An empty hostname means "keep" on the wire — matching the field's hint —
+  // so only a changed non-empty value is sent.
+  if (hostname && hostname !== (cfg.hostname || '')) payload.hostname = hostname;
+  var hadRoutes = !!(cfg.routes && cfg.routes.length);
+  try {
+    if (routeMode) {
+      var routes = collectServiceRoutes('upd-svc');
+      if (!_serviceRoutesEqual(routes, cfg.routes)) payload.routes = routes;
+    } else if (hadRoutes) {
+      // Leaving route mode takes both halves in one call: the emptied route
+      // list and the catch-all port that replaces it.
+      payload.routes = [];
+      payload.port = parseInt(port, 10);
+    } else if (parseInt(port, 10) !== (cfg.port || 0)) {
+      payload.port = parseInt(port, 10);
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+    return;
+  }
+  var envEl = document.getElementById('upd-svc-envvars');
   // Send a mapping, not the raw blob: the server must not re-split values.
-  if (raw.trim() !== _updateSvcInitial.trim()) payload.env_vars = parseEnvLines(raw);
+  // The field is disabled when a value cannot round-trip the textarea.
+  if (!envEl.disabled && envEl.value.trim() !== formatEnvLines(cfg.env_vars).trim()) {
+    payload.env_vars = parseEnvLines(envEl.value);
+  }
+  errEl.style.display = 'none';
   _updateSvcSeq++;
   hideModal('svc-update-modal');
   var card = document.querySelector('[data-svc="' + name + '"]');
@@ -5771,26 +6286,59 @@ async function doRestartService(name) {
   await loadServices();
 }
 
+async function doProtectService(name, isProtected) {
+  var action = isProtected ? 'unprotect' : 'protect';
+  if (isProtected && !(await confirmDialog({
+    title: 'Remove protection',
+    message: 'Allow Update, Restore and Delete for the service "' + name + '" again?',
+    confirmLabel: 'Remove protection'
+  }))) return;
+  try {
+    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/' + action, { method: 'POST' });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(name + ': ' + (isProtected ? 'unprotected' : 'protected'));
+    } else {
+      showToast(data.error || action + ' failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+  await loadServices();
+}
+
 async function doDeleteService(name) {
-  if (!(await confirmDialog({
+  var opts = {
     title: 'Delete service',
     message: 'Remove the container of "' + name + '" and its data?',
     confirmLabel: 'Delete service',
-    danger: true
-  }))) return;
+    danger: true,
+    checkbox: { label: 'Save as preset — keeps the configuration so the service can be restored', checked: true }
+  };
+  if (!(await confirmDialog(opts))) return;
+  var savePreset = opts.checkbox.checked;
   var card = document.querySelector('[data-svc="' + name + '"]');
   if (card) card.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
   try {
-    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/delete', { method: 'POST' });
+    var r = await fetch(API_SERVICES + '/' + encodeURIComponent(name) + '/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ save_preset: savePreset })
+    });
     var data = await readResult(r);
     if (data.ok) {
-      showToast('Service "' + name + '" deleted');
+      // preset_kept reports what is actually on disk, not the checkbox: a
+      // legacy service may have no preset to keep.
+      var kept = data.result && data.result.preset_kept;
+      showToast('Service "' + name + '" deleted' +
+        (kept ? ' — preset kept' : savePreset ? ' — no saved preset' : ' — preset removed'));
     } else {
       showToast(data.error || 'Delete failed', true);
     }
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
   }
+  // loadServices also refreshes the preset list (see its wrapper below).
   await loadServices();
 }
 
@@ -5811,20 +6359,9 @@ async function showServiceLogs(name) {
 }
 
 function openCreateServiceModal() {
-   document.getElementById('svc-name').value = '';
-   document.getElementById('svc-image').value = '';
-   document.getElementById('svc-command').value = '';
-   document.getElementById('svc-port').value = '';
-   document.getElementById('svc-exposure').value = 'port';
-   setServiceRoutes('svc', []);
-   toggleServiceExposure('svc');
-   document.getElementById('svc-hostname').value = '';
-   document.getElementById('svc-envvars').value = '';
-   document.getElementById('svc-host-mode').checked = false;
-   document.getElementById('svc-volumes').value = '';
-   document.getElementById('svc-privileged').checked = false;
-   document.getElementById('svc-net-admin').checked = false;
-   var errEl = document.getElementById('create-svc-error');
+  document.getElementById('svc-name').value = '';
+  fillServiceFields('svc', {});
+  var errEl = document.getElementById('create-svc-error');
   errEl.style.display = 'none';
   errEl.textContent = '';
   document.getElementById('svc-submit').disabled = false;
@@ -5908,6 +6445,15 @@ async function loadServicePresets() {
   } catch (e) { /* silent */ }
 }
 
+var _presetsOpen = false;  // Saved Presets is collapsed by default
+
+function togglePresetsList() {
+  _presetsOpen = !_presetsOpen;
+  document.getElementById('svc-presets-list').style.display = _presetsOpen ? '' : 'none';
+  document.getElementById('svc-presets-toggle').setAttribute('aria-expanded', _presetsOpen ? 'true' : 'false');
+  document.querySelector('#svc-presets-toggle .section-chevron').innerHTML = _presetsOpen ? '&#9662;' : '&#9656;';
+}
+
 function renderPresetsList(presets) {
   var section = document.getElementById('svc-presets-section');
   var el = document.getElementById('svc-presets-list');
@@ -5916,6 +6462,7 @@ function renderPresetsList(presets) {
     return;
   }
   section.style.display = 'block';
+  document.getElementById('svc-presets-count').textContent = '(' + presets.length + ')';
   el.innerHTML = presets.map(function(p) {
     var envStr = '';
     if (p.env_vars && Object.keys(p.env_vars).length > 0) {
@@ -5970,34 +6517,21 @@ async function doDeletePreset(name) {
   }
 }
 
+// Runtime has no form field; remember the selected preset's value so the
+// restore payload carries it even when the user renames the service.
+var _restoreRuntime = null;
+
 function _fillRestoreFields(p) {
+   _restoreRuntime = p.runtime || {};
    document.getElementById('restore-svc-name').value = p.name || '';
-   document.getElementById('restore-svc-image').value = p.image || '';
-   document.getElementById('restore-svc-port').value = p.routes && p.routes.length ? '' : (p.port || '');
-   document.getElementById('restore-svc-exposure').value = p.routes && p.routes.length ? 'routes' : 'port';
-   setServiceRoutes('restore-svc', p.routes || []);
-   toggleServiceExposure('restore-svc');
-   document.getElementById('restore-svc-hostname').value = p.hostname || '';
-   var envStr = '';
-   if (p.env_vars && Object.keys(p.env_vars).length) {
-     envStr = Object.keys(p.env_vars).map(function(k) { return k + '=' + p.env_vars[k]; }).join('\n');
-   }
-   document.getElementById('restore-svc-envvars').value = envStr;
-   document.getElementById('restore-svc-host-mode').checked = !!p.host_mode;
-   var volStr = '';
-   if (p.volumes && p.volumes.length) {
-     volStr = p.volumes.map(function(v) { return v.volume + ':' + v.mount_path + (v.mode === 'ro' ? ':ro' : ''); }).join('\n');
-   }
-   document.getElementById('restore-svc-volumes').value = volStr;
-   document.getElementById('restore-svc-privileged').checked = !!p.privileged;
-   document.getElementById('restore-svc-net-admin').checked = !!(p.cap_add && p.cap_add.indexOf('NET_ADMIN') !== -1);
-   document.getElementById('restore-svc-command').value = shellJoin(p.command);
+   fillServiceFields('restore-svc', p);
 }
 
 function openRestoreServiceModal(preselect) {
    var sel = document.getElementById('restore-svc-select');
    var errEl = document.getElementById('restore-svc-error');
    errEl.style.display = 'none';
+   _restoreRuntime = null;
    document.getElementById('restore-svc-submit').disabled = false;
    document.getElementById('restore-svc-name').value = '';
    document.getElementById('restore-svc-image').value = '';
@@ -6072,6 +6606,7 @@ async function submitRestoreService() {
     var netAdmin = document.getElementById('restore-svc-net-admin').checked;
     var command = document.getElementById('restore-svc-command').value.trim();
     var payload = { name: name, image: image, host_mode: hostMode, privileged: privileged, net_admin: netAdmin };
+    if (_restoreRuntime !== null) payload.runtime = _restoreRuntime;
     if (command) payload.command = command;
     if (routeMode) payload.routes = collectServiceRoutes('restore-svc');
     else payload.port = parseInt(port, 10);
@@ -6682,13 +7217,88 @@ function renderCredentials(creds) {
   }).join('');
 }
 
+var cachedSshKey = '';
+
+async function loadSshKey() {
+  try {
+    var r = await fetch('/api/ssh-key');
+    var data = await readResult(r);
+    if (data.ok) {
+      renderSshKey(data);
+    } else {
+      showToast(data.error || 'Failed to load SSH key', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+function renderSshKey(data) {
+  cachedSshKey = data.public_key || '';
+  var el = document.getElementById('ssh-key-body');
+  if (!cachedSshKey) {
+    el.innerHTML = '<div class="empty">No SSH key yet. ' +
+      '<button class="btn btn-sm" onclick="generateSshKey(false)">Generate key</button></div>';
+    return;
+  }
+  el.innerHTML = '<div class="svc-card">' +
+    '<div class="svc-header">' +
+      '<div class="left">' +
+        '<span class="svc-name">id_ed25519.pub</span>' +
+        '<code style="margin-left:8px;color:var(--text-dim);">' + esc(data.fingerprint || '') + '</code>' +
+      '</div>' +
+      '<div class="svc-actions">' +
+        '<button class="btn btn-sm" onclick="copySshKey()">Copy</button>' +
+        '<button class="btn btn-delete" onclick="regenerateSshKey()">Regenerate</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="svc-meta"><code style="word-break:break-all;">' + esc(cachedSshKey) + '</code></div>' +
+  '</div>';
+}
+
+function copySshKey() {
+  if (cachedSshKey) copyToClipboard(cachedSshKey, 'Public key copied');
+}
+
+async function generateSshKey(force) {
+  try {
+    var r = await fetch('/api/ssh-key/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: !!force})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(force ? 'SSH key regenerated' : 'SSH key generated');
+      renderSshKey(data);
+    } else {
+      showToast(data.error || 'SSH key generation failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+async function regenerateSshKey() {
+  if (!(await confirmDialog({
+    title: 'Regenerate SSH key',
+    message: 'Generate a new key? The current key stops working immediately — every repository or account where it is registered will need the new public key.',
+    confirmLabel: 'Regenerate',
+    danger: true
+  }))) return;
+  await generateSshKey(true);
+}
+
 function openAddCredentialModal() {
+  document.getElementById('credential-token').value = '';
+  document.getElementById('credential-host').value = 'github.com';
+  document.getElementById('credential-username').value = '';
   document.getElementById('credential-url').value = '';
   document.getElementById('add-credential-error').style.display = 'none';
   document.getElementById('credential-submit').disabled = false;
   document.getElementById('credential-submit').innerHTML = 'Save &amp; Verify';
   showModal('add-credential-modal');
-  document.getElementById('credential-url').focus();
+  document.getElementById('credential-token').focus();
 }
 
 function closeAddCredentialModal(event) {
@@ -6697,10 +7307,18 @@ function closeAddCredentialModal(event) {
 }
 
 async function submitAddCredential() {
+  var token = document.getElementById('credential-token').value.trim();
+  var host = document.getElementById('credential-host').value.trim();
+  var username = document.getElementById('credential-username').value.trim();
   var url = document.getElementById('credential-url').value.trim();
   var errEl = document.getElementById('add-credential-error');
-  if (!url) {
-    errEl.textContent = 'Repository URL with credentials is required.';
+  if (!token) {
+    errEl.textContent = 'Access token is required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!host) {
+    errEl.textContent = 'Git host is required.';
     errEl.style.display = 'block';
     return;
   }
@@ -6712,12 +7330,15 @@ async function submitAddCredential() {
     var r = await fetch(API_CREDENTIALS + '/add', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo_url: url})
+      body: JSON.stringify({token: token, host: host, username: username, repo_url: url})
     });
     var data = await readResult(r);
     if (data.ok) {
       closeAddCredentialModal();
-      showToast('Credential saved and verified');
+      var status = data.result && data.result.status;
+      showToast(status === 'unverified'
+        ? 'Credential saved (no verification available for this host)'
+        : 'Credential saved and verified');
       await loadCredentials();
     } else {
       errEl.textContent = data.error || 'Failed to save credential';
@@ -6788,6 +7409,198 @@ async function doValidateCredential(host, username) {
   }
 }
 
+// --- Version: on-demand release check ---
+// The dashboard never contacts GitHub on its own. The header version is a
+// button; opening the dialog (or pressing Check again) performs exactly one
+// lookup of the latest published release, and nothing is cached between them.
+const API_VERSION = '/api/version';
+
+function formatVersionLabel(value) {
+  if (!value) return '\u2014';
+  return value === 'dev' ? 'dev (source checkout)' : 'v' + value;
+}
+
+function openVersionModal() {
+  showModal('version-modal');
+  checkVersion();
+}
+
+function closeVersionModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  hideModal('version-modal');
+}
+
+async function checkVersion() {
+  var installedEl = document.getElementById('version-installed');
+  var latestEl = document.getElementById('version-latest');
+  var statusEl = document.getElementById('version-status');
+  var titleEl = document.getElementById('version-release-title');
+  var noteEl = document.getElementById('version-upgrade-note');
+  var linkEl = document.getElementById('version-release-link');
+  var btn = document.getElementById('version-recheck');
+  latestEl.textContent = '\u2014';
+  titleEl.hidden = true;
+  noteEl.hidden = true;
+  statusEl.textContent = 'Checking github.com for the latest release...';
+  btn.disabled = true;
+  try {
+    var r = await fetch(API_VERSION);
+    var data = await readResult(r);
+    if (!data.ok) {
+      statusEl.textContent = 'Check failed: ' + (data.error || 'unknown error');
+      return;
+    }
+    var info = data.version || {};
+    installedEl.textContent = formatVersionLabel(info.current);
+    if (info.release_url) linkEl.href = info.release_url;
+    if (info.status === 'error') {
+      statusEl.textContent = 'Check failed: ' + (info.error || 'unknown error');
+      return;
+    }
+    latestEl.textContent = formatVersionLabel(info.latest);
+    if (info.release_title || info.published_at) {
+      titleEl.textContent = [info.release_title, info.published_at ? 'released ' + relTime(info.published_at) : '']
+        .filter(Boolean).join(' \u00b7 ');
+      titleEl.hidden = false;
+    }
+    if (info.status === 'update-available') {
+      statusEl.textContent = 'An update is available: ' + formatVersionLabel(info.latest) + '.';
+      noteEl.hidden = false;
+    } else if (info.status === 'up-to-date') {
+      statusEl.textContent = 'You are running the latest release.';
+    } else {
+      statusEl.textContent = 'This build is not a published release, so it cannot be compared with ' +
+        formatVersionLabel(info.latest) + '.';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Connection error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- Secrets (write-only named values for env vars) ---
+const API_SECRETS = '/api/secrets';
+
+async function loadSecrets() {
+  try {
+    var r = await fetch(API_SECRETS);
+    var data = await readResult(r);
+    if (data.ok) {
+      renderSecrets(data.secrets || []);
+    } else {
+      showToast(data.error || 'Failed to load secrets', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+function renderSecrets(secrets) {
+  var el = document.getElementById('secrets-list');
+  if (!secrets || secrets.length === 0) {
+    el.innerHTML = '<div class="empty">No secrets defined.<br>Add one to reference it as <code>KEY=secret:&lt;name&gt;</code>.</div>';
+    return;
+  }
+  el.innerHTML = secrets.map(function(s) {
+    return '<div class="svc-card">' +
+      '<div class="svc-header">' +
+        '<div class="left">' +
+          '<span class="svc-name">' + esc(s.name) + '</span>' +
+          '<span class="badge badge-preset">write-only</span>' +
+        '</div>' +
+        '<div class="svc-actions">' +
+          '<button class="btn btn-sm" onclick="openSecretModal(\'' + escAttr(s.name) + '\')">Replace value</button>' +
+          '<button class="btn btn-delete" onclick="doDeleteSecret(\'' + escAttr(s.name) + '\')">Delete</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="svc-meta">' +
+        '<span>Reference: <strong class="copy-db" role="button" tabindex="0" title="Copy reference" aria-label="Copy reference" ' +
+          'onclick="copyToClipboard(\'secret:' + escAttr(s.name) + '\')">secret:' + esc(s.name) + '</strong></span>' +
+        (s.updated_at ? '<span>Updated: <strong>' + formatDate(s.updated_at) + '</strong></span>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openSecretModal(name) {
+  document.getElementById('secret-modal-title').textContent = name ? 'Replace Secret Value' : 'Add Secret';
+  var nameEl = document.getElementById('secret-name');
+  nameEl.value = name || '';
+  nameEl.readOnly = !!name;
+  document.getElementById('secret-value').value = '';
+  document.getElementById('secret-error').style.display = 'none';
+  document.getElementById('secret-submit').disabled = false;
+  showModal('secret-modal');
+  (name ? document.getElementById('secret-value') : nameEl).focus();
+}
+
+function closeSecretModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('secret-value').value = '';
+  hideModal('secret-modal');
+}
+
+async function submitSecret() {
+  var name = document.getElementById('secret-name').value.trim();
+  var value = document.getElementById('secret-value').value;
+  var errEl = document.getElementById('secret-error');
+  if (!name || !value) {
+    errEl.textContent = 'Name and value are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  errEl.style.display = 'none';
+  var btn = document.getElementById('secret-submit');
+  btn.disabled = true;
+  try {
+    var r = await fetch(API_SECRETS + '/' + encodeURIComponent(name) + '/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: value})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      closeSecretModal();
+      var created = data.result && data.result.created;
+      showToast(created
+        ? 'Secret "' + name + '" saved — reference it as secret:' + name
+        : 'Secret "' + name + '" value replaced. Recreate services/environments that use it.');
+      await loadSecrets();
+    } else {
+      errEl.textContent = data.error || 'Failed to save secret';
+      errEl.style.display = 'block';
+    }
+  } catch (e) {
+    errEl.textContent = 'Connection error: ' + e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doDeleteSecret(name) {
+  if (!(await confirmDialog({
+    title: 'Delete secret',
+    message: 'Delete the secret "' + name + '"? Configurations referencing secret:' + name +
+      ' will fail to resolve on their next create or update. Running containers keep the value until recreated.',
+    confirmLabel: 'Delete secret',
+    danger: true
+  }))) return;
+  try {
+    var r = await fetch(API_SECRETS + '/' + encodeURIComponent(name) + '/delete', { method: 'POST' });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast('Secret "' + name + '" deleted');
+      await loadSecrets();
+    } else {
+      showToast(data.error || 'Delete failed', true);
+    }
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
 // xterm.js is vendored under /static and loaded on first console open,
 // so the dashboard stays self-contained and works air-gapped.
 var _xtermReady = null;
@@ -6834,9 +7647,13 @@ function ensureChatAssets() {
   // chat.js and acp-client.js are an interdependent pair of our own code; bump
   // this shared CHAT_V whenever either one changes (see AGENTS.md). One version
   // busts both at once, preventing a stale chat.js/acp-client.js mismatch.
-  var CHAT_V = '6';
+  var CHAT_V = '7';
+  // marked.min.js and purify.min.js are vendored third-party assets (not part
+  // of the CHAT_V pair — bump their filename if upgraded). DOMPurify must load
+  // before chat.js: renderMarkdown sanitizes marked's raw-HTML output with it.
   _chatAssets = Promise.all([
     loadScript('/static/marked.min.js'),
+    loadScript('/static/purify.min.js'),
     loadScript('/static/acp-client.js?v=' + CHAT_V)
   ]).then(function() { return loadScript('/static/chat.js?v=' + CHAT_V); });
   return _chatAssets;
@@ -6851,7 +7668,7 @@ function openChat(branch, type) {
 }
 
 var _XTERM_THEME = { background: '#060a12', foreground: '#e6e8eb', cursor: '#2e79f5' };
-var _XTERM_FONT = '"Geist Mono", Menlo, ui-monospace, monospace';
+var _XTERM_FONT = getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim();
 
 var _consoleState = { ws: null, term: null, fitAddon: null };
 
@@ -7091,6 +7908,12 @@ window.addEventListener('resize', function() {
 });
 
 var MODAL_CLOSERS = {
+  // Created dynamically by openCreateProductionModal; promptDialog overlays
+  // handle Escape themselves via their own overlay keydown listener.
+  'create-prod-modal': function() {
+    var m = document.getElementById('create-prod-modal');
+    if (m) m.remove();
+  },
   'sync-result-modal': closeSyncResult,
   'create-modal': closeCreateModal,
   'feedback-modal': closeFeedbackModal,
@@ -7107,8 +7930,10 @@ var MODAL_CLOSERS = {
   'restore-svc-modal': closeRestoreServiceModal,
   'create-vol-modal': closeCreateVolumeModal,
   'license-modal': closeLicenseModal,
+  'version-modal': closeVersionModal,
   'add-extra-repo-modal': closeAddExtraRepoModal,
   'add-credential-modal': closeAddCredentialModal,
+  'secret-modal': closeSecretModal,
   'import-from-odoo-modal': closeImportFromOdooModal,
   'import-odoo-modal': closeImportOdooModal,
   'template-settings-modal': closeTemplateSettingsModal,
@@ -7248,8 +8073,101 @@ console.log(
 
 const API_PRODUCTIONS = '/api/productions';
 var cachedProds = [];
+var _walBusy = false;
+var _walStatus = null;
+
+function walDuration(seconds) {
+  if (seconds == null) return '—';
+  if (seconds < 60) return Math.round(seconds) + ' s';
+  if (seconds < 3600) return Math.round(seconds / 60) + ' min';
+  return (seconds / 3600).toFixed(1) + ' h';
+}
+
+function renderWalStatus() {
+  var el = document.getElementById('prod-wal');
+  var s = _walStatus;
+  if (!el || !s) return;
+  var g = s.guard || {};
+  var a = s.archiver || {};
+  var badge = s.status === 'ok' ? 'badge-running' : s.status === 'warn' ? 'badge-busy' : s.status === 'off' ? 'badge-neutral' : 'badge-exited';
+  function metric(label, value) { return '<span>' + label + ': <strong>' + esc(value) + '</strong></span>'; }
+  function button(action, label, disabled) {
+    return '<button class="btn"' + ((_walBusy || disabled) ? ' disabled' : '') +
+      ' onclick="controlWal(\'' + action + '\')">' + (_walBusy ? 'Working…' : label) + '</button>';
+  }
+  var actions = s.configured ? button(g.paused ? 'resume' : 'pause', g.paused ? 'Resume archiving' : 'Pause archiving', false) +
+    button('retry', 'Retry upload', g.paused || s.pg_status !== 'running') : '';
+  if (g.latched) actions += button(g.recovering ? 'release' : 'recover', g.recovering ? 'Release protection' : 'Start PostgreSQL recovery', s.stale);
+  el.innerHTML = '<div class="env-header"><div class="left"><span class="branch-name">PostgreSQL WAL</span>' +
+    '<span class="badge ' + badge + '">' + esc(s.stale ? 'unknown' : s.status) + '</span></div>' +
+    '<div class="env-actions">' + actions + '</div></div>' +
+    '<p>' + esc(s.detail || '') + '</p>' +
+    '<div class="env-meta">' +
+      metric('Queue', s.ready_count == null ? '—' : s.ready_count + ' segments · ' + fmtBytes(s.ready_bytes)) + ' · ' +
+      metric('Queue stop limit', s.stop_queue_bytes == null ? '—' : fmtBytes(s.stop_queue_bytes)) + ' · ' +
+      metric('Oldest waiting', walDuration(s.oldest_ready_seconds)) + ' · ' +
+      metric('No progress', walDuration(s.no_progress_seconds)) + '</div>' +
+    '<div class="env-meta">' + metric('WAL on disk', s.wal_bytes == null ? '—' : fmtBytes(s.wal_bytes)) + ' · ' +
+      metric('Available to PostgreSQL', s.disk_free_bytes == null ? '—' : fmtBytes(s.disk_free_bytes)) + ' · ' +
+      metric('Safety reserve', s.reserve_bytes == null ? '—' : fmtBytes(s.reserve_bytes)) + ' · ' +
+      metric('Disk consumption', s.disk_growth_bytes_per_second == null ? '—' : fmtBytes(s.disk_growth_bytes_per_second) + '/s') + ' · ' +
+      metric('Estimated time to reserve', walDuration(s.seconds_to_reserve)) + '</div>' +
+    '<div class="env-meta">' + metric('Archived', a.archived_count == null ? '—' : a.archived_count) + ' · ' +
+      metric('Last archive', a.last_archived_time || '—') + ' · ' + metric('Failed attempts', a.failed_count == null ? '—' : a.failed_count) + ' · ' +
+      metric('PG restarts', s.restart_count == null ? '—' : s.restart_count) + '</div>' +
+    (s.attempt ? '<div class="env-meta">' + metric('Current upload', s.attempt.segment + ' · ' + walDuration(s.attempt.seconds)) + '</div>' : '') +
+    (s.last_attempt && s.last_attempt.exit_code ? '<p>Last upload failed: exit ' + esc(s.last_attempt.exit_code) + '. Check PostgreSQL logs.</p>' : '') +
+    (s.storage ? '<div class="env-meta">' + metric('Storage probe', s.storage.detail) + '</div>' : '') +
+    (s.preflight && s.preflight.status ? '<div class="env-meta">' + metric('Last startup check', s.preflight.status + ' · ' + s.preflight.detail) + '</div>' : '') +
+    '<div class="env-meta">Shared by all productions and teams. ' +
+      (g.latched ? 'Applications remain stopped during recovery. ' : '') +
+      (g.paused ? 'Paused archiving retains WAL and does not free disk space. ' : '') +
+      'Sample: ' + esc(s.sampled_at ? new Date(s.sampled_at * 1000).toLocaleString() : 'unavailable') + '</div>';
+}
+
+async function loadWalStatus() {
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/wal-status');
+    var s = await readResult(r);
+    if (!s.ok) throw new Error(s.error || 'WAL status unavailable');
+    _walStatus = s;
+  } catch (e) {
+    _walStatus = Object.assign({}, _walStatus || {}, {status: 'error', stale: true, detail: 'WAL status unavailable; displayed values may be stale'});
+  }
+  renderWalStatus();
+}
+
+async function controlWal(action) {
+  var messages = {
+    pause: 'Pause archiving for every production. Unsent WAL is retained and the queue can fill the disk. Disk protection remains active.',
+    resume: 'Resume WAL archiving for the shared production cluster.',
+    retry: 'Interrupt the current WAL upload. PostgreSQL will retry it; no WAL files are discarded.',
+    recover: 'Start only PostgreSQL to drain WAL after checking free space. Production applications stay stopped and disk protection remains active.',
+    release: 'Verify free space and archiving progress, then release cluster protection. Applications remain stopped; start the desired productions separately.'
+  };
+  if (_walBusy || !messages[action]) return;
+  if (!(await confirmDialog({title: 'Shared production cluster', message: messages[action], confirmText: 'Continue'}))) return;
+  _walBusy = true;
+  renderWalStatus();
+  try {
+    await _prodPost(API_PRODUCTIONS + '/wal-control', {action: action, confirm: 'ALL-PRODUCTIONS'}, 'WAL action completed', true);
+  } finally {
+    _walBusy = false;
+    await loadWalStatus();
+  }
+}
 var _prodWebhookSecret = '';
-var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'logs' | undefined
+var _prodOpen = {};  // name -> 'deploys' | 'snapshots' | 'settings' | undefined
+// name -> true while the Settings form holds unsaved edits (set by the form's
+// oninput). The auto-refresh timer skips re-rendering the productions list
+// while any form is dirty or focused, so in-progress edits are not wiped.
+var _prodSettingsDirty = Object.create(null);
+
+function _prodSettingsEditing() {
+  var dirty = Object.keys(_prodSettingsDirty).some(function(n) { return _prodSettingsDirty[n]; });
+  var ae = document.activeElement;
+  return dirty || !!(ae && ae.closest && ae.closest('.prod-settings'));
+}
 
 function prodBadgeClass(status) {
   if (status === 'running') return 'badge-running';
@@ -7259,12 +8177,14 @@ function prodBadgeClass(status) {
 }
 
 async function loadProductions() {
+  loadWalStatus();
   try {
     var r = await fetch(API_PRODUCTIONS);
     var data = await readResult(r);
     if (!data.ok) { showToast(data.error || 'Failed to load productions', true); return; }
     cachedProds = data.productions || [];
     window._prodBackupConfigured = !!data.backup_configured;
+    window._teamBaseDomain = data.base_domain || window._teamBaseDomain || '';
     _prodWebhookSecret = (data.webhook && data.webhook.secret) || '';
     var box = document.getElementById('prod-webhook-box');
     if (box) {
@@ -7303,13 +8223,20 @@ function renderProductions() {
       ? '<span>Snapshot: <strong class="prod-mono">' + esc(backup.last_snapshot_id) + '</strong></span>'
       : '<span>Snapshot: <strong>—</strong></span>';
     var open = _prodOpen[p.name];
+    // Missing key = allowed (pre-existing records, and older cached payloads).
+    var allowCopy = p.allow_copy_to_dev_mcp !== false;
     return '<div class="env-card" data-prod="' + esc(p.name) + '">' +
       '<div class="env-header">' +
         '<div class="left">' +
           '<span class="branch-name">' + esc(p.name) + '</span>' +
-          '<a class="repo-link prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
+          '<a class="prod-domain prod-mono" href="' + escAttr(p.url) + '" target="_blank" rel="noopener">' + esc(p.domain) + '</a>' +
+          (p.extra_domains || []).map(function(d) {
+            var scheme = (p.url || '').indexOf('http://') === 0 ? 'http' : 'https';
+            return '<a class="prod-domain prod-mono" href="' + escAttr(scheme + '://' + d) + '" target="_blank" rel="noopener">' + esc(d) + '</a>';
+          }).join('') +
           '<span class="badge ' + prodBadgeClass(p.status) + '">' + esc(p.status) + '</span>' +
           (p.auto_update ? '<span class="badge badge-neutral" title="Deploys automatically on GitHub push">auto</span>' : '') +
+          (allowCopy ? '' : '<span class="badge badge-neutral" title="Agents cannot publish new copies of this production into dev over MCP; the dashboard still can">copy off</span>') +
         '</div>' +
         '<div class="env-actions">' +
           '<button class="btn btn-sync" title="Pull the branch and deploy (failed deploys roll the code back)" onclick="prodUpdate(\'' + escAttr(p.name) + '\')">Update</button>' +
@@ -7317,16 +8244,19 @@ function renderProductions() {
           (window._prodBackupConfigured
             ? '<button class="btn" title="Snapshot the database and filestore to S3 now" onclick="prodSnapshot(\'' + escAttr(p.name) + '\')">Snapshot</button>'
             : '') +
-          '<button class="btn btn-logs" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'logs\')">Logs</button>' +
+          '<button class="btn btn-logs" onclick="showProdLogs(\'' + escAttr(p.name) + '\')">Logs</button>' +
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
+              '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'settings\')">Settings</button>' +
               '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'deploys\')">Deploy history</button>' +
               (window._prodBackupConfigured
                 ? '<button role="menuitem" onclick="prodToggle(\'' + escAttr(p.name) + '\',\'snapshots\')">Snapshots &amp; restore</button>'
                 : '') +
               '<button role="menuitem" onclick="prodAutoUpdate(\'' + escAttr(p.name) + '\',' + (p.auto_update ? 'false' : 'true') + ')">' +
                 (p.auto_update ? 'Disable auto-deploy' : 'Enable auto-deploy') + '</button>' +
+              '<button role="menuitem" onclick="prodSaveAsTemplate(\'' + escAttr(p.name) + '\')">Save as template</button>' +
+              '<button role="menuitem" onclick="prodCreateEnvironment(\'' + escAttr(p.name) + '\')">Create environment</button>' +
               (p.status === 'stopped'
                 ? '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'start\')">Start</button>'
                 : '<button role="menuitem" onclick="prodAction(\'' + escAttr(p.name) + '\',\'stop\')">Stop</button>') +
@@ -7351,6 +8281,23 @@ function renderProductions() {
   });
 }
 
+async function showProdLogs(name) {
+  _dropChip('logs-modal');   // reopening replaces any minimized logs window
+  _logsState.branch = '';
+  _logsState.lines = [];
+  _logsState.type = 'prod';
+  _logsState.serviceName = '';
+  _logsState.prodName = name;
+  document.getElementById('logs-container').style.display = 'none';
+  document.getElementById('logs-search').value = '';
+  document.getElementById('logs-match-count').textContent = '';
+  document.getElementById('logs-title').textContent = 'Production Logs — ' + name;
+  document.getElementById('logs-content').textContent = 'Loading...';
+  showModal('logs-modal');
+  document.getElementById('logs-search').focus();
+  await fetchLogs();
+}
+
 function prodToggle(name, section) {
   _prodOpen[name] = _prodOpen[name] === section ? undefined : section;
   renderProductions();
@@ -7360,13 +8307,7 @@ async function _loadProdSection(name, section) {
   var el = document.getElementById('prod-section-' + name);
   if (!el) return;
   try {
-    if (section === 'logs') {
-      var r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/logs?lines=200');
-      var data = await readResult(r);
-      el.innerHTML = data.ok
-        ? '<div class="prod-logs-pre">' + esc(data.logs || '(no output)') + '</div>'
-        : esc(data.error || 'Failed to load logs');
-    } else if (section === 'deploys') {
+    if (section === 'deploys') {
       var r2 = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/deploys');
       var d2 = await readResult(r2);
       if (!d2.ok) { el.textContent = d2.error || 'Failed to load deploys'; return; }
@@ -7396,10 +8337,124 @@ async function _loadProdSection(name, section) {
         ? '<table><thead><tr><th>Snapshot</th><th>Created</th><th>DB size</th><th>Commit</th><th>Trigger</th><th></th></tr></thead><tbody>' + rows3 + '</tbody></table>'
         : 'No snapshots yet.') +
         '<div style="margin-top:8px"><button class="btn" onclick="prodRefreshSnapshots(\'' + escAttr(name) + '\')">Refresh from S3</button></div>';
+    } else if (section === 'settings') {
+      var r5 = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name));
+      var d5 = await readResult(r5);
+      if (!d5.ok) { el.textContent = d5.error || 'Failed to load settings'; return; }
+      _prodSettingsDirty[name] = false;  // freshly rendered from server state
+      el.innerHTML = _prodSettingsHtml(d5);
     }
   } catch (e) {
     el.textContent = 'Connection error: ' + e.message;
   }
+}
+
+// Settings panel: oduflow-level options (applied via container recreation),
+// the MCP copy gate, and per-production odoo.conf overrides.
+function _prodSettingsHtml(p) {
+  var n = escAttr(p.name);
+  var extras = formatEnvLines(p.extra_addons || {});
+  var conf = Object.keys(p.odoo_conf || {}).sort().map(function(k) {
+    return k + ' = ' + p.odoo_conf[k];
+  }).join('\n');
+  // Form values use escHtmlAttr (round-trips ' and \ unchanged); escAttr is
+  // only for the JS-string-in-attribute contexts (oninput/onclick/onchange).
+  return '<div class="prod-settings" oninput="_prodSettingsDirty[\'' + n + '\']=true">' +
+    '<div class="form-group"><label for="ps-domain-' + n + '">Domain</label>' +
+      '<input type="text" id="ps-domain-' + n + '" value="' + escHtmlAttr(p.domain || '') + '">' +
+      '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt' +
+      (window._teamBaseDomain ? '. Must be ' + esc(window._teamBaseDomain) + ' or a subdomain of it' : '') + '</div></div>' +
+    '<div class="form-group"><label for="ps-xdomains-' + n + '">Extra domains (optional, comma-separated)</label>' +
+      '<input type="text" id="ps-xdomains-' + n + '" value="' + escHtmlAttr((p.extra_domains || []).join(', ')) + '">' +
+      '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
+    '<div class="form-group"><label for="ps-image-' + n + '">Odoo image</label>' +
+      '<input type="text" id="ps-image-' + n + '" value="' + escHtmlAttr(p.odoo_image || '') + '">' +
+      '<div class="hint">Changing the image does not migrate the database</div></div>' +
+    '<div class="form-group"><label for="ps-repo-' + n + '">Repository URL</label>' +
+      '<input type="text" id="ps-repo-' + n + '" value="' + escHtmlAttr(p.repo_url || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-branch-' + n + '">Branch</label>' +
+      '<input type="text" id="ps-branch-' + n + '" value="' + escHtmlAttr(p.branch || '') + '">' +
+      '<div class="hint">Switching deploys the new branch as-is; run Update afterwards if modules need install/upgrade</div></div>' +
+    '<div class="form-group"><label for="ps-gituser-' + n + '">Git user (credential matching, optional)</label>' +
+      '<input type="text" id="ps-gituser-' + n + '" value="' + escHtmlAttr(p.git_user || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-extras-' + n + '">Extra addon repos (one per line, repo=branch)</label>' +
+      '<textarea id="ps-extras-' + n + '" rows="3">' + esc(extras) + '</textarea></div>' +
+    '<div class="form-group"><label class="select-box"><input type="checkbox" id="ps-copy-' + n + '"' +
+      (p.allow_copy_to_dev_mcp !== false ? ' checked' : '') +
+      ' onchange="prodCopyToDevMcp(\'' + n + '\', this.checked)"> ' +
+      'Agents may copy this production into dev over MCP (the dashboard is never gated)</label></div>' +
+    '<div style="margin-bottom:16px"><button class="btn btn-start" onclick="prodApplySettings(\'' + n + '\')">Apply — recreates container</button></div>' +
+    '<div class="form-group"><label for="ps-conf-' + n + '">odoo.conf overrides (one per line, key = value)</label>' +
+      '<textarea id="ps-conf-' + n + '" rows="4" placeholder="limit_time_real = 300">' + esc(conf) + '</textarea>' +
+      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*) are refused.</div></div>' +
+    '<div><button class="btn" onclick="prodSaveOdooConf(\'' + n + '\')">Save odoo.conf — restarts Odoo</button></div>' +
+  '</div>';
+}
+
+function _parseKvLines(raw, errLabel) {
+  // Null prototype, like parseEnvLines: a key literally named __proto__ must
+  // land as an own key instead of hitting the setter and vanishing.
+  var out = Object.create(null);
+  var lines = (raw || '').split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line || line.charAt(0) === '#' || line.charAt(0) === ';') continue;
+    var idx = line.indexOf('=');
+    if (idx < 1) { showToast(errLabel, true); return null; }
+    out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  }
+  return out;
+}
+
+async function prodApplySettings(name) {
+  var v = function(prefix) {
+    var e = document.getElementById(prefix + '-' + name);
+    return e ? e.value.trim() : '';
+  };
+  var extras = _parseKvLines(document.getElementById('ps-extras-' + name).value,
+    'Extra addons: each line must be repo=branch');
+  if (extras === null) return;
+  var body = {
+    domain: v('ps-domain'),
+    extra_domains: v('ps-xdomains'),
+    odoo_image: v('ps-image'),
+    repo_url: v('ps-repo'),
+    branch: v('ps-branch'),
+    git_user: v('ps-gituser'),
+    extra_addons: extras
+  };
+  if (!(await confirmDialog({
+    title: 'Reconfigure production',
+    message: 'Apply the settings to "' + name + '"? The container is recreated (brief downtime); the database and filestore are preserved.',
+    confirmLabel: 'Apply'
+  }))) return;
+  showToast('Reconfiguring "' + name + '"… this can take a minute');
+  // Clear the dirty flag before the successful save reloads the list, so the
+  // fresh form renders; restore it on failure — the unsaved edits are still
+  // in the form and must keep their auto-refresh protection.
+  _prodSettingsDirty[name] = false;
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/reconfigure', body, null);
+  if (data) {
+    showToast(data.changed && data.changed.length
+      ? 'Reconfigured "' + name + '": ' + data.changed.join(', ') +
+        (data.healthy === false ? ' — NOT healthy yet, check logs' : '')
+      : (data.message || 'No settings changed'));
+  } else {
+    _prodSettingsDirty[name] = true;
+  }
+}
+
+async function prodSaveOdooConf(name) {
+  var raw = document.getElementById('ps-conf-' + name).value;
+  var options = _parseKvLines(raw, 'odoo.conf: each line must be key = value');
+  if (options === null) return;
+  // replace: true makes the sent options the complete new override set (the
+  // server computes removals itself), so no stale client-side diffing.
+  _prodSettingsDirty[name] = false;
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/odoo-conf',
+    { options: options, replace: true },
+    'odoo.conf overrides saved for "' + name + '" (Odoo restarted)');
+  if (!data) _prodSettingsDirty[name] = true;
 }
 
 async function prodRefreshSnapshots(name) {
@@ -7409,13 +8464,16 @@ async function prodRefreshSnapshots(name) {
   } catch (e) { showToast('Connection error: ' + e.message, true); }
 }
 
-async function _prodPost(url, body, okMsg) {
+// skipReload: don't re-render the productions list on success — for controls
+// that live inside the Settings form, where a re-render would wipe the
+// surrounding unsaved edits.
+async function _prodPost(url, body, okMsg, skipReload) {
   try {
     var r = await fetch(url, body !== undefined
       ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
       : { method: 'POST' });
     var data = await readResult(r);
-    if (data.ok) { if (okMsg) showToast(okMsg); await loadProductions(); return data; }
+    if (data.ok) { if (okMsg) showToast(okMsg); if (!skipReload) await loadProductions(); return data; }
     showToast(data.error || 'Request failed', true);
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
@@ -7461,6 +8519,96 @@ function prodAutoUpdate(name, enabled) {
     'Auto-deploy ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"');
 }
 
+async function prodCopyToDevMcp(name, enabled) {
+  // skipReload: this checkbox sits inside the Settings form; a full reload
+  // would re-render the form and wipe any other in-progress edits.
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/copy-to-dev-mcp',
+    { enabled: enabled },
+    'Agent copy to dev ' + (enabled ? 'enabled' : 'disabled') + ' for "' + name + '"',
+    true);
+  if (data) {
+    // Keep the cached record in sync so a later re-render shows the new state.
+    cachedProds.forEach(function(p) {
+      if (p.name === name) p.allow_copy_to_dev_mcp = enabled;
+    });
+  } else {
+    var cb = document.getElementById('ps-copy-' + name);
+    if (cb) cb.checked = !enabled;
+  }
+}
+
+// Publish a production's database + filestore as a dev template. The dashboard
+// is deliberately not gated by the production's "agent copy to dev" flag.
+async function prodSaveAsTemplate(name) {
+  var template = await promptDialog({
+    title: 'Save production as template',
+    message: 'Copy the database and filestore of "' + name + '" into a dev template. ' +
+      'The production keeps serving; the template holds UNSANITIZED production data ' +
+      '(environments created from it are sanitized). Template name:',
+    placeholder: 'prod-' + name,
+    confirmLabel: 'Save as template'
+  });
+  if (template === null) return;
+  if (!template) { showToast('Template name is required', true); return; }
+  await _prodPublishTemplate(name, template, false);
+}
+
+async function _prodPublishTemplate(name, template, overwrite) {
+  showToast('Saving production "' + name + '" as template "' + template + '"… this can take a while');
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/save-as-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_name: template, overwrite: !!overwrite })
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      var res = data.result || {};
+      var msg = 'Production "' + name + '" saved as template "' + template + '"';
+      var affected = res.affected_envs || [];
+      msg += affected.length
+        ? '. Remounted (changes preserved): ' + affected.join(', ')
+        : '. No other environments were affected.';
+      var failures = res.remount_failures || [];
+      if (failures.length) {
+        msg += ' Remount issues: ' + failures.map(function(f) {
+          return (f[0] || '') + ' — ' + (f[1] || '');
+        }).join('; ');
+      }
+      showToast(msg, failures.length > 0);
+      await loadTemplates();
+      return;
+    }
+    if (data.conflict && !overwrite) {
+      // Refreshing an existing template from the live production is the normal
+      // case for the managed prod-<name> template, so offer it instead of a
+      // dead end — but only as an explicit second choice.
+      if (await confirmDialog({
+        title: 'Template already exists',
+        message: 'Template "' + template + '" already exists. Re-baseline it from the live ' +
+          'production "' + name + '"? Environments using it are remounted onto the new ' +
+          'baseline; their own filestore changes are preserved.',
+        confirmLabel: 'Re-baseline',
+        danger: true
+      })) {
+        await _prodPublishTemplate(name, template, true);
+      }
+      return;
+    }
+    showToast(data.error || 'Save as template failed', true);
+  } catch (e) {
+    showToast('Connection error: ' + e.message, true);
+  }
+}
+
+// Build a dev environment from a copy of this production's data. Opens the
+// normal create dialog (branch / environment name / addons) pre-wired to the
+// production; the server resolves the managed prod-<name> template.
+function prodCreateEnvironment(name) {
+  switchTab('environments');
+  openCreateModal(name);
+}
+
 async function prodDelete(name) {
   var typed = await promptDialog({
     title: 'Delete production',
@@ -7493,7 +8641,9 @@ async function prodRestore(name, snapshotId) {
 function promptDialog(opts) {
   return new Promise(function(resolve) {
     var overlay = document.createElement('div');
-    overlay.className = 'modal-overlay active';
+    // Only .modal-overlay.show has display:flex — any other modifier renders
+    // an invisible dialog whose promise never settles.
+    overlay.className = 'modal-overlay show';
     overlay.innerHTML =
       '<div class="modal modal-sm" role="dialog" aria-modal="true">' +
         '<div class="modal-header"><h3>' + esc(opts.title || 'Confirm') + '</h3></div>' +
@@ -7514,23 +8664,41 @@ function promptDialog(opts) {
     overlay.addEventListener('click', function(e) { if (e.target === overlay) close(null); });
     input.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') close(input.value.trim());
-      if (e.key === 'Escape') close(null);
+    });
+    // Escape on the overlay, not the input: it must also dismiss when a
+    // button has focus, and the id-less overlay is invisible to the global
+    // MODAL_CLOSERS Escape handler.
+    overlay.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { e.stopPropagation(); close(null); }
     });
   });
 }
 
-function openCreateProductionModal() {
+function _prodEnabled() {
+  return PROD_ENABLED;
+}
+
+function openCreateProductionModal(fromEnv) {
   var overlay = document.createElement('div');
-  overlay.className = 'modal-overlay active';
+  overlay.className = 'modal-overlay show';
   overlay.id = 'create-prod-modal';
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true">' +
       '<div class="modal-header"><h3>Create Production</h3></div>' +
       '<div class="modal-body">' +
         '<div class="form-group"><label for="cp-name">Name</label><input type="text" id="cp-name" placeholder="erp"></div>' +
+        '<div class="form-group"><label for="cp-fromenv">Promote from environment (optional)</label>' +
+          '<input type="text" id="cp-fromenv" value="' + escHtmlAttr(fromEnv || '') + '" placeholder="empty = fresh or template seed">' +
+          '<div class="hint">Copies the environment\'s database and filestore (its Odoo briefly stops for a consistent copy); repository, branch and image default to the environment\'s</div></div>' +
         '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/org/repo.git"></div>' +
         '<div class="form-group"><label for="cp-branch">Branch</label><input type="text" id="cp-branch" placeholder="production"></div>' +
-        '<div class="form-group"><label for="cp-domain">Domain</label><input type="text" id="cp-domain" placeholder="erp.customer.com"><div class="hint">DNS must point at this server; TLS via Let\'s Encrypt</div></div>' +
+        '<div class="form-group"><label for="cp-domain">Domain' + (window._teamBaseDomain ? ' (optional)' : '') + '</label>' +
+          '<input type="text" id="cp-domain" placeholder="' + escHtmlAttr(window._teamBaseDomain ? 'empty = default under ' + window._teamBaseDomain : 'erp.customer.com') + '">' +
+          '<div class="hint">DNS must point at this server; TLS via Let\'s Encrypt' +
+          (window._teamBaseDomain ? '. Empty = ' + esc(window._teamBaseDomain) + ' for the first production, name.' + esc(window._teamBaseDomain) + ' after that' : '') + '</div></div>' +
+        '<div class="form-group"><label for="cp-xdomains">Extra domains (optional, comma-separated)</label>' +
+          '<input type="text" id="cp-xdomains" placeholder="erp.customer.com">' +
+          '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
         '<div class="form-group"><label for="cp-image">Odoo image</label><input type="text" id="cp-image" placeholder="odoo:18.0"></div>' +
         '<div class="form-group"><label for="cp-template">Template (optional)</label><input type="text" id="cp-template" placeholder="empty = fresh database"></div>' +
         '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-auto"> Deploy automatically on GitHub push</label></div>' +
@@ -7551,12 +8719,22 @@ async function submitCreateProduction() {
     repo_url: v('cp-repo'),
     branch: v('cp-branch'),
     domain: v('cp-domain'),
+    extra_domains: v('cp-xdomains'),
     odoo_image: v('cp-image'),
     template_name: v('cp-template'),
+    from_environment: v('cp-fromenv'),
     auto_update: document.getElementById('cp-auto').checked
   };
-  if (!body.name || !body.repo_url || !body.branch || !body.domain || !body.odoo_image) {
-    showToast('Name, repository, branch, domain and image are required', true);
+  if (!body.name || (!body.domain && !window._teamBaseDomain)) {
+    showToast(window._teamBaseDomain ? 'Name is required' : 'Name and domain are required', true);
+    return;
+  }
+  if (!body.from_environment && (!body.repo_url || !body.branch || !body.odoo_image)) {
+    showToast('Repository, branch and image are required (or promote from an environment)', true);
+    return;
+  }
+  if (body.from_environment && body.template_name) {
+    showToast('Pick either a template or an environment to seed from, not both', true);
     return;
   }
   showToast('Creating production "' + body.name + '"… this can take a few minutes');
@@ -7578,7 +8756,7 @@ async function loadHealth() {
     if (!el || !data.checks) return;
     var labels = {
       dev_pg: 'PG DEV', prod_pg: 'PG PROD', traefik: 'TRAEFIK', s3: 'S3', disk: 'DISK',
-      overlays: 'OVERLAY'
+      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK'
     };
     el.innerHTML = Object.keys(labels).map(function(key) {
       var check = data.checks[key];

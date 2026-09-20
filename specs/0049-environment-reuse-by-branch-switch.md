@@ -4,7 +4,7 @@
 **Type:** Lifecycle / Capacity
 **First introduced:** `litnimax/bangkok` branch (2026-08-17)
 **Key code today:** `docker_ops/env_ops.py` (`switch_environment_branch`),
-`git_ops.py` (`fetch_branch`, `checkout_branch`, `tree_modules`), `server.py`
+`git_ops.py` (`fetch_branch`, `checkout_branch`), `server.py`
 (`switch_branch`), `web_ui.py`, `templates/dashboard.html`
 
 ## Context
@@ -63,11 +63,10 @@ already effectively was: a stable slot label. (Revisited — see *Evolution*.)
   and install/upgrade/restart have exactly one implementation. The file list is a
   *tree* diff between the two tips, which is what keeps squash-merged histories
   behaving.
-- Reuse introduces one failure mode a fresh environment cannot have: the
-  database outlives the code. A preflight compares the modules the current tree
-  provides with the target tree's and, for those that disappear, asks the
-  database which are installed. That is a warning by default — a module can also
-  come from extra-addons or the image — and a refusal under `strict`.
+- The retained database may outlive code from an earlier branch. The switch does
+  not inspect installed module state or predict whether that mismatch is safe;
+  install/upgrade/restart failures and later Odoo runtime errors are returned
+  through their normal paths for the caller or coding agent to diagnose.
 - The coding agent's own checkout for the environment follows the switch through
   the existing create hook, which already refuses to clobber uncommitted work.
 - Live-mounted environments ([[0021-code-delivery-modes]]) are rejected: their
@@ -86,8 +85,8 @@ already effectively was: a stable slot label. (Revisited — see *Evolution*.)
   every card and the info tools report it.
 - A reused database accumulates schema from every branch it has served. For the
   intended flow (branch merged, next branch cut from the updated default) that is
-  simply the merged work; for abandoned branches, residue remains, and the
-  preflight only reports the part that is detectable.
+  simply the merged work; for abandoned branches, residue remains. Oduflow does
+  not proactively classify that residue during a branch switch.
 - Declarative Stacks ([[0046-declarative-oduflow-stacks]]) still treat a changed
   branch as immutable drift and recreate the environment. Reconciling it in place
   through this operation is a natural follow-up, not part of this decision.
@@ -138,6 +137,16 @@ name with its agent checkout still under the old slug. That is a best-effort
 side path — the next console or chat re-clones it — and buying atomicity there
 would mean moving it before a step that can still fail.
 
+**Unconditional switching.** The original implementation compared module
+manifests in the two Git trees and queried `ir_module_module` for modules that
+disappeared. That heuristic could not see the effective addons path: code may
+still come from an extra repository or the image, while a real incompatibility
+may only appear on a later request or restart. Blocking a branch move under
+`strict` therefore treated an incomplete prediction as stronger evidence than
+the actual apply and runtime results. The preflight was removed: `switch_branch`
+now moves the code unconditionally after fetch, and `strict` is limited to the
+ordinary apply guardrail for an incomplete install/upgrade/restart action.
+
 ## History
 
 - `litnimax/bangkok` (2026-08-17) — `switch_branch` MCP tool, REST endpoint and
@@ -148,3 +157,6 @@ would mean moving it before a step that can still fail.
   `update_environment` with `check_rename_target` /
   `_relocate_environment_state`, `rename_env` in the port and hostname
   registries, `activity.rename`, `agent_sessions.rename`, `_agent_rename_env`.
+- `litnimax/explain-strict-module-check` (2026-08-29) — removed the installed
+  module preflight; branch switching now relies on actual apply and runtime
+  failures, while `strict` remains scoped to action completeness.

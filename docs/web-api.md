@@ -11,16 +11,17 @@ Odoo/SQL terminals, Connect As, notes, protection, scoped MCP access,
 single-environment share links, and save-as-template actions.
 
 The header's **Feedback** action opens a prefilled issue form on
-`github.com/oduist/oduflow`. Oduflow holds no GitHub credentials and files
+`github.com/oduflow/oduflow`. Oduflow holds no GitHub credentials and files
 nothing itself: it builds the link with the description and a short
 version/platform/transport block, then the user reviews and submits it from
 their own GitHub account.
 
 ## Authentication and responses
 
-Dashboard API routes use the authenticated UI session (user `admin`, password
-from `[team.*].ui_password`). The login form creates an HTTP-only session
-cookie; HTTP Basic credentials are also accepted. State-changing cookie-auth
+Dashboard API routes use the authenticated UI session (password from
+`[team.*].ui_password`, plus TOTP when enabled). The login form creates an
+HTTP-only session cookie; HTTP Basic credentials are rejected. See
+[UI 2FA](security.md#enable-authenticator-app-2fa) for setup and recovery. State-changing cookie-auth
 requests and all WebSocket handshakes are protected by Origin/Referer checks.
 This authentication is separate from MCP Bearer authentication.
 
@@ -42,7 +43,7 @@ than a JSON API. Production routes are registered only when
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
-| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user` |
+| `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
@@ -154,16 +155,20 @@ Odoo.sh ingest endpoints accept the import token only in
 |---|---|---|
 | `GET` | `/api/services` | List services |
 | `POST` | `/api/services/create` | Create a service with either catch-all `port` or restricted Traefik `routes`, plus optional image/runtime settings. `command` accepts a shell-quoted string or an argv array and replaces the image `CMD` |
-| `GET` | `/api/services/{name}/env-vars` | Return the environment variables an update keeps — the saved preset, or the container's own environment for a service created before presets |
-| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
+| `GET` | `/api/services/{name}/config` | Return the full configuration an update keeps (image, `port`/`routes`, hostname, env vars, `host_mode`, volumes, capabilities, `command`) — what the dashboard's Update dialog prefills. Env values configured as team secrets come back as their `secret:<name>` reference |
+| `POST` | `/api/services/{name}/update` | Pull/change settings and recreate safely; `env_vars`, `volumes`, and `routes` are full replacements when supplied — omitting the key keeps the current value, sending an empty one clears it. Omit `command` to keep it, send `""`/`[]` to fall back to the image `CMD` |
 | `POST` | `/api/services/{name}/restart` | Restart a service |
-| `POST` | `/api/services/{name}/delete` | Delete a service |
+| `POST` | `/api/services/{name}/delete` | Delete a service (refused while protected). The optional body `{"save_preset": false}` removes the saved preset too; by default it is kept for `restore_service`. The result's `preset_kept` reports what is actually on disk afterwards |
+| `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
+| `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
-| `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name` |
+| `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |
 | `POST` | `/api/service-databases/{name}/rotate` | Rotate the database role password |
-| `POST` | `/api/service-databases/{name}/delete` | Permanently drop the database and role, terminating connections |
+| `POST` | `/api/service-databases/{name}/protect` | Protect a database: deletion is refused until unprotected |
+| `POST` | `/api/service-databases/{name}/unprotect` | Remove database protection |
+| `POST` | `/api/service-databases/{name}/delete` | Permanently drop the database and role, terminating connections (refused while protected) |
 | `GET` | `/api/service-presets` | List saved presets |
 | `POST` | `/api/service-presets/restore` | Restore a preset; body: `name` plus optional runtime overrides |
 | `POST` | `/api/service-presets/{name}/delete` | Delete a preset |
@@ -188,9 +193,14 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
 | `POST` | `/api/extra-repos/{name}/delete` | Delete the repository and unused cached revisions |
 | `GET` | `/api/credentials` | List stored credential identities (not secrets) |
-| `POST` | `/api/credentials/add` | Store credentials embedded in body `repo_url` |
+| `POST` | `/api/credentials/add` | Store an access token for a git host: body `token`, `host` (default `github.com`), optional `username`, optional `repo_url` to verify with `git ls-remote`; legacy body `repo_url` with inline `user:PAT@` |
 | `POST` | `/api/credentials/delete` | Delete by body `host` and `username` |
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
+| `GET` | `/api/ssh-key` | The team's SSH public key and fingerprint (only the public key is returned) |
+| `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
+| `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
+| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
+| `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
 
@@ -200,9 +210,10 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
 | `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
+| `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
-| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduist/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
+| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduflow/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
 | `GET` | `/api/agent-guides` | List available agent guides |
 | `GET` | `/api/agent-guides/{filename}` | Read a guide |
 
@@ -228,8 +239,10 @@ and delete operations require explicit confirmation in their JSON body.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/productions` | List productions and return webhook/backup state |
-| `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally a template |
+| `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image) |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
+| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
+| `POST` | `/api/productions/wal-control` | Body `{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }`; cluster-wide action under the system lock |
 | `GET` | `/api/productions/{name}` | Detailed production information |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |
@@ -237,6 +250,10 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/update` | Start an asynchronous deploy; returns `202` |
 | `POST` | `/api/productions/{name}/rollback?to_commit=` | Roll code back to a commit |
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
+| `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
+| `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
+| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`; recreates the container (database and filestore preserved). A present-but-empty `git_user` or `extra_domains` clears it; an absent key leaves it unchanged |
+| `POST` | `/api/productions/{name}/odoo-conf` | Set body `options` and remove body `unset` per-production `odoo.conf` overrides; optional `restart` (default true) and `replace` (body `options` become the complete override set) |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
 | `POST` | `/api/productions/{name}/delete` | Delete; body `confirm` must equal name, optional `drop_database` |

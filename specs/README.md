@@ -75,6 +75,19 @@ precursors).
 | [0054](0054-agent-container-image-build-and-publish.md) | 2026-09-01 | Agent-driven container image build and publication |
 | [0055](0055-scoped-environment-ui-sharing.md) | 2026-09-02 | Shared single-environment dashboard (`/env/<name>` share links) |
 | [0056](0056-public-url-scheme.md) | 2026-09-04 | Public URL scheme (`[routing] public_scheme`) and conditional forwarded-header trust |
+| [0057](0057-service-container-lifecycle.md) | 2026-09-12 | Explicit service container lifecycle settings |
+| [0058](0058-team-secrets.md) | 2026-09-12 | Team secrets for environment variables (write-only vault, `secret:<name>` references) |
+| [0059](0059-production-to-dev-data-flow.md) | 2026-09-13 | Production → dev data flow through a managed template, gated for MCP agents only |
+| [0060](0060-deleted-production-purge.md) | 2026-09-13 | Tombstoned purge of deleted-production leftovers (`prod_purge_hours`, cleanup flag) |
+| [0061](0061-mutable-production-configuration.md) | 2026-09-16 | Mutable production configuration: `reconfigure_production`, per-production odoo.conf overrides, dashboard Settings panel |
+| [0062](0062-dev-to-production-promotion.md) | 2026-09-16 | Dev → production promotion: `create_production(from_environment=...)` copies a dev environment's data directly, no intermediate template |
+
+| [0063](0063-production-stack-targets.md) | 2026-09-16 | Production Stack targets, explicit adoption, registry ownership and retryable reconciliation |
+| [0064](0064-team-base-domain.md) | 2026-09-16 | Team base domain (flat env/service/production naming zone) and multi-domain productions |
+| [0065](0065-team-ssh-deploy-keys.md) | 2026-09-17 | Per-team SSH deploy keys: auto-generated keypair, public key in the dashboard, SSH repository URLs |
+| [0066](0066-production-wal-disk-protection.md) | 2026-09-19 | Production WAL monitoring, archive controls, persistent disk protection and fenced recovery |
+| [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
+| [0068](0068-production-mcp-credentials.md) | 2026-09-19 | Separate production MCP credentials, direct OduMCP access and automatic addon provisioning |
 
 ## Design docs
 

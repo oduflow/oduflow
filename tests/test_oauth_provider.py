@@ -18,12 +18,14 @@ def _settings(**overrides):
         {
             "1": TeamSettings(
                 team_id="1",
+                hostname="team-a.example.com",
                 auth_token="tok-a",
                 port_range_start=50000,
                 port_range_end=50100,
             ),
             "2": TeamSettings(
                 team_id="2",
+                hostname="team-b.example.com",
                 auth_token="tok-b",
                 port_range_start=50100,
                 port_range_end=50200,
@@ -31,7 +33,6 @@ def _settings(**overrides):
         },
     )
     return Settings(
-        oauth_base_url=overrides.pop("oauth_base_url", "https://oduflow.example.com"),
         # Minted-token store lives under base_data_dir; give each provider its own
         # temp dir unless a test needs two providers to share one (persistence).
         base_data_dir=overrides.pop("base_data_dir", tempfile.mkdtemp()),
@@ -64,9 +65,8 @@ def _mint(provider, client_id="team_1", scopes=None):
 
 
 def _host_settings(*hostnames):
-    """Host-relative Settings (no oauth_base_url) with a team per hostname."""
+    """Settings with a team per OAuth issuer hostname."""
     return Settings(
-        oauth_base_url="",
         base_data_dir=tempfile.mkdtemp(),
         teams={
             str(i): TeamSettings(
@@ -82,14 +82,10 @@ def _host_settings(*hostnames):
 
 
 class TestOduflowOAuthProvider:
-    def test_host_relative_without_oauth_base_url(self):
-        # No oauth_base_url (the traefik norm): the issuer is derived per-request
-        # from the incoming Host, so construction is allowed (host-relative mode)
-        # and uses a team hostname as the placeholder base_url.
+    def test_team_hostname_is_used_as_internal_placeholder(self):
         s = Settings(
             routing_mode="traefik",
             acme_email="admin@example.com",
-            oauth_base_url="",
             base_data_dir=tempfile.mkdtemp(),
             teams={
                 "1": TeamSettings(
@@ -102,7 +98,7 @@ class TestOduflowOAuthProvider:
             },
         )
         provider = OduflowOAuthProvider(s)
-        assert provider._host_relative is True
+        assert str(provider.base_url).rstrip("/") == "https://team1.example.com"
 
     def test_preregistered_clients(self):
         provider = OduflowOAuthProvider(_settings())
@@ -347,10 +343,13 @@ class TestOduflowOAuthProvider:
         provider = OduflowOAuthProvider(_settings())
         app = Starlette(routes=provider.get_routes("/mcp"))
         client = TestClient(app)
-        resp = client.get("/.well-known/oauth-authorization-server")
+        resp = client.get(
+            "/.well-known/oauth-authorization-server",
+            headers={"host": "team-a.example.com", "x-forwarded-proto": "https"},
+        )
         assert resp.status_code == 200
         meta = json.loads(resp.text)
-        assert meta["issuer"].rstrip("/") == "https://oduflow.example.com"
+        assert meta["issuer"].rstrip("/") == "https://team-a.example.com"
         assert "authorization_endpoint" in meta
         assert "token_endpoint" in meta
         # Revocation is advertised; DCR is disabled and must not be.
@@ -361,11 +360,10 @@ class TestOduflowOAuthProvider:
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
 
-        # No fixed issuer → issuer/endpoints derived per-request from the Host.
+        # Issuer/endpoints are derived per-request from the team Host.
         provider = OduflowOAuthProvider(
             _host_settings("zipfit.oduflow.dev", "other.example.com")
         )
-        assert provider._host_relative is True
         app = Starlette(routes=provider.get_routes("/mcp"))
         client = TestClient(app)
 
@@ -395,6 +393,28 @@ class TestOduflowOAuthProvider:
             ).text
         )
         assert other["issuer"].rstrip("/") == "https://other.example.com"
+
+    @pytest.mark.parametrize(
+        ("host", "proto"),
+        [
+            ("zipfit.oduflow.dev:443@evil.example.com", "https"),
+            ("zipfit.oduflow.dev:not-a-port", "https"),
+            ("zipfit.oduflow.dev", "javascript"),
+        ],
+    )
+    def test_metadata_rejects_malformed_external_origin(self, host, proto):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        provider = OduflowOAuthProvider(_host_settings("zipfit.oduflow.dev"))
+        app = Starlette(routes=provider.get_routes("/mcp"))
+        response = TestClient(app).get(
+            "/.well-known/oauth-authorization-server",
+            headers={"host": host, "x-forwarded-proto": proto},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_request"
 
     def test_auth_challenge_rewrites_resource_metadata_host(self):
         # The 401 WWW-Authenticate resource_metadata origin must follow the

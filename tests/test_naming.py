@@ -42,6 +42,22 @@ class TestEnvironmentHostname:
             == "feature-a.dev.example.com"
         )
 
+    def test_base_domain_flattens_branch_hostname(self):
+        assert (
+            get_env_hostname(
+                "feature-a", "oduflow.demo.example.com", "", "demo.example.com"
+            )
+            == "feature-a.demo.example.com"
+        )
+
+    def test_base_domain_applies_to_slot_hostname(self):
+        assert (
+            get_env_hostname(
+                "feature-a", "oduflow.demo.example.com", "dev3", "demo.example.com"
+            )
+            == "dev3.demo.example.com"
+        )
+
     def test_team_hostname_splits_first_label(self):
         assert split_team_hostname("odoo.dev.example.com") == (
             "odoo",
@@ -323,6 +339,10 @@ class TestProdNaming:
             "",
             "ERP",  # uppercase
             "-erp",  # leading dash
+            # A prod name is also a DNS label: "erp-" would build the invalid
+            # default domain "erp-.<base_domain>" and fail validate_domain for
+            # a domain the user never typed.
+            "erp-",  # trailing dash
             "erp/main",  # slash
             "erp_main",  # underscore
             "a b",

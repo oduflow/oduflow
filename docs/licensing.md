@@ -1,6 +1,6 @@
 # Licensing
 
-Oduflow is source-available under the [Business Source License 1.1](https://github.com/oduist/oduflow/blob/main/LICENSE) (BUSL-1.1).
+Oduflow is source-available under the [Business Source License 1.1](https://github.com/oduflow/oduflow/blob/main/LICENSE) (BUSL-1.1).
 
 - **Free forever for non-commercial use**: evaluation, education, academic research, personal and hobby projects, non-profits.
 - **Commercial use requires a paid license** in one of three tiers (below).

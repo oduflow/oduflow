@@ -25,7 +25,7 @@ Shared infrastructure (Docker network, PostgreSQL, team directories) is initiali
 
 **stdio mode** — the server communicates over stdin/stdout. The MCP client starts the process directly; no network port is needed. Ideal for local clients like Claude Desktop, Windsurf, etc.
 
-**HTTP mode** — starts a persistent HTTP server on `http://0.0.0.0:8000` by default. Exposes the MCP endpoint at `/mcp`, a Web Dashboard at `/`, and a REST API at `/api/`. MCP uses Bearer tokens; the dashboard uses a form/session cookie, while API clients may also use HTTP Basic auth.
+**HTTP mode** — starts a persistent HTTP server on `http://0.0.0.0:8000` by default. Exposes the MCP endpoint at `/mcp`, a Web Dashboard at `/`, and a REST API at `/api/`. MCP uses Bearer tokens; the dashboard and its REST/WS API use session cookies obtained through the login form (with TOTP when enabled). HTTP Basic is not accepted.
 
 Configuration is loaded from `oduflow.toml` (see [Installation](installation.md#configuration-reference)).
 See [Quick Start](quick-start.md) for MCP client configuration examples for both modes.
@@ -38,6 +38,28 @@ oduflow --stack /path/to/oduflow.yaml --stack-team 1 --transport http
 
 Startup stops with a non-zero exit if Stack validation, preflight, or apply
 fails. See [Declarative Stacks](stacks.md).
+
+## Dashboard Two-Factor Authentication
+
+Run locally on the server as the Oduflow service user, with the server's existing
+configuration and persistent data directory. Docker users should execute these
+commands inside the running Oduflow container with an interactive terminal.
+
+```bash
+# Print a local QR code and enable TOTP after confirming an authenticator code
+oduflow ui-2fa setup --team 1
+
+# Confirm disabling TOTP and revoke full operator UI sessions
+oduflow ui-2fa reset --team 1
+```
+
+`--team` defaults to `1`. Setup requires a configured `ui_password`; an existing
+factor must be reset before replacement. Reset returns the UI to password-only
+login until setup runs again. Commands use the same `ODUFLOW_TOML` configuration
+lookup as the server, do not require Docker access, and do not start the server.
+Changes take effect without a restart. Shared links and MCP clients are
+unaffected. See [UI 2FA](security.md#enable-authenticator-app-2fa) for enrollment,
+session expiry, and recovery details.
 
 ## Declarative Stack Commands
 
@@ -76,6 +98,13 @@ oduflow retune-postgres
 
 # Back up and write configs; stage production Odoo configs in containers
 oduflow retune-postgres --apply
+
+# Upgrade the Oduflow package itself, reconcile bundled files, restart
+oduflow self-update
+
+# Non-interactive: overwrite bundle conflicts; or skip the service restart
+oduflow self-update --force
+oduflow self-update --no-restart
 ```
 
 `retune-postgres` accounts for `[production].enabled` and does not restart
@@ -109,6 +138,38 @@ first-line `# KEEP` remains an unconditional opt-out.
 This command is separate from upgrading the Python package (for example,
 `uv tool upgrade oduflow`). It does not manage `postgresql.conf`; use
 `oduflow retune-postgres` for PostgreSQL planning and updates.
+
+`oduflow self-update` chains the whole documented upgrade: it compares the
+installed version with the latest GitHub release, upgrades the package through
+its own installer (`uv tool upgrade oduflow` for a uv tool install, otherwise
+`pip install --upgrade oduflow` in the same environment), verifies the installed
+version, runs the bundled-file reconciliation above through a fresh process in
+that Python environment, and restarts the systemd service when the unit
+installed by `oduflow systemd-install` exists and the command runs as root.
+`--force` is forwarded to the reconciliation, and it
+also finishes an interrupted upgrade: if the package is already at the latest
+version — for example after a first run stopped on a bundle conflict — the
+command reconciles and restarts instead of reporting "already up to date" and
+doing nothing. `--no-restart` leaves the running server on the old version
+until you restart it yourself.
+
+If the installer succeeds but the advertised release is not installed (for
+example, uv has a version pin or the package index has not received the release
+yet), the command exits with an error before reconciliation or restart. Check
+the installer's constraints and index, then retry. A uv tool upgrade also checks
+that uv's tool directory contains the running installation; use the installing
+user and original `UV_TOOL_DIR` if they differ.
+
+It refuses, with an error, installations it cannot upgrade durably: **a
+container** (a package upgraded inside the `oduist/oduflow` container reverts
+when the container is recreated — pull the new image and recreate it instead,
+see [Docker](docker.md)), a source checkout or editable install (update those
+with `git pull`), an ephemeral `uvx` run (use `uvx oduflow@latest` to refresh the
+cached version), and an environment pip cannot upgrade in place — a virtualenv
+created without pip, or a `site-packages` the current user cannot
+write, where `pip install --upgrade` would install a second copy into
+`~/.local` that the running service never loads. Re-run those as the user that
+owns the installation.
 
 ## Template Commands
 
@@ -164,6 +225,8 @@ with `oduflow call`, for example:
 
 ```bash
 oduflow call create_service_database '{"name":"events"}'
+# Or on the dedicated production PostgreSQL cluster (requires production hosting)
+oduflow call create_service_database '{"name":"events","cluster":"prod"}'
 oduflow call get_service_database '{"name":"events"}'
 oduflow call rotate_service_database_password '{"name":"events"}'
 oduflow call delete_service_database '{"name":"events"}'

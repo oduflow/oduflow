@@ -145,6 +145,19 @@ def test_save_as_template_shows_elapsed_progress(tmp_path):
     assert "setBusy(branch, 'Saving template')" in dashboard.text
 
 
+def test_dynamic_modals_use_the_show_class(tmp_path):
+    """P-H15: only .modal-overlay.show has display:flex. Dialogs created with a
+    'modal-overlay active' class never rendered — Create/Delete/Restore
+    Production were dead and promptDialog's promise never settled."""
+    dashboard = _client(tmp_path).get("/")
+
+    assert dashboard.status_code == 200
+    assert "modal-overlay active" not in dashboard.text
+    assert "'modal-overlay show'" in dashboard.text
+    # The dynamically created production modal is Escape-closable like the rest.
+    assert "'create-prod-modal':" in dashboard.text
+
+
 def test_feedback_modal_is_registered_for_escape_key(tmp_path):
     dashboard = _client(tmp_path).get("/")
 
@@ -301,7 +314,7 @@ def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):
     assert dashboard.status_code == 200
     assert "data.default === 'opencode'" in dashboard.text
     assert "(agentType === 'opencode' ? 'OpenCode' : 'Claude')" in dashboard.text
-    assert "var CHAT_V = '6'" in dashboard.text
+    assert "var CHAT_V = '7'" in dashboard.text
 
 
 def test_minimized_window_dock_has_group_semantics_and_restores_focus(tmp_path):
@@ -364,6 +377,7 @@ def test_upgrade_module_picker_discards_stale_environment_responses():
             "openUpgradeModules",
             "_upgradeModulesRequestIsCurrent",
             "closeUpgradeModules",
+            "_disableUpgradePickerActions",
         )
     )
     harness = (
@@ -382,7 +396,9 @@ var elements = {
   'upgrade-modules-filter': {value: '', focus: function () {}},
   'upgrade-modules-list': {innerHTML: ''},
   'upgrade-modules-count': {textContent: ''},
-  'upgrade-modules-shown': {textContent: ''}
+  'upgrade-modules-shown': {textContent: ''},
+  'upgrade-modules-select-all': {disabled: false},
+  'upgrade-modules-clear': {disabled: false}
 };
 var document = {getElementById: function (id) { return elements[id]; }};
 function showModal() { modalShown = true; }
@@ -430,6 +446,168 @@ function renderUpgradeModules() {
         "env": "beta",
         "modules": ["beta_module"],
         "renders": [{"env": "beta", "modules": ["beta_module"]}],
+    }
+
+
+def test_upgrade_picker_offers_select_all_and_clear(tmp_path):
+    dashboard = _client(tmp_path).get("/").text
+
+    assert 'id="upgrade-modules-select-all"' in dashboard
+    assert 'id="upgrade-modules-clear"' in dashboard
+    assert "upgrades them with <code>odoo -u all</code>" in dashboard
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_upgrade_picker_sends_odoo_all_only_for_a_whole_selection():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in (
+            "selectAllUpgradeModules",
+            "clearUpgradeModules",
+            "_upgradeSelectionIsEverything",
+            "toggleUpgradeModule",
+            "updateUpgradeCount",
+            "confirmUpgradeModules",
+        )
+    )
+    harness = (
+        functions
+        + r"""
+var _upgradeModulesEnv = 'feature-x';
+var _upgradeModules = [{name: 'base'}, {name: 'sale'}, {name: 'crm'}];
+var _upgradeSelected = new Set();
+var elements = {
+  'upgrade-modules-count': {textContent: ''},
+  'upgrade-modules-select-all': {disabled: false},
+  'upgrade-modules-clear': {disabled: false}
+};
+var document = {getElementById: function (id) { return elements[id]; }};
+var applied = [];
+var toasts = [];
+function renderUpgradeModules() { updateUpgradeCount(); }
+function showToast(message) { toasts.push(message); }
+function closeUpgradeModules() {}
+async function applyModules(branch, action, modules) {
+  applied.push({branch: branch, action: action, modules: modules});
+}
+
+(async function () {
+  selectAllUpgradeModules();
+  var whole = {
+    count: elements['upgrade-modules-count'].textContent,
+    selectAllDisabled: elements['upgrade-modules-select-all'].disabled,
+    clearDisabled: elements['upgrade-modules-clear'].disabled
+  };
+  await confirmUpgradeModules();
+
+  clearUpgradeModules();
+  var cleared = {
+    count: elements['upgrade-modules-count'].textContent,
+    selectAllDisabled: elements['upgrade-modules-select-all'].disabled,
+    clearDisabled: elements['upgrade-modules-clear'].disabled
+  };
+
+  toggleUpgradeModule({checked: true, value: 'sale'});
+  await confirmUpgradeModules();
+
+  process.stdout.write(JSON.stringify({
+    whole: whole,
+    cleared: cleared,
+    partialCount: elements['upgrade-modules-count'].textContent,
+    applied: applied,
+    toasts: toasts
+  }));
+})();
+"""
+    )
+
+    result = _run_node(harness)
+
+    assert result == {
+        "whole": {
+            "count": "All 3 modules selected \u2014 runs odoo -u all",
+            "selectAllDisabled": True,
+            "clearDisabled": False,
+        },
+        "cleared": {
+            "count": "No modules selected",
+            "selectAllDisabled": False,
+            "clearDisabled": True,
+        },
+        "partialCount": "1 module selected",
+        # The whole list collapses to Odoo's own keyword; a partial selection
+        # still travels as explicit module names.
+        "applied": [
+            {"branch": "feature-x", "action": "upgrade", "modules": "all"},
+            {"branch": "feature-x", "action": "upgrade", "modules": "sale"},
+        ],
+        "toasts": [],
+    }
+
+
+def test_extra_addon_pickers_offer_select_all_and_clear(tmp_path):
+    dashboard = _client(tmp_path).get("/").text
+
+    assert 'id="cr-extra-select-all"' in dashboard
+    assert 'id="cr-extra-clear"' in dashboard
+    assert 'id="tset-extra-select-all"' in dashboard
+    assert 'id="tset-extra-clear"' in dashboard
+    assert "setAllExtraRepos('.cr-extra-cb', true)" in dashboard
+    assert "setAllExtraRepos('.tset-extra-cb', false)" in dashboard
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_extra_repo_bulk_actions_stay_inside_their_own_picker():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in ("setAllExtraRepos", "setExtraRepoActionsEnabled")
+    )
+    harness = (
+        functions
+        + r"""
+var lists = {
+  '.cr-extra-cb': [{checked: false}, {checked: false}],
+  '.tset-extra-cb': [{checked: true}]
+};
+var buttons = {
+  'cr-extra-select-all': {disabled: true},
+  'cr-extra-clear': {disabled: true}
+};
+var document = {
+  querySelectorAll: function (selector) { return lists[selector] || []; },
+  getElementById: function (id) { return buttons[id]; }
+};
+
+setAllExtraRepos('.cr-extra-cb', true);
+var selected = lists['.cr-extra-cb'].map(function (cb) { return cb.checked; });
+setExtraRepoActionsEnabled('cr-extra', true);
+var enabled = {
+  selectAll: buttons['cr-extra-select-all'].disabled,
+  clear: buttons['cr-extra-clear'].disabled
+};
+// The template picker's buttons are absent from this harness: a modal that is
+// not on screen must not break the one that is.
+setExtraRepoActionsEnabled('tset-extra', true);
+setAllExtraRepos('.cr-extra-cb', false);
+
+process.stdout.write(JSON.stringify({
+  selected: selected,
+  cleared: lists['.cr-extra-cb'].map(function (cb) { return cb.checked; }),
+  untouched: lists['.tset-extra-cb'].map(function (cb) { return cb.checked; }),
+  enabled: enabled
+}));
+"""
+    )
+
+    result = _run_node(harness)
+
+    assert result == {
+        "selected": [True, True],
+        "cleared": [False, False],
+        "untouched": [True],
+        "enabled": {"selectAll": False, "clear": False},
     }
 
 
@@ -568,3 +746,55 @@ process.stdout.write(JSON.stringify({
             "unchanged and omitted here."
         ),
     }
+
+
+def test_chat_markdown_is_sanitized_with_vendored_dompurify(tmp_path):
+    """Regression for the bypassable hand-rolled sanitizer (entity-encoded
+    scheme whitespace like ``java&Tab;script:``, SVG ``xlink:href``): marked's
+    raw-HTML output must go through the vendored DOMPurify with the HTML-only
+    profile, keep a plain-text fallback when DOMPurify is unavailable, and the
+    dashboard must load purify.min.js before chat.js. (Static wiring checks:
+    the repo has no DOM test harness — jsdom is not available — so a
+    behavioral render test cannot run here.)"""
+    chat = (_DASHBOARD.parent / "static" / "chat.js").read_text(encoding="utf-8")
+
+    # marked output is sanitized by DOMPurify, HTML profile only (no
+    # SVG/MathML — kills xlink:href), with style/form forbidden.
+    assert "window.DOMPurify.sanitize(html," in chat
+    assert "USE_PROFILES: { html: true }" in chat
+    assert "FORBID_TAGS: ['style', 'form']" in chat
+    # Missing-DOMPurify (or marked failure) fallback: plain escaped text, never
+    # unsanitized HTML.
+    assert "if (html == null || !window.DOMPurify)" in chat
+    assert "d.textContent = text;" in chat
+    # Every kept anchor is forced external-safe.
+    assert "afterSanitizeAttributes" in chat
+    assert "node.setAttribute('rel', 'noopener noreferrer');" in chat
+
+    client = _client(tmp_path)
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    # purify.min.js loads before chat.js (renderMarkdown needs it at parse
+    # time), and the vendored asset is actually served with its license intact.
+    purify_at = dashboard.text.index("loadScript('/static/purify.min.js')")
+    chat_at = dashboard.text.index("/static/chat.js?v=")
+    assert purify_at < chat_at
+    purify = client.get("/static/purify.min.js")
+    assert purify.status_code == 200
+    assert b"DOMPurify" in purify.content
+    assert b"@license DOMPurify" in purify.content
+
+
+def test_prompt_dialog_escape_is_handled_on_the_overlay(tmp_path):
+    """The typed-confirmation prompt (Delete/Restore Production) has no id, so
+    the global MODAL_CLOSERS Escape handler cannot close it. Escape must be
+    handled on the overlay itself — the input-only listener stopped working as
+    soon as focus moved to the Cancel/confirm buttons."""
+    dashboard = _client(tmp_path).get("/")
+
+    assert dashboard.status_code == 200
+    assert re.search(
+        r"overlay\.addEventListener\('keydown',\s*function\(e\)\s*\{\s*"
+        r"if \(e\.key === 'Escape'\) \{ e\.stopPropagation\(\); close\(null\); \}",
+        dashboard.text,
+    )

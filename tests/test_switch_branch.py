@@ -2,10 +2,9 @@
 
 The environment is the reusable unit: switching the branch must keep the
 database, filestore and routing while changing only the code. What these tests
-pin down is the part that is easy to get subtly wrong — the *order* of the
-mutations, and the two refusals that keep a reused environment honest (a branch
-that was never pushed, a database whose installed modules the target branch does
-not carry).
+pin down is the part that is easy to get subtly wrong: mutation order, refusing
+branches that were never pushed, and handing the branch diff to the normal apply
+guardrail.
 """
 
 from __future__ import annotations
@@ -134,23 +133,6 @@ class TestCheckoutBranch:
         diff_names.assert_not_called()
 
 
-class TestTreeModules:
-    def test_reads_module_names_from_manifests_anywhere_in_the_tree(self, tmp_path):
-        listing = (
-            "README.md\n"
-            "sale_x/__manifest__.py\n"
-            "sale_x/models/sale.py\n"
-            "addons/deep/crm_y/__manifest__.py\n"
-            "__manifest__.py\n"
-        )
-        with patch("subprocess.run", return_value=MagicMock(stdout=listing)):
-            modules = git_ops.tree_modules(str(tmp_path), "origin/main")
-
-        # The repository root is never an addons directory, so a root manifest
-        # is not a module the addons path could load.
-        assert modules == {"sale_x", "crm_y"}
-
-
 # --- switch_environment_branch -------------------------------------------
 
 
@@ -177,7 +159,6 @@ def switch_env(tmp_path):
         ) as pull,
         patch.object(env_ops, "_agent_add_env") as agent,
         patch.object(env_ops, "_agent_rename_env") as agent_rename,
-        patch.object(env_ops, "_dropped_module_warnings", return_value=[]) as preflight,
         patch.object(env_ops, "_db_exists", return_value=False) as db_exists,
     ):
         yield {
@@ -188,7 +169,6 @@ def switch_env(tmp_path):
             "pull": pull,
             "agent": agent,
             "agent_rename": agent_rename,
-            "preflight": preflight,
             "db_exists": db_exists,
         }
 
@@ -225,9 +205,11 @@ class TestSwitchEnvironmentBranch:
         # requirements.txt belongs to the diff, not to this recreate.
         assert kwargs["install_dependencies"] is False
 
-    def test_the_diff_is_handed_to_the_normal_apply_path(self, tmp_path, switch_env):
-        _switch(tmp_path, upgrade=["sale_x"], strict=True)
+    def test_strict_only_applies_to_the_normal_apply_path(self, tmp_path, switch_env):
+        with patch("oduflow.docker_ops.odoo_ops._get_module_states") as module_states:
+            _switch(tmp_path, upgrade=["sale_x"], strict=True)
 
+        module_states.assert_not_called()
         kwargs = switch_env["pull"].call_args.kwargs
         assert kwargs["presynced"] == ("old111", ["sale_x/a.py"])
         assert kwargs["upgrade"] == ["sale_x"]
@@ -365,125 +347,6 @@ class TestSwitchEnvironmentBranch:
             _switch(tmp_path)
 
 
-class TestDroppedModulePreflight:
-    def test_a_dropped_installed_module_is_reported_but_still_switches(
-        self, tmp_path, switch_env
-    ):
-        switch_env["preflight"].return_value = ["sale_x is installed but absent"]
-
-        result = _switch(tmp_path)
-
-        assert result["branch_switched"] is True
-        assert result["warnings"] == ["sale_x is installed but absent"]
-        switch_env["update"].assert_called_once()
-
-    def test_strict_refuses_and_mutates_nothing(self, tmp_path, switch_env):
-        switch_env["preflight"].return_value = ["sale_x is installed but absent"]
-
-        result = _switch(tmp_path, strict=True)
-
-        assert result["action"] == "blocked"
-        assert result["branch"] == "feature/old"
-        assert result["requested_branch"] == "feature/new"
-        switch_env["update"].assert_not_called()
-        switch_env["checkout"].assert_not_called()
-        switch_env["pull"].assert_not_called()
-
-    def test_warnings_from_the_switch_and_from_the_guardrail_are_both_kept(
-        self, tmp_path, switch_env
-    ):
-        switch_env["preflight"].return_value = ["module gone"]
-        switch_env["pull"].return_value = {
-            "action": "restart",
-            "message": "Restarted.",
-            "warnings": ["a data file changed but nothing was upgraded"],
-        }
-
-        result = _switch(tmp_path)
-
-        assert result["warnings"] == [
-            "module gone",
-            "a data file changed but nothing was upgraded",
-        ]
-
-    def test_only_modules_installed_in_the_database_are_warned_about(self, tmp_path):
-        trees = {"HEAD": {"sale_x", "crm_y"}, "tip999": {"crm_y"}}
-
-        with (
-            patch.object(
-                git_ops, "tree_modules", side_effect=lambda _p, ref: trees[ref]
-            ),
-            patch(
-                "oduflow.docker_ops.odoo_ops._get_module_states",
-                return_value={"sale_x": "installed"},
-            ) as states,
-        ):
-            warnings = env_ops._dropped_module_warnings(
-                _settings(tmp_path), _team(tmp_path), "dev1", "/repo", "tip999"
-            )
-
-        assert states.call_args[0][3] == ("sale_x",)
-        assert len(warnings) == 1
-        assert "sale_x" in warnings[0]
-
-    def test_an_uninstalled_module_is_not_worth_a_warning(self, tmp_path):
-        trees = {"HEAD": {"sale_x"}, "tip999": set()}
-
-        with (
-            patch.object(
-                git_ops, "tree_modules", side_effect=lambda _p, ref: trees[ref]
-            ),
-            patch(
-                "oduflow.docker_ops.odoo_ops._get_module_states",
-                return_value={"sale_x": "uninstalled"},
-            ),
-        ):
-            assert (
-                env_ops._dropped_module_warnings(
-                    _settings(tmp_path), _team(tmp_path), "dev1", "/repo", "tip999"
-                )
-                == []
-            )
-
-    def test_an_unreachable_database_does_not_block_the_switch(self, tmp_path):
-        trees = {"HEAD": {"sale_x"}, "tip999": set()}
-
-        with (
-            patch.object(
-                git_ops, "tree_modules", side_effect=lambda _p, ref: trees[ref]
-            ),
-            patch(
-                "oduflow.docker_ops.odoo_ops._get_module_states",
-                side_effect=RuntimeError("postgres is down"),
-            ),
-        ):
-            assert (
-                env_ops._dropped_module_warnings(
-                    _settings(tmp_path), _team(tmp_path), "dev1", "/repo", "tip999"
-                )
-                == []
-            )
-
-    def test_module_names_git_would_allow_but_sql_should_not_are_dropped(
-        self, tmp_path
-    ):
-        trees = {"HEAD": {"sale_x", "we'ird-name"}, "tip999": set()}
-
-        with (
-            patch.object(
-                git_ops, "tree_modules", side_effect=lambda _p, ref: trees[ref]
-            ),
-            patch(
-                "oduflow.docker_ops.odoo_ops._get_module_states", return_value={}
-            ) as states,
-        ):
-            env_ops._dropped_module_warnings(
-                _settings(tmp_path), _team(tmp_path), "dev1", "/repo", "tip999"
-            )
-
-        assert states.call_args[0][3] == ("sale_x",)
-
-
 # --- renaming an environment while switching -----------------------------
 
 
@@ -583,19 +446,6 @@ class TestSwitchWithRename:
         assert result["env_name"] == "dev1"
         assert "renamed_from" not in result
         assert "was not applied" in result["message"]
-
-    def test_a_dropped_module_refusal_blocks_the_rename_too(self, tmp_path, switch_env):
-        switch_env["preflight"].return_value = ["Module 'sale_x' would be dropped."]
-
-        result = _switch(tmp_path, new_name="dev2", strict=True)
-
-        # The full-switch guardrail must behave like the same-branch one:
-        # "blocked" means nothing changed, the name included — and says so.
-        switch_env["update"].assert_not_called()
-        assert result["action"] == "blocked"
-        assert result["env_name"] == "dev1"
-        assert "renamed_from" not in result
-        assert "The rename to 'dev2' was not applied." in result["message"]
 
     def test_an_invalid_name_is_refused_before_anything_is_mutated(
         self, tmp_path, switch_env

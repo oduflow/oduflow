@@ -1,8 +1,11 @@
 """Chunkstore tests — all against LocalStorage, no S3/Docker required."""
 
 import datetime
+import importlib
 import os
 import random
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -21,6 +24,10 @@ from oduflow.chunkstore.storage import CountingStorage, LocalStorage
 
 # Small chunk parameters so tests work on kilobytes, not megabytes.
 SMALL = dict(min_size=1024, avg_size=4096, max_size=16384)
+
+# The package __init__ re-exports the backup *function* under the same name,
+# so resolve the module itself to reach (and patch) its internals.
+backup_mod = importlib.import_module("oduflow.chunkstore.backup")
 
 
 def _chunk_all(chunker: Chunker, data: bytes, block: int = 8192) -> list[bytes]:
@@ -131,13 +138,7 @@ def small_config_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(fmt, "META_MIN_SIZE", 256)
     monkeypatch.setattr(fmt, "META_AVG_SIZE", 1024)
     monkeypatch.setattr(fmt, "META_MAX_SIZE", 4096)
-    # backup.py imported the names at module load; patch there too. (The
-    # package __init__ re-exports the backup *function* under the same
-    # name, so resolve the module via importlib.)
-    import importlib
-
-    backup_mod = importlib.import_module("oduflow.chunkstore.backup")
-
+    # backup.py imported the names at module load; patch there too.
     monkeypatch.setattr(backup_mod, "META_MIN_SIZE", 256)
     monkeypatch.setattr(backup_mod, "META_AVG_SIZE", 1024)
     monkeypatch.setattr(backup_mod, "META_MAX_SIZE", 4096)
@@ -151,6 +152,206 @@ def small_config_storage(tmp_path, monkeypatch):
     raw.update({"min_size": 1024, "avg_size": 4096, "max_size": 16384})
     storage.put("config", json.dumps(raw).encode())
     return storage
+
+
+class _SlowStorage:
+    """Delegating storage that sleeps in exists/put and records the peak
+    number of concurrent chunk operations."""
+
+    def __init__(self, inner, delay: float = 0.02) -> None:
+        self.inner = inner
+        self.delay = delay
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_concurrent = 0
+
+    def _enter(self):
+        with self._lock:
+            self._active += 1
+            self.max_concurrent = max(self.max_concurrent, self._active)
+
+    def _exit(self):
+        with self._lock:
+            self._active -= 1
+
+    def exists(self, key):
+        self._enter()
+        try:
+            time.sleep(self.delay)
+            return self.inner.exists(key)
+        finally:
+            self._exit()
+
+    def put(self, key, data):
+        self._enter()
+        try:
+            time.sleep(self.delay)
+            self.inner.put(key, data)
+        finally:
+            self._exit()
+
+    def get(self, key):
+        return self.inner.get(key)
+
+    def list(self, prefix):
+        return self.inner.list(prefix)
+
+    def rename(self, src, dst):
+        self.inner.rename(src, dst)
+
+    def delete(self, key):
+        self.inner.delete(key)
+
+
+class _FailingChunkPuts:
+    """Delegating storage whose chunk PUTs fail (config/revision pass)."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    def put(self, key, data):
+        if key.startswith("chunks/"):
+            raise RuntimeError("chunk upload boom")
+        self.inner.put(key, data)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+class TestParallelUploads:
+    def test_parallel_roundtrip_uses_concurrency(self, small_config_storage, tmp_path):
+        rng = random.Random(11)
+        spec = {f"f{i}.bin": rng.randbytes(20_000) for i in range(12)}
+        src = tmp_path / "src"
+        _make_tree(str(src), spec)
+
+        slow = _SlowStorage(small_config_storage)
+        result = chunkstore.backup(str(src), slow, "erp", upload_threads=8)
+        assert result.new_chunks > 4
+        assert result.upload_seconds > 0
+        assert result.elapsed_seconds > 0
+        assert slow.max_concurrent >= 2
+
+        dst = tmp_path / "dst"
+        chunkstore.restore(small_config_storage, "erp", None, str(dst))
+        assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    def test_sequential_mode_unchanged(self, small_config_storage, tmp_path):
+        rng = random.Random(12)
+        src = tmp_path / "src"
+        _make_tree(str(src), {f"f{i}.bin": rng.randbytes(10_000) for i in range(4)})
+
+        slow = _SlowStorage(small_config_storage, delay=0.001)
+        result = chunkstore.backup(str(src), slow, "erp", upload_threads=1)
+        assert result.revision == 1
+        assert slow.max_concurrent == 1
+
+        dst = tmp_path / "dst"
+        chunkstore.restore(small_config_storage, "erp", None, str(dst))
+        assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    def test_dedup_counts_deterministic_with_threads(
+        self, small_config_storage, tmp_path
+    ):
+        # Same content twice in one tree: known_ids dedup happens on the
+        # producer thread, so exists/put counts stay exact under threading.
+        blob = random.Random(13).randbytes(30_000)
+        src = tmp_path / "src"
+        _make_tree(str(src), {"a.bin": blob, "b.bin": blob})
+
+        counting = CountingStorage(small_config_storage)
+        result = chunkstore.backup(str(src), counting, "erp", upload_threads=8)
+        assert counting.counts["put"] == result.new_chunks + 1  # + revision file
+        dst = tmp_path / "dst"
+        chunkstore.restore(small_config_storage, "erp", None, str(dst))
+        assert _read_tree(str(src)) == _read_tree(str(dst))
+
+    def test_inflight_plaintext_is_bounded_by_bytes(
+        self, small_config_storage, monkeypatch
+    ):
+        # Budget = max(floor, threads x avg_size) = 2 x 4096 with the floor
+        # neutralized: the producer must block on the third 4 KiB chunk
+        # instead of queueing the whole tree in memory.
+        monkeypatch.setattr(backup_mod, "_INFLIGHT_BYTES_FLOOR", 1)
+        config = ensure_config(small_config_storage)
+        gate = threading.Event()
+
+        class _Gated:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def exists(self, key):
+                gate.wait(10)
+                return self.inner.exists(key)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        sink = backup_mod._ChunkSink(
+            storage=_Gated(small_config_storage),
+            config=config,
+            known_ids=set(),
+            upload_threads=2,
+        )
+        emitted = []
+
+        def produce():
+            for i in range(20):
+                sink.emit_new((b"%04d" % i) * 1024)  # 4096 distinct bytes
+                emitted.append(i)
+
+        producer = threading.Thread(target=produce)
+        producer.start()
+        try:
+            time.sleep(0.2)
+            assert len(emitted) == 2  # 8192 bytes in flight, then blocked
+        finally:
+            gate.set()
+            producer.join(10)
+            sink.wait()
+            sink.close()
+        assert len(emitted) == 20
+        assert sink.new_chunks == 20
+
+    def test_byte_budget_admits_a_chunk_larger_than_the_budget(self):
+        # A chunk bigger than the whole budget must still pass when nothing
+        # else is in flight, or the producer would deadlock on it.
+        budget = backup_mod._ByteBudget(1024)
+        budget.acquire(8192)
+        budget.release(8192)
+
+    def test_completed_futures_do_not_accumulate(
+        self, small_config_storage, monkeypatch
+    ):
+        monkeypatch.setattr(backup_mod, "_FUTURE_REAP_THRESHOLD", 8)
+        config = ensure_config(small_config_storage)
+        sink = backup_mod._ChunkSink(
+            storage=small_config_storage,
+            config=config,
+            known_ids=set(),
+            upload_threads=2,
+        )
+        peak = 0
+        for i in range(200):
+            sink.emit_new((b"%06d" % i) * 512)
+            peak = max(peak, len(sink._futures))
+        sink.wait()
+        sink.close()
+        # Without reaping this would be 200 — one live Future per chunk.
+        assert peak <= 12
+        assert sink.new_chunks == 200
+
+    @pytest.mark.parametrize("threads", [1, 8])
+    def test_failed_upload_aborts_revision(
+        self, small_config_storage, tmp_path, threads
+    ):
+        src = tmp_path / "src"
+        _make_tree(str(src), {"f.bin": random.Random(14).randbytes(50_000)})
+        failing = _FailingChunkPuts(small_config_storage)
+        with pytest.raises(RuntimeError, match="chunk upload boom"):
+            chunkstore.backup(str(src), failing, "erp", upload_threads=threads)
+        # No revision file was committed: the snapshot does not exist.
+        assert list_revisions(small_config_storage, "erp") == []
 
 
 class TestBackupRestore:
@@ -433,6 +634,36 @@ class TestPruneKeepRevisions:
         # Both survivors restore.
         for rev in (2, 3):
             dst = tmp_path / f"dst{rev}"
+            chunkstore.restore(storage, "erp", rev, str(dst))
+
+    def test_untracked_snapshot_is_kept_whole(self, small_config_storage, tmp_path):
+        """P-H8: a snapshot present in storage but absent from keep_revisions —
+        e.g. a deleted production whose backups were intentionally kept — must
+        keep ALL its revisions. Collapsing to the latest would strand its
+        retained manifests on pruned revisions (all but the newest unrestorable).
+        """
+        rng = random.Random(22)
+        storage = small_config_storage
+        for sid in ("erp", "crm"):
+            src = tmp_path / f"src-{sid}"
+            _make_tree(str(src), {"a.bin": rng.randbytes(20_000)})
+            for _ in range(3):
+                with open(src / "a.bin", "wb") as f:
+                    f.write(rng.randbytes(20_000))
+                chunkstore.backup(str(src), storage, sid)
+        assert list_revisions(storage, "erp") == [1, 2, 3]
+        assert list_revisions(storage, "crm") == [1, 2, 3]
+
+        # Retention tracks only the live production "crm"; "erp" is untracked.
+        chunkstore.prune(storage, keep_revisions={"crm": {2}})
+
+        # Untracked "erp" keeps every revision; tracked "crm" keeps mapped+latest.
+        assert list_revisions(storage, "erp") == [1, 2, 3]
+        assert list_revisions(storage, "crm") == [2, 3]
+
+        # Every "erp" revision still restores — the data loss the fix prevents.
+        for rev in (1, 2, 3):
+            dst = tmp_path / f"erp-dst{rev}"
             chunkstore.restore(storage, "erp", rev, str(dst))
 
     def test_prune_requires_a_policy(self, small_config_storage):

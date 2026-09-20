@@ -396,10 +396,10 @@ def _ui_settings() -> Settings:
     )
 
 
-def _ui_client(settings) -> TestClient:
+def _ui_client(settings, base_url="http://testserver") -> TestClient:
     app = Starlette()
     mount_web_ui(app, lambda: settings, LockManager())
-    return TestClient(app)
+    return TestClient(app, base_url=base_url)
 
 
 def test_mcp_access_endpoint_returns_url_and_token(monkeypatch):
@@ -422,6 +422,17 @@ def test_mcp_access_endpoint_token_missing(monkeypatch):
     assert data["ok"] is True
     assert data["result"]["token"] is None
     assert data["result"]["url"].endswith("/mcp/main")
+
+
+def test_mcp_access_port_mode_uses_request_origin(monkeypatch):
+    settings = _ui_settings()
+    monkeypatch.setattr(env_ops, "get_env_token", lambda s, t, e: "the-secret")
+
+    resp = _ui_client(settings, "https://oduflow.example.com").get(
+        "/api/environments/main/mcp-access"
+    )
+
+    assert resp.json()["result"]["url"] == "https://oduflow.example.com/mcp/main"
 
 
 def test_mcp_access_endpoint_unknown_env(monkeypatch):

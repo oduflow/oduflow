@@ -335,3 +335,106 @@ class TestTraefikYmlConfigMigration:
 
     def test_absent_traefik_is_not_an_error(self, monkeypatch):
         self._run(monkeypatch, None)  # must not raise
+
+
+class TestServicePresetsPermissions:
+    def _settings(self, tmp_path):
+        from oduflow.settings import TeamSettings
+
+        team_dir = tmp_path / "team_1"
+        os.makedirs(team_dir, exist_ok=True)
+        team = TeamSettings(team_id="1", data_dir=str(team_dir))
+        return Settings(base_data_dir=str(tmp_path), teams={"1": team}), team_dir
+
+    def test_restricts_existing_presets_file(self, tmp_path):
+        from oduflow.migrations import _migrate_service_presets_permissions
+
+        settings, team_dir = self._settings(tmp_path)
+        presets = team_dir / "service_presets.json"
+        presets.write_text("{}")
+        os.chmod(presets, 0o644)
+
+        _migrate_service_presets_permissions(settings)
+        assert oct(os.stat(presets).st_mode & 0o777) == "0o600"
+
+        # Idempotent on rerun and with no file at all.
+        _migrate_service_presets_permissions(settings)
+        os.remove(presets)
+        _migrate_service_presets_permissions(settings)
+
+    def test_unchmodable_file_is_logged_not_fatal(self, tmp_path):
+        """Permission hardening must not block startup: a file the server user
+        cannot chmod (e.g. root-owned after a backup restore) is only warned
+        about — this migration re-runs on every failed start otherwise."""
+        from unittest.mock import patch
+
+        from oduflow.migrations import _migrate_service_presets_permissions
+
+        settings, team_dir = self._settings(tmp_path)
+        presets = team_dir / "service_presets.json"
+        presets.write_text("{}")
+
+        with patch("os.chmod", side_effect=PermissionError("not the owner")):
+            _migrate_service_presets_permissions(settings)
+
+
+class TestTemplateMetadataPermissions:
+    def test_restricts_metadata_including_nested_templates(self, tmp_path):
+        from oduflow.migrations import _migrate_template_metadata_permissions
+        from oduflow.settings import TeamSettings
+
+        team_dir = tmp_path / "team_1"
+        team = TeamSettings(team_id="1", data_dir=str(team_dir))
+        settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+        for name in ("base", "customer/prod"):
+            tpl_dir = team_dir / "templates" / name
+            os.makedirs(tpl_dir, exist_ok=True)
+            meta = tpl_dir / "metadata.json"
+            meta.write_text("{}")
+            os.chmod(meta, 0o644)
+
+        _migrate_template_metadata_permissions(settings)
+
+        for name in ("base", "customer/prod"):
+            meta = team_dir / "templates" / name / "metadata.json"
+            assert oct(os.stat(meta).st_mode & 0o777) == "0o600"
+
+        # Idempotent on rerun and with no templates dir at all.
+        _migrate_template_metadata_permissions(settings)
+        empty = Settings(
+            base_data_dir=str(tmp_path),
+            teams={"2": TeamSettings(team_id="2", data_dir=str(tmp_path / "team_2"))},
+        )
+        _migrate_template_metadata_permissions(empty)
+
+
+class TestBackfillServicePresetsMigration:
+    def test_backfills_each_labelled_service(self, monkeypatch):
+        from unittest.mock import patch
+
+        from oduflow.migrations import _migrate_backfill_service_presets
+        from oduflow.settings import TeamSettings
+
+        svc = MagicMock()
+        svc.labels = {
+            "oduflow.managed": "true",
+            "oduflow.team": "1",
+            "oduflow.service": "redis",
+        }
+        unlabeled = MagicMock()
+        unlabeled.labels = {}
+        client = MagicMock()
+        client.containers.list.return_value = [svc, unlabeled]
+        monkeypatch.setattr("oduflow.docker_ops.client.get_client", lambda: client)
+        team = TeamSettings(team_id="1")
+        settings = Settings(teams={"1": team})
+
+        with patch(
+            "oduflow.docker_ops.service_ops.backfill_service_preset"
+        ) as backfill:
+            _migrate_backfill_service_presets(settings)
+
+        # One call per service-labelled container; the unlabeled one is skipped.
+        backfill.assert_called_once_with(settings, team, "redis", svc)
+        filters = client.containers.list.call_args.kwargs["filters"]
+        assert "oduflow.service" in filters["label"]
