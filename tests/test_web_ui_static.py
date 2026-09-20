@@ -546,6 +546,71 @@ async function applyModules(branch, action, modules) {
     }
 
 
+def test_extra_addon_pickers_offer_select_all_and_clear(tmp_path):
+    dashboard = _client(tmp_path).get("/").text
+
+    assert 'id="cr-extra-select-all"' in dashboard
+    assert 'id="cr-extra-clear"' in dashboard
+    assert 'id="tset-extra-select-all"' in dashboard
+    assert 'id="tset-extra-clear"' in dashboard
+    assert "setAllExtraRepos('.cr-extra-cb', true)" in dashboard
+    assert "setAllExtraRepos('.tset-extra-cb', false)" in dashboard
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_extra_repo_bulk_actions_stay_inside_their_own_picker():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in ("setAllExtraRepos", "setExtraRepoActionsEnabled")
+    )
+    harness = (
+        functions
+        + r"""
+var lists = {
+  '.cr-extra-cb': [{checked: false}, {checked: false}],
+  '.tset-extra-cb': [{checked: true}]
+};
+var buttons = {
+  'cr-extra-select-all': {disabled: true},
+  'cr-extra-clear': {disabled: true}
+};
+var document = {
+  querySelectorAll: function (selector) { return lists[selector] || []; },
+  getElementById: function (id) { return buttons[id]; }
+};
+
+setAllExtraRepos('.cr-extra-cb', true);
+var selected = lists['.cr-extra-cb'].map(function (cb) { return cb.checked; });
+setExtraRepoActionsEnabled('cr-extra', true);
+var enabled = {
+  selectAll: buttons['cr-extra-select-all'].disabled,
+  clear: buttons['cr-extra-clear'].disabled
+};
+// The template picker's buttons are absent from this harness: a modal that is
+// not on screen must not break the one that is.
+setExtraRepoActionsEnabled('tset-extra', true);
+setAllExtraRepos('.cr-extra-cb', false);
+
+process.stdout.write(JSON.stringify({
+  selected: selected,
+  cleared: lists['.cr-extra-cb'].map(function (cb) { return cb.checked; }),
+  untouched: lists['.tset-extra-cb'].map(function (cb) { return cb.checked; }),
+  enabled: enabled
+}));
+"""
+    )
+
+    result = _run_node(harness)
+
+    assert result == {
+        "selected": [True, True],
+        "cleared": [False, False],
+        "untouched": [True],
+        "enabled": {"selectAll": False, "clear": False},
+    }
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
 def test_template_settings_form_round_trips_attribute_and_prototype_key_values():
     dashboard = _DASHBOARD.read_text(encoding="utf-8")

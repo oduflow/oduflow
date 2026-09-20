@@ -824,7 +824,7 @@
   .module-row .module-name { font-family: var(--font-mono); }
   .module-row .module-version { margin-left: auto; font-size: var(--text-xs); color: var(--text-dim); font-family: var(--font-mono); }
   .module-picker-status { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-xs); color: var(--text-dim); margin-top: 6px; }
-  .module-picker-actions { display: flex; gap: 6px; margin-bottom: 6px; }
+  .module-picker-actions, .check-list-actions { display: flex; gap: 6px; margin-bottom: 6px; }
   .toast {
     position: fixed;
     bottom: 24px;
@@ -1530,6 +1530,12 @@
       </div>
       <div class="form-group">
         <label>Extra Addons Repos</label>
+        <div class="check-list-actions">
+          <button class="btn btn-sm" type="button" id="cr-extra-select-all"
+                  onclick="setAllExtraRepos('.cr-extra-cb', true)">Select all</button>
+          <button class="btn btn-sm" type="button" id="cr-extra-clear"
+                  onclick="setAllExtraRepos('.cr-extra-cb', false)">Clear</button>
+        </div>
         <div id="cr-extra-addons-checkboxes" class="check-list"></div>
         <div class="hint">Select repos to mount in this environment</div>
       </div>
@@ -2105,6 +2111,12 @@
         </div>
         <div class="form-group">
           <label>Extra addons repos</label>
+          <div class="check-list-actions">
+            <button class="btn btn-sm" type="button" id="tset-extra-select-all"
+                    onclick="setAllExtraRepos('.tset-extra-cb', true)">Select all</button>
+            <button class="btn btn-sm" type="button" id="tset-extra-clear"
+                    onclick="setAllExtraRepos('.tset-extra-cb', false)">Clear</button>
+          </div>
           <div id="tset-extra-addons" class="check-list"></div>
           <div class="hint">Checked repos are mounted into environments created from this template. Each one needs a branch.</div>
         </div>
@@ -4737,6 +4749,21 @@ function _tsetBranchOptions(branches) {
   return out;
 }
 
+// The create-environment modal and the template settings form both render the
+// extra addon repos as a plain checkbox list, so one pair of helpers drives
+// either of them. Ticking every repo still leaves each branch to be filled in:
+// a repo without a branch cannot be mounted, and only the user knows which one.
+function setAllExtraRepos(selector, checked) {
+  document.querySelectorAll(selector).forEach(function(cb) { cb.checked = checked; });
+}
+
+function setExtraRepoActionsEnabled(prefix, enabled) {
+  ['-select-all', '-clear'].forEach(function(suffix) {
+    var button = document.getElementById(prefix + suffix);
+    if (button) button.disabled = !enabled;
+  });
+}
+
 function _tsetExtraRow(name, repoUrl, branches, extras, idx, missing) {
   var checked = Object.prototype.hasOwnProperty.call(extras, name);
   var branch = checked ? (extras[name] || '') : '';
@@ -4772,6 +4799,7 @@ function _tsetRenderExtraAddons(extras) {
   container.innerHTML = rows.length
     ? rows.join('')
     : '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+  setExtraRepoActionsEnabled('tset-extra', rows.length > 0);
 }
 
 function _tsetRenderCredentials(current) {
@@ -5311,10 +5339,14 @@ function openCreateFromTemplate(templateName) {
     });
     if (tpl && tpl.git_user) sel.value = tpl.git_user;
   });
+  // The repo list arrives asynchronously; until it does there is nothing to
+  // tick, and a stale state from the previous opening would be misleading.
+  setExtraRepoActionsEnabled('cr-extra', false);
   loadExtraRepos().then(function() {
     var container = document.getElementById('cr-extra-addons-checkboxes');
     if (cachedExtraRepos.length === 0) {
       container.innerHTML = '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+      setExtraRepoActionsEnabled('cr-extra', false);
       return;
     }
     var tplExtras = (tpl && tpl.extra_addons) ? tpl.extra_addons : {};
@@ -5328,6 +5360,7 @@ function openCreateFromTemplate(templateName) {
         ' placeholder="branch" value="' + escAttr(defaultBranch) + '">' +
       '</label>';
     }).join('');
+    setExtraRepoActionsEnabled('cr-extra', true);
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
@@ -5371,10 +5404,14 @@ function openCreateModal(fromProduction) {
       sel.innerHTML += '<option value="' + escAttr(c.username) + '">' + esc(c.username) + ' (' + esc(c.host) + ')</option>';
     });
   });
+  // The repo list arrives asynchronously; until it does there is nothing to
+  // tick, and a stale state from the previous opening would be misleading.
+  setExtraRepoActionsEnabled('cr-extra', false);
   loadExtraRepos().then(function() {
     var container = document.getElementById('cr-extra-addons-checkboxes');
     if (cachedExtraRepos.length === 0) {
       container.innerHTML = '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+      setExtraRepoActionsEnabled('cr-extra', false);
       return;
     }
     container.innerHTML = cachedExtraRepos.map(function(r) {
@@ -5385,6 +5422,7 @@ function openCreateModal(fromProduction) {
         ' placeholder="branch" value="">' +
       '</label>';
     }).join('');
+    setExtraRepoActionsEnabled('cr-extra', true);
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
