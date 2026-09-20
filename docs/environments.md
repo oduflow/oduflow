@@ -503,9 +503,12 @@ This runs `odoo --test-enable --stop-after-init --workers 0 --http-port 8089 --g
 tests"). Because `--no-http` has no effect under `--test-enable` (tests require a live HTTP
 server), the test server's HTTP and gevent ports are moved off the defaults (8069/8072) — already
 held by the running Odoo container — to avoid a port conflict. On Odoo 15.0 and earlier the port
-flag is `--longpolling-port` instead (Odoo 16.0 renamed it to `--gevent-port`); Oduflow detects the
-environment's Odoo version and uses the right one automatically. `--workers 0` makes the run
-deterministic (Odoo recommends single-worker mode for unit tests).
+flag is `--longpolling-port` instead: 16.0 renamed it to `--gevent-port` and kept the old name as a
+deprecated alias, and 18.0 removed that alias for good. Oduflow detects the environment's Odoo
+version — from the image reference, falling back to `odoo --version` inside the container for
+custom images — and uses the right flag automatically; when the version cannot be determined it
+assumes `--gevent-port`. `--workers 0` makes the run deterministic (Odoo recommends single-worker
+mode for unit tests).
 
 ## Smart Pull — Intelligent Change Detection
 
