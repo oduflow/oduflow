@@ -1772,6 +1772,15 @@ def _clone_repo(
         error_msg = redact_url_credentials(
             e.stderr.decode("utf-8") if e.stderr else str(e)
         )
+        # A missing branch is the user's mistake, not an infrastructure
+        # failure: raise NotFoundError so the actionable message reaches the
+        # dashboard instead of the generic ExternalCommandError banner
+        # (same translation as git_ops.fetch_branch does for switch_branch).
+        if "could not find remote branch" in error_msg.lower():
+            raise NotFoundError(
+                f"Branch '{branch}' does not exist on origin. Push it first "
+                f"(git push -u origin {branch}), then retry."
+            )
         if any(kw.lower() in error_msg.lower() for kw in auth_keywords):
             from oduflow.git_ops import is_ssh_url
 
