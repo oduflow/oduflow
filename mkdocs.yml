@@ -59,7 +59,11 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
@@ -89,6 +93,7 @@ nav:
       - Quick Start: quick-start.md
       - Installation & Configuration: installation.md
   - Core Concepts:
+      - Architecture: architecture.md
       - Use Cases & Workflows: use-cases.md
       - Template Management: templates.md
       - Environment Management: environments.md
