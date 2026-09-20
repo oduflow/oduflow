@@ -100,7 +100,7 @@ end to end.
     [`list_templates`](#list_templates)&nbsp;·
     [`rename_template`](#rename_template)&nbsp;·
     [`delete_template`](#delete_template)&nbsp;·
-    [`import_template_from_odoo`](#import_template_from_odoo)&nbsp;·
+    [`import_template`](#import_template)&nbsp;·
     [`refresh_template`](#refresh_template)&nbsp;·
     [`attach_filestore`](#attach_filestore)
 
@@ -1492,36 +1492,47 @@ Lock: team + template. Destructive and irreversible.
     be recreated until a new template is set up. Requires explicit user
     permission and confirmation.
 
-### `import_template_from_odoo`
+### `import_template`
 
-Import a template from a running Odoo instance through its database manager
-API. Downloads a full ZIP backup, or a database-only PostgreSQL custom dump,
-and loads it into PostgreSQL as a template database.
+Import or refresh a template from an Odoo database manager, an S3 prefix,
+a local directory, or a local dump file. See [Templates](templates.md)
+for the raw dump plus `filestore/` layout and migration examples.
 
-Lock: template. Does not take the team lock: the imported template is always new, so nothing is remounted and other environments keep running.
+Lock: template; overwrite and refresh also take the team lock to protect live
+filestore overlays. Fresh imports can run alongside environment operations.
 { .odu-tool-meta }
 
 **Parameters**
 
-`odoo_url`
-:   *str · required* — Base URL of the Odoo instance (e.g. `https://my-odoo.example.com`).
+`source`
+:   *str · default empty* — An http(s) Odoo URL, `s3://bucket/prefix`, or an absolute local path. Omit with `refresh=True`.
 
 `master_pwd`
-:   *str · required* — Odoo master password (database manager password).
+:   *str · default empty* — Required only for the Odoo database-manager source.
 
 `db_name`
-:   *str · default empty* — Database to back up. Empty auto-detects, and fails if several databases exist.
+:   *str · default empty* — Odoo database to back up. Empty auto-detects, and fails if several databases exist.
 
 `template_name`
-:   *str · default `"default"`* — Template profile to create.
+:   *str · default `"default"`* — Template profile to create or update.
 
 `without_filestore`
-:   *bool · default `False`* — Request a database-only PostgreSQL custom dump instead of the full ZIP.
+:   *bool · default `False`* — Import only the dump. Existing attachments are preserved on overwrite; a single local dump file also preserves them.
+
+`overwrite`
+:   *bool · default `False`* — S3/local only: incrementally replace template data. Unchanged dumps skip restore; deleted source attachments are removed, including when the source tree becomes empty. Requires explicit permission.
+
+`refresh`
+:   *bool · default `False`* — With no source, restore from the template's own files and refresh metadata and overlays. Requires explicit permission.
+
+`s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_region`
+:   *str · default empty* — S3 source connection settings. Credentials fall back to matching `[backup]` settings, then anonymous access. Supply access and secret keys together.
 
 **Use it when**
 
 - Onboarding a customer whose Odoo runs elsewhere.
-- Seeding a first template without shell access to the source server.
+- Importing a raw backup without building an archive.
+- Periodically synchronizing a backup into a development template.
 
 ### `refresh_template`
 
@@ -1578,7 +1589,7 @@ Lock: template throughout; the team lock only for the remount-and-swap, so stagi
 
 **Use it when**
 
-- A database-only import ([`import_template_from_odoo`](#import_template_from_odoo) with `without_filestore=True`) needs its attachments.
+- A database-only import ([`import_template`](#import_template) with `without_filestore=True`) needs its attachments.
 - The filestore arrives separately, e.g. rsynced from the customer's server.
 
 ## Auxiliary Services
@@ -2371,7 +2382,7 @@ once and mounted into environments. See
 Clone an extra addons repository. It is cloned as a **shallow bare** repo (only
 the latest commit of each branch, no history) into the shared repos directory,
 so large repositories like Odoo Enterprise clone quickly. All branches are
-kept, so one clone serves any Odoo version.
+kept by default; `branches` can restrict the clone and future updates to a subset.
 
 **Parameters**
 
@@ -2380,6 +2391,9 @@ kept, so one clone serves any Odoo version.
 
 `repo_url`
 :   *str · required* — HTTPS (`https://github.com/owner/repo.git`) or SSH (`git@github.com:owner/repo.git`, needs the team deploy key — see [`get_ssh_public_key`](#get_ssh_public_key)).
+
+`branches`
+:   *str · default empty* — Comma-separated branch names to clone and track. Empty keeps all branches. The dashboard provides a remote branch picker; REST accepts a list.
 
 **Use it when**
 
@@ -2400,13 +2414,16 @@ List all cloned extra addons repositories.
 
 ### `update_extra_repo`
 
-Fetch the latest changes from the remote, fetching all branches and pruning
+Fetch the latest changes from the remote, fetching all tracked branches and pruning
 deleted remote refs.
 
 **Parameters**
 
 `name`
 :   *str · required* — The extra repo to update (e.g. `enterprise`).
+
+`add_branch`
+:   *str · default empty* — Fetch and start tracking one additional branch in a subset clone. A failed fetch leaves the tracked set unchanged.
 
 **Use it when**
 

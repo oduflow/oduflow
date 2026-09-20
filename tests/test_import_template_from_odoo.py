@@ -119,10 +119,10 @@ def test_import_from_odoo_default_zip_omits_filestore_field(monkeypatch, tmp_pat
     backup_requests = []
     _patch_import_dependencies(monkeypatch, backup_requests)
 
-    result = system_ops.import_from_odoo(
+    result = system_ops.import_template(
         settings,
         team,
-        odoo_url="https://odoo.example.com",
+        source="https://odoo.example.com",
         master_pwd="master",
         db_name="prod",
         template_name="imported",
@@ -143,10 +143,10 @@ def test_import_from_odoo_allows_http_source(monkeypatch, tmp_path):
     backup_requests = []
     _patch_import_dependencies(monkeypatch, backup_requests, patch_url_safety=False)
 
-    result = system_ops.import_from_odoo(
+    result = system_ops.import_template(
         settings,
         team,
-        odoo_url="http://8.8.8.8",
+        source="http://8.8.8.8",
         master_pwd="master",
         db_name="prod",
         template_name="http-import",
@@ -163,10 +163,10 @@ def test_import_from_odoo_without_filestore_uses_custom_dump_and_skips_files(
     backup_requests = []
     _patch_import_dependencies(monkeypatch, backup_requests)
 
-    result = system_ops.import_from_odoo(
+    result = system_ops.import_template(
         settings,
         team,
-        odoo_url="https://odoo.example.com",
+        source="https://odoo.example.com",
         master_pwd="master",
         db_name="prod",
         template_name="dbonly",
@@ -200,10 +200,10 @@ def test_import_from_odoo_existing_template_dir_fails_before_network(
     monkeypatch.setattr(system_ops, "get_client", get_client)
 
     with pytest.raises(ConflictError, match="Template directory already exists"):
-        system_ops.import_from_odoo(
+        system_ops.import_template(
             settings,
             team,
-            odoo_url="https://odoo.example.com",
+            source="https://odoo.example.com",
             master_pwd="master",
             db_name="prod",
             template_name="existing",
@@ -226,10 +226,10 @@ def test_import_from_odoo_existing_template_db_fails_before_network(
     monkeypatch.setattr(system_ops, "check_db_quota", quota)
 
     with pytest.raises(ConflictError, match="Template database already exists"):
-        system_ops.import_from_odoo(
+        system_ops.import_template(
             settings,
             team,
-            odoo_url="https://odoo.example.com",
+            source="https://odoo.example.com",
             master_pwd="master",
             db_name="prod",
             template_name="existingdb",
@@ -260,10 +260,10 @@ def test_a_failure_after_the_download_leaves_no_orphan(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "makedirs", failing_makedirs)
 
     with pytest.raises(OSError):
-        system_ops.import_from_odoo(
+        system_ops.import_template(
             settings,
             team,
-            odoo_url="https://odoo.example.com",
+            source="https://odoo.example.com",
             master_pwd="master",
             db_name="prod",
             template_name="imported",
@@ -286,10 +286,10 @@ def test_a_failed_download_leaves_no_orphan(monkeypatch, tmp_path):
     )
 
     with pytest.raises(OSError):
-        system_ops.import_from_odoo(
+        system_ops.import_template(
             settings,
             team,
-            odoo_url="https://odoo.example.com",
+            source="https://odoo.example.com",
             master_pwd="master",
             db_name="prod",
             template_name="imported",

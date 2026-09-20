@@ -129,7 +129,7 @@ would let work in the environment.
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
-| `POST` | `/api/templates/import-from-odoo` | UI-authenticated: pull a backup from a running Odoo. Body: `odoo_url`, `master_pwd`, `template_name`, optional `db_name`, optional boolean `without_filestore` |
+| `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
 | `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
@@ -187,7 +187,8 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
-| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user` |
+| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names — clone/track only these; empty = all branches) |
+| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before cloning; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |

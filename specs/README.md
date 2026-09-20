@@ -89,6 +89,8 @@ precursors).
 | [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
 | [0068](0068-production-mcp-credentials.md) | 2026-09-19 | Separate production MCP credentials, direct OduMCP access and automatic addon provisioning |
 
+| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite |
+
 ## Design docs
 
 Forward-looking feature design docs also live here, named by date:

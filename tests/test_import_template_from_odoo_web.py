@@ -55,7 +55,7 @@ def _result():
 def test_import_from_odoo_calls_shared_backend(tmp_path):
     client, settings, team, _locks = _client_with_locks(tmp_path)
     with patch(
-        "oduflow.web_ui.system_ops.import_from_odoo", return_value=_result()
+        "oduflow.web_ui.system_ops.import_template", return_value=_result()
     ) as import_from_odoo:
         response = client.post(
             "/api/templates/import-from-odoo",
@@ -72,27 +72,74 @@ def test_import_from_odoo_calls_shared_backend(tmp_path):
     import_from_odoo.assert_called_once_with(
         settings,
         team,
-        odoo_url="http://odoo.example.com",
+        source="http://odoo.example.com",
         master_pwd="master-secret",
         db_name="production",
         template_name="production-copy",
         without_filestore=True,
+        overwrite=False,
+        refresh=False,
+        s3_endpoint="",
+        s3_access_key="",
+        s3_secret_key="",
+        s3_region="",
     )
+
+
+def test_import_from_s3_needs_no_master_pwd(tmp_path):
+    client, _settings, _team, _locks = _client_with_locks(tmp_path)
+    result = {
+        **_result(),
+        "source_url": "s3://bucket/backups/acme",
+        "source_db": "dump.pgdump",
+        "status": "synced",
+        "dump_reloaded": False,
+        "downloaded_files": 3,
+        "downloaded_mb": 12.5,
+        "reused_files": 100,
+        "removed_files": 1,
+    }
+    with patch(
+        "oduflow.web_ui.system_ops.import_template", return_value=result
+    ) as import_from_odoo:
+        response = client.post(
+            "/api/templates/import-from-odoo",
+            json=_payload(
+                odoo_url="s3://bucket/backups/acme",
+                master_pwd="",
+                overwrite=True,
+                s3_access_key="ak",
+                s3_secret_key="sk",
+            ),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["result"]["dump_reloaded"] is False
+    assert body["result"]["reused_files"] == 100
+    assert "internal_path" not in body["result"]
+    kwargs = import_from_odoo.call_args.kwargs
+    assert kwargs["master_pwd"] == ""
+    assert kwargs["overwrite"] is True
+    assert kwargs["s3_access_key"] == "ak"
 
 
 @pytest.mark.parametrize(
     ("overrides", "error"),
     [
-        ({"odoo_url": ""}, "odoo_url is required"),
+        ({"odoo_url": ""}, "source is required"),
         ({"master_pwd": ""}, "master_pwd is required"),
         ({"template_name": ""}, "template_name is required"),
         ({"template_name": "../escape"}, "template"),
         ({"without_filestore": "yes"}, "must be a boolean"),
+        ({"overwrite": "yes"}, "overwrite must be a boolean"),
+        ({"refresh": "yes"}, "refresh must be a boolean"),
     ],
 )
 def test_import_from_odoo_validates_request(tmp_path, overrides, error):
     client, _settings, _team, _locks = _client_with_locks(tmp_path)
-    with patch("oduflow.web_ui.system_ops.import_from_odoo") as import_from_odoo:
+    with patch("oduflow.web_ui.system_ops.import_template") as import_from_odoo:
         response = client.post(
             "/api/templates/import-from-odoo",
             json=_payload(**overrides),
@@ -107,7 +154,7 @@ def test_import_from_odoo_validates_request(tmp_path, overrides, error):
 def test_import_from_odoo_surfaces_backend_conflict(tmp_path):
     client, _settings, _team, _locks = _client_with_locks(tmp_path)
     with patch(
-        "oduflow.web_ui.system_ops.import_from_odoo",
+        "oduflow.web_ui.system_ops.import_template",
         side_effect=ConflictError("Template already exists"),
     ):
         response = client.post(
@@ -126,7 +173,7 @@ def test_import_from_odoo_is_not_blocked_by_a_team_operation(tmp_path):
     locks.acquire_team("1")
     try:
         with patch(
-            "oduflow.web_ui.system_ops.import_from_odoo", return_value=_result()
+            "oduflow.web_ui.system_ops.import_template", return_value=_result()
         ) as import_from_odoo:
             response = client.post(
                 "/api/templates/import-from-odoo",
@@ -144,7 +191,7 @@ def test_import_from_odoo_returns_busy_for_the_same_template(tmp_path):
     client, _settings, _team, locks = _client_with_locks(tmp_path)
     locks.acquire_env(template_lock_key("1", "production-copy"))
     try:
-        with patch("oduflow.web_ui.system_ops.import_from_odoo") as import_from_odoo:
+        with patch("oduflow.web_ui.system_ops.import_template") as import_from_odoo:
             response = client.post(
                 "/api/templates/import-from-odoo",
                 json=_payload(),
@@ -162,7 +209,7 @@ def test_import_from_odoo_ignores_another_template_s_lock(tmp_path):
     locks.acquire_env(template_lock_key("1", "unrelated"))
     try:
         with patch(
-            "oduflow.web_ui.system_ops.import_from_odoo", return_value=_result()
+            "oduflow.web_ui.system_ops.import_template", return_value=_result()
         ) as import_from_odoo:
             response = client.post(
                 "/api/templates/import-from-odoo",
@@ -188,7 +235,7 @@ def test_import_from_odoo_does_not_block_dashboard_reads(tmp_path):
     with (
         client,
         patch(
-            "oduflow.web_ui.system_ops.import_from_odoo",
+            "oduflow.web_ui.system_ops.import_template",
             side_effect=import_from_odoo,
         ),
         patch("oduflow.web_ui.system_ops.list_templates", return_value=[]),
@@ -207,3 +254,26 @@ def test_import_from_odoo_does_not_block_dashboard_reads(tmp_path):
     assert templates.status_code == 200
     assert templates.json() == {"ok": True, "templates": []}
     assert imported.status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["overwrite", "refresh"])
+def test_replacement_import_requires_team_lock(tmp_path, mode):
+    client, _settings, _team, locks = _client_with_locks(tmp_path)
+    locks.acquire_team("1", operation="save_as_template")
+    try:
+        with patch("oduflow.web_ui.system_ops.import_template") as backend:
+            response = client.post(
+                "/api/templates/import-from-odoo",
+                json={
+                    "template_name": "production-copy",
+                    mode: True,
+                    "source": "s3://bucket/prefix" if mode == "overwrite" else "",
+                },
+            )
+    finally:
+        locks.release_team("1")
+    assert response.status_code == 409
+    backend.assert_not_called()
+    # The rejected request must not leave a template lock behind.
+    with locks.env_lock(template_lock_key("1", "production-copy")):
+        pass

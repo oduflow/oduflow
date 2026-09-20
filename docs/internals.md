@@ -76,7 +76,7 @@ src/oduflow/
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM
   sanitizer.py         # DB sanitization (SQL/Python scripts)
-  sync.py              # Sync template data from S3 or local path (aws s3 sync / rsync)
+  template_import.py   # Template import engine: S3 prefix / local path / in-place refresh
   licensing.py         # License verification and installation (RSA signatures)
   systemd.py           # Systemd service install/uninstall
   production_registry.py # Per-team production metadata and deploy history
@@ -192,7 +192,7 @@ resource an operation actually touches:
 | Lock Level | Scope | Example Operations |
 |---|---|---|
 | **Per-branch** | One operation per branch at a time | `create_environment`, `delete_environment`, `install_odoo_modules`, `pull_and_apply`, `export_module_translations` |
-| **Per-resource** | One operation per service / volume / production / template / credential store | `create_service`, `delete_volume`, `setup_repo_auth`, `snapshot_production`, `import_template_from_odoo` |
+| **Per-resource** | One operation per service / volume / production / template / credential store | `create_service`, `delete_volume`, `setup_repo_auth`, `snapshot_production`, `import_template` |
 | **Per-team** | One team-wide operation at a time | template mutations that remount other environments' overlay filestores (`save_as_template`, `save_production_as_template`, `refresh_template`, `attach_filestore`), plus `delete_template` / `rename_template`, which must exclude a concurrent `create_environment` |
 | **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, `restore_cluster_pitr` (excludes every production lock) |
 

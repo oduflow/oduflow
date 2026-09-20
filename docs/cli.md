@@ -191,13 +191,6 @@ oduflow refresh-template <template_name> [--reset-env-changes] [--team 1]
 # Attach or replace a template filestore from a local dir, archive, rsync://, or SSH rsync source
 oduflow attach-filestore <template_name> <source> [--strip-prefix auto|none|PREFIX] [--reset-env-changes] [--team 1]
 
-# Reload template DB from a dump file
-oduflow reload-template <template_name> [--dump-path /path/to/new.dump] [--team 1]
-
-# Sync template from S3 or local path and reload DB
-oduflow reload-template <template_name> --source s3://bucket/path/ [--quiet] [--team 1]
-oduflow reload-template <template_name> --source /backups/prod-latest/ [--team 1]
-
 # List all template profiles
 oduflow list-templates [--team 1]
 
@@ -206,9 +199,18 @@ oduflow delete-template <template_name> [--team 1]
 
 # Import a template from a running Odoo instance
 oduflow import-template <odoo_url> <master_pwd> --template-name myproject [--db-name <db>] [--without-filestore] [--team 1]
+
+# Import (or incrementally re-sync with --overwrite) from an S3 prefix or a
+# local path holding dump.* + filestore/; a single dump file imports DB-only
+oduflow import-template s3://bucket/backups/mydb/ --template-name myproject [--overwrite] [--team 1]
+oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [--team 1]
+
+# Reload the template DB from files already placed in the template directory
+# (an external rsync/scp drop) and refresh its metadata
+oduflow import-template --template-name myproject --refresh [--team 1]
 ```
 
-`template-from-env`, `refresh-template`, `attach-filestore`, and `reload-template --source` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. `import-template` creates a new template and refuses an existing template name.
+`template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
 
 ## Service Commands
 

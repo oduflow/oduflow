@@ -58,6 +58,79 @@ _AUTH_ERROR_KEYWORDS = (
 )
 
 
+def _raise_if_auth_error(repo_url: str, stderr: str) -> None:
+    """Map a git auth failure to a RepoAuthError with actionable guidance."""
+    if not any(kw in stderr for kw in _AUTH_ERROR_KEYWORDS):
+        return
+    from oduflow.git_ops import is_ssh_url
+
+    if is_ssh_url(repo_url):
+        raise RepoAuthError(
+            f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
+            "The remote uses SSH: register the team deploy key "
+            "(get_ssh_public_key) with the git host, or use an "
+            "HTTPS URL with setup_repo_auth."
+        )
+    raise RepoAuthError(
+        f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
+        "Use setup_repo_auth to configure credentials first."
+    )
+
+
+def validate_branch_name(branch: str) -> None:
+    """Reject branch names git itself would refuse (and option injection)."""
+    if not branch or branch.startswith("-"):
+        raise ValueError(f"Invalid branch name {branch!r}.")
+    try:
+        subprocess.run(
+            ["git", "check-ref-format", f"refs/heads/{branch}"],
+            check=True,
+            capture_output=True,
+            timeout=10,
+            env=GIT_ENV,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise ValueError(f"Invalid branch name {branch!r}.")
+
+
+def list_remote_branches(
+    team: TeamSettings, repo_url: str, git_user: str = ""
+) -> list[str]:
+    """List branch names of a remote repo (``git ls-remote --heads``).
+
+    Used by the add-repo wizard to offer a branch selection before anything is
+    cloned; doubles as an early URL/credentials check.
+    """
+    from oduflow.git_ops import inject_credential_user
+
+    remote_url = inject_credential_user(repo_url, git_user)
+    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", remote_url],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=cred_env,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr or ""
+        _raise_if_auth_error(repo_url, stderr)
+        raise ExternalCommandError("git ls-remote --heads", e.returncode, stderr)
+    except subprocess.TimeoutExpired:
+        raise ExternalCommandError(
+            "git ls-remote --heads", -1, "Listing branches timed out (60s)."
+        )
+
+    branches = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+            branches.append(parts[1][len("refs/heads/") :])
+    return sorted(branches)
+
+
 @contextmanager
 def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
     """Serialize fetch/worktree/cache mutations for one team's extra repo.
@@ -75,9 +148,26 @@ def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
 
 
 def clone_extra_repo(
-    team: TeamSettings, name: str, repo_url: str, git_user: str = ""
+    team: TeamSettings,
+    name: str,
+    repo_url: str,
+    git_user: str = "",
+    branches: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Clone a bare shallow extra-addons repo.
+
+    With *branches* empty/None the tip of every branch is kept
+    (``--no-single-branch``), so one bare repo serves any Odoo version. With a
+    non-empty *branches* list only those branches are fetched and tracked: the
+    fetch refspec is limited to them, so later ``git fetch --all`` (the
+    "Update" button / update_extra_repo) also touches only the selected
+    branches. Both variants are shallow (``--depth 1``) so large repos like
+    Odoo Enterprise clone fast instead of timing out.
+    """
     validate_extra_repo_name(name)
+    branches = [b.strip() for b in (branches or []) if b and b.strip()]
+    for branch in branches:
+        validate_branch_name(branch)
 
     target = os.path.join(team.shared_repos_dir, name)
     if os.path.exists(target):
@@ -89,6 +179,83 @@ def clone_extra_repo(
 
     clone_url = inject_credential_user(repo_url, git_user)
     cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+
+    if branches:
+        # Selected branches only: git clone has no multi-branch selection, so
+        # build the repo by hand — init a bare repo, point one refspec at each
+        # chosen branch, then a single shallow fetch of just those tips.
+        def _setup(args: list[str]) -> None:
+            subprocess.run(
+                args,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=GIT_ENV,
+            )
+
+        try:
+            _setup(["git", "init", "--bare", target])
+            _setup(["git", "-C", target, "remote", "add", "origin", clone_url])
+            # `remote add` seeds the wildcard refspec; replace it with the
+            # first selected branch, then append the rest.
+            _setup(
+                [
+                    "git",
+                    "-C",
+                    target,
+                    "config",
+                    "remote.origin.fetch",
+                    f"+refs/heads/{branches[0]}:refs/heads/{branches[0]}",
+                ]
+            )
+            for branch in branches[1:]:
+                _setup(
+                    [
+                        "git",
+                        "-C",
+                        target,
+                        "config",
+                        "--add",
+                        "remote.origin.fetch",
+                        f"+refs/heads/{branch}:refs/heads/{branch}",
+                    ]
+                )
+            subprocess.run(
+                ["git", "-C", target, "fetch", "--depth", "1", "origin"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=cred_env,
+            )
+        except subprocess.CalledProcessError as e:
+            shutil.rmtree(target, ignore_errors=True)
+            stderr = e.stderr or ""
+            _raise_if_auth_error(repo_url, stderr)
+            raise ExternalCommandError(
+                "git fetch --depth 1 (selected branches)", e.returncode, stderr
+            )
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(target, ignore_errors=True)
+            raise ExternalCommandError(
+                "git fetch --depth 1 (selected branches)",
+                -1,
+                "Clone timed out (300s).",
+            )
+
+        logger.info(
+            "Cloned extra repo '%s' from %s (branches: %s)",
+            name,
+            repo_url,
+            ", ".join(branches),
+        )
+        return {
+            "name": name,
+            "repo_url": repo_url,
+            "path": target,
+            "branches": branches,
+        }
 
     try:
         # Shallow clone (--depth 1): drop history so large repos like Odoo
@@ -115,20 +282,7 @@ def clone_extra_repo(
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
-        if any(kw in stderr for kw in _AUTH_ERROR_KEYWORDS):
-            from oduflow.git_ops import is_ssh_url
-
-            if is_ssh_url(repo_url):
-                raise RepoAuthError(
-                    f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
-                    "The remote uses SSH: register the team deploy key "
-                    "(get_ssh_public_key) with the git host, or use an "
-                    "HTTPS URL with setup_repo_auth."
-                )
-            raise RepoAuthError(
-                f"Authentication failed for '{sanitize_repo_url(repo_url)}'. "
-                "Use setup_repo_auth to configure credentials first."
-            )
+        _raise_if_auth_error(repo_url, stderr)
         raise ExternalCommandError("git clone --bare", e.returncode, stderr)
     except subprocess.TimeoutExpired:
         raise ExternalCommandError("git clone --bare", -1, "Clone timed out (300s).")
@@ -575,6 +729,75 @@ def fetch_extra_repo(
 ) -> dict[str, Any]:
     with _repo_operation_lock(team, name):
         return _fetch_extra_repo_unlocked(team, name, branch)
+
+
+def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
+    """Start tracking *branch* in a selected-branches extra repo.
+
+    Adds the branch to the fetch refspec (a no-op for all-branches repos,
+    whose wildcard refspec already covers it) and shallow-fetches its tip so
+    the branch is immediately usable by environments.
+    """
+    validate_branch_name(branch)
+    with _repo_operation_lock(team, name):
+        path = os.path.join(team.shared_repos_dir, name)
+        if not os.path.isdir(path):
+            raise NotFoundError(f"Extra repo '{name}' not found.")
+        if os.path.exists(os.path.join(path, ".local")):
+            raise PrerequisiteNotMetError(
+                f"Extra repo '{name}' is local (no remote); branches cannot be fetched."
+            )
+
+        refspec = f"+refs/heads/{branch}:refs/heads/{branch}"
+        result = subprocess.run(
+            ["git", "-C", path, "config", "--get-all", "remote.origin.fetch"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=GIT_ENV,
+        )
+        refspecs = [line.strip() for line in result.stdout.splitlines()]
+        cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+        try:
+            # --depth 1: the repo is shallow; without it a branch new to the
+            # clone would drag in its entire history.
+            subprocess.run(
+                ["git", "-C", path, "fetch", "--depth", "1", "origin", refspec],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=cred_env,
+            )
+        except subprocess.CalledProcessError as e:
+            raise ExternalCommandError(
+                f"git fetch origin {branch}", e.returncode, e.stderr or ""
+            )
+        except subprocess.TimeoutExpired:
+            raise ExternalCommandError(
+                f"git fetch origin {branch}", -1, "Fetch timed out (120s)."
+            )
+
+        if "+refs/heads/*:refs/heads/*" not in refspecs and refspec not in refspecs:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    path,
+                    "config",
+                    "--add",
+                    "remote.origin.fetch",
+                    refspec,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=GIT_ENV,
+            )
+
+        logger.info("Extra repo '%s': now tracking branch '%s'", name, branch)
+        return {"name": name, "branch": branch, "tracked": True}
 
 
 def _create_worktree_unlocked(
