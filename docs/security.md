@@ -24,7 +24,8 @@ The token is used to both authenticate and identify the team. The self-hosted
 OAuth provider also accepts it directly as a non-expiring Bearer credential.
 
 Fresh configs get a generated `auth_token` for `[team.1]` on first startup. The
-value is printed in the startup log and stored in `oduflow.toml`; use it as
+value is stored in `oduflow.toml` (created with mode `0600`) and never written to
+the log; read it from the file and use it as
 `Authorization: Bearer <auth_token>` when connecting HTTP MCP clients.
 
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)

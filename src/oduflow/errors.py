@@ -22,6 +22,15 @@ class ConflictError(FlowError):
     """Resource already exists."""
 
 
+class ConfigError(FlowError):
+    """oduflow.toml is missing, unreadable, or fails validation.
+
+    Raised at the settings boundary so a bad config surfaces as a single
+    readable line (a CLI error line; MCP: a ToolError) instead of a Python
+    traceback in the journal.
+    """
+
+
 class ExternalCommandError(FlowError):
     """External command (git, psql, docker) failed."""
 

@@ -827,6 +827,21 @@ class Settings:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
 
+        for section in (
+            "server",
+            "routing",
+            "database",
+            "storage",
+            "lifecycle",
+            "agent",
+            "production",
+            "backup",
+            "team",
+            "route",
+        ):
+            if section in raw and not isinstance(raw[section], dict):
+                raise ValueError(f"[{section}] must be a table")
+
         server = raw.get("server", {})
         routing = raw.get("routing", {})
         tls = routing.get("tls", True)
@@ -838,6 +853,8 @@ class Settings:
         agent = raw.get("agent", {})
         production = raw.get("production", {})
         wal = production.get("wal", {})
+        if not isinstance(wal, dict):
+            raise ValueError("[production.wal] must be a table")
         wal_values = {
             "wal_upload_timeout": int(wal.get("upload_timeout", 120)),
             "wal_warn_after": int(wal.get("warn_after", 120)),
@@ -913,6 +930,8 @@ class Settings:
         teams: dict[str, TeamSettings] = {}
         for team_id_raw, team_cfg in teams_raw.items():
             team_id = str(team_id_raw)
+            if not isinstance(team_cfg, dict):
+                raise ValueError(f"[team.{team_id}] must be a table")
             team_data_dir = os.path.join(base_data_dir, f"team_{team_id}")
 
             port_range = team_cfg.get("port_range")
