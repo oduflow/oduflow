@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
+import inspect
 import json
 import logging
 import os
@@ -68,6 +70,7 @@ from oduflow.locking import (
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
+    template_lock_key,
     volume_lock_key,
 )
 from oduflow.naming import (
@@ -122,6 +125,11 @@ editing code.
 # paths, container/DB names and stack detail are not disclosed to MCP callers.
 mcp = FastMCP("Oduflow", instructions=_MCP_INSTRUCTIONS, mask_error_details=True)
 _locks = LockManager()
+# How long attach_filestore waits for the team lock before its remount-and-swap
+# window. Unlike every other team acquire this one blocks, because by then the
+# call has already staged its source — possibly an hours-long rsync of a
+# multi-gigabyte filestore — and an instant BusyError would discard all of it.
+ATTACH_SWAP_LOCK_TIMEOUT = 300.0
 _settings: Settings | None = None
 _instance_id: str = ""
 # Where the dashboard is reachable, recorded when the HTTP transport starts.
@@ -426,14 +434,19 @@ def with_team_lock(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 def with_key_lock(
-    key_fn: Callable[[str, str], str], require_name: bool = True
+    key_fn: Callable[[str, str], str],
+    require_name: bool = True,
+    name_arg: str = "name",
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Serialise a tool on a narrow resource key instead of the whole team.
 
     ``key_fn(team_id, name)`` builds the key from the caller's team and the
-    tool's first argument (``name``); pass ``require_name=False`` for tools
-    whose key is team-scoped only — their first positional argument is not a
-    resource name and is ignored.
+    tool argument that names the resource — ``name`` by default, overridable
+    via ``name_arg`` for tools whose resource is not their first parameter
+    (``import_template_from_odoo`` takes ``odoo_url`` first). The argument is
+    read by name whether it was passed positionally or as a keyword, so the
+    decorator does not care how FastMCP, the CLI or a test calls the tool.
+    Pass ``require_name=False`` for tools whose key is team-scoped only.
 
     These keys are deliberately acquired *without* a ``team_id``, so they stay
     outside the team↔environment mutual exclusion: deleting a service must not
@@ -441,13 +454,23 @@ def with_key_lock(
     """
 
     def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+        # Resolved once, at decoration: the positional slot the resource name
+        # occupies, so a positional call finds it without re-parsing the
+        # signature on every invocation.
+        name_index: int | None = None
+        if require_name:
+            params = list(inspect.signature(fn).parameters)
+            name_index = params.index(name_arg) if name_arg in params else None
+
         @functools.wraps(fn)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             name = ""
             if require_name:
-                raw_name = kwargs.get("name") or (args[0] if args else None)
+                raw_name = kwargs.get(name_arg)
+                if not raw_name and name_index is not None and name_index < len(args):
+                    raw_name = args[name_index]
                 if not raw_name:
-                    raise ToolError("name is required")
+                    raise ToolError(f"{name_arg} is required")
                 name = cast(str, raw_name)
             ctx = cast("Context | None", kwargs.get("ctx"))
             team = _resolve_team(ctx)
@@ -880,11 +903,19 @@ def ensure_production_template(
         # this key must not repeat a publish that has just completed.
         if system_ops.template_is_ready(settings, team, managed):
             return managed, False
+        # The managed template's own key, as every other template mutation
+        # takes: the production key alone would not exclude an import or an
+        # attach_filestore aimed at this same template name.
+        tpl_key = template_lock_key(team.team_id, managed)
+        locks.acquire_env(tpl_key, operation=operation)
         # overwrite=True: prod-<name> is a namespace Oduflow owns; whatever an
         # earlier attempt left behind is replaced, never a reason to refuse.
-        system_ops.publish_production_as_template(
-            settings, team, prod_name, managed, overwrite=True
-        )
+        try:
+            system_ops.publish_production_as_template(
+                settings, team, prod_name, managed, overwrite=True
+            )
+        finally:
+            locks.release_env(tpl_key)
     finally:
         locks.release_env(key)
     return managed, True
@@ -1219,7 +1250,11 @@ def create_environment(
 
 @mcp.tool()
 @handle_errors
+# Team lock: this remounts other environments' overlay filestores. Template
+# key: every mutation of a template takes it, so a publish cannot interleave
+# with an import or an attach into that same template name.
 @with_team_lock
+@with_key_lock(template_lock_key, name_arg="template_name")
 def save_as_template(
     env_name: str,
     template_name: str,
@@ -1288,6 +1323,7 @@ def save_as_template(
 @handle_errors
 @production_enabled
 @with_team_lock
+@with_key_lock(template_lock_key, name_arg="template_name")
 def save_production_as_template(
     prod_name: str,
     template_name: str,
@@ -1412,7 +1448,12 @@ def list_templates(ctx: Context | None = None) -> str:
 
 @mcp.tool()
 @handle_errors
-@with_team_lock
+# Not the team lock: an import refuses to touch an existing template
+# (system_ops.import_from_odoo), so the template it builds is always brand new
+# and no environment can reference it yet — there is nothing to remount and
+# nothing team-wide to protect. Holding the team lock here froze every
+# environment operation for the whole download (600s timeout) plus the restore.
+@with_key_lock(template_lock_key, name_arg="template_name")
 def import_template_from_odoo(
     odoo_url: str,
     master_pwd: str,
@@ -1474,6 +1515,7 @@ def import_template_from_odoo(
 @mcp.tool()
 @handle_errors
 @with_team_lock
+@with_key_lock(template_lock_key, name_arg="template_name")
 def refresh_template(
     template_name: str,
     reset_env_changes: bool = False,
@@ -1522,7 +1564,11 @@ def refresh_template(
 
 @mcp.tool()
 @handle_errors
-@with_team_lock
+# The template key is held throughout; the team lock is taken by system_ops
+# only for the remount-and-swap window, so staging the source (an rsync of a
+# multi-gigabyte filestore, or unpacking an archive) no longer blocks the
+# team's environments.
+@with_key_lock(template_lock_key, name_arg="template_name")
 def attach_filestore(
     template_name: str,
     source: str,
@@ -1548,6 +1594,11 @@ def attach_filestore(
         source,
         reset_env_changes=reset_env_changes,
         strip_prefix=strip_prefix,
+        lock=lambda: _locks.team_lock_blocking(
+            team.team_id,
+            ATTACH_SWAP_LOCK_TIMEOUT,
+            operation="attach_filestore",
+        ),
     )
     affected = cast("list[str]", result.get("affected_envs", []))
     failures = cast("list[tuple[str, str]]", result.get("remount_failures", []))
@@ -1812,7 +1863,15 @@ def report_issue(
 
 @mcp.tool()
 @handle_errors
+# These two remount nothing — they refuse outright while any environment uses
+# the template. The team lock is here for a different invariant: their
+# dependent-environment scan is a check-then-act, and only team↔environment
+# mutual exclusion keeps a concurrent create_environment (which clones the
+# template DB before its container exists, so the scan cannot see it) out of
+# the window. The template key is taken as well, so a staging attach_filestore
+# or import into this same template cannot be pulled out from under.
 @with_team_lock
+@with_key_lock(template_lock_key, name_arg="template_name")
 def delete_template(template_name: str, ctx: Context | None = None) -> str:
     """
     DANGEROUS: Delete a template profile — permanently removes its template database and files from disk.
@@ -1835,7 +1894,9 @@ def delete_template(template_name: str, ctx: Context | None = None) -> str:
 
 @mcp.tool()
 @handle_errors
+# Same reasoning as delete_template above.
 @with_team_lock
+@with_key_lock(template_lock_key, name_arg="template_name")
 def rename_template(
     template_name: str, new_name: str, ctx: Context | None = None
 ) -> str:
@@ -1852,7 +1913,21 @@ def rename_template(
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
-    result = system_ops.rename_template(settings, team, template_name, new_name)
+    # The decorator holds the source name's key; the destination needs one too,
+    # or an import into `new_name` could create that template between
+    # rename_template's "does the target exist?" check and its os.rename.
+    # Skipped when the names are equal: that key is the one the decorator
+    # already holds, and taking it again would report a phantom concurrent
+    # operation instead of the ConflictError this rename really deserves.
+    with contextlib.ExitStack() as stack:
+        if new_name != template_name:
+            stack.enter_context(
+                _locks.env_lock(
+                    template_lock_key(team.team_id, new_name),
+                    operation="rename_template",
+                )
+            )
+        result = system_ops.rename_template(settings, team, template_name, new_name)
     return (
         f"Template '{result['old_name']}' renamed to '{result['template_name']}' "
         f"(DB '{result['template_db']}')."
