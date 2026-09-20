@@ -145,7 +145,7 @@ def _get_settings() -> Settings:
             settings = Settings.from_toml(toml_path)
             settings.validate()
         # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here too.
-        except ValueError as exc:
+        except (ValueError, TypeError, OverflowError) as exc:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
@@ -6810,37 +6810,38 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
     ):
         return settings
     import pathlib
+    import tempfile
 
     try:
         cfg_path = find_toml()
-        updated, generated = _autofill_ui_passwords(
-            pathlib.Path(cfg_path).read_text(encoding="utf-8")
-        )
+        # Follow a config symlink without replacing the symlink itself.
+        cfg = pathlib.Path(cfg_path).resolve(strict=True)
+        updated, generated = _autofill_ui_passwords(cfg.read_text(encoding="utf-8"))
         if not generated:
             return settings
-        pathlib.Path(cfg_path).write_text(updated, encoding="utf-8")
+        original = cfg.stat()
+        # A chmod of the existing inode cannot revoke an already-open reader.
+        # Stage secrets privately and replace the inode, preserving ownership
+        # and any stricter owner permissions (e.g. 0400). If replacement is not
+        # supported, leave the original untouched and let HTTP fail closed.
+        fd, temporary = tempfile.mkstemp(prefix=f".{cfg.name}.", dir=cfg.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                staged = os.fstat(stream.fileno())
+                if (staged.st_uid, staged.st_gid) != (original.st_uid, original.st_gid):
+                    os.fchown(stream.fileno(), original.st_uid, original.st_gid)
+                mode = original.st_mode & 0o600
+                if staged.st_mode & 0o777 != mode:
+                    os.fchmod(stream.fileno(), mode)
+                stream.write(updated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, cfg)
+        finally:
+            pathlib.Path(temporary).unlink(missing_ok=True)
     except Exception:
         logger.exception("Could not auto-provision a web-UI password")
         return settings
-    # The config now holds a secret it did not hold a moment ago, so narrow a
-    # group/world-readable mode. Never widen: an operator who chose 0400 keeps
-    # it. Guarded separately from the write above on purpose: the password is
-    # already persisted at this point, so a chmod failure (config owned by
-    # another user, or a mount that rejects chmod) must NOT fall back to the
-    # stale passwordless settings — that would make _start_http refuse to boot
-    # and ask for a ui_password the file already contains. Tightening the mode
-    # is hardening on top of a completed provisioning, not a condition for it.
-    try:
-        mode = os.stat(cfg_path).st_mode & 0o777
-        if mode & 0o077:
-            os.chmod(cfg_path, mode & 0o700)
-    except OSError:
-        logger.warning(
-            "Auto-provisioned a web-UI password in %s but could not restrict "
-            "its permissions; tighten them manually (chmod 0600).",
-            cfg_path,
-            exc_info=True,
-        )
     # Only the count is logged. Printing the password itself would persist it in
     # the journal (shipped off-host, retained for months) long after it is the
     # live dashboard credential; oduflow.toml is where it belongs.

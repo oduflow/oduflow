@@ -155,32 +155,80 @@ class TestEnsureWebUiPassword:
         # ...and the config that now holds it is no longer world-readable.
         assert cfg.stat().st_mode & 0o077 == 0
 
-    def test_chmod_failure_still_returns_the_reloaded_settings(
-        self, tmp_path, monkeypatch
-    ):
-        """A config we can write but not chmod (owned by another user, or a
-        mount that rejects chmod) must not discard the password we just
-        persisted: returning the stale passwordless settings makes _start_http
-        fail closed and demand a ui_password the file already contains."""
+    @pytest.mark.parametrize("mode", [0o644, 0o640, 0o600, 0o400])
+    def test_replacement_keeps_secrets_private(self, tmp_path, monkeypatch, mode):
+        """Readers of the old inode must never see the generated password."""
         import oduflow.server as server
 
         cfg = tmp_path / "oduflow.toml"
-        cfg.write_text('[team.1]\nui_password = ""\n', encoding="utf-8")
-        cfg.chmod(0o644)
+        original = '[team.1]\nhostname = "a.example.com"\nui_password = ""\n'
+        cfg.write_text(original, encoding="utf-8")
+        cfg.chmod(mode)
+        original_stat = cfg.stat()
         settings = self._settings("")
-        reloaded = object()
         monkeypatch.setattr(server, "find_toml", lambda: str(cfg))
-        monkeypatch.setattr(server, "_get_settings", lambda: reloaded)
-        monkeypatch.setattr(
-            server.os,
-            "chmod",
-            lambda *a, **kw: (_ for _ in ()).throw(PermissionError()),
+        monkeypatch.setattr(server, "_settings", None)
+        replace = server.os.replace
+
+        def check_private_before_replace(source, destination):
+            staged = pathlib.Path(source)
+            assert staged.stat().st_mode & 0o777 == mode & 0o600
+            assert 'ui_password = ""' not in staged.read_text(encoding="utf-8")
+            assert cfg.read_text(encoding="utf-8") == original
+            replace(source, destination)
+
+        monkeypatch.setattr(server.os, "replace", check_private_before_replace)
+        with cfg.open(encoding="utf-8") as old_reader:
+            result = server._ensure_web_ui_password(settings)
+            assert old_reader.read() == original
+
+        assert result.teams["1"].ui_password
+        final_stat = cfg.stat()
+        assert final_stat.st_mode & 0o777 == mode & 0o600
+        assert (final_stat.st_uid, final_stat.st_gid) == (
+            original_stat.st_uid,
+            original_stat.st_gid,
         )
+        assert list(tmp_path.iterdir()) == [cfg]
+
+    def test_preserves_config_symlink(self, tmp_path, monkeypatch):
+        import oduflow.server as server
+
+        target = tmp_path / "target.toml"
+        target.write_text('[team.1]\nui_password = ""\n', encoding="utf-8")
+        cfg = tmp_path / "oduflow.toml"
+        cfg.symlink_to(target)
+        settings = self._settings("")
+        monkeypatch.setattr(server, "find_toml", lambda: str(cfg))
+        monkeypatch.setattr(server, "_get_settings", lambda: settings)
+
+        server._ensure_web_ui_password(settings)
+
+        assert cfg.is_symlink()
+        assert 'ui_password = ""' not in target.read_text(encoding="utf-8")
+        assert target.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.parametrize("failure", ["fchmod", "replace"])
+    def test_failed_replacement_keeps_original(self, tmp_path, monkeypatch, failure):
+        import oduflow.server as server
+
+        cfg = tmp_path / "oduflow.toml"
+        original = '[team.1]\nui_password = ""\n'
+        cfg.write_text(original, encoding="utf-8")
+        cfg.chmod(0o400 if failure == "fchmod" else 0o644)
+        settings = self._settings("")
+        monkeypatch.setattr(server, "find_toml", lambda: str(cfg))
+
+        def fail(*args):
+            raise PermissionError("Read-only config mount")
+
+        monkeypatch.setattr(server.os, failure, fail)
 
         result = server._ensure_web_ui_password(settings)
 
-        assert result is reloaded  # not the stale, passwordless `settings`
-        assert 'ui_password = ""' not in cfg.read_text(encoding="utf-8")
+        assert result is settings
+        assert cfg.read_text(encoding="utf-8") == original
+        assert list(tmp_path.iterdir()) == [cfg]
 
 
 class TestBootstrapConfig:
