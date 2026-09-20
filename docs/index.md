@@ -15,7 +15,7 @@ hide:
   <div class="odu-hero__actions">
     <a class="odu-btn odu-btn--primary" href="quick-start/">Read the Docs →</a>
     <a class="odu-btn odu-btn--changelog" href="changelog/">Changelog</a>
-    <a class="odu-btn odu-btn--ghost" href="https://github.com/oduist/oduflow">View on GitHub</a>
+    <a class="odu-btn odu-btn--ghost" href="https://github.com/oduflow/oduflow">View on GitHub</a>
   </div>
 </section>
 

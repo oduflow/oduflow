@@ -1773,7 +1773,7 @@ def report_issue(
     Use this when the user hits a bug in Oduflow, wants a feature, or wants to
     send feedback about the tool — not for problems in their own Odoo code.
     The tool does NOT create the issue: it returns a prefilled link to the
-    oduist/oduflow issue form. Show the link to the user and let them submit it
+    oduflow/oduflow issue form. Show the link to the user and let them submit it
     from their own GitHub account, so the report is attributable to them and
     they can edit it first.
 

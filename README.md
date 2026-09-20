@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://github.com/oduist/oduflow/actions/workflows/tests.yml"><img src="https://github.com/oduist/oduflow/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/oduflow/oduflow/actions/workflows/tests.yml"><img src="https://github.com/oduflow/oduflow/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/Docker-Required-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/Protocol-MCP-green" alt="MCP">

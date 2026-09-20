@@ -3229,7 +3229,7 @@ Build a prefilled link the user can follow to file a bug, feature request or
 feedback about **Oduflow itself** on GitHub.
 
 The tool does **not** create the issue: it returns a prefilled link to the
-`oduist/oduflow` issue form. Show the link to the user and let them submit it
+`oduflow/oduflow` issue form. Show the link to the user and let them submit it
 from their own GitHub account, so the report is attributable to them and they
 can edit it first. Oduflow version, Python version, platform, transport and
 routing mode are attached automatically.

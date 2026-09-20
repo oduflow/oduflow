@@ -39,9 +39,9 @@ dev = [
 [project.urls]
 Homepage = "https://oduflow.dev"
 Documentation = "https://oduflow.dev"
-Repository = "https://github.com/oduist/oduflow"
-Issues = "https://github.com/oduist/oduflow/issues"
-Changelog = "https://github.com/oduist/oduflow/releases"
+Repository = "https://github.com/oduflow/oduflow"
+Issues = "https://github.com/oduflow/oduflow/issues"
+Changelog = "https://github.com/oduflow/oduflow/releases"
 
 [project.scripts]
 oduflow = "oduflow.server:main"
