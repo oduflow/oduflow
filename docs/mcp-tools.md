@@ -621,7 +621,7 @@ Lock: environment.
 :   *str · required* — The environment.
 
 `modules`
-:   *str · required* — Comma-separated modules to upgrade (e.g. `"sale,crm,web"`).
+:   *str · required* — Comma-separated modules to upgrade (e.g. `"sale,crm,web"`), or `"all"` on its own to upgrade every installed module (`odoo -u all`).
 
 **Use it when**
 

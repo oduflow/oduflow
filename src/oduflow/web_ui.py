@@ -1339,6 +1339,13 @@ def _build_routes(
             result = await _offload(operation, settings, team, branch, *modules)
             exit_code = result["exit_code"]
             applied = result.get("modules", modules)
+            # "all" is Odoo's keyword for every installed module, not a module
+            # name, so the result reads as a phrase instead of a one-item list.
+            applied_label = (
+                "all installed modules"
+                if action == "upgrade" and applied == [odoo_ops.ALL_MODULES]
+                else ", ".join(applied)
+            )
             restart_warning = ""
             container_restarted: bool | None = None
             # A failed run is still a completed request: the Odoo log is the
@@ -1350,8 +1357,7 @@ def _build_routes(
                     await _offload(env_ops.restart_environment, settings, branch, team)
                     container_restarted = True
                     message = (
-                        f"{completed_verb}: {', '.join(applied)}. "
-                        "Odoo container restarted."
+                        f"{completed_verb}: {applied_label}. Odoo container restarted."
                     )
                 except FlowError as e:
                     container_restarted = False
@@ -1362,7 +1368,7 @@ def _build_routes(
                         f"Modules were {action}d, but the Odoo container could not "
                         f"be restarted. {restart_error}"
                     )
-                    message = f"{completed_verb}: {', '.join(applied)}. Restart failed."
+                    message = f"{completed_verb}: {applied_label}. Restart failed."
                 except Exception:
                     container_restarted = False
                     logger.exception(
@@ -1374,10 +1380,10 @@ def _build_routes(
                         f"Modules were {action}d, but the Odoo container could not "
                         "be restarted. Check server logs for details."
                     )
-                    message = f"{completed_verb}: {', '.join(applied)}. Restart failed."
+                    message = f"{completed_verb}: {applied_label}. Restart failed."
             else:
                 verb = "Install" if action == "install" else "Upgrade"
-                message = f"{verb} failed: {', '.join(applied)}."
+                message = f"{verb} failed: {applied_label}."
             payload: dict[str, Any] = {
                 "action": action,
                 "message": message,

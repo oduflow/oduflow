@@ -3020,6 +3020,34 @@ class TestUpgradeModules:
 
         container.exec_run.assert_not_called()
 
+    @patch("oduflow.docker_ops.odoo_ops._execute_db_query")
+    def test_all_upgrades_every_installed_module(self, mock_query, mock_docker_client):
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"OK")
+        mock_docker_client.containers.get.return_value = container
+
+        result = odoo_ops.upgrade_odoo_modules(TEST_SETTINGS, TEST_TEAM, "main", "all")
+
+        assert result["exit_code"] == 0
+        assert result["modules"] == ["all"]
+        assert "-u all" in container.exec_run.call_args[0][0]
+        # "all" is Odoo's keyword, not a module name: ir_module_module holds no
+        # such row, so a state check would reject a legitimate upgrade.
+        mock_query.assert_not_called()
+
+    @patch("oduflow.docker_ops.odoo_ops._execute_db_query")
+    def test_all_is_refused_next_to_module_names(self, mock_query, mock_docker_client):
+        container = MagicMock()
+        mock_docker_client.containers.get.return_value = container
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            odoo_ops.upgrade_odoo_modules(
+                TEST_SETTINGS, TEST_TEAM, "main", "all", "sale"
+            )
+
+        container.exec_run.assert_not_called()
+        mock_query.assert_not_called()
+
 
 class TestRunEnvironmentTests:
     @patch(

@@ -2215,6 +2215,9 @@ oduflow call install_odoo_modules feature-login sale,crm,website
 
 # Upgrade modules (odoo -u)
 oduflow call upgrade_odoo_modules feature-login sale,crm
+
+# Upgrade every installed module (odoo -u all)
+oduflow call upgrade_odoo_modules feature-login all
 ```
 
 ## Running Tests
@@ -4930,7 +4933,7 @@ Lock: environment.
 :   *str · required* — The environment.
 
 `modules`
-:   *str · required* — Comma-separated modules to upgrade (e.g. `"sale,crm,web"`).
+:   *str · required* — Comma-separated modules to upgrade (e.g. `"sale,crm,web"`), or `"all"` on its own to upgrade every installed module (`odoo -u all`).
 
 **Use it when**
 

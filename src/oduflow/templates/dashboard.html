@@ -824,6 +824,7 @@
   .module-row .module-name { font-family: var(--font-mono); }
   .module-row .module-version { margin-left: auto; font-size: var(--text-xs); color: var(--text-dim); font-family: var(--font-mono); }
   .module-picker-status { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-xs); color: var(--text-dim); margin-top: 6px; }
+  .module-picker-actions { display: flex; gap: 6px; margin-bottom: 6px; }
   .toast {
     position: fixed;
     bottom: 24px;
@@ -2317,12 +2318,18 @@
       <button class="modal-close" onclick="closeUpgradeModules()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Runs <code>odoo -u</code> for the modules you pick and restarts the container when it succeeds. Only installed modules are listed; filtering never clears a selection.</p>
+      <p class="modal-note">Runs <code>odoo -u</code> for the modules you pick and restarts the container when it succeeds. Only installed modules are listed; filtering never clears a selection. <strong>Select all</strong> takes every installed module, filtered or not, and upgrades them with <code>odoo -u all</code>.</p>
       <div class="form-group">
         <label for="upgrade-modules-filter">Filter</label>
         <input id="upgrade-modules-filter" class="mono-input" type="text" placeholder="Type to filter, e.g. sale"
                oninput="renderUpgradeModules()"
                onkeydown="if (event.key === 'Enter') { event.preventDefault(); confirmUpgradeModules(); }">
+      </div>
+      <div class="module-picker-actions">
+        <button class="btn btn-sm" type="button" id="upgrade-modules-select-all"
+                onclick="selectAllUpgradeModules()">Select all</button>
+        <button class="btn btn-sm" type="button" id="upgrade-modules-clear"
+                onclick="clearUpgradeModules()">Clear</button>
       </div>
       <div class="module-picker" id="upgrade-modules-list"></div>
       <div class="module-picker-status">
@@ -3981,6 +3988,7 @@ async function openUpgradeModules(branch) {
     '<div class="module-picker-empty">Loading installed modules&hellip;</div>';
   document.getElementById('upgrade-modules-count').textContent = 'No modules selected';
   document.getElementById('upgrade-modules-shown').textContent = '';
+  _disableUpgradePickerActions();
   showModal('upgrade-modules-modal');
   document.getElementById('upgrade-modules-filter').focus();
   try {
@@ -4043,6 +4051,28 @@ function renderUpgradeModules() {
   updateUpgradeCount();
 }
 
+function selectAllUpgradeModules() {
+  _upgradeModules.forEach(function(m) { _upgradeSelected.add(m.name); });
+  renderUpgradeModules();
+}
+
+function clearUpgradeModules() {
+  _upgradeSelected = new Set();
+  renderUpgradeModules();
+}
+
+function _upgradeSelectionIsEverything() {
+  return _upgradeModules.length > 0 &&
+    _upgradeSelected.size === _upgradeModules.length;
+}
+
+function _disableUpgradePickerActions() {
+  var selectAll = document.getElementById('upgrade-modules-select-all');
+  if (selectAll) selectAll.disabled = true;
+  var clear = document.getElementById('upgrade-modules-clear');
+  if (clear) clear.disabled = true;
+}
+
 function toggleUpgradeModule(input) {
   if (input.checked) _upgradeSelected.add(input.value);
   else _upgradeSelected.delete(input.value);
@@ -4051,13 +4081,24 @@ function toggleUpgradeModule(input) {
 
 function updateUpgradeCount() {
   var n = _upgradeSelected.size;
+  var everything = _upgradeSelectionIsEverything();
   document.getElementById('upgrade-modules-count').textContent =
-    n === 0 ? 'No modules selected' : n + (n === 1 ? ' module selected' : ' modules selected');
+    n === 0 ? 'No modules selected'
+      : everything ? 'All ' + n + ' modules selected \u2014 runs odoo -u all'
+      : n + (n === 1 ? ' module selected' : ' modules selected');
+  var selectAll = document.getElementById('upgrade-modules-select-all');
+  if (selectAll) selectAll.disabled = !_upgradeModules.length || everything;
+  var clear = document.getElementById('upgrade-modules-clear');
+  if (clear) clear.disabled = n === 0;
 }
 
 async function confirmUpgradeModules() {
   if (!_upgradeSelected.size) { showToast('Select at least one module', true); return; }
-  var modules = Array.from(_upgradeSelected).join(',');
+  // Everything selected is exactly Odoo's own `-u all`, so send the keyword
+  // instead of a command line carrying every installed module name.
+  var modules = _upgradeSelectionIsEverything()
+    ? 'all'
+    : Array.from(_upgradeSelected).join(',');
   var branch = _upgradeModulesEnv;
   closeUpgradeModules();
   await applyModules(branch, 'upgrade', modules);
