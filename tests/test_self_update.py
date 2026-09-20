@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from importlib.metadata import PackageNotFoundError
 from types import SimpleNamespace
@@ -137,8 +138,61 @@ class TestDetectInstall:
         assert info.kind == "uvx"
         assert info.command is None
 
-    def test_plain_pip_install_upgrades_via_pip(self):
-        dist = _FakeDistribution("/opt/venv/lib/python3.12/site-packages/")
+    def test_uv_tool_dir_env_var_is_honoured(self, tmp_path):
+        dist = _FakeDistribution(
+            f"{tmp_path}{os.sep}oduflow{os.sep}site-packages{os.sep}"
+        )
+        with (
+            patch.object(self_update, "distribution", return_value=dist),
+            patch.dict(os.environ, {"UV_TOOL_DIR": str(tmp_path)}),
+            patch.object(self_update.shutil, "which", return_value="/usr/bin/uv"),
+        ):
+            info = self_update.detect_install()
+        assert info.kind == "uv-tool"
+        assert info.command == ["/usr/bin/uv", "tool", "upgrade", "oduflow"]
+
+    def test_uv_cache_dir_env_var_is_honoured(self, tmp_path):
+        # A custom UV_CACHE_DIR has none of the default path markers; without
+        # reading the env var this uvx run would be mistaken for a pip install.
+        dist = _FakeDistribution(f"{tmp_path}{os.sep}archive-v0{os.sep}AbC{os.sep}")
+        with (
+            patch.object(self_update, "distribution", return_value=dist),
+            patch.dict(os.environ, {"UV_CACHE_DIR": str(tmp_path)}),
+        ):
+            info = self_update.detect_install()
+        assert info.kind == "uvx"
+        assert info.command is None
+
+    def test_environment_without_pip_refused(self, tmp_path):
+        dist = _FakeDistribution(f"{tmp_path}{os.sep}site-packages{os.sep}")
+        (tmp_path / "site-packages").mkdir()
+        with (
+            patch.object(self_update, "distribution", return_value=dist),
+            patch.object(self_update.importlib.util, "find_spec", return_value=None),
+        ):
+            info = self_update.detect_install()
+        assert info.kind == "pip"
+        assert info.command is None
+        assert "no pip" in info.reason
+
+    def test_unwritable_site_packages_refused(self, tmp_path):
+        # pip would quietly "default to user installation" here, upgrading a
+        # copy the running service never loads.
+        target = tmp_path / "site-packages"
+        target.mkdir()
+        dist = _FakeDistribution(f"{target}{os.sep}")
+        with (
+            patch.object(self_update, "distribution", return_value=dist),
+            patch.object(self_update.os, "access", return_value=False),
+        ):
+            info = self_update.detect_install()
+        assert info.kind == "pip"
+        assert info.command is None
+        assert "not writable" in info.reason
+
+    def test_plain_pip_install_upgrades_via_pip(self, tmp_path):
+        dist = _FakeDistribution(f"{tmp_path}{os.sep}site-packages{os.sep}")
+        (tmp_path / "site-packages").mkdir()
         with patch.object(self_update, "distribution", return_value=dist):
             info = self_update.detect_install()
         assert info.kind == "pip"
@@ -215,7 +269,7 @@ class TestRun:
             ),
             patch.object(self_update, "_installed_version", return_value="9.0.0"),
             patch.object(
-                self_update.shutil, "which", return_value="/opt/venv/bin/oduflow"
+                self_update, "_oduflow_binary", return_value="/opt/venv/bin/oduflow"
             ),
             patch.object(self_update, "UNIT_DIR", tmp_path),
             patch.object(self_update.os, "geteuid", return_value=0),
@@ -241,7 +295,7 @@ class TestRun:
                 ),
             ),
             patch.object(self_update, "_installed_version", return_value="9.0.0"),
-            patch.object(self_update.shutil, "which", return_value="oduflow"),
+            patch.object(self_update, "_oduflow_binary", return_value="oduflow"),
             patch.object(self_update, "UNIT_DIR", tmp_path),  # no unit file
             patch.object(self_update.subprocess, "run", run),
         ):
@@ -276,7 +330,7 @@ class TestRun:
                 return_value=_update_available(),
             ),
             patch.object(self_update, "_installed_version", return_value="9.0.0"),
-            patch.object(self_update.shutil, "which", return_value="oduflow"),
+            patch.object(self_update, "_oduflow_binary", return_value="oduflow"),
             patch.object(self_update, "UNIT_DIR", tmp_path),
             patch.object(self_update.os, "geteuid", return_value=0),
             patch.object(self_update.subprocess, "run", run),
@@ -297,7 +351,7 @@ class TestRun:
                 return_value=_update_available(),
             ),
             patch.object(self_update, "_installed_version", return_value="9.0.0"),
-            patch.object(self_update.shutil, "which", return_value="oduflow"),
+            patch.object(self_update, "_oduflow_binary", return_value="oduflow"),
             patch.object(self_update, "UNIT_DIR", tmp_path),
             patch.object(self_update.os, "geteuid", return_value=1000),
             patch.object(self_update.subprocess, "run", run),
@@ -318,10 +372,77 @@ class TestRun:
                 return_value=_update_available(),
             ),
             patch.object(self_update, "_installed_version", return_value="9.0.0"),
-            patch.object(self_update.shutil, "which", return_value="oduflow"),
+            patch.object(self_update, "_oduflow_binary", return_value="oduflow"),
             patch.object(self_update, "UNIT_DIR", tmp_path),
             patch.object(self_update.os, "geteuid", return_value=0),
             patch.object(self_update.subprocess, "run", run),
         ):
             assert self_update.run(restart=False) == 0
         assert ["systemctl", "restart", "oduflow.service"] not in run.calls
+
+
+class TestOduflowBinary:
+    def test_prefers_the_script_next_to_this_interpreter(self, tmp_path):
+        # PATH may hold another Oduflow; the one beside sys.executable belongs
+        # to the environment that was just upgraded.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "python").touch()
+        script = bin_dir / "oduflow"
+        script.touch(mode=0o755)
+        with (
+            patch.object(self_update.sys, "executable", str(bin_dir / "python")),
+            patch.object(self_update.shutil, "which", return_value="/usr/bin/oduflow"),
+        ):
+            assert self_update._oduflow_binary() == str(script)
+
+    def test_falls_back_to_path(self, tmp_path):
+        with (
+            patch.object(self_update.sys, "executable", str(tmp_path / "python")),
+            patch.object(self_update.shutil, "which", return_value="/usr/bin/oduflow"),
+        ):
+            assert self_update._oduflow_binary() == "/usr/bin/oduflow"
+
+
+class TestForcedReconcile:
+    """`--force` on an already-current package still finishes the job."""
+
+    def test_force_reconciles_and_restarts_without_reinstalling(self, tmp_path):
+        unit = tmp_path / "oduflow.service"
+        unit.touch()
+        run = _Run()
+        with (
+            patch.object(self_update, "in_container", return_value=False),
+            patch.object(self_update, "detect_install", return_value=_pip_install()),
+            patch.object(
+                self_update.updates,
+                "check_for_update",
+                return_value=UpdateCheck(current="9.0.0", status=STATUS_CURRENT),
+            ),
+            patch.object(self_update, "_oduflow_binary", return_value="oduflow"),
+            patch.object(self_update, "UNIT_DIR", tmp_path),
+            patch.object(self_update.os, "geteuid", return_value=0),
+            patch.object(self_update.subprocess, "run", run),
+        ):
+            assert self_update.run(force=True) == 0
+        assert run.calls == [
+            ["oduflow", "upgrade", "--force"],
+            ["systemctl", "restart", "oduflow.service"],
+        ]
+
+    def test_force_reports_the_reconcile_failure(self, tmp_path):
+        run = _Run(returncodes={"upgrade": 1})
+        with (
+            patch.object(self_update, "in_container", return_value=False),
+            patch.object(self_update, "detect_install", return_value=_pip_install()),
+            patch.object(
+                self_update.updates,
+                "check_for_update",
+                return_value=UpdateCheck(current="9.0.0", status=STATUS_CURRENT),
+            ),
+            patch.object(self_update, "_oduflow_binary", return_value="oduflow"),
+            patch.object(self_update, "UNIT_DIR", tmp_path),
+            patch.object(self_update.subprocess, "run", run),
+        ):
+            assert self_update.run(force=True) == 1
+        assert run.calls == [["oduflow", "upgrade", "--force"]]

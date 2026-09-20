@@ -19,10 +19,15 @@ Refusals are hard errors, not best-effort attempts:
   overwriting them from PyPI would detach the running code from the checkout.
 * **``uvx`` runs.** The environment is an ephemeral cache entry; the next
   ``uvx oduflow`` resolves fresh anyway, so there is nothing durable to update.
+* **Environments pip cannot upgrade in place.** A virtualenv created without
+  pip has no installer to drive, and a site-packages directory this user cannot
+  write makes pip "default to user installation" — a second copy in ``~/.local``
+  that the running service never loads. Both are reported instead of attempted.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -30,6 +35,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import Path
 
 from oduflow import updates
 from oduflow.systemd import SERVICE_NAME, UNIT_DIR
@@ -72,6 +78,14 @@ class InstallInfo:
     reason: str = ""  # shown to the user when command is None
 
 
+def _under(location: str, env_var: str) -> bool:
+    """True when ``location`` sits under the directory named by ``env_var``."""
+    root = os.environ.get(env_var)
+    if not root:
+        return False
+    return location.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def detect_install() -> InstallInfo:
     """Classify this installation and pick its installer's upgrade command."""
     try:
@@ -112,9 +126,7 @@ def detect_install() -> InstallInfo:
 
     location = str(dist.locate_file(""))
     sep = os.sep
-    if f"{sep}uv{sep}tools{sep}" in location or location.startswith(
-        os.environ.get("UV_TOOL_DIR") or "\0"
-    ):
+    if f"{sep}uv{sep}tools{sep}" in location or _under(location, "UV_TOOL_DIR"):
         uv = shutil.which("uv")
         if not uv:
             return InstallInfo(
@@ -125,13 +137,41 @@ def detect_install() -> InstallInfo:
                 ),
             )
         return InstallInfo(kind="uv-tool", command=[uv, "tool", "upgrade", PACKAGE])
-    if f"{sep}.cache{sep}uv{sep}" in location or f"{sep}uv{sep}archive" in location:
+    if (
+        f"{sep}.cache{sep}uv{sep}" in location
+        or f"{sep}uv{sep}archive" in location
+        or _under(location, "UV_CACHE_DIR")
+    ):
         return InstallInfo(
             kind="uvx",
             reason=(
                 "Oduflow is running from an ephemeral uvx environment; "
                 "there is nothing persistent to update. The next "
                 "`uvx oduflow` run resolves the latest release by itself."
+            ),
+        )
+    if importlib.util.find_spec("pip") is None:
+        # A `uv venv` (or any --without-pip virtualenv) has no pip to drive.
+        return InstallInfo(
+            kind="pip",
+            reason=(
+                f"This environment ({location}) has no pip, so Oduflow cannot "
+                "upgrade itself here. Upgrade it with the installer that "
+                "created the environment, for example "
+                f"`uv pip install --upgrade {PACKAGE}`."
+            ),
+        )
+    if not os.access(location, os.W_OK):
+        # pip silently "defaults to user installation" when the target is not
+        # writable, which installs a second copy into ~/.local while the
+        # running service keeps loading this one.
+        return InstallInfo(
+            kind="pip",
+            reason=(
+                f"{location} is not writable by this user, so "
+                "`pip install --upgrade` would install a second copy "
+                "elsewhere instead of upgrading the running one. Re-run as "
+                "the user that owns the installation (or with sudo)."
             ),
         )
     return InstallInfo(
@@ -159,6 +199,21 @@ def _installed_version() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _oduflow_binary() -> str:
+    """Path to the console script of the environment that was just upgraded.
+
+    ``shutil.which`` searches PATH, which can resolve a *different* Oduflow
+    (another venv earlier on PATH); reconciling bundled files through that one
+    would deploy the old bundle while reporting success. The script installed
+    next to this interpreter belongs to the environment pip/uv just upgraded,
+    so prefer it and fall back to PATH only when it is missing.
+    """
+    sibling = Path(sys.executable).with_name(PACKAGE)
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return shutil.which(PACKAGE) or sys.argv[0]
+
+
 def run(*, force: bool = False, restart: bool = True) -> int:
     """Upgrade the package, reconcile bundled files, restart the service."""
     if in_container():
@@ -171,10 +226,19 @@ def run(*, force: bool = False, restart: bool = True) -> int:
         return 1
 
     check = updates.check_for_update()
-    if check.status == updates.STATUS_CURRENT:
+    already_current = check.status == updates.STATUS_CURRENT
+    if already_current and not force:
         print(f"Already up to date (v{check.current}).")
         return 0
-    if check.status == updates.STATUS_UPDATE:
+    if already_current:
+        # --force also means "finish the job": a previous run may have
+        # installed the package and then stopped on a bundle conflict, so the
+        # reconciliation and restart below still have work to do.
+        print(
+            f"Package is already v{check.current}; --force: reconciling "
+            "bundled files and restarting anyway."
+        )
+    elif check.status == updates.STATUS_UPDATE:
         title = f" — {check.release_title}" if check.release_title else ""
         print(f"Upgrading Oduflow v{check.current} → v{check.latest}{title}")
     else:
@@ -183,22 +247,27 @@ def run(*, force: bool = False, restart: bool = True) -> int:
         note = check.error or "versions are not comparable"
         print(f"Release check inconclusive ({note}); asking the installer.")
 
-    print(f"Running: {' '.join(install.command)}")
-    if subprocess.run(install.command).returncode != 0:
-        print(
-            "Error: the package upgrade command failed (see its output above).",
-            file=sys.stderr,
-        )
-        return 1
+    if not already_current:
+        print(f"Running: {' '.join(install.command)}")
+        if subprocess.run(install.command).returncode != 0:
+            print(
+                "Error: the package upgrade command failed (see its output above).",
+                file=sys.stderr,
+            )
+            return 1
 
-    new_version = _installed_version()
+    new_version = check.current if already_current else _installed_version()
     version_note = f"v{new_version}" if new_version else "the new version"
+    done = (
+        f"Bundled files reconciled for {version_note}."
+        if already_current
+        else f"Package upgraded to {version_note}."
+    )
 
     # Reconcile deployed bundled files (odoo.conf, agent guides, sanitize
     # scripts) through the NEW binary so it applies the new bundle. Without
     # --force this prompts, exactly like a manual `oduflow upgrade`.
-    oduflow_bin = shutil.which(PACKAGE) or sys.argv[0]
-    reconcile = [oduflow_bin, "upgrade"] + (["--force"] if force else [])
+    reconcile = [_oduflow_binary(), "upgrade"] + (["--force"] if force else [])
     print(f"Reconciling bundled files: {' '.join(reconcile)}")
     if subprocess.run(reconcile).returncode != 0:
         print(
@@ -211,20 +280,17 @@ def run(*, force: bool = False, restart: bool = True) -> int:
 
     unit = UNIT_DIR / SERVICE_NAME
     if not restart:
-        print(
-            f"Package upgraded to {version_note}. Restart skipped "
-            "(--no-restart); restart the server to load it."
-        )
+        print(f"{done} Restart skipped (--no-restart); restart the server to load it.")
         return 0
     if not unit.exists():
         print(
-            f"Package upgraded to {version_note}. No systemd unit found — "
+            f"{done} No systemd unit found — "
             "restart your Oduflow server process to load it."
         )
         return 0
     if os.geteuid() != 0:
         print(
-            f"Package upgraded to {version_note}. Restart the service as root:\n"
+            f"{done} Restart the service as root:\n"
             f"  sudo systemctl restart {SERVICE_NAME}"
         )
         return 0

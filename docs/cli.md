@@ -145,16 +145,23 @@ its own installer (`uv tool upgrade oduflow` for a uv tool install, otherwise
 `pip install --upgrade oduflow` in the same environment), runs the bundled-file
 reconciliation above through the freshly installed binary, and restarts the
 systemd service when the unit installed by `oduflow systemd-install` exists and
-the command runs as root. `--force` is forwarded to the reconciliation;
-`--no-restart` leaves the running server on the old version until you restart
-it yourself.
+the command runs as root. `--force` is forwarded to the reconciliation, and it
+also finishes an interrupted upgrade: if the package is already at the latest
+version — for example after a first run stopped on a bundle conflict — the
+command reconciles and restarts instead of reporting "already up to date" and
+doing nothing. `--no-restart` leaves the running server on the old version
+until you restart it yourself.
 
 It refuses, with an error, installations it cannot upgrade durably: **a
 container** (a package upgraded inside the `oduist/oduflow` container reverts
 when the container is recreated — pull the new image and recreate it instead,
 see [Docker](docker.md)), a source checkout or editable install (update those
-with `git pull`), and an ephemeral `uvx` run (the next `uvx oduflow` resolves
-the latest release by itself).
+with `git pull`), an ephemeral `uvx` run (the next `uvx oduflow` resolves the
+latest release by itself), and an environment pip cannot upgrade in place — a
+virtualenv created without pip, or a `site-packages` the current user cannot
+write, where `pip install --upgrade` would install a second copy into
+`~/.local` that the running service never loads. Re-run those as the user that
+owns the installation.
 
 ## Template Commands
 

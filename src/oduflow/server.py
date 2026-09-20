@@ -7606,7 +7606,8 @@ def _run_cli() -> None:
         action="store_true",
         help=(
             "reconcile bundled files without prompting, overwriting conflicts "
-            "(forwarded to `oduflow upgrade --force`)"
+            "(forwarded to `oduflow upgrade --force`); also reconciles and "
+            "restarts when the package is already at the latest version"
         ),
     )
     p_self_update.add_argument(
