@@ -77,7 +77,7 @@ def test_credentials_endpoint_explicitly_requests_secret(tmp_path):
 
 def test_credentials_are_not_reachable_over_get(tmp_path):
     """The only unmasked-secret endpoint must sit behind the CSRF backstop in
-    BasicAuthMiddleware, which by construction only guards unsafe methods."""
+    UIAuthMiddleware, which by construction only guards unsafe methods."""
     client = _client(tmp_path)
     with patch("oduflow.web_ui.service_database_ops.get_database") as get_database:
         response = client.get("/api/service-databases/events/credentials")

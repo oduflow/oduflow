@@ -1,4 +1,4 @@
-# 0067 — Unified template import (S3 prefix, local path, in-place refresh)
+# 0069 — Unified template import (S3 prefix, local path, in-place refresh)
 
 **Status:** Adopted (v2 — unified)
 **Type:** Architecture — new capability + consolidation
@@ -49,13 +49,14 @@ exists to remove); a separate tool per source (two doors for one act); keeping
   never into the live template. The promote is a handful of renames under
   `remount_template_overlays`, so live environments keep their upper-layer
   deltas and a crashed import never masquerades as a template. Resume is
-  free: a staged file with the right size is skipped.
+  cheap: content-addressed filestore files reuse matching sizes; dumps also
+  require the source identity and change token recorded after a completed transfer.
 - **`overwrite=true` is an incremental re-sync, not a re-import.** The live
   template filestore is hardlinked into staging for unchanged files (an
   `rsync --link-dest` analogue — atomic swap *and* incrementality), files
   deleted at the source drop out of the swapped tree, and a dump whose
   identity token (S3 ETag, or local size+mtime) matches the last sync skips
-  both the fetch and the template-DB reload. This makes "pull last night's
+  both the fetch and the template-DB reload. The source path/endpoint must also match. This makes "pull last night's
   production backup into dev" a cheap cron-able operation.
 - **`refresh` blesses the drop-point workflow.** An external process may
   rsync straight into the template directory; `refresh` reloads the DB from
@@ -85,7 +86,7 @@ exists to remove); a separate tool per source (two doors for one act); keeping
   hashes; a non-filestore tree with same-size edits would not re-fetch.
   Accepted for the register this feature serves.
 - `overwrite`/`refresh` replace template data by design and skip the
-  fresh-import quota gate (like refresh/reload before them); the tool
+  quota gate for an existing database; creating a missing database still checks quota; the tool
   docstring demands explicit user permission before using either.
 
 ## History

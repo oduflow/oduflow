@@ -17,7 +17,7 @@ import sys
 import tarfile
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -3792,8 +3792,18 @@ def attach_filestore(
     *,
     reset_env_changes: bool = False,
     strip_prefix: str = "auto",
+    lock: Callable[[], contextlib.AbstractContextManager[Any]] | None = None,
 ) -> dict[str, object]:
-    """Attach or replace a template filestore from a directory, rsync source, or archive."""
+    """Attach or replace a template filestore from a directory, rsync source, or archive.
+
+    ``lock``, when given, is entered only around the remount-and-swap window —
+    never around staging. Staging pulls the source into place (an rsync of a
+    multi-gigabyte filestore, or unpacking an archive) and touches nothing but
+    a private staging directory, so the caller's team lock has no reason to
+    cover it; only replacing the lower layer under live overlays does. The
+    caller keeps a template-scoped lock for the whole call, which is what stops
+    a second attach or an import from racing on this same template.
+    """
     from oduflow.docker_ops import env_ops
 
     validate_template_name(template_name)
@@ -3836,13 +3846,19 @@ def attach_filestore(
 
         target_filestore = team.get_template_filestore_path(template_name)
         previous_filestore = os.path.join(staging_root, "previous")
-        with env_ops.remount_template_overlays(
-            client,
-            settings,
-            team,
-            template_name,
-            reset_upper=reset_env_changes,
-        ) as remount:
+        # Staging is done; from here the template's lower layer changes under
+        # live environments, which is exactly what the team lock exists for.
+        swap_lock = lock() if lock is not None else contextlib.nullcontext()
+        with (
+            swap_lock,
+            env_ops.remount_template_overlays(
+                client,
+                settings,
+                team,
+                template_name,
+                reset_upper=reset_env_changes,
+            ) as remount,
+        ):
             had_previous = os.path.exists(target_filestore)
             os.makedirs(os.path.dirname(target_filestore), exist_ok=True)
             if had_previous:
@@ -4226,48 +4242,58 @@ def import_template(
     )
 
     download_start = time.monotonic()
-    tmp_backup = os.path.join(team.data_dir, f"tmp_odoo_backup.{backup_format}")
+    # Unique per call: imports lock per *template* (locking.template_lock_key),
+    # not per team, so two imports into different templates run concurrently
+    # and must not share one download path. Removed in the finally below, which
+    # opens before the file is created and closes after the last read of it: the
+    # path is unique, so nothing would ever overwrite a leftover, and any failure
+    # in between — a quota-exhausted makedirs right after writing gigabytes, say
+    # — would orphan it permanently.
+    tmp_backup = os.path.join(
+        team.data_dir, f"tmp_odoo_backup.{uuid.uuid4().hex}.{backup_format}"
+    )
     os.makedirs(team.data_dir, exist_ok=True)
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            if "zip" not in content_type and "octet" not in content_type:
-                body = resp.read(2000).decode("utf-8", errors="replace")
-                raise ExternalCommandError(
-                    "odoo backup",
-                    -1,
-                    f"Unexpected response (Content-Type: {content_type}): {body}",
-                )
-            with open(tmp_backup, "wb") as f:
-                while True:
-                    chunk = resp.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-    except urllib.error.HTTPError as e:
-        body = e.read(2000).decode("utf-8", errors="replace")
-        raise ExternalCommandError("odoo backup", e.code, f"HTTP {e.code}: {body}")
-
-    download_elapsed = time.monotonic() - download_start
-    backup_size_mb = os.path.getsize(tmp_backup) / (1024 * 1024)
-    logger.info(
-        "Backup downloaded in %.1fs (%.1f MB)", download_elapsed, backup_size_mb
-    )
-
-    # 3. Stage dump/filestore files
-    from oduflow.docker_ops import env_ops
-
-    template_sql_path = os.path.join(
-        template_dir, "dump.pgdump" if without_filestore else "dump.sql"
-    )
-    template_filestore_path = team.get_template_filestore_path(template_name)
-
-    os.makedirs(template_dir, exist_ok=True)
 
     manifest = {}
     affected_envs: list[str] = []
     remount_failures: list[tuple[str, str]] = []
     try:
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "zip" not in content_type and "octet" not in content_type:
+                    body = resp.read(2000).decode("utf-8", errors="replace")
+                    raise ExternalCommandError(
+                        "odoo backup",
+                        -1,
+                        f"Unexpected response (Content-Type: {content_type}): {body}",
+                    )
+                with open(tmp_backup, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+        except urllib.error.HTTPError as e:
+            body = e.read(2000).decode("utf-8", errors="replace")
+            raise ExternalCommandError("odoo backup", e.code, f"HTTP {e.code}: {body}")
+
+        download_elapsed = time.monotonic() - download_start
+        backup_size_mb = os.path.getsize(tmp_backup) / (1024 * 1024)
+        logger.info(
+            "Backup downloaded in %.1fs (%.1f MB)", download_elapsed, backup_size_mb
+        )
+
+        # 3. Stage dump/filestore files
+        from oduflow.docker_ops import env_ops
+
+        template_sql_path = os.path.join(
+            template_dir, "dump.pgdump" if without_filestore else "dump.sql"
+        )
+        template_filestore_path = team.get_template_filestore_path(template_name)
+
+        os.makedirs(template_dir, exist_ok=True)
+
         # Swap the template's filestore (the overlay lower layer) non-destructively:
         # live overlay envs are unmounted (keeping their upper deltas) and remounted
         # against the new lower on exit. See issue #2.
@@ -4994,6 +5020,13 @@ def delete_template(
     # the overlay lower layer for those envs (see env_ops._mount_filestore), so
     # deleting it would yank the base out from under a live overlay and break it.
     # Mirrors the same guard in rename_template.
+    #
+    # This scan is a check-then-act, and the window is real: create_environment
+    # clones the template database before its container exists, so an in-flight
+    # create is invisible here. Closing it is why the MCP tool holds the *team*
+    # lock — team↔environment mutual exclusion is the only thing that keeps a
+    # concurrent create out — even though this function remounts nothing. Call
+    # it from anywhere else and you inherit that race.
     filters = {
         "label": [
             f"{settings.managed_label}=true",
@@ -5067,6 +5100,8 @@ def rename_template(
     new_db = get_template_db_name(new_name, team.team_id)
 
     # Refuse if any environment references this template (immutable label).
+    # Same check-then-act window as delete_template above, closed by the same
+    # team lock on the caller's side.
     filters = {
         "label": [
             f"{settings.managed_label}=true",

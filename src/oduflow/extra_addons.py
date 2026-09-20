@@ -757,24 +757,6 @@ def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
             env=GIT_ENV,
         )
         refspecs = [line.strip() for line in result.stdout.splitlines()]
-        if "+refs/heads/*:refs/heads/*" not in refspecs and refspec not in refspecs:
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    path,
-                    "config",
-                    "--add",
-                    "remote.origin.fetch",
-                    refspec,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=GIT_ENV,
-            )
-
         cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
         try:
             # --depth 1: the repo is shallow; without it a branch new to the
@@ -794,6 +776,24 @@ def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
         except subprocess.TimeoutExpired:
             raise ExternalCommandError(
                 f"git fetch origin {branch}", -1, "Fetch timed out (120s)."
+            )
+
+        if "+refs/heads/*:refs/heads/*" not in refspecs and refspec not in refspecs:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    path,
+                    "config",
+                    "--add",
+                    "remote.origin.fetch",
+                    refspec,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=GIT_ENV,
             )
 
         logger.info("Extra repo '%s': now tracking branch '%s'", name, branch)

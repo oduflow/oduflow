@@ -88,7 +88,7 @@ def test_dashboard_renders_version_and_diagnostics(tmp_path):
 
     assert "__ODUFLOW_VERSION__" not in html
     assert "__ODUFLOW_DIAGNOSTICS__" not in html
-    assert f'class="brand-version">v{feedback.oduflow_version()}<' in html
+    assert f'onclick="openVersionModal()">v{feedback.oduflow_version()}<' in html
 
 
 def test_feedback_link_endpoint_builds_a_prefilled_url(tmp_path):

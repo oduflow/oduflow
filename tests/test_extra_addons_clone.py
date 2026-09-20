@@ -297,3 +297,14 @@ class TestSharedCheckoutCache:
         assert not cache_root.exists()
         assert not (tmp_path / "data" / "shared_repos" / "enterprise").exists()
         assert not os.path.exists(checkout["path"])
+
+
+def test_failed_track_branch_does_not_break_subsequent_updates(team, tmp_path):
+    from oduflow.errors import ExternalCommandError
+
+    url = _make_git_source(tmp_path)
+    clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+    with pytest.raises(ExternalCommandError):
+        track_branch(team, "enterprise", "missing")
+    fetch_extra_repo(team, "enterprise")
+    assert set(list_extra_repos(team)[0]["branches"]) == {"18.0"}

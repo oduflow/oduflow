@@ -35,6 +35,7 @@ environments keep their upper-layer deltas.
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
+from oduflow.fsutil import atomic_write_private_json
 from oduflow.naming import get_template_db_name, validate_template_name
 from oduflow.settings import Settings, TeamSettings
 
@@ -290,17 +292,20 @@ def _canonical_dump_name(name: str) -> str:
 
 def _sniff_dump_name(path: str) -> str:
     """Target name (one of ``_DUMP_NAMES``) for an arbitrary dump file."""
-    from oduflow.docker_ops.system_ops import _is_text_dump
-
     with open(path, "rb") as f:
         gz = f.read(2) == b"\x1f\x8b"
-    base = "dump.sql" if _is_text_dump(path) else "dump.pgdump"
+    opener = gzip.open if gz else open
+    with opener(path, "rb") as f:
+        base = "dump.pgdump" if f.read(5) == b"PGDMP" else "dump.sql"
     return base + (".gz" if gz else "")
 
 
 def _safe_join(base: str, rel: str) -> str | None:
     """Join ``rel`` under ``base``; None when it would escape (key-slip)."""
-    target = os.path.normpath(os.path.join(base, rel))
+    if os.path.isabs(rel) or any(part in (".", "..", "") for part in rel.split("/")):
+        return None
+    target = os.path.realpath(os.path.join(base, rel))
+    base = os.path.realpath(base)
     if target != base and not target.startswith(base + os.sep):
         return None
     return target
@@ -408,7 +413,7 @@ def _link_one(src: str, target: str) -> None:
     if os.path.exists(tmp):
         os.remove(tmp)
     try:
-        os.link(src, tmp)
+        os.link(os.path.realpath(src), tmp)
     except OSError:
         shutil.copy2(src, tmp)
     os.replace(tmp, target)
@@ -449,8 +454,19 @@ def _check_fresh_conflicts(
             f"Template database already exists: {tpl_db}. "
             "Pass overwrite=true to re-sync it from the source."
         )
-    # Replacement syncs are not gated, mirroring refresh/reload.
+    # Fresh databases consume quota.
     system_ops.check_db_quota(client, settings, team)
+
+
+def _check_overwrite_quota(
+    settings: Settings, team: TeamSettings, name: str, client: Any
+) -> None:
+    from oduflow.docker_ops import system_ops
+
+    if not system_ops._db_exists(
+        client, settings, get_template_db_name(name, team.team_id)
+    ):
+        system_ops.check_db_quota(client, settings, team)
 
 
 def _dump_unchanged(
@@ -460,6 +476,8 @@ def _dump_unchanged(
     dump: _SourceDump,
     carried: dict[str, Any],
     client: Any,
+    source_url: str,
+    source_endpoint: str = "",
 ) -> bool:
     """An unchanged dump (same token + size as the last sync from this
     source) with a live template DB skips the fetch and the reload —
@@ -469,6 +487,8 @@ def _dump_unchanged(
     tpl_db = get_template_db_name(template_name, team.team_id)
     return bool(
         dump.token
+        and carried.get("source_url") == source_url
+        and carried.get("source_endpoint", "") == source_endpoint
         and carried.get("source_dump_etag") == dump.token
         and int(carried.get("source_dump_bytes") or -1) == dump.size
         and os.path.isfile(team.get_template_sql_path(template_name))
@@ -513,29 +533,23 @@ def _promote_and_reload(
     live_fs = os.path.normpath(team.get_template_filestore_path(template_name))
     staged_dump = os.path.join(staging, dump_name)
 
-    chown_image = str(metadata.get("odoo_image") or "")
-    with env_ops.remount_template_overlays(
-        client, settings, team, template_name
-    ) as remount:
-        os.makedirs(tpl_dir, exist_ok=True)
-        if syncing_filestore:
-            if os.path.exists(live_fs):
-                shutil.rmtree(live_fs)
-            os.rename(staging_fs, live_fs)
-        elif not os.path.isdir(live_fs):
-            os.makedirs(live_fs, exist_ok=True)
-        if reload_db:
-            for stale in _DUMP_NAMES:
-                stale_path = os.path.join(tpl_dir, stale)
-                if os.path.isfile(stale_path):
-                    os.remove(stale_path)
-            os.rename(staged_dump, os.path.join(tpl_dir, dump_name))
-        if chown_image and syncing_filestore:
-            _chown_filestore(client, chown_image, live_fs)
-
     restore_seconds: object = 0
     if reload_db:
-        result = system_ops.reload_template(settings, team, template_name=template_name)
+        # Invalidate the old source fingerprint before a destructive DB reload.
+        # On failure, retrying the old source must not skip a partial database.
+        carried = _load_carried_metadata(team, template_name)
+        carried.pop("source_dump_etag", None)
+        os.makedirs(tpl_dir, exist_ok=True)
+        atomic_write_private_json(
+            team.get_template_metadata_path(template_name), carried
+        )
+        result = system_ops.reload_template(
+            settings,
+            team,
+            template_name=template_name,
+            dump_path=staged_dump,
+            persist_dump=False,
+        )
         restore_seconds = result.get("restore_seconds", 0)
         manifest = system_ops._read_template_manifest_from_db(
             client, settings, str(result["template_db"])
@@ -546,11 +560,31 @@ def _promote_and_reload(
         metadata["modules"] = manifest.get("modules", {})
         if not metadata.get("odoo_image") and major:
             metadata["odoo_image"] = f"odoo:{major}"
-        if not chown_image and metadata.get("odoo_image") and syncing_filestore:
-            # Fresh import: the Odoo version was unknown until the dump was
-            # restored, so the in-guard chown above was skipped. A template
-            # that did not exist has no live overlay environments, so
-            # chowning after the promote is safe.
+
+    with env_ops.remount_template_overlays(
+        client, settings, team, template_name
+    ) as remount:
+        os.makedirs(tpl_dir, exist_ok=True)
+        if syncing_filestore:
+            previous_fs = os.path.join(staging, "previous-filestore")
+            had_previous = os.path.exists(live_fs)
+            if had_previous:
+                os.replace(live_fs, previous_fs)
+            try:
+                os.replace(staging_fs, live_fs)
+            except BaseException:
+                if had_previous:
+                    os.replace(previous_fs, live_fs)
+                raise
+        elif not os.path.isdir(live_fs):
+            os.makedirs(live_fs, exist_ok=True)
+        if reload_db:
+            os.replace(staged_dump, os.path.join(tpl_dir, dump_name))
+            for stale in _SOURCE_DUMP_NAMES:
+                stale_path = os.path.join(tpl_dir, stale)
+                if stale != dump_name and os.path.isfile(stale_path):
+                    os.remove(stale_path)
+        if metadata.get("odoo_image") and syncing_filestore:
             _chown_filestore(client, str(metadata["odoo_image"]), live_fs)
 
     metadata["includes_filestore"] = os.path.isdir(live_fs) and bool(
@@ -571,7 +605,26 @@ def _promote_and_reload(
     }
 
 
-def _stage_dump_check(staging: str, dump: _SourceDump) -> tuple[str, bool]:
+def _dump_identity(dump: _SourceDump, source_id: str) -> dict[str, object]:
+    return {
+        "source": source_id,
+        "key": dump.key,
+        "token": dump.token,
+        "size": dump.size,
+    }
+
+
+def _record_staged_dump(staging: str, dump: _SourceDump, source_id: str) -> None:
+    # Record only after the atomic download/copy completed. An interrupted
+    # replacement must never certify the previous same-sized dump.
+    atomic_write_private_json(
+        os.path.join(staging, "dump-source.json"), _dump_identity(dump, source_id)
+    )
+
+
+def _stage_dump_check(
+    staging: str, dump: _SourceDump, source_id: str
+) -> tuple[str, bool]:
     """Return (staged dump path, whether it still needs fetching).
 
     The dump stages under its canonical target name, so a ``db.dump``
@@ -579,8 +632,16 @@ def _stage_dump_check(staging: str, dump: _SourceDump) -> tuple[str, bool]:
     """
     target_name = _canonical_dump_name(dump.name)
     staged_dump = os.path.join(staging, target_name)
+    try:
+        with open(os.path.join(staging, "dump-source.json")) as f:
+            previous = json.load(f)
+    except (OSError, ValueError):
+        previous = None
     needed = not (
-        os.path.isfile(staged_dump) and os.path.getsize(staged_dump) == dump.size
+        dump.token
+        and previous == _dump_identity(dump, source_id)
+        and os.path.isfile(staged_dump)
+        and os.path.getsize(staged_dump) == dump.size
     )
     if needed:
         # Drop stale staged dumps under other names so exactly one survives.
@@ -655,6 +716,8 @@ def import_from_s3_prefix(
     client = get_client()
     if not overwrite:
         _check_fresh_conflicts(settings, team, template_name, client)
+    else:
+        _check_overwrite_quota(settings, team, template_name, client)
 
     s3 = _make_source_client(
         settings,
@@ -675,11 +738,15 @@ def import_from_s3_prefix(
 
     reload_db = not (
         overwrite
-        and _dump_unchanged(settings, team, template_name, dump, carried, client)
+        and _dump_unchanged(
+            settings, team, template_name, dump, carried, client, source_url, endpoint
+        )
     )
     dump_fetch_needed = False
     if reload_db:
-        staged_dump, dump_fetch_needed = _stage_dump_check(staging, dump)
+        staged_dump, dump_fetch_needed = _stage_dump_check(
+            staging, dump, source_url + "|" + endpoint
+        )
 
     plan = _plan_filestore(remote_fs, staging_fs, live_fs, overwrite=overwrite)
 
@@ -713,7 +780,10 @@ def import_from_s3_prefix(
                 f"{dump.size} bytes, got {os.path.getsize(staged_dump)}.",
             )
 
+    if dump_fetch_needed:
+        _record_staged_dump(staging, dump, source_url + "|" + endpoint)
     metadata = _source_metadata(carried, source_url=source_url, dump=dump)
+    metadata["source_endpoint"] = endpoint
     final = _promote_and_reload(
         settings,
         team,
@@ -721,7 +791,7 @@ def import_from_s3_prefix(
         client=client,
         staging=staging,
         staging_fs=staging_fs,
-        syncing_filestore=bool(remote_fs),
+        syncing_filestore=not without_filestore,
         reload_db=reload_db,
         dump_name=_canonical_dump_name(dump.name),
         metadata=metadata,
@@ -760,6 +830,8 @@ def import_from_local_path(
     client = get_client()
     if not overwrite:
         _check_fresh_conflicts(settings, team, template_name, client)
+    else:
+        _check_overwrite_quota(settings, team, template_name, client)
 
     if os.path.isfile(source):
         listing = _SourceListing(
@@ -778,11 +850,13 @@ def import_from_local_path(
     live_fs = os.path.normpath(team.get_template_filestore_path(template_name))
     reload_db = not (
         overwrite
-        and _dump_unchanged(settings, team, template_name, dump, carried, client)
+        and _dump_unchanged(
+            settings, team, template_name, dump, carried, client, source
+        )
     )
     dump_fetch_needed = False
     if reload_db:
-        staged_dump, dump_fetch_needed = _stage_dump_check(staging, dump)
+        staged_dump, dump_fetch_needed = _stage_dump_check(staging, dump, source)
 
     plan = _plan_filestore(remote_fs, staging_fs, live_fs, overwrite=overwrite)
 
@@ -810,8 +884,10 @@ def import_from_local_path(
     _link_filestore(plan.to_fetch)
     if dump_fetch_needed:
         _link_one(dump.key, staged_dump)
+        _record_staged_dump(staging, dump, source)
 
     metadata = _source_metadata(carried, source_url=source, dump=dump)
+    metadata.pop("source_endpoint", None)
     final = _promote_and_reload(
         settings,
         team,
@@ -819,7 +895,7 @@ def import_from_local_path(
         client=client,
         staging=staging,
         staging_fs=staging_fs,
-        syncing_filestore=bool(remote_fs),
+        syncing_filestore=not without_filestore and os.path.isdir(source),
         reload_db=reload_db,
         dump_name=_canonical_dump_name(dump.name),
         metadata=metadata,

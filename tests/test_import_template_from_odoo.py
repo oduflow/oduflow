@@ -237,3 +237,62 @@ def test_import_from_odoo_existing_template_db_fails_before_network(
 
     urlopen.assert_not_called()
     quota.assert_not_called()
+
+
+def _tmp_backups(tmp_path) -> list[str]:
+    return [p for p in os.listdir(tmp_path) if p.startswith("tmp_odoo_backup.")]
+
+
+def test_a_failure_after_the_download_leaves_no_orphan(monkeypatch, tmp_path):
+    """The scratch path is unique per call, so nothing ever overwrites a
+    leftover: a multi-gigabyte download followed by an out-of-space makedirs
+    would strand it on disk forever."""
+    team, settings = _team_and_settings(tmp_path)
+    _patch_import_dependencies(monkeypatch, [])
+
+    real_makedirs = os.makedirs
+
+    def failing_makedirs(path, *args, **kwargs):
+        if path == team.get_template_dir("imported"):
+            raise OSError(28, "No space left on device")
+        return real_makedirs(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "makedirs", failing_makedirs)
+
+    with pytest.raises(OSError):
+        system_ops.import_template(
+            settings,
+            team,
+            source="https://odoo.example.com",
+            master_pwd="master",
+            db_name="prod",
+            template_name="imported",
+        )
+
+    assert _tmp_backups(tmp_path) == []
+
+
+def test_a_failed_download_leaves_no_orphan(monkeypatch, tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    _patch_import_dependencies(monkeypatch, [])
+
+    class _DyingResponse(_Response):
+        def read(self, size: int = -1) -> bytes:
+            raise OSError("connection reset mid-download")
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=0: _DyingResponse(b"", "application/zip"),
+    )
+
+    with pytest.raises(OSError):
+        system_ops.import_template(
+            settings,
+            team,
+            source="https://odoo.example.com",
+            master_pwd="master",
+            db_name="prod",
+            template_name="imported",
+        )
+
+    assert _tmp_backups(tmp_path) == []

@@ -63,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.1"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -82,7 +82,7 @@ port_range = [50000, 50100]           # port range for Odoo containers
 
 ### First launch
 
-On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`; the MCP token and Web Dashboard password are also printed in the startup log.
+On first launch Oduflow automatically creates a default `oduflow.toml` at `/etc/oduflow/oduflow.toml` when writable, otherwise at `~/.oduflow/conf/oduflow.toml`, and initializes shared infrastructure (Docker network, PostgreSQL, team directories). Fresh configs include generated `[database].password`, `[team.1].auth_token`, and `[team.1].ui_password`. The file is created with mode `0600` and the generated secrets are never printed to the log — read them from the config file itself.
 
 ### Upgrade
 
@@ -233,7 +233,7 @@ sanitization scripts followed by project scripts from
 
 ## Links
 
-- Repository: <https://github.com/oduist/oduflow>
+- Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
 - License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
 - Website: <https://oduflow.dev>

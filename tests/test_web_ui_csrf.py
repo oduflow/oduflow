@@ -1,8 +1,7 @@
 """CSRF protection for the web dashboard.
 
-The dashboard authenticates browsers with an ambient session cookie / Basic
-auth, so cross-site state-changing requests must be rejected. ``SameSite=Strict``
-is the first line of defence; ``BasicAuthMiddleware`` adds a server-side
+The dashboard authenticates browsers with an ambient session cookie, so cross-site state-changing requests must be rejected. ``SameSite=Strict``
+is the first line of defence; ``UIAuthMiddleware`` adds a server-side
 Origin/Referer backstop for unsafe HTTP methods and WebSocket handshakes.
 Non-browser clients (curl, the import shell script) send no Origin/Referer and
 are unaffected.
@@ -10,7 +9,6 @@ are unaffected.
 
 from __future__ import annotations
 
-import base64
 import tempfile
 
 from starlette.datastructures import Headers
@@ -19,7 +17,12 @@ from starlette.routing import Route, Router
 from starlette.testclient import TestClient
 
 from oduflow.settings import Settings, TeamSettings
-from oduflow.web_ui import _AUTH_USER, BasicAuthMiddleware, _is_cross_origin
+from oduflow.web_ui import (
+    _AUTH_COOKIE,
+    UIAuthMiddleware,
+    _is_cross_origin,
+    _make_ui_token,
+)
 
 _PW = "s3cret"
 
@@ -64,20 +67,17 @@ def _client() -> TestClient:
             Route("/api/dummy", ok, methods=["GET", "POST"]),
         ]
     )
-    app = BasicAuthMiddleware(router, lambda: settings)
-    return TestClient(app, base_url="http://testserver")
-
-
-def _basic() -> dict[str, str]:
-    blob = base64.b64encode(f"{_AUTH_USER}:{_PW}".encode()).decode()
-    return {"Authorization": f"Basic {blob}"}
+    app = UIAuthMiddleware(router, lambda: settings)
+    client = TestClient(app, base_url="http://testserver")
+    client.cookies.set(_AUTH_COOKIE, _make_ui_token(settings.teams["1"], settings))
+    return client
 
 
 def test_cross_origin_post_blocked():
     client = _client()
     r = client.post(
         "/api/dummy",
-        headers={**_basic(), "Origin": "https://evil.example"},
+        headers={"Origin": "https://evil.example"},
     )
     assert r.status_code == 403
     assert "Cross-origin" in r.json()["error"]
@@ -87,7 +87,7 @@ def test_same_origin_post_allowed():
     client = _client()
     r = client.post(
         "/api/dummy",
-        headers={**_basic(), "Origin": "http://testserver"},
+        headers={"Origin": "http://testserver"},
     )
     assert r.status_code == 200
     assert r.json() == {"ok": True}
@@ -95,12 +95,12 @@ def test_same_origin_post_allowed():
 
 def test_post_without_origin_allowed():
     client = _client()
-    r = client.post("/api/dummy", headers=_basic())
+    r = client.post("/api/dummy")
     assert r.status_code == 200
 
 
 def test_safe_method_never_blocked_by_csrf():
     # A cross-origin GET is not state-changing; the Origin check must not apply.
     client = _client()
-    r = client.get("/api/dummy", headers={**_basic(), "Origin": "https://evil.example"})
+    r = client.get("/api/dummy", headers={"Origin": "https://evil.example"})
     assert r.status_code == 200

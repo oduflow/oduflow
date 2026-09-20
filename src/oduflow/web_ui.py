@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
+import contextlib
 import hashlib
 import hmac
 import html
@@ -15,7 +15,7 @@ import socket
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -49,6 +49,8 @@ from oduflow import (
     production_registry,
     secret_store,
     ui_scope,
+    ui_totp,
+    updates,
 )
 from oduflow.docker_ops import (
     env_ops,
@@ -85,6 +87,7 @@ from oduflow.locking import (
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
+    template_lock_key,
     volume_lock_key,
 )
 from oduflow.naming import (
@@ -100,14 +103,13 @@ from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
-_AUTH_USER = "admin"
 _AUTH_COOKIE = "oduflow_ui_auth"
 # Reachable without authentication: the login flow and static brand assets
 # (so the login page can render its logo/favicon/fonts). /static/ serves only
 # vetted extensions from the packaged assets dir (fonts, icons, xterm).
 # /import-odoo.sh (the Odoo.sh client script) and the five import ingest
 # endpoints authenticate with a short-lived import token, not the UI password,
-# so they bypass Basic auth. They are listed as EXACT paths (never a prefix):
+# so they bypass UI session authentication. They are EXACT paths (not prefixes):
 # a prefix like "/api/templates/import/" would also expose sibling routes such
 # as /api/templates/{name}/delete with name="import" to unauthenticated calls.
 # NOTE: /api/templates/import-token (which mints the token) is deliberately NOT
@@ -215,13 +217,19 @@ def _password_fingerprint(secret: str, ui_password: str) -> str:
     ).hexdigest()
 
 
-def _make_ui_token(team: "TeamSettings", settings: Settings) -> str:
+def _make_ui_token(
+    team: "TeamSettings", settings: Settings, *, mfa_version: str | None = None
+) -> str:
     """Signed, timestamped session token for a team, stored as a cookie so
     WebSocket handshakes (which cannot send an Authorization header) can
     authenticate. Expires after `_SESSION_MAX_AGE`; carries a password
     fingerprint so a password change revokes it at once."""
     fingerprint = _password_fingerprint(_get_secret(settings), team.ui_password)
-    return _get_signer(settings).dumps([team.team_id, fingerprint])
+    if mfa_version is None:
+        # Convenience for password-only callers. MFA sessions may only be minted
+        # with the generation returned by a successful TOTP verification.
+        mfa_version = ui_totp.version(settings, team, password_only=True)
+    return _get_signer(settings).dumps([team.team_id, fingerprint, mfa_version])
 
 
 def _check_cookie_token(token: str, settings: Settings) -> "TeamSettings | None":
@@ -234,13 +242,18 @@ def _check_cookie_token(token: str, settings: Settings) -> "TeamSettings | None"
         data = _get_signer(settings).loads(token, max_age=_SESSION_MAX_AGE)
     except BadData:
         return None
-    if not (isinstance(data, list) and len(data) == 2):
+    if not (isinstance(data, list) and len(data) == 3):
         return None
-    team_id, fingerprint = data
+    team_id, fingerprint, mfa_version = data
     if not isinstance(team_id, str) or not isinstance(fingerprint, str):
         return None
     team = settings.teams.get(team_id)
     if not team or not team.ui_password:
+        return None
+    try:
+        if mfa_version != ui_totp.version(settings, team):
+            return None
+    except ui_totp.TOTPStateError:
         return None
     expected = _password_fingerprint(_get_secret(settings), team.ui_password)
     if not hmac.compare_digest(fingerprint, expected):
@@ -328,7 +341,7 @@ def _is_cross_origin(headers: Headers) -> bool:
     return netloc != host
 
 
-class BasicAuthMiddleware:
+class UIAuthMiddleware:
     def __init__(self, app: ASGIApp, get_settings: Callable[[], Settings]) -> None:
         self._app = app
         self._get_settings = get_settings
@@ -357,8 +370,6 @@ class BasicAuthMiddleware:
         if share:
             team = share[0]
             scoped_env = share[1]
-        else:
-            team = self._check_credentials(conn.headers.get("authorization", ""))
         if not team:
             token = conn.cookies.get(_AUTH_COOKIE)
             if token:
@@ -422,18 +433,6 @@ class BasicAuthMiddleware:
             response = RedirectResponse("/login", status_code=302)
             await response(scope, receive, send)
 
-    def _check_credentials(self, auth_header: str) -> "TeamSettings | None":
-        if not auth_header.startswith("Basic "):
-            return None
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode()
-            user, password = decoded.split(":", 1)
-        except Exception:
-            return None
-        if user != _AUTH_USER:
-            return None
-        return self._get_settings().get_team_by_ui_password(password)
-
 
 def _is_secure_request(request: Request) -> bool:
     """Whether the browser sees this connection as HTTPS, honouring a single
@@ -457,10 +456,8 @@ def _render_login(error: str = "") -> str:
     return page.replace("<!--ERROR-->", banner)
 
 
-async def _read_login_password(request: Request) -> str:
-    """Extract the password from a login POST, accepting either an HTML form
-    (application/x-www-form-urlencoded) or a JSON body. Parsed directly so the
-    UI needs no python-multipart dependency."""
+async def _read_login_credentials(request: Request) -> tuple[str, str]:
+    """Read form/JSON credentials without a multipart dependency."""
     import urllib.parse
 
     body = await request.body()
@@ -468,10 +465,16 @@ async def _read_login_password(request: Request) -> str:
         try:
             data = json.loads(body or b"{}")
         except (ValueError, TypeError):
-            return ""
-        return str((data or {}).get("password") or "").strip()
+            return "", ""
+        if not isinstance(data, dict):
+            return "", ""
+        return str(data.get("password") or "").strip(), str(
+            data.get("otp") or ""
+        ).strip()
     parsed = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
-    return (parsed.get("password", [""])[0]).strip()
+    return (parsed.get("password", [""])[0]).strip(), (
+        parsed.get("otp", [""])[0]
+    ).strip()
 
 
 _EXTERNAL_COMMAND_UI_ERROR = "Operation failed. Check server logs for details."
@@ -896,11 +899,11 @@ def _build_routes(
     import_staging_locks = _ImportStagingLocks()
 
     def _set_session_cookie(
-        response: Response, team: TeamSettings, request: Request
+        response: Response, team: TeamSettings, request: Request, mfa_version: str
     ) -> None:
         response.set_cookie(
             _AUTH_COOKIE,
-            _make_ui_token(team, get_settings()),
+            _make_ui_token(team, get_settings(), mfa_version=mfa_version),
             max_age=_SESSION_MAX_AGE,
             httponly=True,
             samesite="strict",
@@ -946,10 +949,7 @@ def _build_routes(
         settings = get_settings()
         team = getattr(request.state, "team", None)
         page = _render_dashboard(settings, team=team)
-        response = HTMLResponse(page)
-        if team is not None and team.ui_password:
-            _set_session_cookie(response, team, request)
-        return response
+        return HTMLResponse(page)
 
     def _team_for_share(
         settings: Settings, env_name: str, key: str, host: str
@@ -1045,15 +1045,44 @@ def _build_routes(
                     _render_login("Too many failed attempts. Try again later."),
                     status_code=429,
                 )
-            password = await _read_login_password(request)
+            if _is_cross_origin(request.headers):
+                return HTMLResponse(
+                    _render_login("Cross-origin request blocked."), status_code=403
+                )
+            password, code = await _read_login_credentials(request)
             team = settings.get_team_by_ui_password(password) if password else None
             if team is not None:
-                login_limiter.clear(client_ip)
-                response: Response = RedirectResponse("/", status_code=303)
-                _set_session_cookie(response, team, request)
-                return response
+                try:
+                    mfa_version = await run_in_threadpool(
+                        ui_totp.verify, settings, team, code
+                    )
+                except ui_totp.TOTPThrottled:
+                    return HTMLResponse(
+                        _render_login("Too many failed attempts. Try again later."),
+                        status_code=429,
+                    )
+                except (ui_totp.TOTPStateError, OSError):
+                    # Fail-closed: log the cause, or the operator sees a 503
+                    # with nothing in the log explaining what to restore/reset.
+                    logger.exception(
+                        "UI 2FA state unavailable for team %s", team.team_id
+                    )
+                    return HTMLResponse(
+                        _render_login(
+                            "Sign-in unavailable. Contact the server administrator."
+                        ),
+                        status_code=503,
+                    )
+                if mfa_version is not None:
+                    login_limiter.clear(client_ip)
+                    response: Response = RedirectResponse("/", status_code=303)
+                    _set_session_cookie(response, team, request, mfa_version)
+                    return response
             login_limiter.record_failure(client_ip)
-            return HTMLResponse(_render_login("Invalid password."), status_code=401)
+            return HTMLResponse(
+                _render_login("Invalid password or authenticator code."),
+                status_code=401,
+            )
         return HTMLResponse(_render_login())
 
     def logout(request: Request) -> RedirectResponse:
@@ -1313,6 +1342,13 @@ def _build_routes(
             result = await _offload(operation, settings, team, branch, *modules)
             exit_code = result["exit_code"]
             applied = result.get("modules", modules)
+            # "all" is Odoo's keyword for every installed module, not a module
+            # name, so the result reads as a phrase instead of a one-item list.
+            applied_label = (
+                "all installed modules"
+                if action == "upgrade" and applied == [odoo_ops.ALL_MODULES]
+                else ", ".join(applied)
+            )
             restart_warning = ""
             container_restarted: bool | None = None
             # A failed run is still a completed request: the Odoo log is the
@@ -1324,8 +1360,7 @@ def _build_routes(
                     await _offload(env_ops.restart_environment, settings, branch, team)
                     container_restarted = True
                     message = (
-                        f"{completed_verb}: {', '.join(applied)}. "
-                        "Odoo container restarted."
+                        f"{completed_verb}: {applied_label}. Odoo container restarted."
                     )
                 except FlowError as e:
                     container_restarted = False
@@ -1336,7 +1371,7 @@ def _build_routes(
                         f"Modules were {action}d, but the Odoo container could not "
                         f"be restarted. {restart_error}"
                     )
-                    message = f"{completed_verb}: {', '.join(applied)}. Restart failed."
+                    message = f"{completed_verb}: {applied_label}. Restart failed."
                 except Exception:
                     container_restarted = False
                     logger.exception(
@@ -1348,10 +1383,10 @@ def _build_routes(
                         f"Modules were {action}d, but the Odoo container could not "
                         "be restarted. Check server logs for details."
                     )
-                    message = f"{completed_verb}: {', '.join(applied)}. Restart failed."
+                    message = f"{completed_verb}: {applied_label}. Restart failed."
             else:
                 verb = "Install" if action == "install" else "Upgrade"
-                message = f"{verb} failed: {', '.join(applied)}."
+                message = f"{verb} failed: {applied_label}."
             payload: dict[str, Any] = {
                 "action": action,
                 "message": message,
@@ -1643,6 +1678,36 @@ def _build_routes(
         finally:
             locks.release_env(branch)
 
+    @contextlib.contextmanager
+    def _template_locks(
+        team: TeamSettings, *names: str, operation: str, team_wide: bool
+    ) -> Iterator[None]:
+        """Take the same locks a template mutation takes on the MCP side.
+
+        Every mutation holds each touched template's own key, so the dashboard
+        and the MCP tools exclude each other on the template itself. Only
+        ``team_wide=True`` adds the team lock, and only two kinds of operation
+        need it: those that remount live environments' overlay filestores
+        (publish, refresh, attach, finalize) and delete/rename, whose
+        dependent-environment scan is a check-then-act against a concurrent
+        create_environment. Importing a brand-new template and editing
+        metadata.json are neither, and take the key alone.
+        """
+        with contextlib.ExitStack() as stack:
+            if team_wide:
+                stack.enter_context(locks.team_lock(team.team_id, operation=operation))
+            # dict.fromkeys de-duplicates while keeping order: a rename to the
+            # template's own name passes the same name twice, and entering one
+            # key twice would report a phantom concurrent operation instead of
+            # the ConflictError that rename really deserves.
+            for name in dict.fromkeys(names):
+                stack.enter_context(
+                    locks.env_lock(
+                        template_lock_key(team.team_id, name), operation=operation
+                    )
+                )
+            yield
+
     async def api_save_as_template(request: Request) -> JSONResponse:
         branch = request.path_params["branch"]
         team = _get_ui_team(request)
@@ -1664,21 +1729,21 @@ def _build_routes(
         # Team lock (not just the env): publishing can remount other envs' overlay
         # filestores, so it must serialize against the whole team like the MCP tool.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            activity.touch(team, branch)
-            # No overwrite from the UI: publishing over an existing template is a
-            # deliberate re-baseline reserved for the MCP tool, so a duplicate name
-            # here raises ConflictError (surfaced to the client by _error_response).
-            result = await _offload(
-                system_ops.publish_env_as_template,
-                get_settings(),
-                team,
-                branch,
-                template_name=template_name,
-            )
+            with _template_locks(
+                team, template_name, operation="save_as_template", team_wide=True
+            ):
+                activity.touch(team, branch)
+                # No overwrite from the UI: publishing over an existing template
+                # is a deliberate re-baseline reserved for the MCP tool, so a
+                # duplicate name here raises ConflictError (surfaced to the
+                # client by _error_response).
+                result = await _offload(
+                    system_ops.publish_env_as_template,
+                    get_settings(),
+                    team,
+                    branch,
+                    template_name=template_name,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -1700,8 +1765,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     async def _template_from_production(team: TeamSettings, prod_name: str) -> str:
         """Resolve ``from_production`` to its managed ``prod-<name>`` template.
@@ -2097,27 +2160,31 @@ def _build_routes(
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+        # New templates need only their own key; replacements also protect
+        # environments while changing their overlay lower layer.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.import_template,
-                get_settings(),
+            with _template_locks(
                 team,
-                source=source,
-                master_pwd=master_pwd,
-                db_name=db_name,
-                template_name=template_name,
-                without_filestore=without_filestore,
-                overwrite=overwrite,
-                refresh=refresh,
-                s3_endpoint=s3_endpoint,
-                s3_access_key=s3_access_key,
-                s3_secret_key=s3_secret_key,
-                s3_region=s3_region,
-            )
+                template_name,
+                operation="import_template",
+                team_wide=overwrite or refresh,
+            ):
+                result = await _offload(
+                    system_ops.import_template,
+                    get_settings(),
+                    team,
+                    source=source,
+                    master_pwd=master_pwd,
+                    db_name=db_name,
+                    template_name=template_name,
+                    without_filestore=without_filestore,
+                    overwrite=overwrite,
+                    refresh=refresh,
+                    s3_endpoint=s3_endpoint,
+                    s3_access_key=s3_access_key,
+                    s3_secret_key=s3_secret_key,
+                    s3_region=s3_region,
+                )
             payload = {
                 "template_name": result.get("template_name"),
                 "source_url": result.get("source_url"),
@@ -2156,18 +2223,15 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_template_delete(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         team = _get_ui_team(request)
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.delete_template(get_settings(), team, name)
+            with _template_locks(
+                team, name, operation="delete_template", team_wide=True
+            ):
+                result = system_ops.delete_template(get_settings(), team, name)
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2176,8 +2240,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     async def api_template_rename(request: Request) -> JSONResponse:
         name = request.path_params["name"]
@@ -2193,14 +2255,16 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "new_name is required"}, status_code=400
             )
+        # Both names: the destination needs a key too, or an import into
+        # `new_name` could create that template between rename_template's
+        # "does the target exist?" check and its os.rename.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.rename_template, get_settings(), team, name, new_name
-            )
+            with _template_locks(
+                team, name, new_name, operation="rename_template", team_wide=True
+            ):
+                result = await _offload(
+                    system_ops.rename_template, get_settings(), team, name, new_name
+                )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:  # invalid template name
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -2211,8 +2275,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_template_metadata(request: Request) -> JSONResponse:
         name = request.path_params["name"]
@@ -2265,12 +2327,17 @@ def _build_routes(
                 {"ok": False, "error": "revision must be a string"}, status_code=400
             )
 
+        # Template key, not the team lock: this rewrites one metadata.json and
+        # remounts nothing. Concurrent editors are already rejected by the
+        # revision check inside update_template_metadata; the key is what keeps
+        # a publish or an import into this template from interleaving.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.update_template_metadata(team, name, content, revision)
+            with _template_locks(
+                team, name, operation="update_template_metadata", team_wide=False
+            ):
+                result = system_ops.update_template_metadata(
+                    team, name, content, revision
+                )
             return JSONResponse({"ok": True, **result})
         except ConflictError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
@@ -2283,8 +2350,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     # --- Import from Odoo.sh (push-based template ingest) ------------------
 
@@ -2292,8 +2357,8 @@ def _build_routes(
         """Read the import token from the Authorization: Bearer header only.
 
         A ``?token=`` query param is deliberately NOT accepted: these endpoints
-        bypass Basic auth, so the token is the sole credential, and tokens in
-        URLs leak into reverse-proxy/CDN access logs and Referer headers. The
+        bypass UI session authentication, so the token is the sole credential.
+        Tokens in URLs leak into proxy/CDN access logs and Referer headers. The
         official ``import-odoo.sh`` client always sends the Bearer header."""
         auth = request.headers.get("authorization", "")
         if auth.startswith("Bearer "):
@@ -2893,22 +2958,27 @@ def _build_routes(
                 },
                 status_code=400,
             )
+        # Team lock: unlike the pull-based import, finalize can promote into an
+        # existing template and so remounts live environments' overlays. The
+        # uploads that precede it stay lock-free — only this swap is team-wide.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.finalize_imported_template(
-                get_settings(),
+            with _template_locks(
                 team,
                 template_name,
-                staging_dir=team.get_import_staging_dir(template_name),
-                addon_error_policy=str(
-                    record.get("addon_error_policy")
-                    or import_tokens.ADDON_ERROR_POLICY_STRICT
-                ),
-            )
-            import_tokens.invalidate(team, str(record["token"]))
+                operation="finalize_imported_template",
+                team_wide=True,
+            ):
+                result = system_ops.finalize_imported_template(
+                    get_settings(),
+                    team,
+                    template_name,
+                    staging_dir=team.get_import_staging_dir(template_name),
+                    addon_error_policy=str(
+                        record.get("addon_error_policy")
+                        or import_tokens.ADDON_ERROR_POLICY_STRICT
+                    ),
+                )
+                import_tokens.invalidate(team, str(record["token"]))
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2917,8 +2987,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_service_databases(request: Request) -> JSONResponse:
         try:
@@ -3862,6 +3930,17 @@ def _build_routes(
         settings = get_settings()
         info = get_license_info(settings.etc_dir)
         return JSONResponse({"ok": True, "license": info.to_dict()})
+
+    async def api_version(request: Request) -> JSONResponse:
+        """Compare the running version with the latest GitHub release.
+
+        Called only when a user clicks the version in the header, so the
+        outbound request to github.com is always something a person asked
+        for. Failures are reported in the payload, never as a 5xx: "could
+        not reach GitHub" is an answer the dialog shows, not a server error.
+        """
+        result = await _offload(updates.check_for_update)
+        return JSONResponse({"ok": True, "version": result.to_dict()})
 
     async def api_license_activate(request: Request) -> JSONResponse:
         try:
@@ -5909,25 +5988,25 @@ def _build_routes(
         # serializes against the whole team like the save_production_as_template
         # MCP tool. The production's own key on top keeps deploys, restores and
         # deletes of this production out of the dump.
-        try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
         prod_key = _prod_lock_key(team, name)
         try:
-            locks.acquire_env(prod_key, operation="save_production_as_template")
-        except BusyError as e:
-            locks.release_team(team.team_id)
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.publish_production_as_template,
-                get_settings(),
-                team,
-                name,
-                template_name=template_name,
-                overwrite=overwrite,
-            )
+            with (
+                _template_locks(
+                    team,
+                    template_name,
+                    operation="save_production_as_template",
+                    team_wide=True,
+                ),
+                locks.env_lock(prod_key, operation="save_production_as_template"),
+            ):
+                result = await _offload(
+                    system_ops.publish_production_as_template,
+                    get_settings(),
+                    team,
+                    name,
+                    template_name=template_name,
+                    overwrite=overwrite,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -5957,9 +6036,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_env(prod_key)
-            locks.release_team(team.team_id)
 
     def api_production_logs(request: Request) -> JSONResponse:
         try:
@@ -6336,6 +6412,7 @@ def _build_routes(
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/logo.png", logo, methods=["GET"]),
         Route("/static/{filename}", static_file, methods=["GET"]),
+        Route("/api/version", api_version, methods=["GET"]),
         Route("/api/license", api_license, methods=["GET"]),
         Route("/api/license/activate", api_license_activate, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),
@@ -6492,7 +6569,7 @@ def _build_routes(
         ),
         Route(
             # POST, not GET: this is the only endpoint that returns an
-            # unmasked secret, and the CSRF backstop in BasicAuthMiddleware
+            # unmasked secret, and the CSRF backstop in UIAuthMiddleware
             # only guards unsafe methods.
             "/api/service-databases/{name}/credentials",
             api_service_database_credentials,
@@ -6587,8 +6664,8 @@ def mount_web_ui(
     settings = get_settings()
     has_ui_passwords = any(t.ui_password for t in settings.teams.values())
     if has_ui_passwords:
-        sub_app = BasicAuthMiddleware(sub_app, get_settings)
-        logger.info("Web UI Basic Auth ENABLED (user: %s)", _AUTH_USER)
+        sub_app = UIAuthMiddleware(sub_app, get_settings)
+        logger.info("Web UI session authentication ENABLED")
     else:
         logger.warning("Web UI auth DISABLED (no ui_password set in any team)")
 

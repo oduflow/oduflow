@@ -24,6 +24,7 @@ from oduflow.naming import (
     slugify_branch,
     validate_env_name,
 )
+from oduflow.odoo_version import detect_odoo_major as _detect_odoo_major
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -35,6 +36,11 @@ logger = logging.getLogger("oduflow")
 # arbitrary Odoo CLI options into the invocation (argument injection).
 _MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
+# Odoo's own keyword for "every installed module" in ``odoo -u``. It is not a
+# module name: nothing in ir_module_module is called "all", so an upgrade that
+# asks for it skips the installed-module check instead of failing it.
+ALL_MODULES = "all"
+
 
 def _validate_module_names(modules: "list[str] | tuple[str, ...]") -> None:
     for m in modules:
@@ -45,43 +51,19 @@ def _validate_module_names(modules: "list[str] | tuple[str, ...]") -> None:
             )
 
 
-def _detect_odoo_major(container: Any, image_label: str) -> int | None:
-    """Best-effort major version of the Odoo running in *container*.
-
-    Fast path: parse the version out of the image tag stored in the
-    ``oduflow.image`` label (e.g. ``odoo:15.0`` → 15). For custom-tagged images
-    that carry no version (e.g. ``oduist/customer_odoo``) it falls back to asking
-    the already-running binary via ``odoo --version`` — authoritative and
-    independent of the image name. Returns ``None`` if the version can't be
-    determined.
-    """
-    image = container.labels.get(image_label, "")
-    match = re.search(r"odoo[:/](\d+)", image)
-    if match:
-        return int(match.group(1))
-
-    try:
-        _code, out = container.exec_run("odoo --version")
-        text = out.decode("utf-8") if isinstance(out, bytes) else str(out)
-        match = re.search(r"(\d+)\.\d+", text)
-        if match:
-            return int(match.group(1))
-    except Exception as exc:  # noqa: BLE001 - version detection is best-effort
-        logger.warning("Could not detect Odoo version from container: %s", exc)
-    return None
-
-
 def _longpoll_port_flag(container: Any, image_label: str) -> str:
     """CLI flag for the test server's long-polling/gevent port, per Odoo version.
 
-    Odoo 16.0 renamed ``--longpolling-port`` to ``--gevent-port``; the new flag
-    does not exist on 15.0 and earlier (Odoo aborts on the unknown option), while
-    the old name still works as a deprecated alias on 16+. Pick the flag the
-    running Odoo actually understands, defaulting to the modern ``--gevent-port``
-    when the version can't be determined.
+    Odoo 16.0 renamed ``--longpolling-port`` to ``--gevent-port``: the new flag
+    does not exist on 15.0 and earlier, the old one survived as a deprecated
+    alias on 16.0/17.0 and was **removed in 18.0**. Both mistakes are fatal —
+    Odoo aborts with ``error: no such option`` — so use the legacy name only for
+    a version confidently detected as 15 or older, and default to the modern
+    ``--gevent-port`` whenever the version is unknown (every image Oduflow can
+    still be pointed at today is 16+).
     """
     major = _detect_odoo_major(container, image_label)
-    if major is not None and major < 16:
+    if major is not None and major <= 15:
         return "--longpolling-port"
     return "--gevent-port"
 
@@ -315,7 +297,14 @@ def _run_odoo_module_command(
         )
 
     if flag == "-u":
-        _require_upgradeable_modules(settings, team, env_name, modules)
+        if ALL_MODULES in modules:
+            if len(modules) > 1:
+                raise ValueError(
+                    f"'{ALL_MODULES}' already upgrades every installed module "
+                    "and cannot be combined with other module names."
+                )
+        else:
+            _require_upgradeable_modules(settings, team, env_name, modules)
 
     modules_str = ",".join(modules)
     cmd = f"/entrypoint.sh odoo -d {env_db} --stop-after-init --no-http {flag} {modules_str}"
@@ -450,6 +439,7 @@ def _require_upgradeable_modules(
 def upgrade_odoo_modules(
     settings: Settings, team: TeamSettings, env_name: str, *modules: str
 ) -> dict[str, Any]:
+    """Upgrade *modules*, or every installed module when given ``"all"``."""
     return _run_odoo_module_command(settings, team, env_name, "-u", *modules)
 
 

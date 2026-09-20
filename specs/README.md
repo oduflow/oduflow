@@ -86,7 +86,10 @@ precursors).
 | [0064](0064-team-base-domain.md) | 2026-09-16 | Team base domain (flat env/service/production naming zone) and multi-domain productions |
 | [0065](0065-team-ssh-deploy-keys.md) | 2026-09-17 | Per-team SSH deploy keys: auto-generated keypair, public key in the dashboard, SSH repository URLs |
 | [0066](0066-production-wal-disk-protection.md) | 2026-09-19 | Production WAL monitoring, archive controls, persistent disk protection and fenced recovery |
-| [0067](0067-unified-template-import.md) | 2026-09-19 | Unified template import: one `import_template` door (Odoo pull, S3 prefix, local path, in-place refresh), staged promote, incremental `overwrite` re-sync |
+| [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
+| [0068](0068-production-mcp-credentials.md) | 2026-09-19 | Separate production MCP credentials, direct OduMCP access and automatic addon provisioning |
+
+| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite |
 
 ## Design docs
 

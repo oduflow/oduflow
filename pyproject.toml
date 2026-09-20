@@ -1,6 +1,6 @@
 [project]
 name = "oduflow"
-version = "1.78.0"
+version = "1.80.0"
 description = "AI-first Odoo development and CI tool with reusable database templates, powered by MCP"
 authors = [
     { name = "Oduist" }
@@ -12,6 +12,7 @@ keywords = ["odoo", "mcp", "docker", "development", "ci"]
 dependencies = [
     "fastmcp==2.14.3",
     "docker>=3.3.0",
+    "httpx>=0.28,<1",
     # Declarative Oduflow Stack manifests: typed validation + YAML input.
     "pydantic>=2.10,<3",
     "PyYAML>=6.0,<7",
@@ -19,6 +20,8 @@ dependencies = [
     "packaging",
     "cryptography",
     "itsdangerous",
+    "pyotp>=2.9,<3",
+    "qrcode>=7.4,<9",
     "tomli>=2.0; python_version < '3.11'",
     # Production backup subsystem: S3 client + per-chunk compression.
     "boto3",
@@ -36,9 +39,9 @@ dev = [
 [project.urls]
 Homepage = "https://oduflow.dev"
 Documentation = "https://oduflow.dev"
-Repository = "https://github.com/oduist/oduflow"
-Issues = "https://github.com/oduist/oduflow/issues"
-Changelog = "https://github.com/oduist/oduflow/releases"
+Repository = "https://github.com/oduflow/oduflow"
+Issues = "https://github.com/oduflow/oduflow/issues"
+Changelog = "https://github.com/oduflow/oduflow/releases"
 
 [project.scripts]
 oduflow = "oduflow.server:main"

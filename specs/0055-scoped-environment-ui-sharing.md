@@ -3,7 +3,7 @@
 **Status:** Adopted
 **Type:** Architecture / Web capability
 **First introduced:** 2026-09-02
-**Key code today:** `ui_scope.py` (default-deny allowlist, scoped cookie name), `env_share.py` (per-team `shares.json` secrets), `web_ui.py` (`scoped_env_page`, share cookie mint/verify, `BasicAuthMiddleware` scoped principal, `api_share_*`), `templates/dashboard.html` (`data-scoped-env`, Share modal, scoped card rendering)
+**Key code today:** `ui_scope.py` (default-deny allowlist, scoped cookie name), `env_share.py` (per-team `shares.json` secrets), `web_ui.py` (`scoped_env_page`, share cookie mint/verify, `UIAuthMiddleware` scoped principal, `api_share_*`), `templates/dashboard.html` (`data-scoped-env`, Share modal, scoped card rendering)
 
 ## Context
 

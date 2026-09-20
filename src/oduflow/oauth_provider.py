@@ -398,6 +398,15 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
         return await super().get_client(client_id)
 
     async def load_access_token(self, token: str) -> AccessToken | None:
+        from oduflow.production_access import PRODUCTION_SCOPE
+
+        production_team = self._settings.get_team_by_production_token(token)
+        if production_team is not None:
+            return AccessToken(
+                token=token,
+                client_id=production_team.team_id,
+                scopes=[PRODUCTION_SCOPE],
+            )
         # 1. Preseeded team auth_token (direct Bearer, non-expiring). The base
         # class types its store with the SDK's AccessToken, so normalise what
         # comes back — see _as_fastmcp_token.

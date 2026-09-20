@@ -18,7 +18,7 @@ logger = logging.getLogger("oduflow")
 
 TRACE: bool = False
 
-DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.0"
+DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.1"
 DEFAULT_PROD_POSTGRES_IMAGE = "oduist/oduflow-postgres:15-bookworm-1"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 
@@ -26,6 +26,17 @@ _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 # Set in server.main() before the server starts. Mostly informational;
 # local_path is gated by the allow_local_path setting.
 TRANSPORT: str = "stdio"
+
+
+def secret_matches(stored: str, candidate: str) -> bool:
+    """Constant-time secret comparison that tolerates any caller-supplied text.
+
+    ``hmac.compare_digest`` rejects ``str`` arguments outside ASCII with a
+    ``TypeError``. These comparisons run on raw request input (Bearer headers,
+    UI passwords), so a non-ASCII value must be an ordinary mismatch, not a
+    500 from the credential lookup.
+    """
+    return hmac.compare_digest(stored.encode("utf-8"), candidate.encode("utf-8"))
 
 
 def _normalize_agent_image(value: object) -> str:
@@ -89,6 +100,7 @@ class TeamSettings:
     # environments/services nest under the team hostname.
     base_domain: str = ""
     auth_token: str = ""
+    production_token: str = field(default="", repr=False)
     ui_password: str = ""
     port_range_start: int = 50000
     port_range_end: int = 50100
@@ -361,6 +373,8 @@ class Settings:
     # PostgreSQL cluster is physically separate from the dev one and is
     # provisioned lazily (first production or existing container).
     prod_enabled: bool = False
+    prod_odumcp_repo_url: str = "https://github.com/oduflow/oduflow-client-addons.git"
+    prod_odumcp_ref: str = "19.0"
     prod_db_container: str = "oduflow-prod-db"
     prod_db_volume: str = "oduflow-prod-db-data"
     prod_postgres_image: str = ""  # empty = managed PG15, or custom [database].image
@@ -413,8 +427,17 @@ class Settings:
         if not token:
             return None
         for team in self.teams.values():
-            if team.auth_token and hmac.compare_digest(team.auth_token, token):
+            if team.auth_token and secret_matches(team.auth_token, token):
                 return team
+        return None
+
+    def get_team_by_production_token(self, token: str) -> TeamSettings | None:
+        if token:
+            for team in self.teams.values():
+                if team.production_token and secret_matches(
+                    team.production_token, token
+                ):
+                    return team
         return None
 
     def get_team_by_hostname(self, hostname: str) -> TeamSettings | None:
@@ -533,7 +556,7 @@ class Settings:
         if not password:
             return None
         for team in self.teams.values():
-            if team.ui_password and hmac.compare_digest(team.ui_password, password):
+            if team.ui_password and secret_matches(team.ui_password, password):
                 return team
         return None
 
@@ -754,6 +777,24 @@ class Settings:
         if len(tokens) != len(set(tokens)):
             raise ValueError("Duplicate auth_token values across teams.")
 
+        production_tokens = [
+            t.production_token for t in self.teams.values() if t.production_token
+        ]
+        if any(
+            len(token) < 32
+            or len(token) > 512
+            or not token.isascii()
+            or any(c.isspace() for c in token)
+            for token in production_tokens
+        ):
+            raise ValueError(
+                "production_token must be 32..512 ASCII characters without whitespace."
+            )
+        if len(set(tokens + production_tokens)) != len(tokens + production_tokens):
+            raise ValueError(
+                "production_token must be distinct from all dev and production tokens."
+            )
+
         # Validate uniqueness of UI passwords
         passwords = [t.ui_password for t in self.teams.values() if t.ui_password]
         if len(passwords) != len(set(passwords)):
@@ -786,6 +827,21 @@ class Settings:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
 
+        for section in (
+            "server",
+            "routing",
+            "database",
+            "storage",
+            "lifecycle",
+            "agent",
+            "production",
+            "backup",
+            "team",
+            "route",
+        ):
+            if section in raw and not isinstance(raw[section], dict):
+                raise ValueError(f"[{section}] must be a table")
+
         server = raw.get("server", {})
         routing = raw.get("routing", {})
         tls = routing.get("tls", True)
@@ -797,6 +853,8 @@ class Settings:
         agent = raw.get("agent", {})
         production = raw.get("production", {})
         wal = production.get("wal", {})
+        if not isinstance(wal, dict):
+            raise ValueError("[production.wal] must be a table")
         wal_values = {
             "wal_upload_timeout": int(wal.get("upload_timeout", 120)),
             "wal_warn_after": int(wal.get("warn_after", 120)),
@@ -872,6 +930,8 @@ class Settings:
         teams: dict[str, TeamSettings] = {}
         for team_id_raw, team_cfg in teams_raw.items():
             team_id = str(team_id_raw)
+            if not isinstance(team_cfg, dict):
+                raise ValueError(f"[team.{team_id}] must be a table")
             team_data_dir = os.path.join(base_data_dir, f"team_{team_id}")
 
             port_range = team_cfg.get("port_range")
@@ -923,6 +983,7 @@ class Settings:
                 hostname=hostname,
                 base_domain=base_domain,
                 auth_token=str(team_cfg.get("auth_token", "")),
+                production_token=str(team_cfg.get("production_token", "")),
                 ui_password=str(team_cfg.get("ui_password", "")),
                 port_range_start=port_start,
                 port_range_end=port_end,
@@ -1006,6 +1067,13 @@ class Settings:
             auto_delete_hours=int(lifecycle.get("auto_delete_hours", 0)),
             prod_purge_hours=int(lifecycle.get("prod_purge_hours", 0)),
             prod_enabled=prod_enabled,
+            prod_odumcp_repo_url=str(
+                production.get(
+                    "odumcp_repo_url",
+                    "https://github.com/oduflow/oduflow-client-addons.git",
+                )
+            ),
+            prod_odumcp_ref=str(production.get("odumcp_ref", "19.0")),
             prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),
             prod_workers_cap=int(production.get("workers_cap", 8)),

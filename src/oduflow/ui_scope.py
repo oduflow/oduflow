@@ -11,7 +11,7 @@ Two pieces cooperate, both in ``web_ui``:
 - the ``/env/<name>`` route exchanges a share link's ``?key=`` (verified
   against ``oduflow.env_share``) for a signed, host-only cookie and renders the
   dashboard in scoped mode;
-- ``BasicAuthMiddleware`` resolves that cookie to a *scoped principal* — the
+- ``UIAuthMiddleware`` resolves that cookie to a *scoped principal* — the
   owning team plus one environment name — and runs every subsequent request
   through :func:`is_allowed` here.
 

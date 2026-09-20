@@ -288,3 +288,26 @@ def test_deleting_the_environment_drops_its_share(app, settings, monkeypatch):
     assert env_share.verify(team, _ENV, secret)
     env_share.remove(team, _ENV)
     assert env_share.get(team, _ENV) is None
+
+
+def test_shared_links_remain_scoped_without_otp_after_enrollment_and_reset(
+    app, settings
+):
+    import pyotp
+
+    from oduflow import ui_totp
+
+    url = _share_url(app)
+    existing = _visitor(app, url)
+    team = settings.teams["1"]
+    secret = pyotp.random_base32()
+    ui_totp.enroll(settings, team, secret, pyotp.TOTP(secret).now())
+    # Both an existing guest session and a newly opened link stay usable.
+    for visitor in (existing, _visitor(app, url)):
+        assert visitor.get(f"/env/{_ENV}").status_code == 200
+        assert visitor.get("/api/license").status_code == 403
+        assert visitor.get(f"/api/environments/{_ENV}/share").status_code == 403
+        assert web_ui._AUTH_COOKIE not in visitor.cookies
+    ui_totp.reset(settings, team)
+    assert existing.get(f"/env/{_ENV}").status_code == 200
+    assert existing.get("/api/license").status_code == 403

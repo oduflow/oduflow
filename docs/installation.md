@@ -88,12 +88,33 @@ After installation, the `oduflow` command is available globally.
 ### From source
 
 ```bash
-git clone https://github.com/oduist/oduflow.git
+git clone https://github.com/oduflow/oduflow.git
 cd oduflow
 uv sync          # or: python -m venv .venv && pip install -e .
 ```
 
 ### Upgrade
+
+Click the version next to **Oduflow** in the dashboard header to see whether a
+newer release exists. The dialog compares the installed version with the latest
+published release, names it, and links to its release notes. The check runs only
+on that click — Oduflow never polls GitHub on its own.
+
+The one-command path chains everything below and restarts the service:
+
+```bash
+oduflow self-update
+```
+
+It detects how Oduflow was installed and uses that installer (`uv tool upgrade`
+or `pip install --upgrade`), then reconciles bundled files and restarts the
+systemd service. It exits with an error inside a Docker container — a package
+upgraded inside the container would revert on the next recreate; pull the new
+image and recreate the container instead (see [Docker](docker.md)). Source
+checkouts, editable installs, and `uvx` runs are likewise refused with an
+explanation. See [CLI reference](cli.md#system-commands) for details.
+
+The manual steps, equivalent to what `self-update` runs:
 
 ```bash
 uv tool upgrade oduflow
@@ -153,8 +174,12 @@ If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
 `~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`, and
-`[team.1].ui_password`; the generated MCP token and Web Dashboard password are
-also printed in the startup log.
+`[team.1].ui_password`. The file is created with mode `0600` and the generated
+secrets are never printed to the log — read them from the config file:
+
+```bash
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+```
 
 ### Minimal configuration
 
@@ -211,7 +236,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # from the dashboard (Agent Chat / Agent CLI). Opt-in per team via
 # agent_enabled below.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.1"
 # claude_model = ""         # optional Claude model override; empty = CLI default
 # codex_model = ""          # optional Codex model override; empty = CLI default
 # opencode_model = ""       # optional provider/model override; empty = OpenCode default
@@ -317,7 +342,7 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 
 | Key | Default | Description |
 |---|---|---|
-| `[agent].image` | `oduist/oduflow-coder:0.3.0` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
+| `[agent].image` | `oduist/oduflow-coder:0.3.1` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
 | `[agent].claude_model` | *(empty)* | Optional Claude model override for the agent; empty = CLI default |
 | `[agent].codex_model` | *(empty)* | Optional Codex model override for the agent; empty = CLI default |
 | `[agent].opencode_model` | *(empty)* | Optional OpenCode model override in `provider/model` format; empty = OpenCode default |
@@ -325,14 +350,18 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 ### Production settings
 
 Production hosting is opt-in and is documented in detail in
-[Production Hosting](production.md). Production routes and the dashboard tab
-are registered only when `[production].enabled = true`.
+[Production Hosting](production.md). Production dashboard REST routes and the dashboard tab
+are registered only when `[production].enabled = true`. The `/production` MCP
+surface remains discoverable with a production credential and reports disabled
+hosting at call time.
 
 | Key | Default | Description |
 |---|---|---|
 | `[production].enabled` | `false` | Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing |
 | `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty uses `oduist/oduflow-postgres:15-bookworm-1` with CA certificates when `[database].image` is the default `postgres:15`; custom database images/majors are inherited |
 | `[production].walg_version` | *(empty)* | WAL-G release override. Empty uses the version pinned by Oduflow |
+| `[production].odumcp_repo_url` | `https://github.com/oduflow/oduflow-client-addons.git` | Fallback source for automatic OduMCP installation when production repositories do not provide the addon |
+| `[production].odumcp_ref` | `19.0` | Connector branch or tag; must contain Odoo 19 addon version 19.0.1.1.0 or later with managed-key support |
 | `[production].workers_cap` | `8` | Upper bound for automatically calculated Odoo workers; must be at least `1` |
 | `[production].wal` | *(defaults below)* | Nested `[production.wal]` table for cluster-wide WAL timeouts and disk protection; active whenever production hosting is enabled |
 | `[production.wal].upload_timeout` | `120` | Seconds per WAL upload before termination; forced kill follows after 5 seconds |
@@ -374,6 +403,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
+| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token |
 | `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
 | `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
 | `port_range` | `[50000, 50100]` | Port range for Odoo containers `[start, end)` — supports up to 100 concurrent environments |

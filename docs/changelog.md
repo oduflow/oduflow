@@ -36,12 +36,206 @@
   path needs no AWS CLI and stages before swapping. The REST endpoint
   `/api/templates/import-from-odoo` keeps its path and accepts `odoo_url` as
   a legacy alias for `source`.
-- Support `[routing] tls = {}` for HTTPS on port 443 with Traefik’s default
-  self-signed certificate, without Let’s Encrypt or an ACME email. HTTP redirects
-  to HTTPS; generated routes omit the ACME resolver and services omit its volume.
-  Oduflow’s own probes of the URLs it hands out (`http_request_to_odoo`, the
-  environment readiness check) skip certificate verification in this mode only,
-  since the default certificate has no trust anchor to verify against.
+
+## v1.80.0
+
+### Features
+
+- **`oduflow self-update`** — upgrade an installed Oduflow through its own
+  installer, reconcile bundled files in a fresh process on the same interpreter,
+  and restart the systemd service when running as root. pip and uv tool
+  installations are detected; containers, source/editable installs, ephemeral
+  uvx environments and uv tool directories that do not match the running
+  installation are refused rather than half-upgraded. The installed version is
+  verified after the installer exits, so an unavailable release, a retained
+  version pin or an unreadable version stops the command before reconciliation
+  or restart. `--force` forwards conflict handling to `oduflow upgrade --force`
+  and completes reconciliation even when the package is already current (the
+  recovery path after an interrupted upgrade); `--no-restart` leaves the restart
+  to the operator. (#268)
+
+- **Separate production MCP access** — production tools now live behind their own
+  `/production` endpoint with per-team production credentials; development
+  credentials no longer authorize them. New Odoo 19 productions get OduMCP
+  installed automatically and the configured key synchronized for the Odoo
+  administrator, so production records are reached through OduMCP policies,
+  approval plans and audit without standing up a separate MCP server. An addon
+  setup failure leaves production running with a warning and the Odoo tools
+  reporting unavailable; existing productions, retries and key rotations use
+  `sync_production_mcp`. (#260)
+
+- **Release check from the dashboard header** — clicking the version next to
+  **Oduflow** opens a dialog with the installed version, the latest published
+  release with its title and date, a link to its notes, and the upgrade commands
+  when a newer one exists. The lookup is strictly on demand: one unauthenticated
+  request to the GitHub Releases API per click, nothing cached between clicks, no
+  background polling, and no fact about the installation sent. Offline hosts,
+  rate limits and unreadable replies are shown as answers in the dialog, and a
+  source checkout reports `dev` as not comparable rather than guessing. (#261)
+
+- **Select all in the module and extra-addon pickers** — the dashboard's
+  **Upgrade modules** picker gains **Select all** and **Clear**, as do the
+  **Extra addons repos** checkbox lists in the create-environment modal and in
+  template settings (each ticked repo still needs its branch). Selecting every
+  installed module sends Odoo's own `odoo -u all` instead of a command line
+  listing each module, and `upgrade_odoo_modules` / `pull_and_apply(upgrade=...)`
+  accept `all` on its own for the same run. (#262)
+
+- **Template locks narrowed to the template being changed** — template mutations
+  used to take the team lock, stopping every environment operation in the team.
+  `import_template_from_odoo` and the dashboard's metadata editor now take a
+  template-scoped key instead, and `attach_filestore` enters the team lock only
+  for the remount-and-swap window, so staging a multi-gigabyte filestore runs
+  outside it. `delete_template` and `rename_template` keep the team lock, which
+  their dependent-environment scan genuinely needs. The import's download path is
+  unique per call with cleanup that cannot strand an orphan. (#264)
+
+### Security
+
+- **Generated secrets stay out of the log** — `[database].password`, `auth_token`
+  and `ui_password` were printed to the startup log, which is shipped off-host
+  and retained far longer than the secrets stay valid. They now live in
+  `oduflow.toml` only and the log points at the file. The config is created
+  `0600`, and an existing config that gains an auto-provisioned `ui_password` on
+  upgrade has a group/world-readable mode narrowed — never widened. Config
+  bootstrap opens the destination `O_EXCL`, so a missing `ODUFLOW_TOML` path can
+  no longer truncate a live `/etc/oduflow/oduflow.toml` and destroy its database
+  password, teams and tokens. A bad `oduflow.toml` now surfaces as one readable
+  `ConfigError` line instead of a traceback. (#266)
+
+### Bug Fixes
+
+- **One shared Odoo version parser** — the test runner (`--longpolling-port` vs
+  `--gevent-port`), the translation exporter (`--i18n-*` vs the 19-only `odoo
+  i18n` subcommand) and the sanitizer (does `odoo neutralize` exist?) each had
+  their own regex over the image reference, they disagreed, and guessing wrong
+  makes Odoo abort with `error: no such option`. `odoo_version.py` now owns the
+  parsing: official tags, custom repositories with a version tag, versioned
+  repository names, and a live `odoo --version` probe for images that carry no
+  version, anchored on the `Odoo Server N.M` banner. Every source is
+  plausibility-checked, so an image that versions itself on its own scheme falls
+  through to the probe instead of selecting a removed CLI option.
+  `create_environment`'s version-guide reminder uses the same parser. (#265)
+
+- **Coder image source label** — the image's `org.opencontainers.image.source`
+  label still named the old `oduist` org, so a pulled `oduist/oduflow-coder`
+  pointed back at an address the project no longer uses. Corrected and
+  republished as `oduflow-coder:0.3.1`; the Docker Hub namespace is unchanged.
+  (#263)
+
+### Documentation
+
+- **Architecture page** — a new `docs/architecture.md` with two Mermaid diagrams:
+  a system overview (MCP agents, browser and GitHub webhooks → the single-process
+  server → dev environments, production, auxiliary services, Traefik and the S3
+  bucket) and a backup-and-recovery diagram contrasting logical snapshots with
+  the WAL-G stream. Mermaid rendering is enabled in MkDocs Material. (#267)
+
+- **Indexed per-tool MCP tools reference** — `docs/mcp-tools.md` was one 102-row
+  table whose first column squeezed tool names mid-identifier. It is now a
+  clickable index of all 102 tools in 17 categories plus one section per tool,
+  each with its parameters as a definition list, "use it when" bullets, stated
+  lock scope and, where the invocation isn't obvious, an `oduflow call` example.
+  (#259)
+
+## v1.79.0
+
+### Features
+
+- **Dashboard two-factor authentication; HTTP Basic auth removed** — a team can
+  enrol an authenticator app as a second factor for full dashboard login.
+  `oduflow ui-2fa setup --team N` renders the QR code locally (no external chart
+  service) and stores the secret only after a confirming code; `oduflow ui-2fa
+  reset --team N` is the server-side recovery path. Both bump the team's MFA
+  generation, revoking outstanding full-UI cookies on the next request without a
+  server restart. The last consumed step and per-team attempt counters persist in
+  `.ui_totp.json`, so replay protection and throttling survive a restart, and
+  candidate steps are derived from an explicit UTC datetime so a DST transition
+  cannot shift the window. Shared scoped links keep their own cookies and stay
+  reachable without a code; MCP client authentication is untouched. HTTP Basic
+  auth is gone from the web UI entirely — REST and WebSocket access now rely
+  solely on the session cookie, and the `scripts/create_env.py` /
+  `scripts/sync_env.py` Basic-auth helpers are replaced by `oduflow client`. On
+  upgrade, existing full-UI cookies require a fresh login, and sessions expire
+  seven days after login instead of being renewed by dashboard loads. Decision
+  record: `specs/0067-dashboard-totp.md`. (#258)
+
+- **Production WAL disk protection** — the shared production cluster is now
+  guarded against WAL-driven disk exhaustion and against silently losing archive
+  continuity. A local WAL monitor samples the real WAL filesystem (through a
+  read-only volume helper while PostgreSQL is down) and derives archive progress
+  and disk risk without touching Docker or S3 on the read path. On danger a
+  persistent circuit breaker latches: it disables Docker restart policies, stops
+  applications before PostgreSQL, and survives an Oduflow or Docker restart;
+  recovery runs PostgreSQL alone behind an HBA fence and requires confirmed new
+  archiving plus extra headroom before release. Production start and deploy now
+  pass an admission gate — an in-container WAL-G storage read/write preflight
+  plus proof that a freshly generated WAL segment reached storage — while an
+  already admitted, running production accepts a current healthy sample instead,
+  so a hung production stays restartable during a brief storage outage. Ships
+  with a dedicated production PostgreSQL image on a pinned base digest, a
+  dashboard WAL panel, `/healthz` checks and an MCP/REST surface. Decision
+  record: `specs/0066-production-wal-disk-protection.md`. (#254)
+
+- **HTTPS without Let's Encrypt** — `[routing] tls = {}` puts Traefik on :443
+  with the :80 → :443 redirect and no certificate resolver, for local and test
+  deployments that want TLS on the wire without ACME, a publicly resolvable
+  domain or an `acme_email`. Supported values stay a closed set: `true` (ACME,
+  the default), `{}` (HTTPS without ACME) and `false` (HTTP only); non-empty
+  tables are rejected. Whether the resolver is *declared* in Traefik and whether
+  managed routes *use* it are now separate concerns, so `tls = {}` with an
+  `acme_email` set declares the resolver for an operator's own drop-in routes
+  while Oduflow's own hostnames stay on Traefik's default certificate. An
+  existing certificate store is never deleted, so issued certificates and the
+  Let's Encrypt account key survive a later re-enable. In this mode only,
+  Oduflow's probes of the URLs it hands out (`http_request_to_odoo`, the
+  environment readiness check) skip certificate verification, since the default
+  self-signed certificate has no trust anchor to verify against. (#251, #252)
+
+- **Parallel filestore chunk uploads** — a first full filestore snapshot paid two
+  serial object-store round-trips per chunk (observed: 70 chunks / 210 MB in
+  ~21 minutes). Chunk HEAD, compress and PUT now run on a bounded thread pool,
+  with the revision's chunk sequence and dedup set still producer-ordered and the
+  revision file still written only after every upload succeeds. The new
+  `[backup].upload_threads` setting defaults to 16 (`1` restores the previous
+  sequential behaviour) and sizes the boto3 connection pool to match. Memory is
+  bounded on both axes: in-flight plaintext passes a byte budget rather than a
+  weak per-chunk count, and pending futures are reaped past a threshold instead
+  of accumulating one live future per chunk. Snapshot manifests and log lines now
+  record scan, upload and elapsed durations. (#255)
+
+- **Extra-addons dependencies, prod-cluster service databases, service
+  protection** — extra-addons repos contribute their own apt/pip dependency
+  descriptors, installed per repo, so a `requirements.txt` in an extra checkout
+  is honoured the same way the main repo's is. A service database can be created
+  on the production PostgreSQL cluster, taking part in the cluster-wide WAL-G
+  backups instead of the development disk quota. Services and service databases
+  can be marked protected, which blocks delete, update and restore on both the
+  MCP and REST paths. (#250)
+
+### Dashboard
+
+- **Full service editor** — the Update dialog prefills every setting (image,
+  command, exposure and routes, hostname, env vars, host mode, volumes,
+  capabilities) from the new `GET /api/services/{name}/config` and submits only
+  the fields the user actually edited, so an open dialog cannot revert a setting
+  changed concurrently over MCP. Deleting a service now offers a "Save as preset"
+  choice, and the result reports what is actually on disk afterwards rather than
+  echoing the request flag. Migration `0008-backfill-service-presets` writes
+  presets once at server start for services created before presets existed,
+  skipping services whose image or port cannot be reconstructed and filtering out
+  env vars the image itself sets. (#253)
+
+- **Production logs** moved into the shared logs modal. (#250)
+
+### Bug Fixes
+
+- **Templates with a hand-placed `db.dump`** — `get_template_sql_path` tried only
+  four canonical names and then reported the missing `dump.pgdump` fallback,
+  never looking at the `db.dump` sitting next to `filestore/` and
+  `metadata.json`. `db.dump` and `db.dump.gz` are now accepted, ordered last so a
+  dump Oduflow itself persisted keeps priority over a leftover dropped into the
+  template directory. (#256)
 
 ## v1.78.0
 

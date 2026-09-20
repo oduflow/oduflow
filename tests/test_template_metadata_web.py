@@ -7,7 +7,7 @@ from starlette.testclient import TestClient
 
 from oduflow.docker_ops import system_ops
 from oduflow.errors import BusyError
-from oduflow.locking import LockManager
+from oduflow.locking import LockManager, template_lock_key
 from oduflow.settings import Settings, TeamSettings
 from oduflow.web_ui import mount_web_ui
 
@@ -112,7 +112,9 @@ def test_template_metadata_update_validates_request_body(tmp_path, body, error):
     assert response.json()["error"] == error
 
 
-def test_template_metadata_update_busy_keeps_foreign_lock(tmp_path):
+def test_template_metadata_update_is_not_blocked_by_a_team_operation(tmp_path):
+    # Editing metadata.json rewrites one file and remounts nothing, so it takes
+    # the template's own key rather than freezing the team behind a publish.
     _metadata(tmp_path)
     client, locks = _client(tmp_path)
     revision = client.get("/api/templates/default/metadata").json()["revision"]
@@ -122,11 +124,44 @@ def test_template_metadata_update_busy_keeps_foreign_lock(tmp_path):
             "/api/templates/default/metadata",
             json={"content": "{}", "revision": revision},
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
         with pytest.raises(BusyError):
             locks.acquire_team("1")
     finally:
         locks.release_team("1")
+
+
+def test_template_metadata_update_busy_keeps_foreign_template_lock(tmp_path):
+    _metadata(tmp_path)
+    client, locks = _client(tmp_path)
+    revision = client.get("/api/templates/default/metadata").json()["revision"]
+    key = template_lock_key("1", "default")
+    locks.acquire_env(key)
+    try:
+        response = client.put(
+            "/api/templates/default/metadata",
+            json={"content": "{}", "revision": revision},
+        )
+        assert response.status_code == 409
+        with pytest.raises(BusyError):
+            locks.acquire_env(key)
+    finally:
+        locks.release_env(key)
+
+
+def test_template_metadata_update_ignores_another_template_s_lock(tmp_path):
+    _metadata(tmp_path)
+    client, locks = _client(tmp_path)
+    revision = client.get("/api/templates/default/metadata").json()["revision"]
+    locks.acquire_env(template_lock_key("1", "other"))
+    try:
+        response = client.put(
+            "/api/templates/default/metadata",
+            json={"content": "{}", "revision": revision},
+        )
+        assert response.status_code == 200
+    finally:
+        locks.release_env(template_lock_key("1", "other"))
 
 
 def test_template_list_reads_during_a_team_operation(tmp_path):

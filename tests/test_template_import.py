@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -162,6 +163,8 @@ def test_resume_skips_already_staged_files(monkeypatch, tmp_path):
     with open(os.path.join(staging, "dump.pgdump"), "wb") as f:
         f.write(objects["backups/acme/dump.pgdump"])
 
+    dump = template_import._list_s3_source(fake, "bucket", "backups/acme").dump
+    template_import._record_staged_dump(staging, dump, "s3://bucket/backups/acme|")
     result = template_import.import_from_s3_prefix(
         settings, team, url="s3://bucket/backups/acme", template_name="acme"
     )
@@ -196,6 +199,7 @@ def test_overwrite_syncs_incrementally_and_skips_unchanged_dump(monkeypatch, tmp
         "odoo_version": "18.0.1.0",
         "modules": {"base": "18.0.1.0"},
         "extra_addons": {"repo": "18.0"},
+        "source_url": "s3://bucket/backups/acme",
         "source_dump_etag": _etag(objects["backups/acme/dump.pgdump"]),
         "source_dump_bytes": len(objects["backups/acme/dump.pgdump"]),
     }
@@ -636,3 +640,179 @@ def test_refresh_without_template_rejected(monkeypatch, tmp_path):
 
     with pytest.raises(NotFoundError, match="does not exist"):
         template_import.refresh_from_own_files(settings, team, template_name="acme")
+
+
+@pytest.mark.parametrize("kind", ["s3", "local"])
+def test_resumed_import_replaces_same_sized_changed_dump(monkeypatch, tmp_path, kind):
+    team, settings = _team_and_settings(tmp_path)
+    fake, reload_mock = _patch_s3_import(monkeypatch, _source_objects())
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "dump.pgdump").write_bytes(b"PGDMP old")
+    staging = team.get_import_staging_dir("acme")
+    os.makedirs(staging)
+    if kind == "s3":
+        dump = template_import._list_s3_source(fake, "bucket", "backups/acme").dump
+        old = fake.objects[dump.key]
+        new = old.replace(b"fake", b"next")
+        source_id = "s3://bucket/backups/acme|"
+    else:
+        dump = template_import._list_local_source(str(source)).dump
+        old, new = b"PGDMP old", b"PGDMP new"
+        source_id = str(source)
+    Path(staging, "dump.pgdump").write_bytes(old)
+    template_import._record_staged_dump(staging, dump, source_id)
+    if kind == "s3":
+        fake.objects[dump.key] = new
+        template_import.import_from_s3_prefix(
+            settings, team, url="s3://bucket/backups/acme", template_name="acme"
+        )
+    else:
+        (source / "dump.pgdump").write_bytes(new)
+        os.utime(source / "dump.pgdump", ns=(1, 1))
+        template_import.import_from_local_path(
+            settings, team, path=str(source), template_name="acme"
+        )
+    assert Path(team.get_template_sql_path("acme")).read_bytes() == new
+    reload_mock.assert_called_once()
+
+
+@pytest.mark.parametrize("kind", ["s3", "local"])
+def test_overwrite_removes_all_deleted_source_attachments(monkeypatch, tmp_path, kind):
+    team, settings = _team_and_settings(tmp_path)
+    fake, _ = _patch_s3_import(monkeypatch, _source_objects())
+    template_import.import_from_s3_prefix(
+        settings, team, url="s3://bucket/backups/acme", template_name="acme"
+    )
+    if kind == "s3":
+        fake.objects = {k: v for k, v in fake.objects.items() if "/filestore/" not in k}
+        result = template_import.import_from_s3_prefix(
+            settings,
+            team,
+            url="s3://bucket/backups/acme",
+            template_name="acme",
+            overwrite=True,
+        )
+    else:
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "dump.pgdump").write_bytes(b"PGDMP replacement")
+        result = template_import.import_from_local_path(
+            settings, team, path=str(source), template_name="acme", overwrite=True
+        )
+    assert result["includes_filestore"] is False
+    assert list(Path(team.get_template_filestore_path("acme")).iterdir()) == []
+
+
+def test_different_local_source_with_same_stat_reloads(monkeypatch, tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    _, reload_mock = _patch_s3_import(monkeypatch, {}, db_exists=True)
+    for name, contents in [("first", b"PGDMP old"), ("second", b"PGDMP new")]:
+        source = tmp_path / name
+        source.write_bytes(contents)
+        os.utime(source, ns=(1, 1))
+        template_import.import_from_local_path(
+            settings, team, path=str(source), template_name="acme", overwrite=True
+        )
+    assert reload_mock.call_count == 2
+    assert Path(team.get_template_sql_path("acme")).read_bytes() == b"PGDMP new"
+
+
+def test_failed_restore_keeps_live_files_and_invalidates_fingerprint(
+    monkeypatch, tmp_path
+):
+    team, settings = _team_and_settings(tmp_path)
+    fake, reload_mock = _patch_s3_import(monkeypatch, _source_objects())
+    template_import.import_from_s3_prefix(
+        settings, team, url="s3://bucket/backups/acme", template_name="acme"
+    )
+    dump = Path(team.get_template_sql_path("acme"))
+    old_dump = dump.read_bytes()
+    attachment = Path(team.get_template_filestore_path("acme"), "ab", "abcdef01")
+    fake.objects["backups/acme/dump.pgdump"] = b"invalid replacement"
+    fake.objects.pop("backups/acme/filestore/ab/abcdef01")
+    reload_mock.side_effect = RuntimeError("restore failed")
+    with pytest.raises(RuntimeError, match="restore failed"):
+        template_import.import_from_s3_prefix(
+            settings,
+            team,
+            url="s3://bucket/backups/acme",
+            template_name="acme",
+            overwrite=True,
+        )
+    assert dump.read_bytes() == old_dump
+    assert attachment.read_bytes() == b"file-one"
+    metadata = json.loads(Path(team.get_template_metadata_path("acme")).read_text())
+    assert "source_dump_etag" not in metadata
+
+
+def test_failed_filestore_promotion_restores_old_lower_layer(monkeypatch, tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    _patch_s3_import(monkeypatch, _source_objects())
+    template_import.import_from_s3_prefix(
+        settings, team, url="s3://bucket/backups/acme", template_name="acme"
+    )
+    original_replace = os.replace
+    staged_fs = os.path.join(team.get_import_staging_dir("acme"), "filestore")
+
+    def fail_promote(src, dst):
+        if src == staged_fs:
+            raise OSError("rename failed")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_promote)
+    with pytest.raises(OSError, match="rename failed"):
+        template_import.import_from_s3_prefix(
+            settings,
+            team,
+            url="s3://bucket/backups/acme",
+            template_name="acme",
+            overwrite=True,
+        )
+    attachment = Path(team.get_template_filestore_path("acme"), "ab", "abcdef01")
+    assert attachment.read_bytes() == b"file-one"
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [(b"PGDMP archive", "dump.pgdump.gz"), (b"SELECT 1;", "dump.sql.gz")],
+)
+def test_single_gzip_dump_is_sniffed_without_filename_suffix(tmp_path, body, expected):
+    import gzip
+
+    source = tmp_path / "backup"
+    source.write_bytes(gzip.compress(body))
+    assert template_import._sniff_dump_name(str(source)) == expected
+
+
+def test_safe_join_rejects_staging_symlink_escape(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (staging / "ab").symlink_to(outside, target_is_directory=True)
+    assert template_import._safe_join(str(staging), "ab/attachment") is None
+
+
+@pytest.mark.parametrize("kind", ["s3", "local"])
+def test_overwrite_cannot_bypass_quota_for_a_new_database(monkeypatch, tmp_path, kind):
+    team, settings = _team_and_settings(tmp_path)
+    _patch_s3_import(monkeypatch, _source_objects())
+    quota = MagicMock(side_effect=PrerequisiteNotMetError("database quota reached"))
+    monkeypatch.setattr(system_ops, "check_db_quota", quota)
+    source = tmp_path / "dump"
+    source.write_bytes(b"PGDMP archive")
+    with pytest.raises(PrerequisiteNotMetError, match="quota"):
+        if kind == "s3":
+            template_import.import_from_s3_prefix(
+                settings,
+                team,
+                url="s3://bucket/backups/acme",
+                template_name="acme",
+                overwrite=True,
+            )
+        else:
+            template_import.import_from_local_path(
+                settings, team, path=str(source), template_name="acme", overwrite=True
+            )
+    assert not os.path.exists(team.get_template_dir("acme"))

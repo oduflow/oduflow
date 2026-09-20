@@ -11,16 +11,17 @@ Odoo/SQL terminals, Connect As, notes, protection, scoped MCP access,
 single-environment share links, and save-as-template actions.
 
 The header's **Feedback** action opens a prefilled issue form on
-`github.com/oduist/oduflow`. Oduflow holds no GitHub credentials and files
+`github.com/oduflow/oduflow`. Oduflow holds no GitHub credentials and files
 nothing itself: it builds the link with the description and a short
 version/platform/transport block, then the user reviews and submits it from
 their own GitHub account.
 
 ## Authentication and responses
 
-Dashboard API routes use the authenticated UI session (user `admin`, password
-from `[team.*].ui_password`). The login form creates an HTTP-only session
-cookie; HTTP Basic credentials are also accepted. State-changing cookie-auth
+Dashboard API routes use the authenticated UI session (password from
+`[team.*].ui_password`, plus TOTP when enabled). The login form creates an
+HTTP-only session cookie; HTTP Basic credentials are rejected. See
+[UI 2FA](security.md#enable-authenticator-app-2fa) for setup and recovery. State-changing cookie-auth
 requests and all WebSocket handshakes are protected by Origin/Referer checks.
 This authentication is separate from MCP Bearer authentication.
 
@@ -210,9 +211,10 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
 | `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
+| `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
-| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduist/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
+| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduflow/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
 | `GET` | `/api/agent-guides` | List available agent guides |
 | `GET` | `/api/agent-guides/{filename}` | Read a guide |
 

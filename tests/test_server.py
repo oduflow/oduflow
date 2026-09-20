@@ -54,8 +54,10 @@ class TestMCPBootstrapInstructions:
         instructions = oduflow.server.mcp.instructions
 
         assert instructions
-        assert instructions.startswith(
+        assert "On /production" in instructions
+        assert (
             "Once at the start of the session, call get_agent_instructions"
+            in instructions
         )
         assert "get_agent_instructions" in instructions
         assert "get_odoo_development_guide" in instructions
@@ -1909,6 +1911,251 @@ class TestResourceLocks:
             locks.release_env(key)
 
 
+class TestTemplateLocks:
+    """The team lock is for template mutations that remount live environments;
+    everything else about a template locks on the template itself."""
+
+    @staticmethod
+    def _locks():
+        import oduflow.server
+
+        return oduflow.server._locks
+
+    @patch("oduflow.docker_ops.system_ops.import_template")
+    def test_import_runs_during_a_team_operation(self, mock_import):
+        # An import refuses to touch an existing template, so the template it
+        # builds is brand new and remounts nothing. It used to hold the team
+        # lock for the whole download.
+        mock_import.return_value = {
+            "template_name": "fresh",
+            "source_url": "http://odoo.example.com",
+            "source_db": "prod",
+            "odoo_version": "19.0",
+            "odoo_image": "odoo:19.0",
+            "template_db": "db",
+            "includes_filestore": False,
+            "zip_size_mb": 1.0,
+            "restore_seconds": 1.0,
+        }
+        locks = self._locks()
+        locks.acquire_team("1", operation="save_as_template")
+        try:
+            _get_tool_fn("import_template")(
+                source="http://odoo.example.com",
+                master_pwd="secret",
+                template_name="fresh",
+            )
+        finally:
+            locks.release_team("1")
+        mock_import.assert_called_once()
+
+    @patch("oduflow.docker_ops.system_ops.import_template")
+    def test_import_waits_for_the_same_template(self, mock_import):
+        from oduflow.locking import template_lock_key
+
+        locks = self._locks()
+        key = template_lock_key("1", "fresh")
+        locks.acquire_env(key, operation="attach_filestore")
+        try:
+            with pytest.raises(ToolError, match="attach_filestore"):
+                _get_tool_fn("import_template")(
+                    source="http://odoo.example.com",
+                    master_pwd="secret",
+                    template_name="fresh",
+                )
+        finally:
+            locks.release_env(key)
+        mock_import.assert_not_called()
+
+    @patch("oduflow.docker_ops.system_ops.delete_template")
+    def test_delete_template_waits_for_the_same_template(self, mock_delete):
+        # delete_template keeps the team lock (its dependent-environment scan
+        # is a check-then-act against create_environment) and adds the key.
+        from oduflow.locking import template_lock_key
+
+        locks = self._locks()
+        key = template_lock_key("1", "default")
+        locks.acquire_env(key, operation="import_template_from_odoo")
+        try:
+            with pytest.raises(ToolError, match="import_template_from_odoo"):
+                _get_tool_fn("delete_template")(template_name="default")
+        finally:
+            locks.release_env(key)
+        mock_delete.assert_not_called()
+
+    @patch("oduflow.docker_ops.system_ops.delete_template")
+    def test_the_template_key_is_found_in_a_positional_call(self, mock_delete):
+        # with_key_lock resolves its resource argument by name, from the
+        # signature, so a positional call locks the same key as a keyword one.
+        from oduflow.locking import template_lock_key
+
+        locks = self._locks()
+        key = template_lock_key("1", "default")
+        locks.acquire_env(key, operation="refresh_template")
+        try:
+            with pytest.raises(ToolError, match="refresh_template"):
+                _get_tool_fn("delete_template")("default")
+        finally:
+            locks.release_env(key)
+        mock_delete.assert_not_called()
+
+    @patch("oduflow.docker_ops.system_ops.delete_template")
+    def test_delete_template_still_waits_for_the_team(self, mock_delete):
+        locks = self._locks()
+        locks.acquire_team("1", operation="save_as_template")
+        try:
+            with pytest.raises(ToolError, match="save_as_template"):
+                _get_tool_fn("delete_template")(template_name="default")
+        finally:
+            locks.release_team("1")
+        mock_delete.assert_not_called()
+
+    @patch("oduflow.docker_ops.system_ops.attach_filestore")
+    def test_attach_filestore_stages_outside_the_team_lock(self, mock_attach):
+        """Staging (an rsync of a huge filestore) must not freeze the team; the
+        team lock is handed to system_ops and entered only for the swap."""
+        from oduflow.errors import BusyError
+
+        locks = self._locks()
+        observed = {}
+
+        def attach(*args, **kwargs):
+            lock = kwargs["lock"]
+            # Not yet held: system_ops is free to stage its source first.
+            locks.acquire_team("1")
+            locks.release_team("1")
+            with lock():
+                with pytest.raises(BusyError):
+                    locks.acquire_team("1")
+                observed["held_during_swap"] = True
+            return {
+                "template_name": "default",
+                "source": "/srv/fs",
+                "source_kind": "directory",
+                "strip_prefix": "",
+                "filestore_files": 1,
+                "filestore_size_mb": 1.0,
+                "use_overlay": True,
+                "affected_envs": [],
+                "remount_failures": [],
+            }
+
+        mock_attach.side_effect = attach
+        _get_tool_fn("attach_filestore")(template_name="default", source="/srv/fs")
+        assert observed == {"held_during_swap": True}
+
+    @patch("oduflow.docker_ops.system_ops.attach_filestore")
+    def test_attach_filestore_waits_for_the_same_template(self, mock_attach):
+        from oduflow.locking import template_lock_key
+
+        locks = self._locks()
+        key = template_lock_key("1", "default")
+        locks.acquire_env(key, operation="import_template_from_odoo")
+        try:
+            with pytest.raises(ToolError, match="import_template_from_odoo"):
+                _get_tool_fn("attach_filestore")(
+                    template_name="default", source="/srv/fs"
+                )
+        finally:
+            locks.release_env(key)
+        mock_attach.assert_not_called()
+
+    @patch("oduflow.docker_ops.system_ops.attach_filestore")
+    def test_attach_filestore_waits_out_a_busy_team(self, mock_attach):
+        """The swap lock blocks, so a concurrent environment operation delays
+        it instead of discarding the staging the call has already paid for."""
+        import threading
+        import time
+
+        locks = self._locks()
+        locks.acquire_env("main", team_id="1", operation="restart_environment")
+
+        def release_late():
+            # Still held when the swap asks for the lock: a non-blocking
+            # acquire would raise BusyError here and throw the staging away.
+            time.sleep(0.3)
+            locks.release_env("main")
+
+        def attach(*args, **kwargs):
+            waiter = threading.Thread(target=release_late)
+            waiter.start()
+            with kwargs["lock"]():
+                pass
+            waiter.join(2)
+            return {
+                "template_name": "default",
+                "source": "/srv/fs",
+                "source_kind": "directory",
+                "strip_prefix": "",
+                "filestore_files": 1,
+                "filestore_size_mb": 1.0,
+                "use_overlay": True,
+                "affected_envs": [],
+                "remount_failures": [],
+            }
+
+        mock_attach.side_effect = attach
+        with patch("oduflow.server.ATTACH_SWAP_LOCK_TIMEOUT", 5.0):
+            out = _get_tool_fn("attach_filestore")(
+                template_name="default", source="/srv/fs"
+            )
+        assert "Filestore attached" in out
+
+    @patch("oduflow.docker_ops.system_ops.attach_filestore")
+    def test_attach_filestore_still_gives_up_on_a_stuck_team(self, mock_attach):
+        """Blocking is bounded: a team operation that never ends still yields
+        BusyError rather than holding the staging open forever."""
+        locks = self._locks()
+
+        def attach(*args, **kwargs):
+            with kwargs["lock"]():
+                pass
+            raise AssertionError("the swap lock must not have been granted")
+
+        mock_attach.side_effect = attach
+        locks.acquire_team("1", operation="save_as_template")
+        try:
+            with patch("oduflow.server.ATTACH_SWAP_LOCK_TIMEOUT", 0.1):
+                with pytest.raises(ToolError, match="save_as_template"):
+                    _get_tool_fn("attach_filestore")(
+                        template_name="default", source="/srv/fs"
+                    )
+        finally:
+            locks.release_team("1")
+
+    @patch("oduflow.docker_ops.system_ops.rename_template")
+    def test_renaming_a_template_to_its_own_name_reports_the_conflict(
+        self, mock_rename
+    ):
+        """Source and destination are the same key. Taking it twice would
+        report a concurrent operation that does not exist, and tell the caller
+        to wait for it — a retry loop that never ends."""
+        from oduflow.errors import ConflictError
+
+        mock_rename.side_effect = ConflictError(
+            "New template name is the same as the current one."
+        )
+        with pytest.raises(ToolError, match="same as the current one"):
+            _get_tool_fn("rename_template")(template_name="default", new_name="default")
+        mock_rename.assert_called_once()
+
+    @patch("oduflow.docker_ops.system_ops.rename_template")
+    def test_rename_template_still_locks_the_destination(self, mock_rename):
+        from oduflow.locking import template_lock_key
+
+        locks = self._locks()
+        key = template_lock_key("1", "staging")
+        locks.acquire_env(key, operation="import_template_from_odoo")
+        try:
+            with pytest.raises(ToolError, match="import_template_from_odoo"):
+                _get_tool_fn("rename_template")(
+                    template_name="default", new_name="staging"
+                )
+        finally:
+            locks.release_env(key)
+        mock_rename.assert_not_called()
+
+
 class TestProductionBackupLocks:
     """Prune must exclude snapshot and restore, which the team lock never did:
     productions lock in their own `prod:` keyspace."""
@@ -3124,3 +3371,42 @@ class TestTranslationTools:
         # Part of the per-environment dev loop, like install/upgrade_odoo_modules.
         assert "export_module_translations" in SCOPED_ALLOWLIST
         assert "translation_status" in SCOPED_ALLOWLIST
+
+
+class TestOdooGuideReminder:
+    """The reminder must fire for every image reference Oduflow can version."""
+
+    @pytest.mark.parametrize(
+        "image,expected",
+        [
+            ("odoo:17.0", "17"),
+            ("odoo:19", "19"),
+            # Versioned repositories: these carry the version in the name, and
+            # used to be silently skipped.
+            ("ghcr.io/acme/odoo-19", "19"),
+            ("acme/odoo-18:latest", "18"),
+            ("registry.example:5000/acme/odoo-ee:17.0-custom", "17"),
+        ],
+    )
+    def test_versioned_images_get_the_reminder(self, image, expected):
+        from oduflow.server import _odoo_guide_reminder
+
+        reminder = _odoo_guide_reminder(image)
+
+        assert f'get_odoo_development_guide(version="{expected}")' in reminder
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            # Nothing to read: guessing a version here would send the agent to
+            # the wrong guide.
+            "oduist/customer_odoo",
+            "ghcr.io/acme/platform:latest",
+            "ghcr.io/acme/odoo-stack:2.0",
+            "",
+        ],
+    )
+    def test_unversioned_images_get_no_reminder(self, image):
+        from oduflow.server import _odoo_guide_reminder
+
+        assert _odoo_guide_reminder(image) == ""
