@@ -100,6 +100,22 @@ newer release exists. The dialog compares the installed version with the latest
 published release, names it, and links to its release notes. The check runs only
 on that click — Oduflow never polls GitHub on its own.
 
+The one-command path chains everything below and restarts the service:
+
+```bash
+oduflow self-update
+```
+
+It detects how Oduflow was installed and uses that installer (`uv tool upgrade`
+or `pip install --upgrade`), then reconciles bundled files and restarts the
+systemd service. It exits with an error inside a Docker container — a package
+upgraded inside the container would revert on the next recreate; pull the new
+image and recreate the container instead (see [Docker](docker.md)). Source
+checkouts, editable installs, and `uvx` runs are likewise refused with an
+explanation. See [CLI reference](cli.md#system-commands) for details.
+
+The manual steps, equivalent to what `self-update` runs:
+
 ```bash
 uv tool upgrade oduflow
 oduflow upgrade

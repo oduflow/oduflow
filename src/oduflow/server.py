@@ -7694,6 +7694,24 @@ def _run_cli() -> None:
             "files with the new bundle (the replaced file is backed up)"
         ),
     )
+    p_self_update = sub.add_parser(
+        "self-update",
+        help="Upgrade the Oduflow package to the latest release and restart",
+    )
+    p_self_update.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "reconcile bundled files without prompting, overwriting conflicts "
+            "(forwarded to `oduflow upgrade --force`); also reconciles and "
+            "restarts when the package is already at the latest version"
+        ),
+    )
+    p_self_update.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="do not restart the systemd service after upgrading",
+    )
     p_retune = sub.add_parser(
         "retune-postgres",
         help="Preview the unified host resource plan and managed config changes",
@@ -7951,6 +7969,14 @@ def _run_cli() -> None:
         validate_stack_files(manifest, args.manifest)
         print(f"Stack '{manifest.metadata.name}' is valid ({manifest.api_version}).")
         return
+
+    if args.command == "self-update":
+        # No Settings and no Docker init: the command must work even when the
+        # running server is wedged, and the reconcile step runs as a child
+        # `oduflow upgrade` that loads its own (new) settings.
+        from oduflow.self_update import run as run_self_update
+
+        sys.exit(run_self_update(force=args.force, restart=not args.no_restart))
 
     if args.command == "systemd-install":
         from oduflow.systemd import install as systemd_install
