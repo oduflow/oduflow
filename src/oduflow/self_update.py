@@ -4,7 +4,7 @@ This wraps the documented three-step upgrade (upgrade the package, reconcile
 bundled files with ``oduflow upgrade``, restart the service) into one command.
 It deliberately does *not* invent a new upgrade mechanism: it detects how the
 package was installed and drives that installer's own upgrade path, then runs
-the bundled-file reconciliation through the freshly installed binary — a child
+the bundled-file reconciliation through the same Python interpreter — a child
 process, because this process still executes the old code and its import
 machinery predates the upgrade.
 
@@ -17,8 +17,8 @@ Refusals are hard errors, not best-effort attempts:
   host can do.
 * **Source checkouts and editable installs.** Those are updated with ``git``;
   overwriting them from PyPI would detach the running code from the checkout.
-* **``uvx`` runs.** The environment is an ephemeral cache entry; the next
-  ``uvx oduflow`` resolves fresh anyway, so there is nothing durable to update.
+* **``uvx`` runs.** The environment is an ephemeral cache entry; use
+  ``uvx oduflow@latest`` to explicitly refresh it.
 * **Environments pip cannot upgrade in place.** A virtualenv created without
   pip has no installer to drive, and a site-packages directory this user cannot
   write makes pip "default to user installation" — a second copy in ``~/.local``
@@ -36,6 +36,8 @@ import sys
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 from oduflow import updates
 from oduflow.systemd import SERVICE_NAME, UNIT_DIR
@@ -136,6 +138,32 @@ def detect_install() -> InstallInfo:
                     "Run `uv tool upgrade oduflow` as the installing user."
                 ),
             )
+        # uv selects its tool directory from the caller's user/environment,
+        # not from this Python interpreter. Under sudo (or with UV_TOOL_DIR
+        # changed), it could otherwise upgrade an unrelated installation.
+        try:
+            result = subprocess.run(
+                [uv, "tool", "dir"], capture_output=True, text=True, timeout=30
+            )
+            tool_dir = result.stdout.strip()
+            matches = (
+                result.returncode == 0
+                and bool(tool_dir)
+                and Path(location)
+                .resolve()
+                .is_relative_to((Path(tool_dir) / PACKAGE).resolve())
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            matches = False
+        if not matches:
+            return InstallInfo(
+                kind="uv-tool",
+                reason=(
+                    "uv's tool directory does not match this installation "
+                    f"({location}), or could not be determined. Run as the "
+                    "installing user with the original UV_TOOL_DIR."
+                ),
+            )
         return InstallInfo(kind="uv-tool", command=[uv, "tool", "upgrade", PACKAGE])
     if (
         f"{sep}.cache{sep}uv{sep}" in location
@@ -146,8 +174,8 @@ def detect_install() -> InstallInfo:
             kind="uvx",
             reason=(
                 "Oduflow is running from an ephemeral uvx environment; "
-                "there is nothing persistent to update. The next "
-                "`uvx oduflow` run resolves the latest release by itself."
+                "there is nothing persistent to update. Run "
+                "`uvx oduflow@latest` to refresh the cached version."
             ),
         )
     if importlib.util.find_spec("pip") is None:
@@ -199,21 +227,6 @@ def _installed_version() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _oduflow_binary() -> str:
-    """Path to the console script of the environment that was just upgraded.
-
-    ``shutil.which`` searches PATH, which can resolve a *different* Oduflow
-    (another venv earlier on PATH); reconciling bundled files through that one
-    would deploy the old bundle while reporting success. The script installed
-    next to this interpreter belongs to the environment pip/uv just upgraded,
-    so prefer it and fall back to PATH only when it is missing.
-    """
-    sibling = Path(sys.executable).with_name(PACKAGE)
-    if sibling.is_file() and os.access(sibling, os.X_OK):
-        return str(sibling)
-    return shutil.which(PACKAGE) or sys.argv[0]
-
-
 def run(*, force: bool = False, restart: bool = True) -> int:
     """Upgrade the package, reconcile bundled files, restart the service."""
     if in_container():
@@ -257,6 +270,35 @@ def run(*, force: bool = False, restart: bool = True) -> int:
             return 1
 
     new_version = check.current if already_current else _installed_version()
+    if not already_current:
+        # Installer success need not mean the requested release was installed:
+        # uv retains version pins, and a package index can lag GitHub releases.
+        # Never reconcile/restart or claim success without checking this env.
+        try:
+            installed = Version(new_version)
+        except InvalidVersion:
+            print(
+                "Error: could not verify the installed Oduflow version. "
+                "Reconciliation and restart skipped.",
+                file=sys.stderr,
+            )
+            return 1
+        expected = (
+            check.latest if check.status == updates.STATUS_UPDATE else check.current
+        )
+        try:
+            minimum = Version(expected)
+        except InvalidVersion:
+            minimum = installed
+        if installed < minimum:
+            print(
+                f"Error: installer finished, but this environment has v{new_version}; "
+                f"expected at least v{expected}. Check installer version constraints "
+                "and package index availability, then retry. "
+                "Reconciliation and restart skipped.",
+                file=sys.stderr,
+            )
+            return 1
     version_note = f"v{new_version}" if new_version else "the new version"
     done = (
         f"Bundled files reconciled for {version_note}."
@@ -264,10 +306,12 @@ def run(*, force: bool = False, restart: bool = True) -> int:
         else f"Package upgraded to {version_note}."
     )
 
-    # Reconcile deployed bundled files (odoo.conf, agent guides, sanitize
-    # scripts) through the NEW binary so it applies the new bundle. Without
-    # --force this prompts, exactly like a manual `oduflow upgrade`.
-    reconcile = [_oduflow_binary(), "upgrade"] + (["--force"] if force else [])
+    # Launch fresh code through the interpreter whose version we just checked.
+    # Console scripts beside a system Python or on PATH can belong to another
+    # install (notably with pip --user), so neither is a safe fallback.
+    reconcile = [sys.executable, "-m", "oduflow.server", "upgrade"] + (
+        ["--force"] if force else []
+    )
     print(f"Reconciling bundled files: {' '.join(reconcile)}")
     if subprocess.run(reconcile).returncode != 0:
         print(

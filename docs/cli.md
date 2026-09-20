@@ -142,23 +142,31 @@ This command is separate from upgrading the Python package (for example,
 `oduflow self-update` chains the whole documented upgrade: it compares the
 installed version with the latest GitHub release, upgrades the package through
 its own installer (`uv tool upgrade oduflow` for a uv tool install, otherwise
-`pip install --upgrade oduflow` in the same environment), runs the bundled-file
-reconciliation above through the freshly installed binary, and restarts the
-systemd service when the unit installed by `oduflow systemd-install` exists and
-the command runs as root. `--force` is forwarded to the reconciliation, and it
+`pip install --upgrade oduflow` in the same environment), verifies the installed
+version, runs the bundled-file reconciliation above through a fresh process in
+that Python environment, and restarts the systemd service when the unit
+installed by `oduflow systemd-install` exists and the command runs as root.
+`--force` is forwarded to the reconciliation, and it
 also finishes an interrupted upgrade: if the package is already at the latest
 version — for example after a first run stopped on a bundle conflict — the
 command reconciles and restarts instead of reporting "already up to date" and
 doing nothing. `--no-restart` leaves the running server on the old version
 until you restart it yourself.
 
+If the installer succeeds but the advertised release is not installed (for
+example, uv has a version pin or the package index has not received the release
+yet), the command exits with an error before reconciliation or restart. Check
+the installer's constraints and index, then retry. A uv tool upgrade also checks
+that uv's tool directory contains the running installation; use the installing
+user and original `UV_TOOL_DIR` if they differ.
+
 It refuses, with an error, installations it cannot upgrade durably: **a
 container** (a package upgraded inside the `oduist/oduflow` container reverts
 when the container is recreated — pull the new image and recreate it instead,
 see [Docker](docker.md)), a source checkout or editable install (update those
-with `git pull`), an ephemeral `uvx` run (the next `uvx oduflow` resolves the
-latest release by itself), and an environment pip cannot upgrade in place — a
-virtualenv created without pip, or a `site-packages` the current user cannot
+with `git pull`), an ephemeral `uvx` run (use `uvx oduflow@latest` to refresh the
+cached version), and an environment pip cannot upgrade in place — a virtualenv
+created without pip, or a `site-packages` the current user cannot
 write, where `pip install --upgrade` would install a second copy into
 `~/.local` that the running service never loads. Re-run those as the user that
 owns the installation.
