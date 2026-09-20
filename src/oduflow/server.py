@@ -77,6 +77,7 @@ from oduflow.naming import (
     production_template_name,
     redact_url_credentials,
 )
+from oduflow.odoo_version import major_from_image_reference
 from oduflow.output_cache import CachedOutput, OutputCache
 from oduflow.po_tools import PoEntry
 from oduflow.settings import ImageRegistrySettings, Settings, TeamSettings, find_toml
@@ -729,13 +730,15 @@ def _parse_extra_addons(raw: str) -> dict[str, str]:
 
 def _odoo_guide_reminder(odoo_image: str) -> str:
     """The "load the version guide before writing code" line, if the image says
-    which Odoo version this is."""
-    import re
+    which Odoo version this is.
 
-    match = re.search(r"odoo[:/](\d+)(?:\.0)?", odoo_image)
-    if not match:
+    Uses the shared parser so that every image reference Oduflow can read a
+    version out of — versioned repositories such as ``ghcr.io/acme/odoo-19``
+    included — gets the reminder.
+    """
+    version = major_from_image_reference(odoo_image)
+    if version is None:
         return ""
-    version = match.group(1)
     return (
         f"\n⚠️ Immediately call "
         f'get_odoo_development_guide(version="{version}") to load Odoo {version} '

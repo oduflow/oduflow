@@ -3075,3 +3075,42 @@ class TestTranslationTools:
         # Part of the per-environment dev loop, like install/upgrade_odoo_modules.
         assert "export_module_translations" in SCOPED_ALLOWLIST
         assert "translation_status" in SCOPED_ALLOWLIST
+
+
+class TestOdooGuideReminder:
+    """The reminder must fire for every image reference Oduflow can version."""
+
+    @pytest.mark.parametrize(
+        "image,expected",
+        [
+            ("odoo:17.0", "17"),
+            ("odoo:19", "19"),
+            # Versioned repositories: these carry the version in the name, and
+            # used to be silently skipped.
+            ("ghcr.io/acme/odoo-19", "19"),
+            ("acme/odoo-18:latest", "18"),
+            ("registry.example:5000/acme/odoo-ee:17.0-custom", "17"),
+        ],
+    )
+    def test_versioned_images_get_the_reminder(self, image, expected):
+        from oduflow.server import _odoo_guide_reminder
+
+        reminder = _odoo_guide_reminder(image)
+
+        assert f'get_odoo_development_guide(version="{expected}")' in reminder
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            # Nothing to read: guessing a version here would send the agent to
+            # the wrong guide.
+            "oduist/customer_odoo",
+            "ghcr.io/acme/platform:latest",
+            "ghcr.io/acme/odoo-stack:2.0",
+            "",
+        ],
+    )
+    def test_unversioned_images_get_no_reminder(self, image):
+        from oduflow.server import _odoo_guide_reminder
+
+        assert _odoo_guide_reminder(image) == ""

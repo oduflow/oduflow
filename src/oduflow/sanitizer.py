@@ -8,6 +8,7 @@ from docker import DockerClient
 from oduflow.docker_ops.system_ops import _exec_sql
 from oduflow.env_credentials import MissingCredentialsError, load_credentials
 from oduflow.naming import get_db_name, get_repo_path, get_resource_name
+from oduflow.odoo_version import major_from_container_labels
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
@@ -16,32 +17,13 @@ logger = logging.getLogger("oduflow")
 def _detect_odoo_major_from_container(
     container: object, image_label: str
 ) -> int | None:
-    """Best-effort major version from the Odoo image label."""
-    labels = getattr(container, "labels", {}) or {}
-    if not isinstance(labels, dict):
-        return None
+    """Best-effort major version from the Odoo image label.
 
-    image = labels.get(image_label, "")
-    if not isinstance(image, str):
-        return None
-
-    # Prefer the Docker tag: this handles official and custom repositories,
-    # including registries with ports (registry:5000/acme/odoo-ee:15.0).
-    reference = image.split("@", 1)[0]
-    leaf = reference.rsplit("/", 1)[-1]
-    has_tag = ":" in leaf
-    tag = leaf.rsplit(":", 1)[1] if has_tag else ""
-    repository = reference.rsplit(":", 1)[0] if has_tag else reference
-    is_odoo_image = (
-        re.search(r"(?:^|[/_-])odoo(?:$|[/_-])", repository, re.I) is not None
-    )
-    match = re.match(r"(\d+)(?:\.\d+)?(?:$|[-_])", tag) if is_odoo_image else None
-    if not match:
-        # Also accept versioned repository names such as acme/odoo-15.
-        match = re.search(r"odoo[-_:/]?(\d+)(?:\.\d+)?(?:$|[-_])", reference, re.I)
-    if match:
-        return int(match.group(1))
-    return None
+    Thin wrapper over the shared parser in :mod:`oduflow.odoo_version`; kept as
+    a local name because the neutralize path only ever has the label to go on
+    (no live exec) and callers here pass a possibly non-string label.
+    """
+    return major_from_container_labels(container, image_label)
 
 
 def _run_scripts_from_dir(

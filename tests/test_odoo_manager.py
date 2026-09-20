@@ -3085,6 +3085,96 @@ class TestRunEnvironmentTests:
         "oduflow.docker_ops.odoo_ops.load_credentials",
         return_value={"pg_user": "u_1_main", "pg_password": "test-pw"},
     )
+    def test_run_odoo_19_uses_gevent_port(self, mock_load_creds, mock_docker_client):
+        # Odoo 18.0 removed --longpolling-port outright (16.0/17.0 still took it
+        # as a deprecated alias), so on 18+ the legacy flag is a hard failure:
+        # "server: error: no such option: --longpolling-port".
+        container = MagicMock()
+        container.labels = {TEST_SETTINGS.image_label: "odoo:19.0"}
+        container.exec_run.return_value = (0, b"All tests passed")
+        mock_docker_client.containers.get.return_value = container
+
+        odoo_ops.run_environment_tests(TEST_SETTINGS, TEST_TEAM, "main", "base")
+
+        args = container.exec_run.call_args[0][0]
+        assert "--gevent-port 8090" in args
+        assert "--longpolling-port" not in args
+
+    @patch(
+        "oduflow.docker_ops.odoo_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "test-pw"},
+    )
+    def test_run_custom_repository_reads_version_from_the_tag(
+        self, mock_load_creds, mock_docker_client
+    ):
+        # A private registry with a port and a custom repository name still
+        # carries the version in the tag; no live probe should be needed.
+        container = MagicMock()
+        container.labels = {
+            TEST_SETTINGS.image_label: "registry.example:5000/acme/odoo-ee:19.0-custom"
+        }
+        container.exec_run.return_value = (0, b"All tests passed")
+        mock_docker_client.containers.get.return_value = container
+
+        odoo_ops.run_environment_tests(TEST_SETTINGS, TEST_TEAM, "main", "base")
+
+        assert container.exec_run.call_count == 1  # no `odoo --version` probe
+        args = container.exec_run.call_args[0][0]
+        assert "--gevent-port 8090" in args
+
+    @patch(
+        "oduflow.docker_ops.odoo_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "test-pw"},
+    )
+    def test_run_noisy_version_probe_does_not_downgrade_the_flag(
+        self, mock_load_creds, mock_docker_client
+    ):
+        # exec_run merges stderr into stdout, so a custom image that warns before
+        # printing the banner must not be read as Odoo 1 (which would select the
+        # removed --longpolling-port on a 19.0 environment).
+        container = MagicMock()
+        container.labels = {TEST_SETTINGS.image_label: "oduist/customer_odoo"}
+        container.exec_run.side_effect = [
+            (
+                0,
+                b"urllib3 v2 only supports OpenSSL 1.1.1+\nOdoo Server 19.0-20260908\n",
+            ),
+            (0, b"All tests passed"),
+        ]
+        mock_docker_client.containers.get.return_value = container
+
+        odoo_ops.run_environment_tests(TEST_SETTINGS, TEST_TEAM, "main", "base")
+
+        test_cmd = container.exec_run.call_args_list[1][0][0]
+        assert "--gevent-port 8090" in test_cmd
+        assert "--longpolling-port" not in test_cmd
+
+    @patch(
+        "oduflow.docker_ops.odoo_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "test-pw"},
+    )
+    def test_run_failed_version_probe_falls_back_to_gevent_port(
+        self, mock_load_creds, mock_docker_client
+    ):
+        # A probe that errors out prints a runtime message, not a version banner.
+        container = MagicMock()
+        container.labels = {TEST_SETTINGS.image_label: "oduist/customer_odoo"}
+        container.exec_run.side_effect = [
+            (127, b'exec: "odoo": executable file not found in $PATH: 1.0\n'),
+            (0, b"All tests passed"),
+        ]
+        mock_docker_client.containers.get.return_value = container
+
+        odoo_ops.run_environment_tests(TEST_SETTINGS, TEST_TEAM, "main", "base")
+
+        test_cmd = container.exec_run.call_args_list[1][0][0]
+        assert "--gevent-port 8090" in test_cmd
+        assert "--longpolling-port" not in test_cmd
+
+    @patch(
+        "oduflow.docker_ops.odoo_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "test-pw"},
+    )
     def test_run_custom_image_detects_version_via_binary(
         self, mock_load_creds, mock_docker_client
     ):
