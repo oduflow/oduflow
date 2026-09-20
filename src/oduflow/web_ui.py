@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import html
@@ -14,7 +15,7 @@ import socket
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -86,6 +87,7 @@ from oduflow.locking import (
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
+    template_lock_key,
     volume_lock_key,
 )
 from oduflow.naming import (
@@ -1676,6 +1678,36 @@ def _build_routes(
         finally:
             locks.release_env(branch)
 
+    @contextlib.contextmanager
+    def _template_locks(
+        team: TeamSettings, *names: str, operation: str, team_wide: bool
+    ) -> Iterator[None]:
+        """Take the same locks a template mutation takes on the MCP side.
+
+        Every mutation holds each touched template's own key, so the dashboard
+        and the MCP tools exclude each other on the template itself. Only
+        ``team_wide=True`` adds the team lock, and only two kinds of operation
+        need it: those that remount live environments' overlay filestores
+        (publish, refresh, attach, finalize) and delete/rename, whose
+        dependent-environment scan is a check-then-act against a concurrent
+        create_environment. Importing a brand-new template and editing
+        metadata.json are neither, and take the key alone.
+        """
+        with contextlib.ExitStack() as stack:
+            if team_wide:
+                stack.enter_context(locks.team_lock(team.team_id, operation=operation))
+            # dict.fromkeys de-duplicates while keeping order: a rename to the
+            # template's own name passes the same name twice, and entering one
+            # key twice would report a phantom concurrent operation instead of
+            # the ConflictError that rename really deserves.
+            for name in dict.fromkeys(names):
+                stack.enter_context(
+                    locks.env_lock(
+                        template_lock_key(team.team_id, name), operation=operation
+                    )
+                )
+            yield
+
     async def api_save_as_template(request: Request) -> JSONResponse:
         branch = request.path_params["branch"]
         team = _get_ui_team(request)
@@ -1697,21 +1729,21 @@ def _build_routes(
         # Team lock (not just the env): publishing can remount other envs' overlay
         # filestores, so it must serialize against the whole team like the MCP tool.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            activity.touch(team, branch)
-            # No overwrite from the UI: publishing over an existing template is a
-            # deliberate re-baseline reserved for the MCP tool, so a duplicate name
-            # here raises ConflictError (surfaced to the client by _error_response).
-            result = await _offload(
-                system_ops.publish_env_as_template,
-                get_settings(),
-                team,
-                branch,
-                template_name=template_name,
-            )
+            with _template_locks(
+                team, template_name, operation="save_as_template", team_wide=True
+            ):
+                activity.touch(team, branch)
+                # No overwrite from the UI: publishing over an existing template
+                # is a deliberate re-baseline reserved for the MCP tool, so a
+                # duplicate name here raises ConflictError (surfaced to the
+                # client by _error_response).
+                result = await _offload(
+                    system_ops.publish_env_as_template,
+                    get_settings(),
+                    team,
+                    branch,
+                    template_name=template_name,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -1733,8 +1765,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     async def _template_from_production(team: TeamSettings, prod_name: str) -> str:
         """Resolve ``from_production`` to its managed ``prod-<name>`` template.
@@ -2117,21 +2147,27 @@ def _build_routes(
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+        # Template key, not the team lock: an import refuses to touch an
+        # existing template, so it builds a brand-new one that no environment
+        # can reference yet — nothing to remount. The team lock used to hold
+        # every environment operation hostage for the whole download.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.import_from_odoo,
-                get_settings(),
+            with _template_locks(
                 team,
-                odoo_url=odoo_url,
-                master_pwd=master_pwd,
-                db_name=db_name,
-                template_name=template_name,
-                without_filestore=without_filestore,
-            )
+                template_name,
+                operation="import_template_from_odoo",
+                team_wide=False,
+            ):
+                result = await _offload(
+                    system_ops.import_from_odoo,
+                    get_settings(),
+                    team,
+                    odoo_url=odoo_url,
+                    master_pwd=master_pwd,
+                    db_name=db_name,
+                    template_name=template_name,
+                    without_filestore=without_filestore,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -2163,18 +2199,15 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_template_delete(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         team = _get_ui_team(request)
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.delete_template(get_settings(), team, name)
+            with _template_locks(
+                team, name, operation="delete_template", team_wide=True
+            ):
+                result = system_ops.delete_template(get_settings(), team, name)
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2183,8 +2216,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     async def api_template_rename(request: Request) -> JSONResponse:
         name = request.path_params["name"]
@@ -2200,14 +2231,16 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "new_name is required"}, status_code=400
             )
+        # Both names: the destination needs a key too, or an import into
+        # `new_name` could create that template between rename_template's
+        # "does the target exist?" check and its os.rename.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.rename_template, get_settings(), team, name, new_name
-            )
+            with _template_locks(
+                team, name, new_name, operation="rename_template", team_wide=True
+            ):
+                result = await _offload(
+                    system_ops.rename_template, get_settings(), team, name, new_name
+                )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:  # invalid template name
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -2218,8 +2251,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_template_metadata(request: Request) -> JSONResponse:
         name = request.path_params["name"]
@@ -2272,12 +2303,17 @@ def _build_routes(
                 {"ok": False, "error": "revision must be a string"}, status_code=400
             )
 
+        # Template key, not the team lock: this rewrites one metadata.json and
+        # remounts nothing. Concurrent editors are already rejected by the
+        # revision check inside update_template_metadata; the key is what keeps
+        # a publish or an import into this template from interleaving.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.update_template_metadata(team, name, content, revision)
+            with _template_locks(
+                team, name, operation="update_template_metadata", team_wide=False
+            ):
+                result = system_ops.update_template_metadata(
+                    team, name, content, revision
+                )
             return JSONResponse({"ok": True, **result})
         except ConflictError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
@@ -2290,8 +2326,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     # --- Import from Odoo.sh (push-based template ingest) ------------------
 
@@ -2900,22 +2934,27 @@ def _build_routes(
                 },
                 status_code=400,
             )
+        # Team lock: unlike the pull-based import, finalize can promote into an
+        # existing template and so remounts live environments' overlays. The
+        # uploads that precede it stay lock-free — only this swap is team-wide.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.finalize_imported_template(
-                get_settings(),
+            with _template_locks(
                 team,
                 template_name,
-                staging_dir=team.get_import_staging_dir(template_name),
-                addon_error_policy=str(
-                    record.get("addon_error_policy")
-                    or import_tokens.ADDON_ERROR_POLICY_STRICT
-                ),
-            )
-            import_tokens.invalidate(team, str(record["token"]))
+                operation="finalize_imported_template",
+                team_wide=True,
+            ):
+                result = system_ops.finalize_imported_template(
+                    get_settings(),
+                    team,
+                    template_name,
+                    staging_dir=team.get_import_staging_dir(template_name),
+                    addon_error_policy=str(
+                        record.get("addon_error_policy")
+                        or import_tokens.ADDON_ERROR_POLICY_STRICT
+                    ),
+                )
+                import_tokens.invalidate(team, str(record["token"]))
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2924,8 +2963,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_service_databases(request: Request) -> JSONResponse:
         try:
@@ -5876,25 +5913,25 @@ def _build_routes(
         # serializes against the whole team like the save_production_as_template
         # MCP tool. The production's own key on top keeps deploys, restores and
         # deletes of this production out of the dump.
-        try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
         prod_key = _prod_lock_key(team, name)
         try:
-            locks.acquire_env(prod_key, operation="save_production_as_template")
-        except BusyError as e:
-            locks.release_team(team.team_id)
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.publish_production_as_template,
-                get_settings(),
-                team,
-                name,
-                template_name=template_name,
-                overwrite=overwrite,
-            )
+            with (
+                _template_locks(
+                    team,
+                    template_name,
+                    operation="save_production_as_template",
+                    team_wide=True,
+                ),
+                locks.env_lock(prod_key, operation="save_production_as_template"),
+            ):
+                result = await _offload(
+                    system_ops.publish_production_as_template,
+                    get_settings(),
+                    team,
+                    name,
+                    template_name=template_name,
+                    overwrite=overwrite,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -5924,9 +5961,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_env(prod_key)
-            locks.release_team(team.team_id)
 
     def api_production_logs(request: Request) -> JSONResponse:
         try:

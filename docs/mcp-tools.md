@@ -13,10 +13,10 @@ end to end.
 
 !!! info "Locking"
     Many tools acquire a lock on exactly what they touch: **one environment**,
-    **one production**, **one service / volume / database**, the **team's
-    credential store** — or the **whole team**, for the few operations that
-    really are team-wide (template publishing). Each tool's section states its
-    lock. Operations on *different* resources run in parallel. If another
+    **one production**, **one service / volume / database / template**, the
+    **team's credential store** — or the **whole team**, for the few operations
+    that really are team-wide (the template mutations that remount other
+    environments' filestores). Each tool's section states its lock. Operations on *different* resources run in parallel. If another
     operation on the **same** resource is already in progress, the call is
     rejected with `BusyError`, naming the operation holding the lock and how
     long it has held it (e.g. *"Another operation on environment 'main'
@@ -1366,7 +1366,7 @@ new baseline. On re-baseline their filestore changes (the overlay upper layer)
 are **preserved** by default; `reset_env_changes=True` discards them. The source
 environment itself is always reset — its data just became the new template.
 
-Lock: team. Destructive when `overwrite=True` or `reset_env_changes=True`.
+Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=True`.
 { .odu-tool-meta }
 
 **Parameters**
@@ -1402,7 +1402,7 @@ nothing is stopped or modified on the production side.
 Overwrite and reset semantics are identical to
 [`save_as_template`](#save_as_template).
 
-Lock: team. Requires production hosting. Destructive when `overwrite=True` or `reset_env_changes=True`.
+Lock: team + template. Requires production hosting. Destructive when `overwrite=True` or `reset_env_changes=True`.
 { .odu-tool-meta }
 
 **Parameters**
@@ -1455,7 +1455,7 @@ Refused if any environment was created from this template: the template
 reference is fixed at creation time and cannot be updated on a running
 environment. Delete those environments first, or leave the template as is.
 
-Lock: team.
+Lock: team + template (both the old and the new name).
 { .odu-tool-meta }
 
 **Parameters**
@@ -1475,7 +1475,7 @@ Lock: team.
 Permanently remove a template profile — its template database and its files on
 disk.
 
-Lock: team. Destructive and irreversible.
+Lock: team + template. Destructive and irreversible.
 { .odu-tool-meta }
 
 **Parameters**
@@ -1498,7 +1498,7 @@ Import a template from a running Odoo instance through its database manager
 API. Downloads a full ZIP backup, or a database-only PostgreSQL custom dump,
 and loads it into PostgreSQL as a template database.
 
-Lock: team.
+Lock: template. Does not take the team lock: the imported template is always new, so nothing is remounted and other environments keep running.
 { .odu-tool-meta }
 
 **Parameters**
@@ -1532,7 +1532,7 @@ template's current on-disk filestore.
 By default each environment's filestore changes (the overlay upper layer) are
 **preserved** — non-destructive.
 
-Lock: team. Destructive when `reset_env_changes=True`.
+Lock: team + template. Destructive when `reset_env_changes=True`.
 { .odu-tool-meta }
 
 **Parameters**
@@ -1559,7 +1559,7 @@ remote rsync source.
 Archive and directory sources are normalized to the Odoo filestore layout
 (`XX/<sha1>`). Live environments' changes are preserved by default.
 
-Lock: team.
+Lock: template throughout; the team lock only for the remount-and-swap, so staging a large source does not block the team.
 { .odu-tool-meta }
 
 **Parameters**
