@@ -98,6 +98,13 @@ oduflow retune-postgres
 
 # Back up and write configs; stage production Odoo configs in containers
 oduflow retune-postgres --apply
+
+# Upgrade the Oduflow package itself, reconcile bundled files, restart
+oduflow self-update
+
+# Non-interactive: overwrite bundle conflicts; or skip the service restart
+oduflow self-update --force
+oduflow self-update --no-restart
 ```
 
 `retune-postgres` accounts for `[production].enabled` and does not restart
@@ -131,6 +138,23 @@ first-line `# KEEP` remains an unconditional opt-out.
 This command is separate from upgrading the Python package (for example,
 `uv tool upgrade oduflow`). It does not manage `postgresql.conf`; use
 `oduflow retune-postgres` for PostgreSQL planning and updates.
+
+`oduflow self-update` chains the whole documented upgrade: it compares the
+installed version with the latest GitHub release, upgrades the package through
+its own installer (`uv tool upgrade oduflow` for a uv tool install, otherwise
+`pip install --upgrade oduflow` in the same environment), runs the bundled-file
+reconciliation above through the freshly installed binary, and restarts the
+systemd service when the unit installed by `oduflow systemd-install` exists and
+the command runs as root. `--force` is forwarded to the reconciliation;
+`--no-restart` leaves the running server on the old version until you restart
+it yourself.
+
+It refuses, with an error, installations it cannot upgrade durably: **a
+container** (a package upgraded inside the `oduist/oduflow` container reverts
+when the container is recreated — pull the new image and recreate it instead,
+see [Docker](docker.md)), a source checkout or editable install (update those
+with `git pull`), and an ephemeral `uvx` run (the next `uvx oduflow` resolves
+the latest release by itself).
 
 ## Template Commands
 
