@@ -1,11 +1,105 @@
 # Changelog
 
-## Unreleased
+## v1.80.0
 
-- The dashboard's **Upgrade modules** picker gains **Select all** and **Clear**, as do the **Extra addons repos** checkbox lists in the create-environment modal and in template settings (each ticked repo still needs its branch). Selecting every installed module sends Odoo's own `odoo -u all` instead of a command line listing each module, and `upgrade_odoo_modules` / `pull_and_apply(upgrade=...)` accept `all` on its own for the same run.
-- Separate production MCP access at `/production` with per-team production credentials; development credentials no longer authorize production tools.
-- Automatically install OduMCP on new Odoo 19 productions and synchronize the configured key for the Odoo administrator. Addon setup failures leave production running with a warning; Odoo tools report unavailable until setup succeeds. Existing productions, setup retries and key rotations use `sync_production_mcp`.
-- Access production records through OduMCP policies, approval plans and audit without a separate MCP server.
+### Features
+
+- **`oduflow self-update`** — upgrade an installed Oduflow through its own
+  installer, reconcile bundled files in a fresh process on the same interpreter,
+  and restart the systemd service when running as root. pip and uv tool
+  installations are detected; containers, source/editable installs, ephemeral
+  uvx environments and uv tool directories that do not match the running
+  installation are refused rather than half-upgraded. The installed version is
+  verified after the installer exits, so an unavailable release, a retained
+  version pin or an unreadable version stops the command before reconciliation
+  or restart. `--force` forwards conflict handling to `oduflow upgrade --force`
+  and completes reconciliation even when the package is already current (the
+  recovery path after an interrupted upgrade); `--no-restart` leaves the restart
+  to the operator. (#268)
+
+- **Separate production MCP access** — production tools now live behind their own
+  `/production` endpoint with per-team production credentials; development
+  credentials no longer authorize them. New Odoo 19 productions get OduMCP
+  installed automatically and the configured key synchronized for the Odoo
+  administrator, so production records are reached through OduMCP policies,
+  approval plans and audit without standing up a separate MCP server. An addon
+  setup failure leaves production running with a warning and the Odoo tools
+  reporting unavailable; existing productions, retries and key rotations use
+  `sync_production_mcp`. (#260)
+
+- **Release check from the dashboard header** — clicking the version next to
+  **Oduflow** opens a dialog with the installed version, the latest published
+  release with its title and date, a link to its notes, and the upgrade commands
+  when a newer one exists. The lookup is strictly on demand: one unauthenticated
+  request to the GitHub Releases API per click, nothing cached between clicks, no
+  background polling, and no fact about the installation sent. Offline hosts,
+  rate limits and unreadable replies are shown as answers in the dialog, and a
+  source checkout reports `dev` as not comparable rather than guessing. (#261)
+
+- **Select all in the module and extra-addon pickers** — the dashboard's
+  **Upgrade modules** picker gains **Select all** and **Clear**, as do the
+  **Extra addons repos** checkbox lists in the create-environment modal and in
+  template settings (each ticked repo still needs its branch). Selecting every
+  installed module sends Odoo's own `odoo -u all` instead of a command line
+  listing each module, and `upgrade_odoo_modules` / `pull_and_apply(upgrade=...)`
+  accept `all` on its own for the same run. (#262)
+
+- **Template locks narrowed to the template being changed** — template mutations
+  used to take the team lock, stopping every environment operation in the team.
+  `import_template_from_odoo` and the dashboard's metadata editor now take a
+  template-scoped key instead, and `attach_filestore` enters the team lock only
+  for the remount-and-swap window, so staging a multi-gigabyte filestore runs
+  outside it. `delete_template` and `rename_template` keep the team lock, which
+  their dependent-environment scan genuinely needs. The import's download path is
+  unique per call with cleanup that cannot strand an orphan. (#264)
+
+### Security
+
+- **Generated secrets stay out of the log** — `[database].password`, `auth_token`
+  and `ui_password` were printed to the startup log, which is shipped off-host
+  and retained far longer than the secrets stay valid. They now live in
+  `oduflow.toml` only and the log points at the file. The config is created
+  `0600`, and an existing config that gains an auto-provisioned `ui_password` on
+  upgrade has a group/world-readable mode narrowed — never widened. Config
+  bootstrap opens the destination `O_EXCL`, so a missing `ODUFLOW_TOML` path can
+  no longer truncate a live `/etc/oduflow/oduflow.toml` and destroy its database
+  password, teams and tokens. A bad `oduflow.toml` now surfaces as one readable
+  `ConfigError` line instead of a traceback. (#266)
+
+### Bug Fixes
+
+- **One shared Odoo version parser** — the test runner (`--longpolling-port` vs
+  `--gevent-port`), the translation exporter (`--i18n-*` vs the 19-only `odoo
+  i18n` subcommand) and the sanitizer (does `odoo neutralize` exist?) each had
+  their own regex over the image reference, they disagreed, and guessing wrong
+  makes Odoo abort with `error: no such option`. `odoo_version.py` now owns the
+  parsing: official tags, custom repositories with a version tag, versioned
+  repository names, and a live `odoo --version` probe for images that carry no
+  version, anchored on the `Odoo Server N.M` banner. Every source is
+  plausibility-checked, so an image that versions itself on its own scheme falls
+  through to the probe instead of selecting a removed CLI option.
+  `create_environment`'s version-guide reminder uses the same parser. (#265)
+
+- **Coder image source label** — the image's `org.opencontainers.image.source`
+  label still named the old `oduist` org, so a pulled `oduist/oduflow-coder`
+  pointed back at an address the project no longer uses. Corrected and
+  republished as `oduflow-coder:0.3.1`; the Docker Hub namespace is unchanged.
+  (#263)
+
+### Documentation
+
+- **Architecture page** — a new `docs/architecture.md` with two Mermaid diagrams:
+  a system overview (MCP agents, browser and GitHub webhooks → the single-process
+  server → dev environments, production, auxiliary services, Traefik and the S3
+  bucket) and a backup-and-recovery diagram contrasting logical snapshots with
+  the WAL-G stream. Mermaid rendering is enabled in MkDocs Material. (#267)
+
+- **Indexed per-tool MCP tools reference** — `docs/mcp-tools.md` was one 102-row
+  table whose first column squeezed tool names mid-identifier. It is now a
+  clickable index of all 102 tools in 17 categories plus one section per tool,
+  each with its parameters as a definition list, "use it when" bullets, stated
+  lock scope and, where the invocation isn't obvious, an `oduflow call` example.
+  (#259)
 
 ## v1.79.0
 
