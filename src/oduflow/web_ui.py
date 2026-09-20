@@ -49,6 +49,7 @@ from oduflow import (
     secret_store,
     ui_scope,
     ui_totp,
+    updates,
 )
 from oduflow.docker_ops import (
     env_ops,
@@ -3863,6 +3864,17 @@ def _build_routes(
         info = get_license_info(settings.etc_dir)
         return JSONResponse({"ok": True, "license": info.to_dict()})
 
+    async def api_version(request: Request) -> JSONResponse:
+        """Compare the running version with the latest GitHub release.
+
+        Called only when a user clicks the version in the header, so the
+        outbound request to github.com is always something a person asked
+        for. Failures are reported in the payload, never as a 5xx: "could
+        not reach GitHub" is an answer the dialog shows, not a server error.
+        """
+        result = await _offload(updates.check_for_update)
+        return JSONResponse({"ok": True, "version": result.to_dict()})
+
     async def api_license_activate(request: Request) -> JSONResponse:
         try:
             body = await request.json()
@@ -6285,6 +6297,7 @@ def _build_routes(
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/logo.png", logo, methods=["GET"]),
         Route("/static/{filename}", static_file, methods=["GET"]),
+        Route("/api/version", api_version, methods=["GET"]),
         Route("/api/license", api_license, methods=["GET"]),
         Route("/api/license/activate", api_license_activate, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),

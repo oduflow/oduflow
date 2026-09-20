@@ -210,6 +210,7 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
 | `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
+| `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
 | `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduist/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
