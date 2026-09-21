@@ -1,41 +1,68 @@
 # Changelog
 
-## Unreleased
+## v1.81.0
 
-- **One unified template import** — the new `import_template` MCP tool (CLI
-  `import-template`, dashboard API) is now the single door for template data,
-  dispatched on the source shape: an http(s) Odoo URL (database manager API,
-  `master_pwd` required, as before), an `s3://bucket/prefix`, a local
-  directory with the same raw layout, a single local dump file
-  (database-only), or `refresh=true` with no source to reload the template
-  from files already placed in its directory (an external rsync/scp drop).
+### Breaking Changes
+
+- **`import_template_from_odoo` is now `import_template`** — the MCP tool is
+  renamed (first argument `odoo_url` → `source`), and the `reload-template` CLI
+  command is removed. Its jobs are covered by `import-template`: bare reload →
+  `--refresh`, `--dump-path` → a dump-file source with `--overwrite`,
+  `--source s3://…|/dir` → the same source with `--overwrite`. The old
+  `--source` implementation shelled out to `aws s3 sync`/`rsync` into the live
+  template directory (environments stayed unmounted for the whole download and
+  metadata went stale); the unified path needs no AWS CLI on the host and stages
+  before swapping. The REST endpoint `/api/templates/import-from-odoo` keeps its
+  path and accepts `odoo_url` as a legacy alias for `source`. (#257)
+
+### Features
+
+- **One unified template import** — `import_template` (MCP), `import-template`
+  (CLI) and the dashboard API are now the single door for template data,
+  dispatched on the shape of the source: an http(s) Odoo URL (database manager
+  API, `master_pwd` required, as before), an `s3://bucket/prefix`, a local
+  directory with the same raw layout, a single local dump file (database-only),
+  or `refresh=true` with no source to reload the template from files already
+  placed in its directory (an external rsync/scp drop). Every variant refreshes
+  `metadata.json` — Odoo version and modules read from the restored database,
+  sizes, overlay mode and data age. Decision record:
+  `specs/0069-unified-template-import.md`. (#257)
+
 - **Raw-layout import from S3 or a local path** — a `dump.pgdump`/
-  `dump.sql[.gz]` (the hand-made `db.dump`/`db.dump.gz` names are accepted
-  too, installed under the canonical name; canonical wins when both are
-  present) plus an as-is `filestore/` copy (e.g. uploaded with
-  `aws s3 sync`), imported without a master password or archiving. S3
-  downloads run in parallel and resume after interruption; local files are
-  hardlinked (near-instant on the same filesystem). Nothing touches the live
-  template until the staged copy is promoted under the overlay remount
-  guard. `overwrite=true` re-syncs an existing template incrementally — only
-  changed filestore files are fetched, files deleted at the source are
-  removed, and an unchanged dump (same S3 ETag, or local size+mtime) skips
-  the database reload. S3 credentials: explicit `s3_access_key`/
-  `s3_secret_key` (+ `s3_endpoint` for MinIO etc.), the `[backup]` settings
-  when the bucket matches, or anonymous for public buckets. Every variant
-  refreshes `metadata.json` (Odoo version and modules from the restored
-  database, sizes, overlay mode, data age).
-- **Breaking:** the `import_template_from_odoo` MCP tool is renamed to
-  `import_template` (first argument `odoo_url` → `source`), and the
-  `reload-template` CLI command is removed — its jobs are covered by
-  `import-template`: bare reload → `--refresh`, `--dump-path` → a dump-file
-  source with `--overwrite`, `--source s3://…|/dir` → the same source with
-  `--overwrite`. The old `--source` implementation shelled out to
-  `aws s3 sync`/`rsync` into the live template directory (environments
-  stayed unmounted for the whole download, metadata went stale); the unified
-  path needs no AWS CLI and stages before swapping. The REST endpoint
-  `/api/templates/import-from-odoo` keeps its path and accepts `odoo_url` as
-  a legacy alias for `source`.
+  `dump.sql[.gz]` (hand-made `db.dump`/`db.dump.gz` names are accepted too and
+  installed under the canonical name; canonical wins when both are present) plus
+  an as-is `filestore/` copy (e.g. uploaded with `aws s3 sync`) is imported
+  without a master password or archiving. S3 downloads run in parallel and
+  resume after interruption; local files are hardlinked, which is near-instant on
+  the same filesystem. Nothing touches the live template until the staged copy
+  is promoted under the overlay remount guard, so live environments keep their
+  own changes. `overwrite=true` re-syncs an existing template incrementally —
+  only changed filestore files are fetched, files deleted at the source are
+  removed, and an unchanged dump (same S3 ETag, or local size+mtime) skips the
+  database reload, which makes a nightly "pull last night's backup into dev" job
+  cheap. S3 credentials come from explicit `s3_access_key`/`s3_secret_key`
+  (+ `s3_endpoint` for MinIO and similar), the `[backup]` settings when the
+  bucket matches, or anonymous access for public buckets. (#257)
+
+- **Branch picker for extra addon repos** — the dashboard's add-repo dialog can
+  list a remote's branches before cloning (`POST /api/extra-repos/ls-remote`,
+  `git ls-remote --heads`) and clone only a chosen subset; all branches remain
+  the default. `add_extra_repo` takes optional comma-separated `branches`, and
+  `update_extra_repo(add_branch=...)` starts tracking one more branch in a
+  subset clone later. Branch names are validated with `git check-ref-format`,
+  and git authentication failures now say what to fix: SSH remotes point at the
+  team deploy key (`get_ssh_public_key`), HTTPS remotes at `setup_repo_auth`.
+  (#257)
+
+### Bug Fixes
+
+- **Missing branch on environment create is reported as such** — creating an
+  environment for a branch that was never pushed failed with a `git clone` exit
+  128, which the dashboard masks behind the generic "Operation failed" banner.
+  The clone now raises `NotFoundError` with the same actionable message
+  `switch_branch` already uses ("Branch 'X' does not exist on origin. Push it
+  first…"), so the dashboard (404) and MCP callers see the real cause.
+  Production clones share the same path. (#269)
 
 ## v1.80.0
 
