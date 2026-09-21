@@ -59,9 +59,15 @@ attempts to install `odumcp` if it is absent. The supported addon release curren
 tools; automatic OduMCP provisioning requires a compatible Odoo 19 deployment.
 
 Oduflow uses addon code in the main or extra repositories when available. Otherwise
-it clones the configured connector repository and mounts **only** its `odumcp`
-addon read-only. This managed checkout survives container recreation and is not
-silently updated by unrelated deployments:
+it clones the configured connector repository, copies **only** its `odumcp` addon
+into the production's main repository (the directory Odoo scans: `addons/` when
+present, otherwise the repository root), commits it as `Oduflow` and pushes the
+commit to the production branch. From then on `odumcp` is ordinary production
+code: it is deployed and rolled back with the repository, and upgrading it is a
+regular commit — Oduflow never updates it on its own. This requires push access
+for the team's git credentials or deploy key; when the push is rejected (read-only
+key, protected branch) the local commit is discarded and provisioning fails with
+the reason:
 
 ```toml
 [production]
@@ -73,7 +79,7 @@ odumcp_ref = "19.0"  # branch or tag containing odumcp >= 19.0.1.1.0
 Deploy the accompanying addon changes before enabling this feature. The addon
 must implement `_set_oduflow_key`; an older release cannot synchronize credentials.
 For reproducible installations, select a released immutable tag. Source checkout
-failures, unavailable or incompatible modules and failed key provisioning do not
+failures, a rejected push, unavailable or incompatible modules and failed key provisioning do not
 fail production creation. Production remains available with a warning and an
 OduMCP status of `sync_failed`. Infrastructure tools continue to work. The
 `production_odoo_*` tools remain listed but return a configuration error until
@@ -113,7 +119,7 @@ After changing `production_token` in TOML and restarting Oduflow, connect with t
 new token and call `sync_production_mcp(name)`; omit `name` to process all team
 productions. The call installs/configures the addon and replaces only its managed
 key. It reports each production independently; start stopped productions and retry
-failures. Adding a missing managed addon mount recreates the container briefly.
+failures. A missing `odumcp` is committed and pushed to the production repository.
 Reapplying the same key is a no-op for the key itself.
 
 The new token immediately controls the Oduflow endpoint after restart. Each Odoo

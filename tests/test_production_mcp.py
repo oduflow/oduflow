@@ -16,7 +16,9 @@ from oduflow.settings import Settings, TeamSettings
 def configured(tmp_path):
     team = TeamSettings(team_id="1", data_dir=str(tmp_path), production_token="p" * 40)
     settings = Settings(teams={"1": team}, prod_enabled=True, routing_mode="traefik")
-    production_registry.create_production(team, "erp", {"domain": "erp.example.com"})
+    production_registry.create_production(
+        team, "erp", {"domain": "erp.example.com", "branch": "main"}
+    )
     return settings, team
 
 
@@ -27,6 +29,43 @@ def transport(monkeypatch, handler):
         "Client",
         lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs),
     )
+
+
+def git(*args, cwd=None):
+    import subprocess
+
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def production_repo(team, tmp_path, *, nested=False):
+    """A production checkout of a bare origin, as create_production leaves it."""
+    from pathlib import Path
+
+    from oduflow.naming import get_repo_path, prod_env_name
+
+    origin = tmp_path / "origin.git"
+    git("init", "--bare", "-b", "main", str(origin))
+    repo = Path(get_repo_path(prod_env_name("erp"), team.workspaces_dir))
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    git("clone", str(origin), str(repo))
+    seed = repo / ("addons/sale_ext/__manifest__.py" if nested else "README.md")
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    seed.write_text("{}")
+    git("add", "-A", cwd=repo)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "seed", cwd=repo)
+    git("push", "origin", "HEAD:refs/heads/main", cwd=repo)
+    return origin, repo
+
+
+def connector_clone(url, ref, path, *args, **kwargs):
+    from pathlib import Path
+
+    module = Path(path) / "addons/odumcp"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}")
+    (Path(path) / "addons/other").mkdir()
 
 
 def test_http_preserves_approval_and_target(configured, monkeypatch):
@@ -226,54 +265,49 @@ def test_sync_all_continues_after_unexpected_target_failure(configured, monkeypa
     assert [row["status"] for row in result["productions"]] == ["failed", "ready"]
 
 
-def test_managed_addon_is_mounted_and_kept_in_generated_config(configured, monkeypatch):
-    from oduflow.docker_ops import production_ops
-    from oduflow.naming import get_repo_path, prod_env_name
-
+@pytest.mark.parametrize("nested", [False, True])
+def test_missing_addon_is_vendored_into_production_repo(
+    configured, monkeypatch, tmp_path, nested
+):
     settings, team = configured
-    module = connector.addon_checkout(team, "erp") / "addons/odumcp"
-    module.mkdir(parents=True)
-    (module / "__manifest__.py").write_text("{}")
-    record = production_registry.get_production(team, "erp")
-    env, volumes, labels = production_ops._container_spec(
-        settings, team, "erp", record, {"pg_user": "odoo", "pg_password": "db-test"}, []
-    )
-    assert volumes[str(module)] == {"bind": connector.MOUNT + "/odumcp", "mode": "ro"}
-    assert team.production_token not in json.dumps([env, volumes, labels])
-    generate = MagicMock()
-    monkeypatch.setattr("oduflow.extra_addons.generate_odoo_conf", generate)
-    monkeypatch.setattr(
-        "oduflow.pg_tune.detect_resources",
-        lambda: {"total_ram_mb": 4096, "cpu_count": 2},
-    )
-    production_ops._build_prod_odoo_conf(
-        settings,
-        team,
-        "erp",
-        get_repo_path(prod_env_name("erp"), team.workspaces_dir),
-        [],
-    )
-    assert connector.MOUNT in generate.call_args.args[2]
-
-
-def test_missing_addon_uses_configured_source(configured, monkeypatch):
-    settings, team = configured
+    origin, repo = production_repo(team, tmp_path, nested=nested)
 
     def clone(url, ref, path, target_team, **kwargs):
-        from pathlib import Path
-
         assert url == settings.prod_odumcp_repo_url
         assert ref == settings.prod_odumcp_ref
         assert target_team == team
-        module = Path(path) / "addons/odumcp"
-        module.mkdir(parents=True)
-        (module / "__manifest__.py").write_text("{}")
+        connector_clone(url, ref, path)
 
     clone_mock = MagicMock(side_effect=clone)
     monkeypatch.setattr("oduflow.docker_ops.env_ops._clone_repo", clone_mock)
     connector.prepare_addon(settings, team, "erp", [])
     connector.prepare_addon(settings, team, "erp", [])
     assert clone_mock.call_count == 1
+
+    # Only odumcp lands in the directory Odoo scans, and origin has the commit.
+    module = "addons/odumcp" if nested else "odumcp"
+    assert (repo / module / "__manifest__.py").is_file()
+    assert not (repo / "addons/other").exists()
+    assert git("status", "--porcelain", cwd=repo) == ""
+    assert git("rev-parse", "HEAD", cwd=repo) == git("rev-parse", "main", cwd=origin)
+    assert module + "/__manifest__.py" in git(
+        "show", "--name-only", "--format=%an", "main", cwd=origin
+    )
+
+
+def test_rejected_push_leaves_no_local_commit(configured, monkeypatch, tmp_path):
+    settings, team = configured
+    origin, repo = production_repo(team, tmp_path)
+    head = git("rev-parse", "HEAD", cwd=repo)
+    hook = origin / "hooks/pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    monkeypatch.setattr("oduflow.docker_ops.env_ops._clone_repo", connector_clone)
+    with pytest.raises(PrerequisiteNotMetError, match="push access"):
+        connector.prepare_addon(settings, team, "erp", [])
+    assert git("rev-parse", "HEAD", cwd=repo) == head
+    assert not (repo / "odumcp").exists()
+    assert git("status", "--porcelain", cwd=repo) == ""
 
 
 def test_large_production_output_is_bound_to_team(configured, monkeypatch):
@@ -354,35 +388,22 @@ def test_successful_sync_restores_odoo_access(configured, monkeypatch):
     assert connector.execute(settings, team, "erp", "system.info")["connected"]
 
 
-def test_failed_download_can_be_retried(configured, monkeypatch):
-    from pathlib import Path
-
+def test_failed_download_can_be_retried(configured, monkeypatch, tmp_path):
     settings, team = configured
+    _, repo = production_repo(team, tmp_path)
 
     def fail(url, ref, path, *args, **kwargs):
-        module = Path(path) / "addons/odumcp"
-        module.mkdir(parents=True)
-        (module / "__manifest__.py").write_text("{}")
+        connector_clone(url, ref, path)
         raise RuntimeError("download interrupted")
 
     monkeypatch.setattr("oduflow.docker_ops.env_ops._clone_repo", fail)
-    with pytest.raises(RuntimeError, match="interrupted"):
+    with pytest.raises(PrerequisiteNotMetError, match="interrupted"):
         connector.prepare_addon(settings, team, "erp", [])
-    assert not connector.addon_checkout(team, "erp").exists()
-    assert not list(
-        connector.addon_checkout(team, "erp").parent.glob(".odumcp-download-*")
-    )
+    assert not (repo / "odumcp").exists()
 
-    def succeed(url, ref, path, *args, **kwargs):
-        module = Path(path) / "addons/odumcp"
-        module.mkdir(parents=True)
-        (module / "__manifest__.py").write_text("{}")
-
-    monkeypatch.setattr("oduflow.docker_ops.env_ops._clone_repo", succeed)
+    monkeypatch.setattr("oduflow.docker_ops.env_ops._clone_repo", connector_clone)
     connector.prepare_addon(settings, team, "erp", [])
-    assert (
-        connector.addon_checkout(team, "erp") / "addons/odumcp/__manifest__.py"
-    ).is_file()
+    assert (repo / "odumcp/__manifest__.py").is_file()
 
 
 def existing_module(root, *parts):
@@ -394,14 +415,12 @@ def existing_module(root, *parts):
     return module
 
 
-def test_root_addon_is_used_only_when_odoo_scans_the_root(configured, monkeypatch):
+def test_root_addon_is_used_only_when_odoo_scans_the_root(
+    configured, monkeypatch, tmp_path
+):
     """The probe must match the one directory resolve_main_addons_path picks."""
-    from pathlib import Path
-
-    from oduflow.naming import get_repo_path, prod_env_name
-
     settings, team = configured
-    repo = Path(get_repo_path(prod_env_name("erp"), team.workspaces_dir))
+    _, repo = production_repo(team, tmp_path)
     existing_module(repo, "odumcp")
     clone = MagicMock()
     monkeypatch.setattr("oduflow.docker_ops.env_ops._clone_repo", clone)
@@ -414,6 +433,7 @@ def test_root_addon_is_used_only_when_odoo_scans_the_root(configured, monkeypatc
     with pytest.raises(PrerequisiteNotMetError):
         connector.prepare_addon(settings, team, "erp", [])
     clone.assert_called_once()
+    assert not (repo / "addons/odumcp").exists()
 
 
 def test_extra_repo_addon_probe_follows_its_addons_path(

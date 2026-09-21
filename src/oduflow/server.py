@@ -5493,7 +5493,8 @@ def sync_production_mcp(name: str = "", ctx: Context | None = None) -> str:
     Empty name processes every production of this team, reporting failures
     separately. Use after changing production_token in TOML and restarting
     Oduflow. No secret is accepted or returned. Stopped productions must be
-    started first. Adding the managed addon mount recreates the container.
+    started first. A missing odumcp is committed and pushed to the production
+    repository, which requires push access.
     """
     from oduflow import production_mcp
 
