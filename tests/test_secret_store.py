@@ -123,3 +123,45 @@ class TestResolveEnvSecrets:
     def test_malformed_reference_names_the_variable(self, team):
         with pytest.raises(PrerequisiteNotMetError, match="API_KEY"):
             secret_store.resolve_env_secrets(team, {"API_KEY": "secret:Bad Name"})
+
+
+@pytest.mark.parametrize(
+    "value", ['{\n  "key": "private"\n}', "[]", "null", "true", "42", '"token"']
+)
+def test_json_values_preserve_original_text(team, value):
+    secret_store.set_secret(team, "key", value, "json")
+    assert secret_store.list_secrets(team)[0]["value_type"] == "json"
+    assert secret_store.resolve_env_secrets(team, {"KEY": "secret:key"}) == {
+        "KEY": value
+    }
+
+
+@pytest.mark.parametrize(
+    "value", ['{"private":}', "NaN", "Infinity", "-Infinity", '{"x": NaN}', "   "]
+)
+def test_invalid_json_does_not_replace_secret(team, value):
+    secret_store.set_secret(team, "key", "{}", "json")
+    before = open(secret_store.secrets_path(team)).read()
+    with pytest.raises(ValueError, match="Invalid JSON") as error:
+        secret_store.set_secret(team, "key", value)
+    assert "private" not in str(error.value)
+    assert open(secret_store.secrets_path(team)).read() == before
+
+
+def test_legacy_secret_defaults_to_text_and_can_change_type(team):
+    with open(secret_store.secrets_path(team), "w") as handle:
+        json.dump({"version": 1, "secrets": {"key": {"value": "old"}}}, handle)
+    assert secret_store.list_secrets(team)[0]["value_type"] == "text"
+    secret_store.set_secret(team, "key", "new")
+    secret_store.set_secret(team, "key", "{}", "json")
+    secret_store.set_secret(team, "key", "[]")
+    assert secret_store.list_secrets(team)[0]["value_type"] == "json"
+    secret_store.set_secret(team, "key", "plain", "text")
+    assert secret_store.list_secrets(team)[0]["value_type"] == "text"
+
+
+@pytest.mark.parametrize("value_type", ["xml", "", False, [], {}])
+def test_unknown_type_is_rejected(team, value_type):
+    with pytest.raises(ValueError, match="value_type"):
+        secret_store.set_secret(team, "key", "{}", value_type)
+    assert secret_store.list_secrets(team) == []

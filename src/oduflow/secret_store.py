@@ -92,11 +92,12 @@ def _save(team: TeamSettings, data: dict[str, Any]) -> None:
 
 
 def list_secrets(team: TeamSettings) -> list[dict[str, str]]:
-    """Names and timestamps only — the values never leave this module."""
+    """Names, types and timestamps only — never secret values."""
     records = _load(team)["secrets"]
     return [
         {
             "name": name,
+            "value_type": record.get("value_type", "text"),
             "created_at": record.get("created_at", ""),
             "updated_at": record.get("updated_at", ""),
         }
@@ -104,16 +105,36 @@ def list_secrets(team: TeamSettings) -> list[dict[str, str]]:
     ]
 
 
-def set_secret(team: TeamSettings, name: str, value: str) -> dict[str, Any]:
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("Invalid JSON value.")
+
+
+def set_secret(
+    team: TeamSettings, name: str, value: str, value_type: str | None = None
+) -> dict[str, Any]:
     validate_secret_name(name)
     if not isinstance(value, str) or not value:
         raise ValueError("A secret value must be a non-empty string.")
+    if value_type is not None and value_type not in ("text", "json"):
+        raise ValueError("value_type must be 'text' or 'json'.")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with keyed_mutex(team_secrets_lock_key(team.team_id)):
         data = _load(team)
         existing = data["secrets"].get(name)
+        if value_type is None:
+            value_type = existing.get("value_type", "text") if existing else "text"
+        if value_type == "json":
+            try:
+                json.loads(value, parse_constant=_reject_json_constant)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON value at line {exc.lineno}, column {exc.colno}."
+                ) from None
+            except (ValueError, RecursionError):
+                raise ValueError("Invalid JSON value.") from None
         data["secrets"][name] = {
             "value": value,
+            "value_type": value_type,
             "created_at": existing.get("created_at", now) if existing else now,
             "updated_at": now,
         }

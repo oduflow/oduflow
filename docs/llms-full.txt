@@ -4478,8 +4478,8 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
 | `GET` | `/api/ssh-key` | The team's SSH public key and fingerprint (only the public key is returned) |
 | `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
-| `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
-| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
+| `GET` | `/api/secrets` | List team secret names, types (`value_type`) and timestamps; stored values are never returned by any endpoint |
+| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from string body field `value` (write-only); optional `value_type`: `text` or `json`. Omitted/null type preserves the existing type, defaulting to `text` for new secrets. Invalid JSON secret values or unknown types return HTTP 400 without changing the stored value |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
@@ -9167,6 +9167,8 @@ the old key stops working everywhere it was registered.
 Environment variables on services and environments are visible to coding agents through `get_service_info`, `list_services`, `get_environment_info` and the dashboard — so putting a password or API key directly into `env_vars` leaks it into every agent conversation that inspects the resource.
 
 **Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
+
+When adding or replacing a secret, **Hide value** masks the input by default. **JSON value** opens a multiline field, turns off masking, and validates the JSON while you type. JSON secrets also undergo server-side validation before saving; invalid input leaves the previous value intact. The stored type (`text` or `json`) persists across replacements. Existing secrets default to `text`. JSON values retain their original formatting and may contain any valid JSON value, including arrays and scalars; `NaN` and `Infinity` are rejected.
 
 To use one, set the env-var value to a reference:
 

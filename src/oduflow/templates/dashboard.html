@@ -564,6 +564,7 @@
     box-sizing: border-box;
   }
   .form-group textarea { resize: vertical; }
+  #secret-json-value { font-family: var(--font-mono); }
   .form-group input:not([type="checkbox"]):focus, .form-group textarea:focus, .text-input:focus { border-color: var(--accent); }
   .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
   .modal-body .form-actions {
@@ -2597,9 +2598,21 @@
         <div class="hint">Lowercase letters, digits, dots, hyphens, underscores. Referenced from env vars as <code>KEY=secret:&lt;name&gt;</code>.</div>
       </div>
       <div class="form-group">
-        <label for="secret-value">Value</label>
-        <input type="password" id="secret-value" placeholder="" autocomplete="new-password">
+        <label id="secret-value-label" for="secret-value">Value</label>
+        <input type="password" id="secret-value" autocomplete="new-password" oninput="secretDraftValue = this.value; validateSecretValue()">
+        <textarea id="secret-json-value" rows="8" hidden spellcheck="false" autocomplete="off" aria-describedby="secret-json-status" oninput="secretDraftValue = this.value; validateSecretValue()"></textarea>
+        <div class="hint" id="secret-json-status" role="status" aria-live="polite" hidden></div>
         <div class="hint">Write-only: the stored value can be replaced here, but never read back.</div>
+      </div>
+      <div class="form-group">
+        <div class="check-row">
+          <input type="checkbox" id="secret-hide-value" checked onchange="secretHidePref = this.checked; updateSecretValueMode()">
+          <label for="secret-hide-value">Hide value</label>
+        </div>
+        <div class="check-row" style="margin-top:6px;">
+          <input type="checkbox" id="secret-is-json" onchange="updateSecretValueMode()">
+          <label for="secret-is-json">JSON value</label>
+        </div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="closeSecretModal()">Cancel</button>
@@ -7566,6 +7579,12 @@ async function checkVersion() {
 
 // --- Secrets (write-only named values for env vars) ---
 const API_SECRETS = '/api/secrets';
+var secretTypes = Object.create(null);
+var secretDraftValue = '';
+var secretSaving = false;
+// JSON mode has to unmask the value (a textarea cannot be a password field),
+// so the user's masking choice is kept here and restored when they leave it.
+var secretHidePref = true;
 
 async function loadSecrets() {
   try {
@@ -7582,6 +7601,8 @@ async function loadSecrets() {
 }
 
 function renderSecrets(secrets) {
+  secretTypes = Object.create(null);
+  (secrets || []).forEach(function(s) { secretTypes[s.name] = s.value_type || 'text'; });
   var el = document.getElementById('secrets-list');
   if (!secrets || secrets.length === 0) {
     el.innerHTML = '<div class="empty">No secrets defined.<br>Add one to reference it as <code>KEY=secret:&lt;name&gt;</code>.</div>';
@@ -7608,27 +7629,74 @@ function renderSecrets(secrets) {
   }).join('');
 }
 
+function updateSecretValueMode() {
+  var isJson = document.getElementById('secret-is-json').checked;
+  var hide = document.getElementById('secret-hide-value');
+  hide.checked = isJson ? false : secretHidePref;
+  hide.disabled = isJson;
+  var input = document.getElementById('secret-value');
+  var textarea = document.getElementById('secret-json-value');
+  input.type = hide.checked ? 'password' : 'text';
+  input.hidden = isJson;
+  textarea.hidden = !isJson;
+  input.value = isJson ? '' : secretDraftValue;
+  textarea.value = isJson ? secretDraftValue : '';
+  document.getElementById('secret-value-label').htmlFor = isJson ? textarea.id : input.id;
+  validateSecretValue();
+}
+
+function validateSecretValue() {
+  var isJson = document.getElementById('secret-is-json').checked;
+  var status = document.getElementById('secret-json-status');
+  var valid = !!secretDraftValue;
+  status.hidden = !isJson;
+  var message = '';
+  if (isJson) {
+    try {
+      JSON.parse(secretDraftValue);
+      message = 'Valid JSON';
+    } catch (e) {
+      valid = false;
+      // Parser messages can include secret fragments; never display them.
+      message = secretDraftValue ? 'Invalid JSON. Check the syntax.' : 'Enter a JSON value.';
+    }
+  }
+  // This runs on every keystroke, and the region is aria-live: rewriting it
+  // with identical text would make a screen reader repeat it per character.
+  if (status.textContent !== message) status.textContent = message;
+  document.getElementById('secret-json-value').setAttribute('aria-invalid', String(isJson && !valid));
+  document.getElementById('secret-submit').disabled = secretSaving || !valid;
+  return valid;
+}
+
 function openSecretModal(name) {
   document.getElementById('secret-modal-title').textContent = name ? 'Replace Secret Value' : 'Add Secret';
   var nameEl = document.getElementById('secret-name');
   nameEl.value = name || '';
   nameEl.readOnly = !!name;
-  document.getElementById('secret-value').value = '';
+  secretDraftValue = '';
+  secretHidePref = true;
+  document.getElementById('secret-hide-value').checked = true;
+  document.getElementById('secret-is-json').checked = secretTypes[name] === 'json';
+  updateSecretValueMode();
   document.getElementById('secret-error').style.display = 'none';
-  document.getElementById('secret-submit').disabled = false;
   showModal('secret-modal');
-  (name ? document.getElementById('secret-value') : nameEl).focus();
+  (name ? document.getElementById(document.getElementById('secret-is-json').checked ? 'secret-json-value' : 'secret-value') : nameEl).focus();
 }
 
 function closeSecretModal(event) {
   if (event && event.target !== event.currentTarget) return;
+  secretDraftValue = '';
   document.getElementById('secret-value').value = '';
+  document.getElementById('secret-json-value').value = '';
   hideModal('secret-modal');
 }
 
 async function submitSecret() {
+  if (secretSaving || !validateSecretValue()) return;
   var name = document.getElementById('secret-name').value.trim();
-  var value = document.getElementById('secret-value').value;
+  var value = secretDraftValue;
+  var valueType = document.getElementById('secret-is-json').checked ? 'json' : 'text';
   var errEl = document.getElementById('secret-error');
   if (!name || !value) {
     errEl.textContent = 'Name and value are required.';
@@ -7637,12 +7705,13 @@ async function submitSecret() {
   }
   errEl.style.display = 'none';
   var btn = document.getElementById('secret-submit');
+  secretSaving = true;
   btn.disabled = true;
   try {
     var r = await fetch(API_SECRETS + '/' + encodeURIComponent(name) + '/set', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({value: value})
+      body: JSON.stringify({value: value, value_type: valueType})
     });
     var data = await readResult(r);
     if (data.ok) {
@@ -7660,7 +7729,8 @@ async function submitSecret() {
     errEl.textContent = 'Connection error: ' + e.message;
     errEl.style.display = 'block';
   } finally {
-    btn.disabled = false;
+    secretSaving = false;
+    validateSecretValue();
   }
 }
 

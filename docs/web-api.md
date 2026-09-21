@@ -199,8 +199,8 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
 | `GET` | `/api/ssh-key` | The team's SSH public key and fingerprint (only the public key is returned) |
 | `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
-| `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
-| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
+| `GET` | `/api/secrets` | List team secret names, types (`value_type`) and timestamps; stored values are never returned by any endpoint |
+| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from string body field `value` (write-only); optional `value_type`: `text` or `json`. Omitted/null type preserves the existing type, defaulting to `text` for new secrets. Invalid JSON secret values or unknown types return HTTP 400 without changing the stored value |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
