@@ -398,6 +398,8 @@ Environment variables on services and environments are visible to coding agents 
 
 **Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
 
+When adding or replacing a secret, **Hide value** masks the input by default. **JSON value** opens a multiline field, turns off masking, and validates the JSON while you type. JSON secrets also undergo server-side validation before saving; invalid input leaves the previous value intact. The stored type (`text` or `json`) persists across replacements. Existing secrets default to `text`. JSON values retain their original formatting and may contain any valid JSON value, including arrays and scalars; `NaN` and `Infinity` are rejected.
+
 To use one, set the env-var value to a reference:
 
 ```bash

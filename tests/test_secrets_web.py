@@ -64,3 +64,38 @@ def test_delete(tmp_path):
 
     resp = client.post("/api/secrets/api-key/delete")
     assert resp.status_code == 404
+
+
+def test_json_validation_and_preserved_type(tmp_path):
+    client = _client(tmp_path)
+    endpoint = "/api/secrets/key/set"
+    assert (
+        client.post(
+            endpoint, json={"value": '{"token":"private"}', "value_type": "json"}
+        ).status_code
+        == 200
+    )
+    before = (tmp_path / "secrets.json").read_text()
+    for value in ('{"private":}', "NaN", "Infinity"):
+        response = client.post(endpoint, json={"value": value})
+        assert response.status_code == 400
+        assert "private" not in response.text
+        assert (tmp_path / "secrets.json").read_text() == before
+    listing = client.get("/api/secrets")
+    assert listing.json()["secrets"][0]["value_type"] == "json"
+    assert "private" not in listing.text
+    assert (
+        client.post(endpoint, json={"value": "plain", "value_type": "text"}).status_code
+        == 200
+    )
+    assert client.get("/api/secrets").json()["secrets"][0]["value_type"] == "text"
+
+
+def test_invalid_secret_type(tmp_path):
+    client = _client(tmp_path)
+    for value_type in ("xml", "", False, [], {}):
+        response = client.post(
+            "/api/secrets/key/set", json={"value": "{}", "value_type": value_type}
+        )
+        assert response.status_code == 400
+    assert client.get("/api/secrets").json()["secrets"] == []

@@ -4364,7 +4364,7 @@ def _build_routes(
             locks.release_env(key)
 
     def api_secrets(request: Request) -> JSONResponse:
-        """Names and timestamps only — secret values never leave the server."""
+        """Names, types and timestamps only — never secret values."""
         try:
             team = _get_ui_team(request)
             return JSONResponse(
@@ -4394,7 +4394,7 @@ def _build_routes(
                 {"ok": False, "error": "Invalid JSON body."}, status_code=400
             )
         try:
-            result = secret_store.set_secret(team, name, value)
+            result = secret_store.set_secret(team, name, value, body.get("value_type"))
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
