@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ class LicenseInfo:
     issued: str = ""
     plan: str = ""
     scope: str = ""
+    license_id: str = ""
     subscription_id: str = ""
     paddle_environment: str = ""
     valid_from: str = ""
@@ -103,7 +105,10 @@ class LicenseInfo:
             "valid_from": self.valid_from,
             "expires": self.expires,
             "perpetual": self.type != TYPE_UNLICENSED and not self.expires,
-            "can_refresh": bool(self.subscription_id),
+            "can_refresh": self.type != TYPE_UNLICENSED,
+            "can_subscribe": bool(self.license_id)
+            and not self.subscription_id
+            and self.expired,
         }
 
 
@@ -159,6 +164,7 @@ def _verify_license_text(raw: str) -> LicenseInfo:
         raise ValueError(f"Unknown license type: {license_type}")
 
     annual_fields = (
+        "license_id",
         "plan",
         "scope",
         "subscription_id",
@@ -166,20 +172,33 @@ def _verify_license_text(raw: str) -> LicenseInfo:
         "valid_from",
         "expires",
     )
-    if data.get("version") == 2 or any(data.get(field) for field in annual_fields):
+    if data.get("version") in (2, 3) or any(data.get(field) for field in annual_fields):
         expected = {
             "solo": (TYPE_INDIVIDUAL, "individual-commercial"),
             "business": (TYPE_BUSINESS, "internal-use"),
             "integrator": (TYPE_INTEGRATOR, "client-services"),
         }
+        required = ("plan", "scope", "paddle_environment", "valid_from", "expires")
+        version = data.get("version")
         if (
-            data.get("version") != 2
+            version not in (2, 3)
             or not all(
-                isinstance(data.get(field), str) and data[field]
-                for field in annual_fields
+                isinstance(data.get(field), str) and data[field] for field in required
             )
             or expected.get(data["plan"]) != (license_type, data["scope"])
-            or not data["subscription_id"].startswith("sub_")
+            or (
+                version == 3
+                and not re.fullmatch(
+                    r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+                    str(data.get("license_id", "")),
+                )
+            )
+            or (
+                (version == 2 or data.get("subscription_id"))
+                and not re.fullmatch(
+                    r"sub_[a-z0-9]{26}", str(data.get("subscription_id", ""))
+                )
+            )
             or data["paddle_environment"] not in ("sandbox", "production")
             or _parse_date(data["expires"]) <= _parse_date(data["valid_from"])
         ):
@@ -243,8 +262,6 @@ def refresh_license(etc_dir: str | None = None) -> tuple[LicenseInfo, bool]:
     with open(license_path, "r", encoding="utf-8") as f:
         raw = f.read().strip()
     current = _verify_license_text(raw)
-    if not current.subscription_id:
-        return current, False
     try:
         response = httpx.post(
             LICENSE_CHECK_URL,
@@ -269,19 +286,20 @@ def refresh_license(etc_dir: str | None = None) -> tuple[LicenseInfo, bool]:
         updated = _verify_license_text(key)
     except (InvalidSignature, ValueError) as exc:
         raise ValueError("Invalid renewal signature or payload") from exc
-    for field in (
-        "type",
-        "name",
-        "email",
-        "plan",
-        "scope",
-        "subscription_id",
-        "paddle_environment",
-    ):
+    identity_fields = ["type", "name", "email"]
+    if current.expires:
+        identity_fields.extend(["plan", "scope", "paddle_environment"])
+        identity_fields.append(
+            "license_id" if current.license_id else "subscription_id"
+        )
+    elif not updated.license_id:
+        raise ValueError("Legacy migration requires a stable license identity")
+    for field in identity_fields:
         if getattr(updated, field) != getattr(current, field):
             raise ValueError("Renewal does not match the installed license")
-    if updated.status != "active" or _parse_date(updated.expires) <= _parse_date(
-        current.expires
+    if current.expires and (
+        updated.status != "active"
+        or _parse_date(updated.expires) <= _parse_date(current.expires)
     ):
         raise ValueError("Renewal does not extend the paid license period")
     # An operator may have installed another license while the network call ran.
@@ -291,3 +309,43 @@ def refresh_license(etc_dir: str | None = None) -> tuple[LicenseInfo, bool]:
                 "The installed license changed. Please check its status again."
             )
     return install_license_from_text(key, etc_dir), True
+
+
+def get_license_checkout_url(etc_dir: str | None = None) -> str:
+    """Exchange the installed credential for a short-lived hosted checkout link."""
+    from urllib.parse import urlparse
+
+    import httpx
+
+    with open(get_license_path(etc_dir), "r", encoding="utf-8") as f:
+        raw = f.read().strip()
+    current = _verify_license_text(raw)
+    if not current.license_id or not current.expired:
+        raise ValueError(
+            "Update license status first; subscribe after the granted period ends."
+        )
+    try:
+        response = httpx.post(
+            "https://license.oduist.com/oduflow/renew_checkout",
+            json={"license_key": raw},
+            timeout=25,
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ValueError(
+            "Unable to open checkout. Update license status or contact support."
+        ) from exc
+    url = data.get("checkout_url") if isinstance(data, dict) else None
+    if not isinstance(url, str):
+        raise ValueError("Invalid checkout response")
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "license.oduist.com"
+        or parsed.path != "/oduflow/buy"
+        or not parsed.query.startswith("renewal=")
+    ):
+        raise ValueError("Invalid checkout URL")
+    return url

@@ -704,3 +704,28 @@ def test_api_license_refresh_requires_session_and_uses_config_dir(
     assert response.status_code == 200
     assert response.json()["renewed"] is True
     assert seen == [settings.etc_dir]
+
+
+def test_api_license_checkout_requires_session_and_same_origin(tmp_path, monkeypatch):
+    seen = []
+
+    def checkout(etc_dir):
+        seen.append(etc_dir)
+        return "https://license.oduist.com/oduflow/buy?renewal=opaque"
+
+    monkeypatch.setattr(web_ui, "get_license_checkout_url", checkout)
+    settings = _settings(etc_dir=str(tmp_path / "conf"))
+    client = TestClient(_full_app(settings))
+    assert client.post("/api/license/checkout").status_code == 401
+    client.post("/login", data={"password": _PW})
+    assert (
+        client.post(
+            "/api/license/checkout", headers={"origin": "https://evil.example"}
+        ).status_code
+        == 403
+    )
+    assert seen == []
+    response = client.post("/api/license/checkout")
+    assert response.status_code == 200
+    assert response.json()["checkout_url"].startswith("https://license.oduist.com/")
+    assert seen == [settings.etc_dir]

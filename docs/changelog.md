@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.83.0
+
+### Features
+
+- **Manual commercial periods and agreed annual migration** - existing customers
+  can retrieve an agreed annual term through **Update license status**. A stable
+  license identity allows a manually granted period before a Paddle subscription
+  exists. After expiry, **Subscribe annually** opens checkout for the same holder
+  and plan; completed payment links the subscription and enables paid renewal.
+  Other perpetual licenses remain valid, and expiration never restricts features.
+
 ## v1.82.0
 
 ### Features

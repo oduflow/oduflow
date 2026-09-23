@@ -1,6 +1,6 @@
 [project]
 name = "oduflow"
-version = "1.82.0"
+version = "1.83.0"
 description = "AI-first Odoo development and CI tool with reusable database templates, powered by MCP"
 authors = [
     { name = "Oduist" }
