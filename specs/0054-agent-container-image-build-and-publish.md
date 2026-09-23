@@ -81,6 +81,23 @@ a thin control plane over the host Docker daemon:
 - Multi-platform builds, build secrets, SBOMs, and a dashboard UI are out of
   scope and layer on cleanly later.
 
+## Evolution
+
+- **2026-09-23 — staging images run as auxiliary services.** `create_service`
+  and `update_service` accept the local staging tag
+  (`oduflow-build/team-<id>:<build-id>`) and resolve it from the daemon instead
+  of pulling, so an agent can build, run the result as a service, verify it,
+  and only then publish. The tag prefix is checked against the calling team's
+  own staging repository: the daemon is shared, and without that check one
+  team could run another team's build through these service operations.
+  Pruning preserves staging tags referenced by running or stopped containers,
+  even when a cached rebuild gives the same image another tag. It shares the
+  service registry mutex with creation and recreation, protecting the interval
+  between image lookup and container creation. Updates recheck the staging tag
+  under that mutex before removing the old container. Before this, the only path
+  from a build to a running service went through the registry, and a locally
+  configured registry (or none) left the agent stuck.
+
 ## Shelved alternative — the multi-tenant builder
 
 Recorded because it is the design to return to if Oduflow is ever hosted for
@@ -122,6 +139,7 @@ mutually untrusting tenants. Each pillar and why it was dropped:
 
 - 2026-09-01 — introduced (simplified from a 2026-08-31 design after review;
   that document's rationale is folded into this record).
+- 2026-09-23 — staging tags accepted by `create_service`/`update_service` (see Evolution).
 - 2026-09-02 — registry tokens moved from an environment-variable reference to
   a direct config value, matching how Oduflow stores its other deployment
   credentials while preserving request-scoped Docker authentication.

@@ -1614,7 +1614,7 @@ Lock: service.
 :   *str · required* — Short service name (e.g. `redis`, `meilisearch`).
 
 `image`
-:   *str · required* — Docker image with tag (e.g. `redis:7`, `getmeili/meilisearch:v1.6`).
+:   *str · required* — Docker image with tag (e.g. `redis:7`, `getmeili/meilisearch:v1.6`). A staging tag from [`start_image_build`](#start_image_build) (`oduflow-build/team-<id>:<build-id>`) is taken from the local Docker daemon without a pull — see [Container Image Builds](#container-image-builds).
 
 `port`
 :   *int · default `0`* — Catch-all exposure: forward every path to this one container port. Required outside Traefik. Mutually exclusive with `routes`.
@@ -1686,7 +1686,7 @@ Lock: service.
 :   *str · default empty* — `KEY=VALUE` pairs that **fully replace** existing variables. Empty keeps them.
 
 `image`
-:   *str · default empty* — New image with tag (e.g. `redis:8`). Empty keeps the current image.
+:   *str · default empty* — New image with tag (e.g. `redis:8`). Empty keeps the current image. A staging tag from [`start_image_build`](#start_image_build) (`oduflow-build/team-<id>:<build-id>`) is taken from the local Docker daemon without a pull — see [Container Image Builds](#container-image-builds).
 
 `port`
 :   *int · default `0`* — New container port. `0` keeps the current one.
@@ -2192,6 +2192,18 @@ configuration keeps the reference.
 ## Container Image Builds
 
 Requires a `[team.X.image_registry]` section in `oduflow.toml`.
+
+A succeeded build is kept in the host's Docker daemon under a **staging tag**,
+`oduflow-build/team-<id>:<build-id>` (reported by
+[`get_image_build`](#get_image_build)). That tag can be passed directly as the
+`image` of [`create_service`](#create_service) or
+[`update_service`](#update_service): it is resolved from the local daemon, not
+pulled from a registry, so a build can be run and checked as an auxiliary
+service *before* [`publish_image_build`](#publish_image_build) pushes it
+anywhere. These service operations accept only the team's own staging images.
+Automatic build retention preserves tags referenced by running or stopped
+containers. Unused staging tags remain temporary and can be pruned; use a
+published tag to restore a service after pruning or move it to a new host.
 
 ### `start_image_build`
 

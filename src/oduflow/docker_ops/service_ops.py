@@ -11,6 +11,7 @@ from typing import Any
 import docker
 from oduflow import secret_store
 from oduflow.docker_ops import service_presets, volume_ops
+from oduflow.docker_ops.build_ops import STAGING_REPOSITORY_PREFIX, staging_repository
 from oduflow.docker_ops.client import (
     docker_error_detail,
     docker_operation_error,
@@ -112,8 +113,35 @@ def _raise_service_start_error(
     raise docker_operation_error(f"start service '{name}'", exc) from exc
 
 
-def _pull_service_image(client: Any, image: str) -> Any:
-    """Pull a service image and expose only safe, actionable failures."""
+def _pull_service_image(client: Any, image: str, team: TeamSettings) -> Any:
+    """Resolve a service image and expose only safe, actionable failures.
+
+    Registry images are pulled. A staging image produced by
+    ``start_image_build`` (``oduflow-build/team-<id>:<build-id>``) exists only
+    in the local daemon, so it is looked up there instead — but only the
+    calling team's own staging repository: the local daemon is shared, and the
+    prefix check is what keeps one team from running another team's build.
+    """
+    if image.startswith(STAGING_REPOSITORY_PREFIX):
+        repository = image.rsplit(":", 1)[0] if ":" in image else image
+        if repository != staging_repository(team.team_id):
+            raise NotFoundError(
+                f"Docker image '{image}' was not found or is not accessible. "
+                "Staging builds can only be used by the team that built them; "
+                "pass a build's local tag as reported by get_image_build."
+            )
+        try:
+            return client.images.get(image)
+        except docker.errors.ImageNotFound as exc:
+            raise NotFoundError(
+                f"Staging image '{image}' is not in the local Docker daemon: the "
+                "build may have failed, been cancelled, or been pruned. Check "
+                "get_image_build and run start_image_build again if needed."
+            ) from exc
+        except docker.errors.DockerException as exc:
+            raise PrerequisiteNotMetError(
+                f"Could not inspect staging image '{image}'. Check Docker connectivity."
+            ) from exc
     try:
         return client.images.pull(image)
     except docker.errors.NotFound as exc:
@@ -558,16 +586,21 @@ def create_service(
         run_kwargs["cap_add"] = list(cap_add)
 
     logger.info("Pulling image %s for service %s", image, name)
-    _pull_service_image(client, image)
+    is_staging = image.startswith(STAGING_REPOSITORY_PREFIX)
+    if not is_staging:
+        _pull_service_image(client, image, team)
 
     # Registry section: slot admission and the volume binds are both read here
     # and consumed by the `run` below with nothing in between. Concurrent
     # creates therefore cannot overshoot the slot count, and delete_volume —
     # which takes the same key around its in-use check — cannot remove a volume
     # this container is about to mount (Docker would silently re-create it as an
-    # empty, unmanaged volume). Held only around these calls; the image pull
-    # above and the preset write below stay outside.
+    # empty, unmanaged volume). Staging resolution also stays in this section:
+    # build retention takes the same key before inspecting/removing tags.
+    # Registry pulls and the preset write stay outside.
     with keyed_mutex(service_registry_key(team.team_id)):
+        if is_staging:
+            _pull_service_image(client, image, team)
         if is_new_service:
             _assert_free_service_slot(settings, team, client)
         vol_binds = _resolve_service_volume_binds(
@@ -1460,7 +1493,7 @@ def update_service(
 
     # Pull the latest image
     logger.info("Pulling latest image %s for service %s", target_image, name)
-    new_image_obj = _pull_service_image(client, target_image)
+    new_image_obj = _pull_service_image(client, target_image, team)
     new_digest = new_image_obj.id
     image_updated = old_digest != new_digest
 
@@ -1503,10 +1536,14 @@ def update_service(
     # both happen under the registry key: a delete_volume that looked in that
     # window would find the volume unused and remove it out from under the
     # recreated container. The mutex is re-entrant — create_service takes the
-    # same key for its own admission check. Its (already-pulled, cache-warm)
-    # image pull is inside this window; splitting the window to exclude it would
-    # reopen the very race it exists to close.
+    # same key for its own admission check. Build retention also takes this
+    # key, so it cannot remove a staging tag in the container-free window.
     with keyed_mutex(service_registry_key(team.team_id)):
+        if target_image.startswith(STAGING_REPOSITORY_PREFIX):
+            # Retention may have run since the initial lookup. Fail before
+            # removing the old container if the target is already gone, then
+            # hold off pruning until create_service has installed its user.
+            _pull_service_image(client, target_image, team)
         # Stop and remove the old container
         container.stop(**stop_kwargs(container))
         container.remove(v=True)
