@@ -2941,6 +2941,12 @@ def get_image_build(
     if job.error:
         lines.append(f"Error: {job.error}")
     if job.status == image_builds.STATUS_SUCCEEDED:
+        if job.local_tag:
+            lines.append(
+                f"Local image: {job.local_tag} — pass it as the image to "
+                "create_service or update_service to run this build before "
+                "publishing (no pull; same team only)."
+            )
         lines.append(
             f'Ready to publish: publish_image_build(build_id="{job.build_id}", '
             'repository="<name>", tags="...").'
@@ -4593,7 +4599,7 @@ def create_service(
     Args:
         name: Short name for the service (e.g. "redis", "meilisearch").
         runtime: Explicit Docker tmpfs, private cgroupns, stop_signal and stop_timeout settings.
-        image: Docker image with tag (e.g. "redis:7", "getmeili/meilisearch:v1.6").
+        image: Docker image with tag (e.g. "redis:7", "getmeili/meilisearch:v1.6"). A staging tag from start_image_build (oduflow-build/team-<id>:<build-id>, as reported by get_image_build) is taken from the local Docker daemon without a pull, so a build can be run as a service before publish_image_build.
         port: Catch-all exposure mode: forward every path to this one container port. Required outside Traefik. Mutually exclusive with routes.
         hostname: Custom hostname for traefik routing (optional, traefik mode only).
         env_vars: Comma- or newline-separated KEY=VALUE pairs (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. So "CONNECT_MCP_TOOL_GROUPS=write,collaboration,documents" is one variable. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
@@ -4687,7 +4693,7 @@ def update_service(
         name: The name of the service to update (e.g. "redis", "meilisearch").
         env_vars: Comma- or newline-separated KEY=VALUE pairs that fully replace existing env vars (e.g. "MEILI_MASTER_KEY=abc,MEILI_ENV=production"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. Leave empty to keep current env vars. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         runtime: Replace lifecycle settings; omit to preserve, pass {} to clear.
-        image: New Docker image with tag (e.g. "redis:8"). Leave empty to keep current image.
+        image: New Docker image with tag (e.g. "redis:8"). Leave empty to keep current image. A staging tag from start_image_build (oduflow-build/team-<id>:<build-id>, as reported by get_image_build) is taken from the local Docker daemon without a pull, so a build can be tested as a service before publish_image_build.
         port: New container port. Pass 0 to keep current port.
         hostname: New hostname for traefik routing. Leave empty to keep current hostname.
         host_mode: Run in host network mode. Leave unset (null) to keep current mode.

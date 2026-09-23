@@ -1,4 +1,8 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -3061,3 +3065,303 @@ class TestServiceProtection:
 
         assert rows[0]["name"] == "redis"
         assert rows[0]["protected"] is True
+
+
+class TestStagingImageServices:
+    """Staging builds (oduflow-build/team-<id>:<build-id>) live only in the
+    local daemon: they are resolved with images.get, never pulled, and only
+    for the team that built them."""
+
+    OWN_TAG = "oduflow-build/team-1:bld-abcdef123456"
+
+    @pytest.mark.parametrize("operation", ["create", "update_image", "update_config"])
+    def test_retention_waits_until_staging_container_exists(
+        self, mock_docker_client, operation
+    ):
+        from oduflow import image_builds
+        from oduflow.docker_ops import build_ops
+
+        client = mock_docker_client
+        container = MagicMock()
+        container.image.id = "sha256:old"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.attrs = {"Config": {"Image": "redis:7", "Env": []}}
+        if operation == "update_config":
+            container.attrs["Config"]["Image"] = self.OWN_TAG
+            container.image.id = "sha256:built"
+        live = [] if operation == "create" else [container]
+        client.containers.list.side_effect = lambda **kwargs: list(live)
+        client.containers.get.side_effect = (
+            [container, docker.errors.NotFound("nf")]
+            if operation != "create"
+            else docker.errors.NotFound("nf")
+        )
+        local_image = SimpleNamespace(id="sha256:built", tags=[self.OWN_TAG])
+        client.images.get.return_value = local_image
+        old_job = SimpleNamespace(
+            build_id="bld-abcdef123456",
+            status=image_builds.STATUS_SUCCEEDED,
+            local_tag=self.OWN_TAG,
+            image_id=local_image.id,
+            finished_at="2026-09-01",
+        )
+        new_job = SimpleNamespace(
+            status=image_builds.STATUS_SUCCEEDED,
+            local_tag="oduflow-build/team-1:bld-000000000000",
+            finished_at="2026-09-02",
+        )
+        registry_requested = threading.Event()
+        prune_finished = threading.Event()
+        registry_key = service_ops.service_registry_key(TEST_TEAM.team_id)
+        real_mutex = build_ops.keyed_mutex
+
+        @contextmanager
+        def observe_pruning_lock(key):
+            if key == registry_key:
+                registry_requested.set()
+            with real_mutex(key):
+                yield
+
+        def prune():
+            try:
+                build_ops._prune_staging_images(TEST_TEAM, keep=1)
+            finally:
+                prune_finished.set()
+
+        def run(**kwargs):
+            live.append(SimpleNamespace(attrs={"Config": {"Image": kwargs["image"]}}))
+
+        client.containers.run.side_effect = run
+        preset = {
+            "name": "fs",
+            "image": container.attrs["Config"]["Image"],
+            "port": 8080,
+            "hostname": "",
+            "env_vars": {},
+        }
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            patch.object(build_ops, "get_client", return_value=client),
+            patch.object(build_ops.store, "list_jobs", return_value=[old_job, new_job]),
+            patch.object(build_ops, "keyed_mutex", observe_pruning_lock),
+            patch.object(
+                service_ops.service_presets, "get_preset", return_value=preset
+            ),
+        ):
+            futures = []
+
+            def start_pruning():
+                futures.append(executor.submit(prune))
+                assert registry_requested.wait(5), "Pruning did not reach the registry"
+                assert not prune_finished.wait(0.1), (
+                    "Pruning entered the unpinned window"
+                )
+
+            def inspect(image):
+                if operation == "create":
+                    start_pruning()
+                return local_image
+
+            def remove(**kwargs):
+                live.clear()
+                start_pruning()
+
+            client.images.get.side_effect = inspect
+            container.remove.side_effect = remove
+            if operation == "create":
+                service_ops.create_service(
+                    TEST_SETTINGS, TEST_TEAM, "fs", self.OWN_TAG, 8080
+                )
+            elif operation == "update_image":
+                service_ops.update_service(
+                    TEST_SETTINGS, TEST_TEAM, "fs", image_override=self.OWN_TAG
+                )
+            else:
+                service_ops.update_service(
+                    TEST_SETTINGS, TEST_TEAM, "fs", port_override=8081
+                )
+            for future in futures:
+                future.result(timeout=5)
+
+        assert prune_finished.is_set()
+        client.images.remove.assert_not_called()
+        assert live[0].attrs["Config"]["Image"] == self.OWN_TAG
+
+    def test_pruned_update_target_leaves_old_service_untouched(
+        self, mock_docker_client
+    ):
+        client = mock_docker_client
+        container = MagicMock()
+        container.image.id = "sha256:old"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.attrs = {"Config": {"Image": "redis:7", "Env": []}}
+        client.containers.get.return_value = container
+        client.images.get.side_effect = [
+            SimpleNamespace(id="sha256:built"),
+            docker.errors.ImageNotFound("pruned before acquiring the registry lock"),
+        ]
+        preset = {
+            "name": "fs",
+            "image": "redis:7",
+            "port": 8080,
+            "hostname": "",
+            "env_vars": {},
+        }
+        with (
+            patch.object(
+                service_ops.service_presets, "get_preset", return_value=preset
+            ),
+            pytest.raises(NotFoundError, match="not in the local Docker daemon"),
+        ):
+            service_ops.update_service(
+                TEST_SETTINGS, TEST_TEAM, "fs", image_override=self.OWN_TAG
+            )
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+        client.containers.run.assert_not_called()
+
+    def test_create_uses_local_staging_image_without_pull(self, mock_docker_client):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        result = service_ops.create_service(
+            TEST_SETTINGS, TEST_TEAM, "fs", self.OWN_TAG, 8080
+        )
+
+        assert result["image"] == self.OWN_TAG
+        mock_docker_client.images.get.assert_called_once_with(self.OWN_TAG)
+        mock_docker_client.images.pull.assert_not_called()
+        assert mock_docker_client.containers.run.call_args.kwargs["image"] == (
+            self.OWN_TAG
+        )
+
+    def test_create_rejects_another_teams_staging_image(self, mock_docker_client):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        foreign = "oduflow-build/team-2:bld-abcdef123456"
+
+        with pytest.raises(NotFoundError) as exc_info:
+            service_ops.create_service(TEST_SETTINGS, TEST_TEAM, "fs", foreign, 8080)
+
+        assert "not found or is not accessible" in str(exc_info.value)
+        mock_docker_client.images.get.assert_not_called()
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_create_missing_staging_image_points_at_rebuild(self, mock_docker_client):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.images.get.side_effect = docker.errors.ImageNotFound("nf")
+
+        with pytest.raises(NotFoundError) as exc_info:
+            service_ops.create_service(
+                TEST_SETTINGS, TEST_TEAM, "fs", self.OWN_TAG, 8080
+            )
+
+        message = str(exc_info.value)
+        assert self.OWN_TAG in message
+        assert "start_image_build" in message
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_update_to_staging_image_recreates_from_local_daemon(
+        self, mock_docker_client
+    ):
+        container = MagicMock()
+        container.image.tags = ["oduist/freeswitch:latest"]
+        container.image.id = "sha256:old"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.attrs = {"Config": {"Env": []}}
+        local_image = MagicMock()
+        local_image.id = "sha256:built"
+        mock_docker_client.images.get.return_value = local_image
+        mock_docker_client.containers.get.side_effect = [
+            container,
+            docker.errors.NotFound("nf"),
+        ]
+        mock_docker_client.networks.get.return_value = MagicMock()
+        mock_docker_client.containers.run.return_value = MagicMock()
+        preset = {
+            "name": "fs",
+            "image": "oduist/freeswitch:latest",
+            "port": 8080,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            result = service_ops.update_service(
+                TEST_SETTINGS, TEST_TEAM, "fs", image_override=self.OWN_TAG
+            )
+
+        assert result["image"] == self.OWN_TAG
+        assert result["image_updated"] is True
+        mock_docker_client.images.get.assert_any_call(self.OWN_TAG)
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_called_once()
+
+    def test_update_with_unchanged_staging_image_is_a_noop(self, mock_docker_client):
+        container = MagicMock()
+        container.image.tags = [self.OWN_TAG]
+        container.image.id = "sha256:built"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.attrs = {"Config": {"Env": []}}
+        local_image = MagicMock()
+        local_image.id = "sha256:built"
+        mock_docker_client.images.get.return_value = local_image
+        mock_docker_client.containers.get.return_value = container
+        preset = {
+            "name": "fs",
+            "image": self.OWN_TAG,
+            "port": 8080,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with patch(
+            "oduflow.docker_ops.service_ops.service_presets.get_preset",
+            return_value=preset,
+        ):
+            result = service_ops.update_service(TEST_SETTINGS, TEST_TEAM, "fs")
+
+        assert result["image_updated"] is False
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+
+    def test_update_rejects_another_teams_staging_image_before_touching_it(
+        self, mock_docker_client
+    ):
+        container = MagicMock()
+        container.image.tags = ["oduist/freeswitch:latest"]
+        container.image.id = "sha256:old"
+        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.attrs = {"Config": {"Env": []}}
+        mock_docker_client.containers.get.return_value = container
+        preset = {
+            "name": "fs",
+            "image": "oduist/freeswitch:latest",
+            "port": 8080,
+            "hostname": "",
+            "env_vars": {},
+        }
+
+        with (
+            patch(
+                "oduflow.docker_ops.service_ops.service_presets.get_preset",
+                return_value=preset,
+            ),
+            pytest.raises(NotFoundError),
+        ):
+            service_ops.update_service(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "fs",
+                image_override="oduflow-build/team-2:bld-abcdef123456",
+            )
+
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
