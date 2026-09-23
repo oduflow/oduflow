@@ -1,12 +1,13 @@
 [project]
 name = "oduflow"
-version = "1.83.0"
+version = "1.84.0"
 description = "AI-first Odoo development and CI tool with reusable database templates, powered by MCP"
 authors = [
     { name = "Oduist" }
 ]
 readme = "README.md"
-license = { text = "BUSL-1.1" }
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "NOTICE", "COMMERCIAL-LICENSE.md", "EVALUATION-LICENSE.md"]
 requires-python = ">=3.10"
 keywords = ["odoo", "mcp", "docker", "development", "ci"]
 dependencies = [

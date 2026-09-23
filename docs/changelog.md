@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.84.0
+
+### Licensing
+
+- **PolyForm Noncommercial source license** - new releases use the unmodified
+  PolyForm Noncommercial License 1.0.0, with a separate free internal evaluation
+  permission and alternative Solo, Business, Integrator and Enterprise commercial
+  agreements. Earlier BSL releases and perpetual commercial purchases retain
+  their original terms. All plans keep the same code, features and public updates.
+- **License terms in the dashboard** - the license details dialog now links to
+  the Oduflow Commercial License Agreement and the public source license alongside
+  the holder, validity period and renewal actions.
+
 ## v1.83.0
 
 ### Features
