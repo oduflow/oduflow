@@ -214,6 +214,7 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
+| `POST` | `/api/license/refresh` | Manually check the installed annual license for a paid renewal and save its signed extension; returns `license` and `renewed`. Requires dashboard authentication and the normal same-origin mutation checks. No request body is needed |
 | `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduflow/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
 | `GET` | `/api/agent-guides` | List available agent guides |
 | `GET` | `/api/agent-guides/{filename}` | Read a guide |
