@@ -91,6 +91,8 @@ precursors).
 
 | [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite |
 
+| [0070](0070-annual-commercial-licenses.md) | 2026-09-23 | Annual commercial license terms, informational expiry, and manual Paddle renewal |
+
 ## Design docs
 
 Forward-looking feature design docs also live here, named by date:

@@ -231,4 +231,151 @@ class TestLicenseLabel:
             "name": "Ada",
             "email": "a@b.co",
             "label": "Licensed to individual: Ada",
+            "status": "active",
+            "issued": "",
+            "plan": "",
+            "valid_from": "",
+            "expires": "",
+            "perpetual": True,
+            "can_refresh": False,
         }
+
+
+@pytest.fixture
+def annual_signer(monkeypatch):
+    private, pem = TestVerifyLicenseText._keypair()
+    monkeypatch.setattr(licensing, "_PUBLIC_KEY_PEM", pem)
+    return lambda payload: TestVerifyLicenseText._sign(private, payload)
+
+
+def annual_payload(**changes):
+    return {
+        "version": 2,
+        "type": "individual",
+        "plan": "solo",
+        "scope": "individual-commercial",
+        "name": "Ada",
+        "email": "ada@example.com",
+        "subscription_id": "sub_" + "a" * 26,
+        "paddle_environment": "production",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "expires": "2021-01-01T00:00:00Z",
+        **changes,
+    }
+
+
+def test_expired_license_keeps_owner_and_features(annual_signer):
+    info = licensing._verify_license_text(annual_signer(annual_payload()))
+    assert info.type == "individual"
+    assert info.status == "expired"
+    assert "LICENSE EXPIRED" in info.label
+    assert "Ada" in info.label
+    assert info.to_dict()["can_refresh"] is True
+
+
+def test_legacy_key_remains_perpetual(annual_signer):
+    info = licensing._verify_license_text(
+        annual_signer({"type": "business", "name": "Acme"})
+    )
+    assert info.status == "active"
+    assert info.to_dict()["perpetual"] is True
+    assert info.to_dict()["can_refresh"] is False
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"expires": "garbage"},
+        {"expires": "2019-01-01T00:00:00Z"},
+        {"expires": "2028-01-01T00:00:00"},
+        {"plan": "business"},
+        {"scope": "hosting"},
+        {"subscription_id": ""},
+        {"version": 1},
+    ],
+)
+def test_rejects_malformed_annual_terms(annual_signer, change):
+    with pytest.raises(ValueError):
+        licensing._verify_license_text(annual_signer(annual_payload(**change)))
+
+
+def test_manual_refresh_installs_only_matching_newer_signed_key(
+    tmp_path, monkeypatch, annual_signer
+):
+    from datetime import datetime, timedelta, timezone
+
+    import httpx
+
+    now = datetime.now(timezone.utc)
+    renewed = annual_signer(
+        annual_payload(
+            valid_from=(now - timedelta(days=1)).isoformat(),
+            expires=(now + timedelta(days=364)).isoformat(),
+        )
+    )
+    expired = annual_signer(annual_payload())
+    (tmp_path / "license.key").write_text(expired)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(
+            200,
+            json={"renewed": True, "license_key": renewed},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    info, changed = licensing.refresh_license(str(tmp_path))
+    assert changed and info.status == "active"
+    assert (tmp_path / "license.key").read_text() == renewed
+    assert calls[0][0] == "https://license.oduist.com/oduflow/check_license"
+    assert calls[0][1]["json"] == {"license_key": expired}
+    assert calls[0][1]["follow_redirects"] is False
+
+
+@pytest.mark.parametrize(
+    "kind", ["unpaid", "network", "tampered", "wrong_owner", "older"]
+)
+def test_failed_refresh_never_overwrites_installed_key(
+    tmp_path, monkeypatch, annual_signer, kind
+):
+    from datetime import datetime, timedelta, timezone
+
+    import httpx
+
+    now = datetime.now(timezone.utc)
+    expired = annual_signer(annual_payload())
+    path = tmp_path / "license.key"
+    path.write_text(expired)
+    renewal = annual_payload(
+        valid_from=(now - timedelta(days=1)).isoformat(),
+        expires=(now + timedelta(days=364)).isoformat(),
+    )
+    if kind == "wrong_owner":
+        renewal["name"] = "Someone else"
+    if kind == "older":
+        renewal = annual_payload()
+
+    def post(url, **kwargs):
+        if kind == "network":
+            raise httpx.ConnectError("offline")
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "renewed": kind != "unpaid",
+                "license_key": "bad.key"
+                if kind == "tampered"
+                else annual_signer(renewal),
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    if kind == "unpaid":
+        info, changed = licensing.refresh_license(str(tmp_path))
+        assert not changed and info.expired
+    else:
+        with pytest.raises(Exception):
+            licensing.refresh_license(str(tmp_path))
+    assert path.read_text() == expired

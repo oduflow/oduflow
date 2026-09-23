@@ -78,7 +78,11 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.licensing import get_license_info, install_license_from_text
+from oduflow.licensing import (
+    get_license_info,
+    install_license_from_text,
+    refresh_license,
+)
 from oduflow.locking import (
     LockManager,
     credentials_lock_key,
@@ -3931,6 +3935,21 @@ def _build_routes(
         info = get_license_info(settings.etc_dir)
         return JSONResponse({"ok": True, "license": info.to_dict()})
 
+    async def api_license_refresh(request: Request) -> JSONResponse:
+        try:
+            info, renewed = await _offload(refresh_license, get_settings().etc_dir)
+            return JSONResponse(
+                {"ok": True, "license": info.to_dict(), "renewed": renewed}
+            )
+        except (ValueError, OSError):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Unable to update the license. Check your payment and retry, or contact support.",
+                },
+                status_code=400,
+            )
+
     async def api_version(request: Request) -> JSONResponse:
         """Compare the running version with the latest GitHub release.
 
@@ -6415,6 +6434,7 @@ def _build_routes(
         Route("/api/version", api_version, methods=["GET"]),
         Route("/api/license", api_license, methods=["GET"]),
         Route("/api/license/activate", api_license_activate, methods=["POST"]),
+        Route("/api/license/refresh", api_license_refresh, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),
         Route("/api/templates", api_templates, methods=["GET"]),
         Route("/import-odoo.sh", import_odoo_script, methods=["GET"]),
