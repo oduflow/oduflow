@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.82.0
+
+### Features
+
+- **Annual commercial license details and renewal** - click the license banner
+  to see the named holder, plan and paid-through date. Expired licenses show a
+  red status and an **Update license status** action. A manual check retrieves
+  a signed extension after a completed Paddle payment. All product features
+  remain available, and existing perpetual keys remain valid. Checkout, key
+  delivery and renewal are hosted by the license server.
+- **Staging builds as services** - staging image builds run through the service
+  lifecycle, with image retention that preserves images still used by services
+  or staging environments. (#273)
+
+### Fixes
+
+- Validate JSON-typed team secrets before storing them, with clear errors for
+  malformed values. (#271)
+
 ## v1.81.0
 
 ### Breaking Changes

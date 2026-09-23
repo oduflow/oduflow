@@ -1089,6 +1089,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .license-details { display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 1rem; margin: 0 0 1rem; }
+  .license-details dt { font-weight: 600; }
+  .license-details dd { margin: 0; overflow-wrap: anywhere; }
   .license-owner {
     position: relative;
     z-index: 1;
@@ -2461,16 +2464,20 @@
   </div>
 </div>
 <div class="modal-overlay" id="license-modal" onclick="closeLicenseModal(event)">
-  <div class="modal modal-sm">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="license-modal-title">
     <div class="modal-header">
-      <h2>Activate License</h2>
+      <h2 id="license-modal-title">License details</h2>
       <button class="modal-close" onclick="closeLicenseModal()">&times;</button>
     </div>
     <div class="modal-body">
+      <dl class="license-details" id="license-details"></dl>
+      <p class="modal-note" id="license-status-note"></p>
+      <button class="btn" id="lic-refresh" onclick="refreshLicenseStatus()" style="display:none">Update license status</button>
+      <p class="modal-note" id="license-refresh-result" role="status"></p>
       <p class="modal-note">
-        Paste your license key below. Purchase a key at <a href="https://oduflow.dev/#pricing" target="_blank">oduflow.dev</a>
+        Paste your license key below. Purchase a key at <a href="https://oduflow.dev/pricing" target="_blank" rel="noopener noreferrer">oduflow.dev</a>
       </p>
-      <div class="form-error" id="license-error"></div>
+      <div class="form-error" id="license-error" role="alert"></div>
       <div class="form-group">
         <label for="lic-key">License key</label>
         <textarea id="lic-key" rows="4" placeholder="Paste your license key here..." class="mono-input"></textarea>
@@ -6855,6 +6862,7 @@ function closeGuideViewer() {
 
 // --- License ---
 const API_LICENSE = '/api/license';
+let currentLicense = null;
 
 async function loadLicense() {
   try {
@@ -6862,9 +6870,10 @@ async function loadLicense() {
     var data = await readResult(r);
     if (!data.ok) return;
     var lic = data.license;
+    currentLicense = lic;
     var badge = document.getElementById('license-badge');
     var label = document.createElement('span');
-    var isLicensed = lic.type !== 'unlicensed';
+    var isLicensed = lic.status === 'active';
     var shouldReveal = isLicensed && badge.dataset.licenseRevealed !== 'true';
     label.className = 'license-badge-text';
     if (isLicensed) {
@@ -6882,7 +6891,7 @@ async function loadLicense() {
       label.textContent = lic.label;
     }
     badge.replaceChildren(label);
-    badge.className = 'license-badge license-' + lic.type + (isLicensed ? ' license-active' : '') + (shouldReveal ? ' license-reveal' : '');
+    badge.className = 'license-badge license-' + (lic.status === 'expired' || lic.status === 'not_yet_valid' ? 'unlicensed' : lic.type) + (isLicensed ? ' license-active' : '') + (shouldReveal ? ' license-reveal' : '');
     if (shouldReveal) {
       badge.dataset.licenseRevealed = 'true';
     }
@@ -6908,19 +6917,67 @@ async function loadLicense() {
         }
       }
     } else {
-      badge.style.cursor = 'default';
-      badge.onclick = null;
-      badge.title = '';
+      badge.style.cursor = 'pointer';
+      badge.onclick = openLicenseModal;
+      badge.title = 'View license details and validity period';
     }
   } catch (e) {}
 }
 
 function openLicenseModal() {
+  renderLicenseDetails();
+  document.getElementById('license-refresh-result').textContent = '';
   document.getElementById('license-error').style.display = 'none';
   document.getElementById('lic-key').value = '';
   document.getElementById('lic-submit').disabled = false;
   document.getElementById('lic-submit').textContent = 'Activate';
   showModal('license-modal');
+}
+
+function renderLicenseDetails() {
+  var lic = currentLicense || {type: 'unlicensed', status: 'unlicensed'};
+  var details = document.getElementById('license-details');
+  details.replaceChildren();
+  function row(title, value) {
+    var dt = document.createElement('dt'); dt.textContent = title;
+    var dd = document.createElement('dd'); dd.textContent = value;
+    details.append(dt, dd);
+  }
+  row('Status', {active: 'Active', expired: 'Expired', unlicensed: 'No commercial license', not_yet_valid: 'Not yet valid'}[lic.status] || lic.status);
+  if (lic.name) row('Licensed to', lic.name);
+  if (lic.type === 'business') row('Use rights', 'Company internal use only');
+  if (lic.plan) row('Plan', lic.plan.charAt(0).toUpperCase() + lic.plan.slice(1));
+  if (lic.email) row('Email', lic.email);
+  if (lic.valid_from) row('Valid from', new Date(lic.valid_from).toLocaleString());
+  if (lic.expires) row('Paid through', new Date(lic.expires).toLocaleString());
+  else if (lic.perpetual) row('Term', 'Perpetual (legacy license)');
+  document.getElementById('lic-refresh').style.display = lic.can_refresh && lic.status === 'expired' ? '' : 'none';
+  document.getElementById('license-status-note').textContent = lic.status === 'expired'
+    ? 'Your commercial license has expired. All features remain available. Update the status after payment to install the renewed license.'
+    : 'License status does not restrict product features. Subscription checks run only when you request them.';
+}
+
+async function refreshLicenseStatus() {
+  var button = document.getElementById('lic-refresh');
+  var result = document.getElementById('license-refresh-result');
+  button.disabled = true;
+  button.textContent = 'Checking subscription...';
+  result.textContent = '';
+  try {
+    var response = await fetch(API_LICENSE + '/refresh', {method: 'POST'});
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Unable to update the license');
+    await loadLicense();
+    renderLicenseDetails();
+    result.textContent = data.renewed
+      ? 'License renewed. The new paid period is installed.'
+      : 'No newer paid period is available. Check your Paddle payment or contact support.';
+  } catch (e) {
+    result.textContent = e.message || 'Unable to check the subscription. Please retry.';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Update license status';
+  }
 }
 
 function closeLicenseModal(event) {
@@ -8927,6 +8984,9 @@ async function loadHealth() {
 
 if (!SCOPED_ENV) {
   loadLicense();
+  // Refresh the local status so an open dashboard notices expiration. This
+  // endpoint only reads the local key; it never contacts the license server.
+  setInterval(loadLicense, 60000);
   loadStats();
   loadHealth();
   loadServicePresets();

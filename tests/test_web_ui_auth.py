@@ -676,3 +676,31 @@ def test_session_helper_cannot_upgrade_auth_during_concurrent_enrollment(
     monkeypatch.setattr(ui_totp, "_load", enroll_after_read)
     cookie = _make_ui_token(team, settings)
     assert _check_cookie_token(cookie, settings) is None
+
+
+def test_api_license_refresh_requires_session_and_uses_config_dir(
+    tmp_path, monkeypatch
+):
+    seen = []
+
+    def refresh(etc_dir):
+        seen.append(etc_dir)
+        return LicenseInfo(TYPE_INDIVIDUAL, "Ada", "ada@example.com"), True
+
+    monkeypatch.setattr(web_ui, "refresh_license", refresh)
+    settings = _settings(etc_dir=str(tmp_path / "conf"))
+    client = TestClient(_full_app(settings))
+    assert client.post("/api/license/refresh").status_code == 401
+    assert seen == []
+    client.post("/login", data={"password": _PW})
+    assert (
+        client.post(
+            "/api/license/refresh", headers={"origin": "https://evil.example"}
+        ).status_code
+        == 403
+    )
+    assert seen == []
+    response = client.post("/api/license/refresh")
+    assert response.status_code == 200
+    assert response.json()["renewed"] is True
+    assert seen == [settings.etc_dir]
