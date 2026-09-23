@@ -83,3 +83,24 @@ Annual keys use the existing RSA-PSS/SHA-256 signature envelope, with signed
 `version: 2`, `plan`, `scope`, `subscription_id`, `paddle_environment`, `valid_from`
 and `expires` fields. `expires` is an exclusive timezone-aware timestamp. The
 built-in public key remains unchanged; unsigned or altered deadlines are rejected.
+
+
+## Agreed migration and manually granted periods
+
+A commercial license can have a manually granted period before a Paddle
+subscription exists. For customers who agreed to migrate, the license server
+records one calendar year from the original archived purchase timestamp. The
+license has a stable identity independent of its later Paddle subscription.
+
+After updating Oduflow, click the license banner and **Update license status** to
+retrieve the agreed term. Only explicitly imported legacy holders can migrate;
+other perpetual keys keep their existing status. The server verifies the old
+signature and matches the holder, plan and issue date when the original archive
+has no key copy. No periodic network check is added.
+
+After a manual period ends, **Subscribe annually** opens a short-lived checkout
+link with the existing holder and plan. The customer accepts the annual terms
+and pays through Paddle. The completed payment attaches the subscription to the
+same license. **Update license status** then installs the paid extension. An
+administrator can also extend an unlinked manual period from the license server's
+Oduflow admin page. Expiration never disables product features.

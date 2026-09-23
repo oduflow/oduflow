@@ -79,6 +79,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
 )
 from oduflow.licensing import (
+    get_license_checkout_url,
     get_license_info,
     install_license_from_text,
     refresh_license,
@@ -3950,6 +3951,19 @@ def _build_routes(
                 status_code=400,
             )
 
+    async def api_license_checkout(request: Request) -> JSONResponse:
+        try:
+            url = await _offload(get_license_checkout_url, get_settings().etc_dir)
+            return JSONResponse({"ok": True, "checkout_url": url})
+        except (ValueError, OSError):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Unable to open checkout. Update license status or contact support.",
+                },
+                status_code=400,
+            )
+
     async def api_version(request: Request) -> JSONResponse:
         """Compare the running version with the latest GitHub release.
 
@@ -6435,6 +6449,7 @@ def _build_routes(
         Route("/api/license", api_license, methods=["GET"]),
         Route("/api/license/activate", api_license_activate, methods=["POST"]),
         Route("/api/license/refresh", api_license_refresh, methods=["POST"]),
+        Route("/api/license/checkout", api_license_checkout, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),
         Route("/api/templates", api_templates, methods=["GET"]),
         Route("/import-odoo.sh", import_odoo_script, methods=["GET"]),
