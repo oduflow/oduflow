@@ -1,6 +1,6 @@
 # 0024 — Relicense to Business Source License 1.1 with three commercial tiers
 
-**Status:** Adopted
+**Status:** Superseded for new releases by [[0072-polyform-commercial-licensing]]; historical BSL grants remain in effect
 **Type:** Product / Legal
 **First introduced:** 2026-07-02 (this change)
 **Key code today:** `LICENSE`, `pyproject.toml` (`BUSL-1.1`), `docs/licensing.md`, `README.md`; activation machinery unchanged in `licensing.py`

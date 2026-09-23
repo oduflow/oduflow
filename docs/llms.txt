@@ -235,5 +235,5 @@ sanitization scripts followed by project scripts from
 
 - Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
-- License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
+- License: PolyForm-Noncommercial-1.0.0 from v1.84.0 — public noncommercial and organizational permissions, a separate internal evaluation grant, and alternative annual commercial licenses at https://oduflow.dev/eula. Earlier BSL releases retain their original terms.
 - Website: <https://oduflow.dev>

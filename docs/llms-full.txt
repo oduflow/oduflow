@@ -235,7 +235,7 @@ sanitization scripts followed by project scripts from
 
 - Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
-- License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
+- License: PolyForm-Noncommercial-1.0.0 from v1.84.0 — public noncommercial and organizational permissions, a separate internal evaluation grant, and alternative annual commercial licenses at https://oduflow.dev/eula. Earlier BSL releases retain their original terms.
 - Website: <https://oduflow.dev>
 
 ---
@@ -10146,11 +10146,25 @@ secrets before submitting.
 
 # Licensing
 
-Oduflow is source-available under the [Business Source License 1.1](https://github.com/oduflow/oduflow/blob/main/LICENSE) (BUSL-1.1).
+Starting with v1.84.0, Oduflow is source-available under
+[PolyForm Noncommercial License 1.0.0](https://github.com/oduflow/oduflow/blob/main/LICENSE)
+(`PolyForm-Noncommercial-1.0.0`).
 
-- **Free forever for non-commercial use**: evaluation, education, academic research, personal and hobby projects, non-profits.
-- **Commercial use requires a paid license** in one of three tiers (below).
-- Standard BUSL mechanics: each release converts to the open-source **MPL 2.0** four years after publication.
+- **Free public license:** noncommercial purposes, personal uses and the
+  organizations covered by the standard license, including its education,
+  research, public-sector and charitable-organization permissions.
+- **Free internal evaluation:** a separate
+  [evaluation permission](https://github.com/oduflow/oduflow/blob/main/EVALUATION-LICENSE.md)
+  lets a business assess Oduflow in isolation before buying. It does not cover
+  live business operations, commercial project development or paid client work.
+- **Alternative commercial license:** Solo, Business, Integrator or Enterprise
+  covers use outside those permissions, under the agreement and purchased scope.
+
+The standard PolyForm text is unmodified; preserve its required notice from
+`NOTICE` when distributing copies. Third-party components retain their own terms.
+PolyForm releases have no automatic conversion to an open-source license.
+Earlier BSL releases retain their original terms, including their MPL 2.0 change
+dates. Existing perpetual commercial grants are not revoked by this change.
 
 ## Annual Commercial Plans
 
@@ -10161,7 +10175,7 @@ available to everyone. All plans have the same functions, including Production.
 
 | Plan | Annual price (EUR, excluding tax) | License holder and scope |
 |---|---|---|
-| Free | Free | Evaluation and non-commercial use under the release license |
+| Free | Free | Public-license permissions and the separate internal evaluation grant |
 | Solo | 149 | One named developer, including personal client development and administration |
 | Business | 499 | Named company, internal use only |
 | Integrator | 999 | Named Odoo integrator's team delivering client services |
@@ -10210,7 +10224,9 @@ For business use or integrator licenses, visit [oduflow.dev](https://oduflow.dev
 ## License Details and Renewal
 
 Click **Licensed to** in the dashboard header to see the holder, plan, status,
-valid-from date and paid-through timestamp. An expired license is shown in red
+valid-from date, paid-through timestamp and a link to the
+[Oduflow Commercial License Agreement](https://oduflow.dev/eula).
+An expired license is shown in red
 with the text **LICENSE EXPIRED**, while all functions and running systems remain
 available. The dashboard refreshes this local status once a minute.
 
