@@ -946,9 +946,10 @@ def check_db_quota(
 # target filesystem would be left without breathing room. Deliberately
 # constants, not TOML options — the reserve exists so PostgreSQL never hits
 # 0 bytes free (at which point even deleting environments fails).
-_DISK_MIN_FREE_GB = 5.0  # absolute floor that must remain free
+_DISK_MIN_FREE_GB = 5.0  # comfort target that should remain free
 _DISK_MIN_FREE_PERCENT = 5.0  # relative floor for small disks
 _DISK_RESERVE_CAP_GB = 10.0  # cap on the percent leg (large/dev-machine disks)
+_DISK_RECOVERY_FLOOR_BYTES = 1024**3  # always keep this much when the disk has it
 _DISK_ESTIMATE_MARGIN = 1.2  # safety multiplier on the write estimate
 _CLONE_BUDGET_BYTES = 512 * 1024**2  # remote git checkout allowance
 _OVERLAY_HEADROOM_BYTES = 512 * 1024**2  # upper/work layer of an overlay
@@ -1034,6 +1035,19 @@ def _reserve_bytes(total: int) -> int:
     return int(max(_DISK_MIN_FREE_GB * 1024**3, percent_leg))
 
 
+def _headroom_bytes(free: int, reserve: int) -> int:
+    """Bytes that must remain free after the estimated write.
+
+    ``reserve`` is the comfort target. A volume that already holds one
+    template often has only a few GiB free; demanding the full target then
+    rejects the first environment even though the copy fits and more than
+    1 GiB would remain. Cap the demand at max(1 GiB, 10% of current free).
+    """
+    if free <= 0:
+        return reserve
+    return min(reserve, max(_DISK_RECOVERY_FLOOR_BYTES, free // 10))
+
+
 def _pgdata_usage_via_df(
     client: DockerClient, settings: Settings
 ) -> tuple[int, int] | None:
@@ -1074,8 +1088,9 @@ def check_disk_space(
     Estimates the bytes each target directory will receive (database
     tablespace, workspace filestore + checkout), groups targets that share a
     device via ``st_dev``, and requires ``free - estimate*margin`` to stay
-    above ``max(5 GiB, min(5%, 10 GiB))`` on every device. The PGDATA volume (WAL +
-    catalogs live there, not in the tablespace) is held to the same floor.
+    above ``min(comfort, max(1 GiB, 10% of current free))``, where comfort is
+    ``max(5 GiB, min(5%, 10 GiB))``. The PGDATA volume (WAL + catalogs live
+    there, not in the tablespace) is held to the same floor.
     Like ``check_db_quota``, only new creation is gated — delete/cleanup paths
     stay available so a full disk can always be recovered.
     """
@@ -1137,38 +1152,40 @@ def check_disk_space(
             continue
         required = int(group["bytes"] * _DISK_ESTIMATE_MARGIN)
         reserve = _reserve_bytes(usage.total)
+        headroom = _headroom_bytes(usage.free, reserve)
         checked.append(
             {
                 "anchor": group["anchor"],
                 "components": group["labels"],
                 "free_gb": round(usage.free / 1024**3, 1),
                 "required_gb": round(required / 1024**3, 1),
-                "reserve_gb": round(reserve / 1024**3, 1),
+                "reserve_gb": round(headroom / 1024**3, 1),
             }
         )
-        if usage.free - required < reserve:
+        if usage.free - required < headroom:
             problems.append(
                 f"{' + '.join(group['labels'])} on '{group['anchor']}': "
                 f"{usage.free / 1024**3:.1f} GiB free, creation needs "
-                f"~{required / 1024**3:.1f} GiB and {reserve / 1024**3:.1f} GiB "
+                f"~{required / 1024**3:.1f} GiB and {headroom / 1024**3:.1f} GiB "
                 "must stay free"
             )
     if pgdata_df is not None:
         total, free = pgdata_df
         reserve = _reserve_bytes(total)
+        headroom = _headroom_bytes(free, reserve)
         checked.append(
             {
                 "anchor": "PGDATA (in-container)",
                 "components": ["PostgreSQL data (WAL)"],
                 "free_gb": round(free / 1024**3, 1),
                 "required_gb": 0.0,
-                "reserve_gb": round(reserve / 1024**3, 1),
+                "reserve_gb": round(headroom / 1024**3, 1),
             }
         )
-        if free < reserve:
+        if free < headroom:
             problems.append(
                 f"PostgreSQL data volume '{settings.shared_db_volume}': "
-                f"{free / 1024**3:.1f} GiB free, {reserve / 1024**3:.1f} GiB "
+                f"{free / 1024**3:.1f} GiB free, {headroom / 1024**3:.1f} GiB "
                 "must stay free"
             )
 
