@@ -7,7 +7,6 @@
 
 ## Context
 
-[[0024-business-source-license]] put commercial tiers into BSL parameters.
 The annual model in [[0070-annual-commercial-licenses]] now has a separate
 commercial agreement on oduflow.dev/eula. The owner explicitly chose PolyForm
 Noncommercial for public source and alternative commercial agreements for paid
@@ -31,8 +30,8 @@ license dialog links to that agreement beside the validity and renewal controls.
 
 ## Consequences
 
-- New releases have no BSL change date or automatic MPL conversion.
-- Previously published BSL releases keep their grants and change dates; earlier
+- The public source license and commercial agreement define separate grants.
+- Previously published releases keep their original terms; earlier
   perpetual commercial agreements also remain effective.
 - Standard PolyForm organizational permissions are not narrowed by marketing
   summaries or the commercial agreement.

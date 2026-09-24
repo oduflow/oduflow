@@ -17,8 +17,8 @@ Starting with v1.84.0, Oduflow is source-available under
 The standard PolyForm text is unmodified; preserve its required notice from
 `NOTICE` when distributing copies. Third-party components retain their own terms.
 PolyForm releases have no automatic conversion to an open-source license.
-Earlier BSL releases retain their original terms, including their MPL 2.0 change
-dates. Existing perpetual commercial grants are not revoked by this change.
+Earlier releases retain their original terms. Existing perpetual commercial
+grants remain in effect.
 
 ## Annual Commercial Plans
 

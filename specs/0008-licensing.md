@@ -1,6 +1,6 @@
 # 0008 — Licensing: Polyform Noncommercial + in-app license activation
 
-**Status:** Adopted; license terms superseded by [[0024-business-source-license]] (BUSL-1.1) — the in-app activation model remains in force
+**Status:** Adopted; current license terms are described in [[0072-polyform-commercial-licensing]] — the in-app activation model remains in force
 **Type:** Product / Architecture
 **First introduced:** `317b816` "add Polyform Noncommercial 1.0.0 license" (2026-02-12), `00936c9` "license activation via dashboard UI" (2026-02-13)
 **Key code today:** `licensing.py` (RSA verification, license types, install), `web_ui.py` (`/api/license`, `/api/license/activate`), `templates/dashboard.html` (activation form + banner), `LICENSE`, `docs/licensing.md`

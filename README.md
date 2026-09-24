@@ -153,5 +153,4 @@ Use outside those permissions requires an alternative
 [commercial license](COMMERCIAL-LICENSE.md): Solo, Business, Integrator, or
 Enterprise. Read the [Oduflow Commercial License Agreement](https://oduflow.dev/eula)
 and [compare plans](https://oduflow.dev/pricing). All plans include the same code,
-features and public updates. Earlier releases retain their original licenses;
-the BSL-to-MPL conversion applies only to releases distributed under BSL.
+features and public updates. Earlier releases retain their original licenses.

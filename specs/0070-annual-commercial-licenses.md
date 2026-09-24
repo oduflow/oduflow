@@ -10,8 +10,8 @@ Oduflow moves new commercial purchases to annual Solo, Business and Integrator
 subscriptions while keeping the full codebase and features publicly available.
 Operators must be able to see the paid term and pick up a successful renewal
 without a technical dependency on the payment provider for normal operation.
-Legacy perpetual purchases must remain valid. See [[0008-licensing]] and
-[[0024-business-source-license]]. The public source-license choice is separate.
+Legacy perpetual purchases must remain valid. See [[0008-licensing]].
+The public source-license choice is separate.
 
 ## Decision
 

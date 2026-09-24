@@ -235,5 +235,5 @@ sanitization scripts followed by project scripts from
 
 - Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
-- License: PolyForm-Noncommercial-1.0.0 from v1.84.0 — public noncommercial and organizational permissions, a separate internal evaluation grant, and alternative annual commercial licenses at https://oduflow.dev/eula. Earlier BSL releases retain their original terms.
+- License: PolyForm-Noncommercial-1.0.0 from v1.84.0 — public noncommercial and organizational permissions, a separate internal evaluation grant, and alternative annual commercial licenses at https://oduflow.dev/eula. Earlier releases retain their original terms.
 - Website: <https://oduflow.dev>
