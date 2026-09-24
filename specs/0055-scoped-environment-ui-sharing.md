@@ -69,9 +69,12 @@ power to anyone holding its token.
   request. Handlers keep acting as the team; the environment is the restriction.
 - **Policy, default-deny.** Every scoped request is matched against the
   allowlist before reaching a handler; a mismatch is a 403 (or a 1008 WebSocket
-  close). The environment list endpoint is allowed but filtered server-side to
-  the one environment, mirroring how the scoped MCP endpoint filters
-  `tools/list`.
+  close). Page *navigation* out of scope is recovered rather than refused: a
+  non-API `GET`/`HEAD` is redirected back to `/env/<name>`, so a stray click or
+  an old bookmark returns the visitor to their workspace instead of showing
+  them a bare error. The environment list endpoint is allowed but filtered
+  server-side to the one environment, mirroring how the scoped MCP endpoint
+  filters `tools/list`.
 - **Operator UX.** The card's **Share UI** action shows the link masked, with
   Copy, Regenerate and Revoke. The share routes are themselves outside the
   allowlist, so a shared session cannot read, reissue or revoke the link it
@@ -102,3 +105,7 @@ power to anyone holding its token.
 - 2026-09-02 — shared single-environment dashboard: `/env/<name>` page, per-env
   share secrets with rotate/revoke, default-deny scoped allowlist in the auth
   middleware, Share modal on the environment card.
+- 2026-09-24 — dead ends made recoverable: out-of-scope page navigation
+  redirects back to `/env/<name>` instead of a 403, and leaving the shared view
+  lands on a page that names both ways back in. A revoked share cookie no
+  longer suppresses an operator's own sign-out.

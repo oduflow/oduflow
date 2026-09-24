@@ -4376,12 +4376,18 @@ request:
   MCP endpoint and Secret Key;
 - use **Agent Chat**.
 
-Everything else is refused with HTTP 403 (WebSockets close with 1008): the full
-dashboard, any other environment, every team-wide surface (templates, services,
-volumes, extra addons, credentials, productions, host statistics, license), the
-provisioning actions on the shared environment itself (create, delete, update,
-recreate, switch branch, protect, save as template), the share routes, and
-**Agent CLI**.
+Everything else is out of scope: any other environment, every team-wide surface
+(templates, services, volumes, extra addons, credentials, productions, host
+statistics, license), the provisioning actions on the shared environment itself
+(create, delete, update, recreate, switch branch, protect, save as template),
+the share routes, and **Agent CLI**. API calls and state-changing requests are
+refused with HTTP 403 and WebSockets close with 1008; a browser *navigating* to
+another page — the full dashboard at `/`, a bookmark — is sent back to
+`/env/<name>` with a 303 instead of being shown a raw error.
+
+Leaving the shared view (**Logout**) clears the scoped cookie and returns to
+`/env/<name>`, which then explains how to get back in: reopen the full share
+link, or sign in at `/login` if you are an operator who was previewing it.
 
 Agent CLI is excluded because it is a terminal in the *per-team* agent
 container, whose workspace holds a checkout of every environment of the team.
