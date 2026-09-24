@@ -412,6 +412,12 @@ class UIAuthMiddleware:
             ):
                 if scope["type"] == "websocket":
                     await WebSocket(scope, receive, send).close(code=1008)
+                elif method in ("GET", "HEAD") and not path.startswith("/api/"):
+                    # Recover browser navigation using the saved session; the
+                    # shared dashboard includes the control to leave this mode.
+                    target = ui_scope.PAGE_PREFIX + quote(scoped_env, safe="/")
+                    redirect = RedirectResponse(target, status_code=303)
+                    await redirect(scope, receive, send)
                 else:
                     denied: Response = JSONResponse(
                         {"ok": False, "error": "Not available for a shared link."},
@@ -1030,7 +1036,8 @@ def _build_routes(
             return HTMLResponse(_render_dashboard(settings, scoped_env=env_name))
         return _share_link_error(
             "This link is missing its key. Open the full share link you were "
-            "sent (it ends with ?key=...).",
+            "sent (it ends with ?key=...) to get back to this environment. "
+            "If you have a team password, sign in at /login instead.",
             401,
         )
 
@@ -1096,15 +1103,18 @@ def _build_routes(
         # already authenticated browser, leaving scoped mode restores that
         # operator session instead of signing it out too.
         settings = get_settings()
-        share_token = request.cookies.get(ui_scope.SHARE_COOKIE, "")
-        share = _check_share_token(share_token, settings)
+        share = _check_share_token(
+            request.cookies.get(ui_scope.SHARE_COOKIE, ""), settings
+        )
         session = request.cookies.get(_AUTH_COOKIE, "")
         operator = _check_cookie_token(session, settings) if session else None
-        if share_token and operator is not None:
+        if share and operator is not None:
             response = RedirectResponse("/", status_code=303)
             response.delete_cookie(ui_scope.SHARE_COOKIE, path="/", samesite="strict")
             return response
         if share:
+            # A visitor with no team credentials: land back on the scoped page,
+            # which now explains both ways back in (reopen the link, or sign in).
             target = ui_scope.PAGE_PREFIX + quote(share[1], safe="/")
             response = RedirectResponse(target, status_code=303)
             response.delete_cookie(ui_scope.SHARE_COOKIE, path="/", samesite="strict")
