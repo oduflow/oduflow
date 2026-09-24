@@ -4427,7 +4427,9 @@ def _build_routes(
                 {"ok": False, "error": "Invalid JSON body."}, status_code=400
             )
         try:
-            result = secret_store.set_secret(team, name, value, body.get("value_type"))
+            result = await _offload(
+                secret_store.set_secret, team, name, value, body.get("value_type")
+            )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -4435,6 +4437,38 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("Unexpected error in api_secret_set")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_secret_update_json(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body."}, status_code=400
+            )
+        if not isinstance(body, dict) or "path" not in body or "value" not in body:
+            return JSONResponse(
+                {"ok": False, "error": "An object with path and value is required."},
+                status_code=400,
+            )
+        try:
+            team = _get_ui_team(request)
+            result = await _offload(
+                secret_store.update_secret_json,
+                team,
+                request.path_params["name"],
+                body["path"],
+                body["value"],
+            )
+            return JSONResponse({"ok": True, "result": result})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_secret_update_json")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -6677,6 +6711,9 @@ def _build_routes(
         # the ui_scope allowlist, so scoped share sessions cannot touch them.
         Route("/api/secrets", api_secrets, methods=["GET"]),
         Route("/api/secrets/{name}/set", api_secret_set, methods=["POST"]),
+        Route(
+            "/api/secrets/{name}/update-json", api_secret_update_json, methods=["POST"]
+        ),
         Route("/api/secrets/{name}/delete", api_secret_delete, methods=["POST"]),
         Route("/api/environments/{branch:path}/logs", api_logs, methods=["GET"]),
         WebSocketRoute("/api/environments/{branch:path}/terminal", ws_terminal),

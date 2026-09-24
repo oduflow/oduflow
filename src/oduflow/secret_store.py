@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 from typing import Any
 
 from oduflow.errors import NotFoundError, PrerequisiteNotMetError
@@ -140,6 +141,67 @@ def set_secret(
         }
         _save(team, data)
     return {"name": name, "created": existing is None}
+
+
+def _json_element_key(container: Any, token: str) -> str | int:
+    """Resolve an existing object key or canonical, in-bounds array index."""
+    if isinstance(container, dict) and token in container:
+        return token
+    if (
+        isinstance(container, list)
+        and re.fullmatch(r"0|[1-9][0-9]*", token)
+        and len(token) <= len(str(len(container)))
+    ):
+        index = int(token)
+        if index < len(container):
+            return index
+    raise ValueError("The JSON path does not identify an existing element.")
+
+
+def update_secret_json(
+    team: TeamSettings, name: str, path: str, value: Any
+) -> dict[str, Any]:
+    """Replace an existing element using a non-empty JSON Pointer, write-only.
+
+    The read/modify/write shares the set/delete mutex so concurrent changes to
+    other elements or secrets cannot be lost. An empty pointer (whole-document
+    replacement) is deliberately excluded; use set_secret for that operation.
+    """
+    validate_secret_name(name)
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("path must be a non-empty JSON Pointer starting with '/'.")
+    if re.search(r"~(?:[^01]|$)", path):
+        raise ValueError("Invalid JSON Pointer escape; use ~0 for '~' and ~1 for '/'.")
+    tokens = [
+        token.replace("~1", "/").replace("~0", "~") for token in path[1:].split("/")
+    ]
+    with keyed_mutex(team_secrets_lock_key(team.team_id)):
+        data = _load(team)
+        record = data["secrets"].get(name)
+        if record is None:
+            raise NotFoundError(f"Secret '{name}' not found.")
+        if record.get("value_type", "text") != "json":
+            raise ValueError("Element updates are only supported for JSON secrets.")
+        try:
+            document = json.loads(record["value"], parse_constant=_reject_json_constant)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise PrerequisiteNotMetError(
+                "The stored secret is not valid JSON."
+            ) from None
+        parent = document
+        for token in tokens[:-1]:
+            parent = parent[_json_element_key(parent, token)]
+        parent[_json_element_key(parent, tokens[-1])] = value
+        try:
+            updated = json.dumps(document, allow_nan=False, indent=2)
+        except (ValueError, TypeError, RecursionError):
+            raise ValueError(
+                "The updated secret must contain only valid JSON values."
+            ) from None
+        record["value"] = updated
+        record["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _save(team, data)
+    return {"name": name, "updated": True}
 
 
 def delete_secret(team: TeamSettings, name: str) -> None:
