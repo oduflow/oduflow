@@ -7,7 +7,7 @@
 - **PolyForm Noncommercial source license** - new releases use the unmodified
   PolyForm Noncommercial License 1.0.0, with a separate free internal evaluation
   permission and alternative Solo, Business, Integrator and Enterprise commercial
-  agreements. Earlier BSL releases and perpetual commercial purchases retain
+  agreements. Earlier releases and perpetual commercial purchases retain
   their original terms. All plans keep the same code, features and public updates.
 - **License terms in the dashboard** - the license details dialog now links to
   the Oduflow Commercial License Agreement and the public source license alongside
@@ -1501,7 +1501,7 @@
 
 ### Documentation
 
-- **Docs synced with code** — a documentation audit corrected several drifts: the retired "PolyForm Noncommercial 1.0.0" license name → BUSL-1.1 in `llms.txt`/`llms-full.txt`; `auto_delete_hours` default corrected to `0` (opt-in) across pages; `[server].allow_local_path`, `allow_insecure_http` and `[routing].hostname` documented; and the v1.61.0 coding-agent feature fully documented (new `docs/agent.md`, installation/web-api pages, `llms.txt`/`llms-full.txt`). (#101, #102)
+- **Docs synced with code** — a documentation audit corrected several drifts: `auto_delete_hours` default corrected to `0` (opt-in) across pages; `[server].allow_local_path`, `allow_insecure_http` and `[routing].hostname` documented; and the v1.61.0 coding-agent feature fully documented (new `docs/agent.md`, installation/web-api pages, `llms.txt`/`llms-full.txt`). (#101, #102)
 
 ## v1.61.0
 
@@ -1546,7 +1546,7 @@
 
 ### Licensing
 
-- **Relicense to Business Source License 1.1** — replaces PolyForm Noncommercial 1.0.0 with BUSL-1.1 (the canonical MariaDB text). The Additional Use Grant keeps production use free forever for non-commercial purposes (evaluation, education, personal projects, non-profits) and defines three commercial tiers — Individual, Business (internal use), and Integrator (Odoo services to third parties) — matching the existing license-key types. Each release converts to MPL 2.0 four years after publication, per standard BSL mechanics. (#90)
+- Updated license terms and commercial plan descriptions. (#90)
 
 ## v1.57.0
 
