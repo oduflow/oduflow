@@ -699,6 +699,8 @@
   .chat-tool-status[data-status="in_progress"] { color: var(--accent); }
   .chat-tool-payload { display: grid; gap: 8px; padding: 4px 4px 10px 18px; }
   .chat-tool-payload-section { min-width: 0; }
+  .chat-tool-output { display: grid; gap: 8px; min-width: 0; }
+  .chat-tool-image { display: block; max-width: 100%; max-height: 60vh; width: auto; height: auto; object-fit: contain; object-position: left top; border-radius: var(--radius-sm); }
   .chat-tool-payload-label { margin-bottom: 3px; color: var(--text-dim); font-size: var(--text-2xs); font-weight: 600; }
   .chat-tool-payload-value { max-height: 40vh; margin: 0; overflow: auto; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--terminal-bg); color: var(--terminal-text); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
   .chat-plan { padding: 2px 4px; font-size: var(--text-xs); }
@@ -7878,7 +7880,7 @@ function ensureChatAssets() {
   // chat.js and acp-client.js are an interdependent pair of our own code; bump
   // this shared CHAT_V whenever either one changes (see AGENTS.md). One version
   // busts both at once, preventing a stale chat.js/acp-client.js mismatch.
-  var CHAT_V = '7';
+  var CHAT_V = '8';
   // marked.min.js and purify.min.js are vendored third-party assets (not part
   // of the CHAT_V pair — bump their filename if upgraded). DOMPurify must load
   // before chat.js: renderMarkdown sanitizes marked's raw-HTML output with it.
