@@ -3,6 +3,9 @@
 import json
 import os
 import stat
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -165,3 +168,173 @@ def test_unknown_type_is_rejected(team, value_type):
     with pytest.raises(ValueError, match="value_type"):
         secret_store.set_secret(team, "key", "{}", value_type)
     assert secret_store.list_secrets(team) == []
+
+
+def test_update_json_preserves_other_values_and_metadata(team):
+    original = {"database": {"password": "old", "user": "private"}, "enabled": True}
+    secret_store.set_secret(team, "config", json.dumps(original), "json")
+    secret_store.set_secret(team, "other", "untouched")
+    path = Path(secret_store.secrets_path(team))
+    before = json.loads(path.read_text())
+
+    result = secret_store.update_secret_json(
+        team, "config", "/database/password", "new"
+    )
+
+    after = json.loads(path.read_text())
+    record = after["secrets"]["config"]
+    original["database"]["password"] = "new"
+    assert json.loads(record["value"]) == original
+    assert result == {"name": "config", "updated": True}
+    assert record["value_type"] == "json"
+    assert record["created_at"] == before["secrets"]["config"]["created_at"]
+    assert record["updated_at"] > before["secrets"]["config"]["updated_at"]
+    assert after["secrets"]["other"] == before["secrets"]["other"]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "value", [None, False, 0, 1.5, "", "secret", [], {"key": "new"}]
+)
+def test_update_json_accepts_json_value_types(team, value):
+    secret_store.set_secret(team, "config", '{"key": "old", "keep": 42}', "json")
+    secret_store.update_secret_json(team, "config", "/key", value)
+    resolved = secret_store.resolve_env_secrets(team, {"CONFIG": "secret:config"})
+    assert json.loads(resolved["CONFIG"]) == {"key": value, "keep": 42}
+
+
+@pytest.mark.parametrize(
+    "original,path,expected",
+    [
+        (
+            {"accounts": [{"token": "old"}, {"token": "keep"}]},
+            "/accounts/0/token",
+            {"accounts": [{"token": "new"}, {"token": "keep"}]},
+        ),
+        (["keep", "old"], "/1", ["keep", "new"]),
+        ({"a/b": {"~key": "old"}}, "/a~1b/~0key", {"a/b": {"~key": "new"}}),
+        ({"~1": "old"}, "/~01", {"~1": "new"}),
+        ({"": "old"}, "/", {"": "new"}),
+        ({"": {"": "old"}}, "//", {"": {"": "new"}}),
+        ({"01": "old"}, "/01", {"01": "new"}),
+        (
+            {"a.b": "old", "a": {"b": "keep"}},
+            "/a.b",
+            {"a.b": "new", "a": {"b": "keep"}},
+        ),
+        ({"key": None}, "/key", {"key": "new"}),
+    ],
+)
+def test_update_json_pointer(team, original, path, expected):
+    secret_store.set_secret(team, "config", json.dumps(original), "json")
+    secret_store.update_secret_json(team, "config", path, "new")
+    resolved = secret_store.resolve_env_secrets(team, {"CONFIG": "secret:config"})
+    assert json.loads(resolved["CONFIG"]) == expected
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    [
+        None,
+        1,
+        [],
+        {},
+        "",
+        "key",
+        "#/key",
+        "/bad~",
+        "/bad~2",
+        "/missing",
+        "/missing/key",
+        "/key/nested",
+        "/items/-",
+        "/items/-1",
+        "/items/01",
+        "/items/+0",
+        "/items/ 0",
+        "/items/١",
+        "/items/1",
+        "/items/0/missing",
+        "/items/" + "9" * 5000,
+    ],
+)
+def test_update_json_invalid_path_changes_nothing(team, pointer):
+    secret_store.set_secret(team, "config", '{"key":"private","items":[null]}', "json")
+    path = Path(secret_store.secrets_path(team))
+    before = path.read_bytes()
+    with pytest.raises(ValueError) as error:
+        secret_store.update_secret_json(team, "config", pointer, "new-private")
+    assert "private" not in str(error.value)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("original", ["null", "true", "42", '"private"', "[]", "{}"])
+def test_update_json_requires_existing_element(team, original):
+    secret_store.set_secret(team, "config", original, "json")
+    with pytest.raises(ValueError, match="existing element"):
+        secret_store.update_secret_json(team, "config", "/0", "new")
+    assert secret_store.resolve_env_secrets(team, {"C": "secret:config"}) == {
+        "C": original
+    }
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_update_json_rejects_text_without_converting(team, legacy):
+    secret_store.set_secret(team, "config", '{"key": "private"}')
+    path = Path(secret_store.secrets_path(team))
+    if legacy:
+        data = json.loads(path.read_text())
+        del data["secrets"]["config"]["value_type"]
+        path.write_text(json.dumps(data))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="only supported for JSON secrets"):
+        secret_store.update_secret_json(team, "config", "/key", "new")
+    assert path.read_bytes() == before
+
+
+def test_update_json_missing_secret_is_not_created(team):
+    with pytest.raises(NotFoundError):
+        secret_store.update_secret_json(team, "missing", "/key", "new")
+    assert secret_store.list_secrets(team) == []
+
+
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), {"nested": float("-inf")}, {1, 2}]
+)
+def test_update_json_invalid_value_changes_nothing(team, value):
+    secret_store.set_secret(team, "config", '{"key": "private"}', "json")
+    path = Path(secret_store.secrets_path(team))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="valid JSON values"):
+        secret_store.update_secret_json(team, "config", "/key", value)
+    assert path.read_bytes() == before
+
+
+def test_update_json_corrupt_value_does_not_leak_or_overwrite(team):
+    secret_store.set_secret(team, "config", "{}", "json")
+    path = Path(secret_store.secrets_path(team))
+    data = json.loads(path.read_text())
+    data["secrets"]["config"]["value"] = '{"private": broken}'
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+    with pytest.raises(PrerequisiteNotMetError) as error:
+        secret_store.update_secret_json(team, "config", "/private", "new")
+    assert "private" not in str(error.value)
+    assert path.read_bytes() == before
+
+
+def test_concurrent_json_updates_preserve_each_other(team):
+    count = 8
+    secret_store.set_secret(
+        team, "config", json.dumps({str(i): "old" for i in range(count)}), "json"
+    )
+    barrier = Barrier(count)
+
+    def update(index):
+        barrier.wait(timeout=10)
+        secret_store.update_secret_json(team, "config", f"/{index}", index)
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        list(pool.map(update, range(count)))
+    resolved = secret_store.resolve_env_secrets(team, {"C": "secret:config"})
+    assert json.loads(resolved["C"]) == {str(i): i for i in range(count)}

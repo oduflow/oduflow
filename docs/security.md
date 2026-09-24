@@ -417,6 +417,45 @@ A dangling reference (secret deleted or never created) fails the create/update w
 
 The store lives at `{team_data_dir}/secrets.json` with owner-only (0600) file permissions, like the other credential stores. Note the boundary: code running *inside* a container can always read its own environment — secrets protect the MCP/REST/dashboard read surfaces, not the container itself.
 
+### Updating one JSON element
+
+To rotate one field without knowing or resubmitting the other values, send an
+authenticated request to `POST /api/secrets/{name}/update-json`:
+
+```json
+{"path": "/database/password", "value": "new-password"}
+```
+
+The secret must already have type `json`, and the element must exist. Text
+secrets return HTTP 400 even when their contents happen to be valid JSON;
+the method never changes a secret's type. A missing secret returns HTTP 404.
+
+`path` uses JSON Pointer syntax: `/password` selects a top-level key,
+`/database/password` selects a nested key, and `/accounts/0/token` selects a
+field in the first array element. Escape `/` within a key as `~1`, and `~` as
+`~0`. `/` selects an empty-string key. Array indices start at zero and cannot
+have leading zeros. Empty paths, missing keys, out-of-range indices, and array
+append (`-`) are rejected with HTTP 400, without modifying the secret.
+
+`value` is the new JSON value itself, not a JSON-encoded string. Strings,
+numbers, booleans, objects, arrays, and `null` are supported; `null` replaces
+the element with null rather than deleting it. Replacing an object or array
+replaces that entire selected subtree. Other elements retain their values,
+though the stored JSON is reformatted with two-space indentation and non-ASCII
+characters are escaped as `\uXXXX` sequences (surrogate pairs where needed).
+JSON parsing restores the same characters. `NaN` and `Infinity` are rejected.
+
+The server performs the read/modify/write under the same team lock as other
+secret writes. It preserves `created_at` and updates `updated_at`. Responses
+contain only the secret name and success status, never secret values:
+
+```json
+{"ok": true, "result": {"name": "my-secret", "updated": true}}
+```
+
+Recreate consumers with `update_service` / `update_environment` to apply the
+updated value to their containers.
+
 ## iptables rule
 
 On startup, an `iptables ACCEPT` rule is automatically added for the `oduflow-net` Docker bridge interface. This ensures that containers on the shared network can communicate with the host (required for Traefik `host.docker.internal` routing and PostgreSQL access). If `iptables` is not available, the rule is skipped with a warning.

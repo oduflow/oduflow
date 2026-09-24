@@ -201,6 +201,7 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
 | `GET` | `/api/secrets` | List team secret names, types (`value_type`) and timestamps; stored values are never returned by any endpoint |
 | `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from string body field `value` (write-only); optional `value_type`: `text` or `json`. Omitted/null type preserves the existing type, defaulting to `text` for new secrets. Invalid JSON secret values or unknown types return HTTP 400 without changing the stored value |
+| `POST` | `/api/secrets/{name}/update-json` | Replace one existing element of a JSON secret; body: `path` (non-empty JSON Pointer, e.g. `/database/password` or `/accounts/0/token`) and `value` (a JSON value, including `null`). Returns only `{"ok":true,"result":{"name":"…","updated":true}}`. Text secrets, invalid paths/values and missing elements return HTTP 400; missing secrets return HTTP 404. Errors leave the stored value unchanged. See [JSON element updates](security.md#updating-one-json-element) |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
