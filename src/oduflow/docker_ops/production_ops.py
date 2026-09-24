@@ -226,11 +226,6 @@ def _build_prod_odoo_conf(
     for key, value in user_conf.items():
         if str(key).lower() not in RESERVED_ODOO_CONF_KEYS:
             overrides[str(key).lower()] = str(value)
-    from oduflow.production_mcp import MOUNT, addon_checkout
-
-    extra_container_paths = list(extra_container_paths)
-    if (addon_checkout(team, name) / "addons/odumcp/__manifest__.py").is_file():
-        extra_container_paths.append(MOUNT)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
         _prod_base_conf_path(team, repo_path),
@@ -744,11 +739,6 @@ def _container_spec(
     odoo_volumes: dict[str, dict[str, str]] = {
         repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
     }
-    from oduflow.production_mcp import MOUNT, addon_checkout
-
-    connector = addon_checkout(team, name) / "addons/odumcp"
-    if (connector / "__manifest__.py").is_file():
-        odoo_volumes[str(connector)] = {"bind": MOUNT + "/odumcp", "mode": "ro"}
     for host_path, container_path in extra_mount_paths:
         odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
     odoo_volumes[prod_filestore_dir(team, name)] = {

@@ -53,7 +53,23 @@ client-addon release before rollout.
 Related: [[0035-production-hosting]], [[0028-scoped-environment-mcp-access]],
 [[0059-production-to-dev-data-flow]].
 
+## Evolution
+
+Creation first shipped the fallback addon as a private checkout in the production
+workspace, bind-mounted read-only on a dedicated addons path. That made `odumcp`
+the only production module living outside the repository: invisible to deploys,
+rollbacks and code review, and needing its own mount and `addons_path` plumbing.
+It is now vendored instead — when neither the main nor the extra repositories
+provide `odumcp`, Oduflow copies it into the production repository, commits and
+pushes it to the production branch (the first place Oduflow writes to a main
+repository). The addon is ordinary production code afterwards and is never
+updated automatically. The cost is that the team's credentials need push access;
+a rejected push discards the local commit and is reported like any other failed
+setup.
+
 ## History
 
 - 2026-09-19: agreed separate endpoints, a shared configured production key,
   direct OduMCP API access and automatic installation on production creation.
+- 2026-09-21: replaced the managed read-only addon mount with vendoring
+  `odumcp` into the production repository (commit and push).
