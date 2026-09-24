@@ -408,14 +408,112 @@
     return tool.content;
   }
 
+  function toolImageSource(value) {
+    if (!value || value.type !== 'image') return null;
+    // MCP/ACP image blocks and Claude's native base64 image blocks.
+    var source = value.source;
+    var mime = source ? source.media_type : value.mimeType;
+    var data = source ? source.data : value.data;
+    if (source && source.type !== 'base64') return null;
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(mime) || typeof data !== 'string') return null;
+    data = data.replace(/\s/g, '');
+    if (!data || data.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) return null;
+    return 'data:' + mime + ';base64,' + data;
+  }
+
+  // An image can only hide inside a serialized block if the literal type shows
+  // up in the text, so this lets us skip parsing big results that cannot hold
+  // one -- the parse would be thrown away anyway.
+  function mayHoldImageBlock(text) {
+    return text.indexOf('"image"') !== -1;
+  }
+
+  function collectToolOutputParts(parts, value, depth) {
+    if (depth > 8) {
+      parts.push({ value: value });
+      return;
+    }
+    if (typeof value === 'string') {
+      // Some adapters serialize the content array into a text block.
+      if (/^\s*[\[{]/.test(value) && mayHoldImageBlock(value)) {
+        try {
+          collectToolOutputParts(parts, JSON.parse(value), depth + 1);
+          return;
+        } catch (e) { /* plain text */ }
+      }
+      parts.push({ value: value });
+      return;
+    }
+    if (!value || typeof value !== 'object') {
+      parts.push({ value: value });
+      return;
+    }
+    var src = toolImageSource(value);
+    if (src) {
+      parts.push({ src: src, value: value });
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(function (item) { collectToolOutputParts(parts, item, depth + 1); });
+      return;
+    }
+    if (value.type === 'text' && typeof value.text === 'string') {
+      collectToolOutputParts(parts, value.text, depth + 1);
+      return;
+    }
+    if (value.type === 'content' || Array.isArray(value.content)) {
+      collectToolOutputParts(parts, value.content, depth + 1);
+      var metadata = Object.create(null);
+      Object.keys(value).forEach(function (key) {
+        if (key !== 'content' && !(key === 'type' && value.type === 'content')) {
+          metadata[key] = value[key];
+        }
+      });
+      if (Object.keys(metadata).length) parts.push({ value: metadata });
+      return;
+    }
+    parts.push({ value: value });
+  }
+
+  function toolOutputParts(value) {
+    var parts = [];
+    collectToolOutputParts(parts, value, 0);
+    return parts;
+  }
+
+  function renderToolOutput(container, output) {
+    var parts = toolOutputParts(output);
+    // Keep ordinary tool output exactly as supplied unless it contains images.
+    if (!parts.some(function (part) { return !!part.src; })) parts = [{ value: output }];
+    container.textContent = '';
+    parts.forEach(function (part) {
+      if (!part.src) {
+        var text = part.value === undefined ? 'Not provided by agent' : formatToolValue(part.value);
+        container.appendChild(el('pre', 'chat-tool-payload-value', text));
+        return;
+      }
+      var preview = el('img', 'chat-tool-image');
+      preview.alt = 'Tool result image';
+      preview.addEventListener('error', function () {
+        preview.replaceWith(el('pre', 'chat-tool-payload-value', formatToolValue(part.value)));
+      }, { once: true });
+      preview.src = part.src;
+      container.appendChild(preview);
+    });
+  }
+
   function renderToolPayload(tool) {
     tool.input.textContent = tool.hasRawInput
       ? formatToolValue(tool.rawInput)
       : 'Not provided by agent';
     var output = toolOutputValue(tool);
-    tool.output.textContent = output === undefined
-      ? 'Not provided by agent'
-      : formatToolValue(output);
+    // Rendering walks and stringifies the whole result, which is costly for a
+    // big one; status-only updates carry the same output, so re-render only
+    // when it actually changed.
+    if (tool.hasRenderedOutput && tool.renderedOutput === output) return;
+    tool.hasRenderedOutput = true;
+    tool.renderedOutput = output;
+    renderToolOutput(tool.output, output);
   }
 
   function patchTool(tool, u) {
@@ -472,7 +570,7 @@
     payload.appendChild(inputSection);
     var outputSection = el('div', 'chat-tool-payload-section');
     outputSection.appendChild(el('div', 'chat-tool-payload-label', 'Output'));
-    var output = el('pre', 'chat-tool-payload-value');
+    var output = el('div', 'chat-tool-output');
     outputSection.appendChild(output);
     payload.appendChild(outputSection);
     details.appendChild(payload);
@@ -493,7 +591,9 @@
       hasRawOutput: false,
       rawOutput: undefined,
       hasContent: false,
-      content: undefined
+      content: undefined,
+      hasRenderedOutput: false,
+      renderedOutput: undefined
     };
     activity.tools.push(tool);
     activity.toolCount += 1;

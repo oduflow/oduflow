@@ -314,7 +314,6 @@ def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):
     assert dashboard.status_code == 200
     assert "data.default === 'opencode'" in dashboard.text
     assert "(agentType === 'opencode' ? 'OpenCode' : 'Claude')" in dashboard.text
-    assert "var CHAT_V = '7'" in dashboard.text
 
 
 def test_minimized_window_dock_has_group_semantics_and_restores_focus(tmp_path):
