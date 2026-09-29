@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Features
+
+- **On-demand extra-addons branches** — adding an extra-addons repository no
+  longer downloads code: Oduflow checks access and reads the branch list, and
+  each branch is downloaded (latest commit only) the first time an environment
+  uses it. Large multi-version repositories are added in seconds instead of
+  timing out. Downloaded branches update incrementally; branches deleted on the
+  remote are untracked. Repositories added by earlier versions keep fetching all
+  branches.
+
 ### Fixes
 
 - **SSH in the coder image** — `oduflow-coder:0.3.2` includes the OpenSSH
