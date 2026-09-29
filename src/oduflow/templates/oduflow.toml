@@ -78,7 +78,7 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # deployment-wide bits; changes apply on server restart (the agent container
 # is recreated automatically when its config changed).
 # [agent]
-# image = "oduist/oduflow-coder:0.3.1"
+# image = "oduist/oduflow-coder:0.3.2"
 # claude_model = ""                # optional model override; empty = CLI default
 # codex_model = ""                 # optional model override; empty = CLI default
 # opencode_model = ""              # optional provider/model; empty = OpenCode default

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- **SSH in the coder image** — `oduflow-coder:0.3.2` includes the OpenSSH
+  client so agent Git operations can use team SSH deploy keys.
+
 ## v1.84.0
 
 ### Licensing
