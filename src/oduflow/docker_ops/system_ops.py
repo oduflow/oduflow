@@ -4610,9 +4610,10 @@ def _wire_imported_addons(
 
         # Already registered (e.g. a re-run, or the user added it manually):
         # reference it only if the requested branch is genuinely available.
+        # A registered repo downloads branches on demand, so fetch it if absent.
         if os.path.isdir(repo_path):
             try:
-                extra_addons._resolve_branch_revision(repo_path, name, branch)
+                extra_addons.ensure_branch_revision(team, name, branch)
             except Exception as exc:
                 if not best_effort:
                     raise
@@ -4626,10 +4627,27 @@ def _wire_imported_addons(
         local_fallback_reason = ""
         if kind == "remote" and origin_url:
             try:
-                extra_addons.clone_extra_repo(team, name, origin_url)
+                # Download only the branch this template needs, not every
+                # version branch of the remote.
+                extra_addons.register_extra_repo(
+                    team, name, origin_url, branches=[branch]
+                )
+                extra_addons._resolve_branch_revision(repo_path, name, branch)
+            except NotFoundError as exc:
+                # The remote is reachable but lacks the branch, so the repo can
+                # never serve it. Strict mode rejects this instead of settling
+                # for uploaded files that cannot receive remote updates.
+                shutil.rmtree(repo_path, ignore_errors=True)
+                if not best_effort:
+                    raise
+                if not os.path.isdir(src_dir):
+                    record_warning(name, "skipped", str(exc))
+                    continue
+                local_fallback_reason = str(exc)
             except Exception as exc:
-                # A failed clone may leave a partial bare repo. It belongs to
-                # this import attempt, so remove it before a retry or fallback.
+                # The download itself failed (network, auth, timeout). The bare
+                # repo belongs to this import attempt, so remove it before a
+                # retry or fallback.
                 shutil.rmtree(repo_path, ignore_errors=True)
                 if not os.path.isdir(src_dir):
                     if best_effort:
@@ -4638,27 +4656,12 @@ def _wire_imported_addons(
                     raise
                 local_fallback_reason = str(exc)
                 logger.warning(
-                    "Clone of extra repo '%s' failed; using uploaded files",
+                    "Download of extra repo '%s' failed; using uploaded files",
                     name,
                 )
             else:
-                try:
-                    extra_addons._resolve_branch_revision(repo_path, name, branch)
-                except Exception as exc:
-                    # Clone succeeded but the requested branch is missing on
-                    # the remote: the bare repo cannot serve this branch, so
-                    # discard the repo created by this import attempt.
-                    shutil.rmtree(repo_path, ignore_errors=True)
-                    if not best_effort:
-                        raise
-                    reason = str(exc)
-                    if not os.path.isdir(src_dir):
-                        record_warning(name, "skipped", reason)
-                        continue
-                    local_fallback_reason = reason
-                else:
-                    wired[name] = branch
-                    continue
+                wired[name] = branch
+                continue
         if not os.path.isdir(src_dir):
             error = PrerequisiteNotMetError(
                 f"Addon '{name}' has no uploaded files and no usable origin."

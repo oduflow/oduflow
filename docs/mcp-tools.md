@@ -2391,10 +2391,10 @@ once and mounted into environments. See
 
 ### `add_extra_repo`
 
-Clone an extra addons repository. It is cloned as a **shallow bare** repo (only
-the latest commit of each branch, no history) into the shared repos directory,
-so large repositories like Odoo Enterprise clone quickly. All branches are
-kept by default; `branches` can restrict the clone and future updates to a subset.
+Register an extra addons repository. Registration checks access and reads the
+remote branch list; **no code is downloaded**. The first environment that uses a
+branch downloads only that branch's latest commit (no history), so a large
+multi-version repository costs only the versions in use.
 
 **Parameters**
 
@@ -2405,7 +2405,7 @@ kept by default; `branches` can restrict the clone and future updates to a subse
 :   *str · required* — HTTPS (`https://github.com/owner/repo.git`) or SSH (`git@github.com:owner/repo.git`, needs the team deploy key — see [`get_ssh_public_key`](#get_ssh_public_key)).
 
 `branches`
-:   *str · default empty* — Comma-separated branch names to clone and track. Empty keeps all branches. The dashboard provides a remote branch picker; REST accepts a list.
+:   *str · default empty* — Comma-separated branch names to download now instead of on first use. Empty downloads nothing yet. The dashboard provides a remote branch picker; REST accepts a list.
 
 **Use it when**
 
@@ -2414,7 +2414,8 @@ kept by default; `branches` can restrict the clone and future updates to a subse
 
 ### `list_extra_repos`
 
-List all cloned extra addons repositories.
+List extra addons repositories with their downloaded branches and the branch
+list last read from the remote.
 
 **Parameters**
 
@@ -2422,12 +2423,14 @@ List all cloned extra addons repositories.
 
 **Use it when**
 
-- Finding the exact name to use in an `extra_addons` argument.
+- Finding the exact name and branch to use in an `extra_addons` argument.
 
 ### `update_extra_repo`
 
-Fetch the latest changes from the remote, fetching all tracked branches and pruning
-deleted remote refs.
+Refresh the remote branch list and fetch the latest changes of every downloaded
+branch, pruning branches deleted on the remote. Branches never used stay
+undownloaded (repositories added by older Oduflow versions still fetch all
+branches).
 
 **Parameters**
 
@@ -2435,16 +2438,16 @@ deleted remote refs.
 :   *str · required* — The extra repo to update (e.g. `enterprise`).
 
 `add_branch`
-:   *str · default empty* — Fetch and start tracking one additional branch in a subset clone. A failed fetch leaves the tracked set unchanged.
+:   *str · default empty* — Download one more branch now and keep it updated, instead of waiting for its first use. A failed fetch leaves the tracked set unchanged.
 
 **Use it when**
 
-- A new Odoo version branch appeared upstream.
+- Warming up a branch before the first environment needs it.
 - An environment needs a fix that landed in the shared addons repo.
 
 ### `delete_extra_repo`
 
-Delete a cloned extra addons repository.
+Delete an extra addons repository.
 
 **Parameters**
 

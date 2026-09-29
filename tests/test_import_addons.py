@@ -1,12 +1,13 @@
 """Unit tests for the Odoo.sh addon ingest server-side contract (no Docker).
 
 Covers extract_addon_dir (tar → staged addon dir) and _wire_imported_addons
-(staged addon → local extra-addons repo + template mapping). The remote (clone)
-branch needs network and is not exercised here.
+(staged addon → local extra-addons repo + template mapping). Remote addons use
+a local file:// git remote, so no network is needed.
 """
 
 import json
 import os
+import subprocess
 import tarfile
 
 import pytest
@@ -33,6 +34,38 @@ def _tar_dir(src_dir, tar_path, arcname):
     """Mirror the script's `tar -C parent -cf - base` (top-level dir = base)."""
     with tarfile.open(tar_path, "w") as tf:
         tf.add(str(src_dir), arcname=arcname)
+
+
+def _make_git_remote(tmp_path):
+    """A file:// remote with branches ``main`` and ``18.0``."""
+    src = _make_repo_dir(tmp_path, top="remote-enterprise")
+    ident = ["-c", "user.name=Test", "-c", "user.email=test@example.com"]
+    for args in (
+        ["init", "-b", "main"],
+        ["add", "-A"],
+        [*ident, "commit", "-m", "init"],
+        ["branch", "18.0"],
+    ):
+        subprocess.run(["git", "-C", str(src), *args], check=True, capture_output=True)
+    return f"file://{src}"
+
+
+def _remote_addon_staging(tmp_path, url, branch="18.0"):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "addons.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "enterprise",
+                    "kind": "remote",
+                    "origin_url": url,
+                    "branch": branch,
+                }
+            ]
+        )
+    )
+    return staging
 
 
 class TestExtractAddonDir:
@@ -132,6 +165,68 @@ class TestWireImportedAddons:
         with pytest.raises(PrerequisiteNotMetError, match="no uploaded files"):
             system_ops._wire_imported_addons(team, str(staging), "18.0")
 
+    def test_registered_repo_downloads_requested_branch(self, team, tmp_path):
+        from oduflow.extra_addons import list_extra_repos, register_extra_repo
+
+        url = _make_git_remote(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        staging = _remote_addon_staging(tmp_path, url)
+
+        wired = system_ops._wire_imported_addons(team, str(staging), "18.0")
+
+        assert wired == {"enterprise": "18.0"}
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+
+    def test_new_remote_addon_downloads_only_requested_branch(self, team, tmp_path):
+        from oduflow.extra_addons import list_extra_repos
+
+        url = _make_git_remote(tmp_path)
+        staging = _remote_addon_staging(tmp_path, url)
+
+        wired = system_ops._wire_imported_addons(team, str(staging), "18.0")
+
+        assert wired == {"enterprise": "18.0"}
+        repo = list_extra_repos(team)[0]
+        assert repo["branches"] == ["18.0"]
+        assert repo["available_branches"] == ["18.0", "main"]
+
+    def test_strict_missing_remote_branch_rejects_uploaded_copy(self, team, tmp_path):
+        """A remote that lacks the branch must fail a strict import even when
+        uploaded files exist; a local copy could never receive remote updates."""
+        from oduflow.errors import NotFoundError
+
+        url = _make_git_remote(tmp_path)
+        staging = _remote_addon_staging(tmp_path, url, branch="17.0")
+        local_src = staging / "addons" / "enterprise"
+        local_src.mkdir(parents=True)
+        (local_src / "__manifest__.py").write_text("{}")
+
+        with pytest.raises(NotFoundError, match="17.0"):
+            system_ops._wire_imported_addons(team, str(staging), "17.0")
+
+        assert not os.path.exists(os.path.join(team.shared_repos_dir, "enterprise"))
+
+    def test_best_effort_missing_remote_branch_uses_uploaded_copy(self, team, tmp_path):
+        url = _make_git_remote(tmp_path)
+        staging = _remote_addon_staging(tmp_path, url, branch="17.0")
+        local_src = staging / "addons" / "enterprise"
+        local_src.mkdir(parents=True)
+        (local_src / "__manifest__.py").write_text("{}")
+        warnings = []
+
+        wired = system_ops._wire_imported_addons(
+            team,
+            str(staging),
+            "17.0",
+            addon_error_policy="best_effort",
+            addon_warnings=warnings,
+        )
+
+        assert wired == {"enterprise": "17.0"}
+        assert is_local_repo(team, "enterprise")
+        assert [w["action"] for w in warnings] == ["used_local_copy"]
+        assert "17.0" in warnings[0]["reason"]
+
     def test_clone_success_with_wrong_branch_fails_loud(self, team, tmp_path):
         """A successful clone whose branch is missing on the remote must NOT
         silently fall back in strict mode. The bare repo is removed and the
@@ -168,7 +263,7 @@ class TestWireImportedAddons:
         with (
             patch.object(
                 extra_addons,
-                "clone_extra_repo",
+                "register_extra_repo",
                 side_effect=fake_clone,
             ),
             patch.object(
@@ -213,7 +308,7 @@ class TestWireImportedAddons:
 
         warnings = []
         with (
-            patch.object(extra_addons, "clone_extra_repo", side_effect=fake_clone),
+            patch.object(extra_addons, "register_extra_repo", side_effect=fake_clone),
             patch.object(
                 extra_addons,
                 "_resolve_branch_revision",
@@ -293,7 +388,7 @@ class TestWireImportedAddons:
 
         with patch.object(
             extra_addons,
-            "clone_extra_repo",
+            "register_extra_repo",
             side_effect=RuntimeError("remote unavailable"),
         ):
             wired = system_ops._wire_imported_addons(

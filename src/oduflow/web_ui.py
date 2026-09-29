@@ -4092,10 +4092,10 @@ def _build_routes(
 
             validate_repo_url(repo_url)
 
-            from oduflow.extra_addons import clone_extra_repo
+            from oduflow.extra_addons import register_extra_repo
 
             result = await _offload(
-                clone_extra_repo,
+                register_extra_repo,
                 team,
                 name,
                 repo_url,
@@ -4114,7 +4114,7 @@ def _build_routes(
             )
 
     async def api_extra_repo_ls_remote(request: Request) -> JSONResponse:
-        """List remote branches before cloning (add-repo wizard branch picker)."""
+        """List remote branches before adding (add-repo wizard branch picker)."""
         team = _get_ui_team(request)
         try:
             body = await request.json()
