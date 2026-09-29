@@ -606,7 +606,7 @@ def test_apply_creates_resources_and_persists_non_secret_state(stack_fixture):
     with (
         patch("oduflow.stack_ops.build_plan", return_value=actions),
         patch(
-            "oduflow.extra_addons.clone_extra_repo",
+            "oduflow.extra_addons.register_extra_repo",
             side_effect=lambda *a, **k: events.append("repo"),
         ),
         patch(

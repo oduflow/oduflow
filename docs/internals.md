@@ -72,7 +72,7 @@ src/oduflow/
   bundled_upgrade.py   # Three-way merge bundled files using persistent baselines
   port_registry.py     # Stable port allocation with JSON persistence
   web_ui.py            # Starlette dashboard, REST/WS API, session/TOTP auth middleware
-  extra_addons.py      # Extra addon repo management (clone, worktree, odoo.conf generation)
+  extra_addons.py      # Extra addon repo management (on-demand branch fetch, worktree, odoo.conf generation)
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM
   sanitizer.py         # DB sanitization (SQL/Python scripts)

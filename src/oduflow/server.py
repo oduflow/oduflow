@@ -666,34 +666,38 @@ def add_extra_repo(
     name: str, repo_url: str, branches: str = "", ctx: Context | None = None
 ) -> str:
     """
-    Clone an extra addons repository for use with environments.
+    Register an extra addons repository for use with environments.
 
-    The repository is cloned as a shallow bare repo (only the latest commit of
-    each branch, no history) to the shared repos directory, so large repos like
-    Odoo Enterprise clone quickly. By default all branches are kept, so one
-    repo serves any Odoo version; pass `branches` to fetch and track only a
-    subset. When creating an environment, reference it by name to mount it as
-    additional addons (e.g., Odoo Enterprise).
+    Registration only checks access and reads the remote branch list; no code
+    is downloaded. The first environment that uses a branch downloads that
+    branch's latest commit (no history), so a large multi-version repo costs
+    only the versions actually used. When creating an environment, reference
+    the repo by name to mount it as additional addons (e.g., Odoo Enterprise).
 
     Args:
         name: Short name for the repo (e.g. "enterprise", "custom-themes").
         repo_url: Repository URL — HTTPS (https://github.com/owner/repo.git)
             or SSH (git@github.com:owner/repo.git, needs the team deploy key,
             see get_ssh_public_key).
-        branches: Optional comma-separated branch names (e.g. "17.0,18.0").
-            When given, only these branches are cloned and later updated;
-            more can be added afterwards with update_extra_repo(add_branch=...).
-            Empty (default): all branches.
+        branches: Optional comma-separated branch names (e.g. "17.0,18.0") to
+            download now instead of on first use. Empty (default): download
+            nothing yet.
     """
-    from oduflow.extra_addons import clone_extra_repo
+    from oduflow.extra_addons import register_extra_repo
 
     git_ops.validate_repo_url(repo_url)
     team = _resolve_team(ctx)
     branch_list = [b.strip() for b in branches.split(",") if b.strip()]
-    result = clone_extra_repo(team, name, repo_url, branches=branch_list)
-    scope = f" (branches: {', '.join(branch_list)})" if branch_list else ""
+    result = register_extra_repo(team, name, repo_url, branches=branch_list)
+    downloaded = (
+        f"Downloaded: {', '.join(branch_list)}."
+        if branch_list
+        else "Nothing downloaded yet; each branch is downloaded on first use."
+    )
+    available = ", ".join(result["available_branches"]) or "(none)"
     return (
-        f"Extra repo '{result['name']}' cloned successfully{scope}.\n"
+        f"Extra repo '{result['name']}' registered. {downloaded}\n"
+        f"Remote branches: {available}\n"
         f"Path: {result['path']}"
     )
 
@@ -701,7 +705,7 @@ def add_extra_repo(
 @mcp.tool()
 @handle_errors
 def list_extra_repos(ctx: Context | None = None) -> str:
-    """List all cloned extra addons repositories."""
+    """List extra addons repositories with downloaded and remote branches."""
     from oduflow.extra_addons import list_extra_repos as _list
 
     team = _resolve_team(ctx)
@@ -710,8 +714,12 @@ def list_extra_repos(ctx: Context | None = None) -> str:
         return "No extra addons repositories found."
     lines = ["Extra addons repositories:"]
     for r in repos:
-        branches = ", ".join(r["branches"][:10]) if r["branches"] else "(no branches)"
-        lines.append(f"- {r['name']}: {r['repo_url']} [{branches}]")
+        downloaded = ", ".join(r["branches"][:10]) if r["branches"] else "none yet"
+        line = f"- {r['name']}: {r['repo_url']} [downloaded: {downloaded}]"
+        available = r.get("available_branches") or []
+        if available:
+            line += f" [on remote: {', '.join(available[:20])}]"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -719,7 +727,7 @@ def list_extra_repos(ctx: Context | None = None) -> str:
 @handle_errors
 def delete_extra_repo(name: str, ctx: Context | None = None) -> str:
     """
-    Delete a cloned extra addons repository.
+    Delete an extra addons repository.
 
     Args:
         name: Name of the extra repo to delete.
@@ -740,13 +748,14 @@ def update_extra_repo(
     """
     Pull latest changes from the remote for an extra addons repository.
 
-    Fetches all tracked branches and prunes deleted remote refs. For a repo
-    cloned with a branch subset, `add_branch` starts tracking one more branch.
+    Refreshes the remote branch list, fetches every downloaded branch and
+    prunes branches deleted on the remote. Branches never downloaded are left
+    alone; environments download them on first use.
 
     Args:
         name: Name of the extra repo to update (e.g. "enterprise").
-        add_branch: Optional branch to add to the tracked set (and fetch)
-            before updating, e.g. "16.0". No-op for all-branches repos.
+        add_branch: Optional branch to download now and keep updated, e.g.
+            "16.0", instead of waiting for its first use.
     """
     from oduflow.extra_addons import fetch_extra_repo, track_branch
 

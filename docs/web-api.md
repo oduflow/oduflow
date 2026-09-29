@@ -193,8 +193,8 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
-| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names — clone/track only these; empty = all branches) |
-| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before cloning; body: `repo_url`, optional `git_user` |
+| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
+| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |

@@ -3828,8 +3828,8 @@ shared by all development environments in a team.
 ```
 {data_dir}/team_{ID}/
   shared_repos/
-    enterprise/          ← bare git clone (shared)
-    custom-themes/       ← bare git clone (shared)
+    enterprise/          ← bare git repo, only the branches in use (shared)
+    custom-themes/       ← bare git repo, only the branches in use (shared)
   shared_extra_checkouts/
     enterprise/
       a1b2c3.../          ← immutable checkout of one commit (shared)
@@ -3851,7 +3851,7 @@ records and resets each worktree HEAD during rollback.
 
 ## Setting Up Extra Repos
 
-Clone an extra repository once (it will be available for all environments):
+Add an extra repository once (it will be available for all environments):
 
 ```bash
 # Via CLI
@@ -3861,6 +3861,25 @@ oduflow call add_extra_repo enterprise https://github.com/odoo/enterprise.git
 oduflow call setup_repo_auth '{"repo_url": "https://github.com/odoo/enterprise.git", "token": "ghp_..."}'
 oduflow call add_extra_repo enterprise https://github.com/odoo/enterprise.git
 ```
+
+Adding a repository downloads **no code**. Oduflow checks access, reads the
+remote branch list (`git ls-remote`) and creates an empty shared bare repo, so
+even a multi-gigabyte repository with a branch per Odoo version is added in
+seconds.
+
+Each branch is downloaded the first time an environment or production uses it:
+only that branch's latest commit, without history (`--depth 1`). A repository
+that holds `16.0` to `19.0` therefore costs only the versions your environments
+actually use. Once downloaded, a branch is kept up to date by
+[`update_extra_repo`](#updating-extra-repos).
+
+The first environment on a new branch waits for that download. To download a
+branch ahead of time, select it when adding the repository (the dashboard's
+**Load branches** picker, or `branches="18.0"` in `add_extra_repo`), or run
+`update_extra_repo(name, add_branch="18.0")` later.
+
+A stalled HTTPS download is aborted after two minutes without progress; a slow
+but progressing one may run up to an hour.
 
 ## Using Extra Addons in Environments
 
@@ -3876,7 +3895,8 @@ oduflow call create_environment feature-x "" default https://github.com/company/
 
 For each development environment Oduflow automatically:
 
-1. Fetches the specified branch and resolves its current commit SHA
+1. Fetches the specified branch (downloading it on first use) and resolves
+   its current commit SHA
 2. Creates or reuses the team's immutable checkout for that SHA
 3. Mounts the checkout **read-only** as `/mnt/extra-addons-{name}`
 4. Generates a merged `odoo.conf` with all extra paths added to `addons_path`
@@ -3890,7 +3910,7 @@ For each development environment Oduflow automatically:
 ## Managing Extra Repos
 
 ```bash
-# List all cloned extra repos with available branches
+# List extra repos with downloaded and remote branches
 oduflow call list_extra_repos
 
 # Delete an extra repo (fails if any environment references it)
@@ -3930,8 +3950,16 @@ Use `update_extra_repo` to fetch the latest changes from the remote:
 oduflow call update_extra_repo enterprise
 ```
 
-This runs `git fetch --all --prune` on the **shared bare repository** only. It
-does **not** change the checkout mounted by any running environment.
+This refreshes the remote branch list and fetches every **downloaded** branch
+into the **shared bare repository**, pruning branches deleted on the remote.
+Branches that no environment has used yet stay undownloaded. It does **not**
+change the checkout mounted by any running environment.
+
+Downloaded branches are fetched incrementally, so the update reports how many
+commits arrived and older commits stay available for production rollback.
+
+Repositories added before on-demand downloads (Oduflow versions that cloned
+every branch) keep that behaviour: their update still fetches all branches.
 
 ### Updating an environment
 
@@ -3947,7 +3975,7 @@ environment's read-only mount, and performs the required install, upgrade, or
 restart. Other environments continue using their previous checkout.
 
 Cached checkouts are deliberately not reference-counted or removed with an
-environment. Deleting the extra repository removes its bare clone and every
+environment. Deleting the extra repository removes its bare repo and every
 cached revision after Oduflow verifies that no environment or production still
 depends on it.
 
@@ -4476,8 +4504,8 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
-| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names — clone/track only these; empty = all branches) |
-| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before cloning; body: `repo_url`, optional `git_user` |
+| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
+| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
@@ -6964,10 +6992,10 @@ once and mounted into environments. See
 
 ### `add_extra_repo`
 
-Clone an extra addons repository. It is cloned as a **shallow bare** repo (only
-the latest commit of each branch, no history) into the shared repos directory,
-so large repositories like Odoo Enterprise clone quickly. All branches are
-kept by default; `branches` can restrict the clone and future updates to a subset.
+Register an extra addons repository. Registration checks access and reads the
+remote branch list; **no code is downloaded**. The first environment that uses a
+branch downloads only that branch's latest commit (no history), so a large
+multi-version repository costs only the versions in use.
 
 **Parameters**
 
@@ -6978,7 +7006,7 @@ kept by default; `branches` can restrict the clone and future updates to a subse
 :   *str · required* — HTTPS (`https://github.com/owner/repo.git`) or SSH (`git@github.com:owner/repo.git`, needs the team deploy key — see [`get_ssh_public_key`](#get_ssh_public_key)).
 
 `branches`
-:   *str · default empty* — Comma-separated branch names to clone and track. Empty keeps all branches. The dashboard provides a remote branch picker; REST accepts a list.
+:   *str · default empty* — Comma-separated branch names to download now instead of on first use. Empty downloads nothing yet. The dashboard provides a remote branch picker; REST accepts a list.
 
 **Use it when**
 
@@ -6987,7 +7015,8 @@ kept by default; `branches` can restrict the clone and future updates to a subse
 
 ### `list_extra_repos`
 
-List all cloned extra addons repositories.
+List extra addons repositories with their downloaded branches and the branch
+list last read from the remote.
 
 **Parameters**
 
@@ -6995,12 +7024,14 @@ List all cloned extra addons repositories.
 
 **Use it when**
 
-- Finding the exact name to use in an `extra_addons` argument.
+- Finding the exact name and branch to use in an `extra_addons` argument.
 
 ### `update_extra_repo`
 
-Fetch the latest changes from the remote, fetching all tracked branches and pruning
-deleted remote refs.
+Refresh the remote branch list and fetch the latest changes of every downloaded
+branch, pruning branches deleted on the remote. Branches never used stay
+undownloaded (repositories added by older Oduflow versions still fetch all
+branches).
 
 **Parameters**
 
@@ -7008,16 +7039,16 @@ deleted remote refs.
 :   *str · required* — The extra repo to update (e.g. `enterprise`).
 
 `add_branch`
-:   *str · default empty* — Fetch and start tracking one additional branch in a subset clone. A failed fetch leaves the tracked set unchanged.
+:   *str · default empty* — Download one more branch now and keep it updated, instead of waiting for its first use. A failed fetch leaves the tracked set unchanged.
 
 **Use it when**
 
-- A new Odoo version branch appeared upstream.
+- Warming up a branch before the first environment needs it.
 - An environment needs a fix that landed in the shared addons repo.
 
 ### `delete_extra_repo`
 
-Delete a cloned extra addons repository.
+Delete an extra addons repository.
 
 **Parameters**
 
@@ -9511,7 +9542,7 @@ src/oduflow/
   bundled_upgrade.py   # Three-way merge bundled files using persistent baselines
   port_registry.py     # Stable port allocation with JSON persistence
   web_ui.py            # Starlette dashboard, REST/WS API, session/TOTP auth middleware
-  extra_addons.py      # Extra addon repo management (clone, worktree, odoo.conf generation)
+  extra_addons.py      # Extra addon repo management (on-demand branch fetch, worktree, odoo.conf generation)
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM
   sanitizer.py         # DB sanitization (SQL/Python scripts)

@@ -1,9 +1,8 @@
-"""Unit tests for cloning remote extra-addons repos (clone_extra_repo).
+"""Unit tests for remote extra-addons repos (register_extra_repo & fetching).
 
 These exercise real git (no network, no Docker): a local source repo with two
-branches is cloned via a file:// URL, and we assert the clone is shallow yet
-keeps every branch (--depth 1 --no-single-branch), so one bare repo still serves
-worktrees for any Odoo version.
+branches is served via a file:// URL. Registration downloads nothing; each
+branch is fetched shallow on first use and incrementally afterwards.
 """
 
 import os
@@ -15,13 +14,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from oduflow.extra_addons import (
-    clone_extra_repo,
     create_worktree,
     delete_extra_repo,
     ensure_shared_checkout,
     fetch_extra_repo,
     list_extra_repos,
     list_remote_branches,
+    register_extra_repo,
     track_branch,
 )
 from oduflow.settings import Settings, TeamSettings
@@ -82,69 +81,165 @@ def _is_shallow(bare_path):
     return out.stdout.strip() == "true"
 
 
-class TestCloneExtraRepoShallow:
-    def test_clone_is_shallow(self, team, tmp_path):
+def _src_git(tmp_path, *args):
+    return subprocess.run(
+        ["git", "-C", str(tmp_path / "source"), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _bare_git(team, *args):
+    return subprocess.run(
+        ["git", "-C", os.path.join(team.shared_repos_dir, "enterprise"), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _commit_on(tmp_path, branch, message):
+    _src_git(tmp_path, "checkout", branch)
+    _src_git(tmp_path, *_GIT_ID, "commit", "--allow-empty", "-m", message)
+    _src_git(tmp_path, "checkout", "main")
+    return _src_git(tmp_path, "rev-parse", branch)
+
+
+def _refspecs(team):
+    out = _bare_git(team, "config", "--get-all", "remote.origin.fetch").stdout
+    return out.split()
+
+
+class TestRegisterOnDemand:
+    def test_register_downloads_nothing(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        result = clone_extra_repo(team, "enterprise", url)
+        result = register_extra_repo(team, "enterprise", url)
 
-        assert _is_shallow(result["path"])
+        assert result["branches"] == []
+        assert result["available_branches"] == ["18.0", "main"]
+        assert _bare_git(team, "for-each-ref").stdout == ""
+        assert _refspecs(team) == []
+        repo = list_extra_repos(team)[0]
+        assert repo["branches"] == []
+        assert repo["available_branches"] == ["18.0", "main"]
 
-    def test_clone_keeps_all_branches(self, team, tmp_path):
+    def test_first_use_downloads_only_that_branch_shallow(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
-
-        repos = list_extra_repos(team)
-        assert len(repos) == 1
-        assert set(repos[0]["branches"]) == {"main", "18.0"}
-
-    def test_worktree_from_non_default_branch(self, team, tmp_path):
-        """A shallow, all-branches clone still checks out any branch's tip."""
-        url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
+        _commit_on(tmp_path, "18.0", "more history")
+        register_extra_repo(team, "enterprise", url)
 
         wt = tmp_path / "wt"
         create_worktree(team, "enterprise", "18.0", str(wt))
 
         # views.xml only exists on the 18.0 branch.
         assert (wt / "sale_enterprise" / "views.xml").is_file()
+        assert _is_shallow(os.path.join(team.shared_repos_dir, "enterprise"))
+        assert _bare_git(team, "rev-list", "--count", "18.0").stdout.strip() == "1"
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+        # The branch joined the tracked set, so Update keeps refreshing it.
+        assert _refspecs(team) == ["+refs/heads/18.0:refs/heads/18.0"]
 
-    def test_worktree_fetches_new_commits_on_branch(self, team, tmp_path):
-        """create_worktree's targeted single-branch fetch pulls updates.
-
-        A commit added to 18.0 *after* the clone must land in the worktree,
-        proving the per-branch fetch runs instead of relying on stale clone
-        data (and without a slow ``--all`` over every branch).
-        """
+    def test_update_without_downloaded_branches_does_not_fetch(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
+        register_extra_repo(team, "enterprise", url)
+        _src_git(tmp_path, "checkout", "-b", "19.0")
+        _src_git(tmp_path, "checkout", "main")
 
-        src = tmp_path / "source"
+        summary = fetch_extra_repo(team, "enterprise")
 
-        def _git(*args):
-            subprocess.run(
-                ["git", "-C", str(src), *args],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+        assert summary["up_to_date"] is True
+        path = os.path.join(team.shared_repos_dir, "enterprise")
+        # A refspec-less fetch would have pulled the remote HEAD into FETCH_HEAD,
+        # and the legacy repair would have restored the wildcard refspec.
+        assert not os.path.exists(os.path.join(path, "FETCH_HEAD"))
+        assert _refspecs(team) == []
+        assert list_extra_repos(team)[0]["available_branches"] == [
+            "18.0",
+            "19.0",
+            "main",
+        ]
 
-        _git("checkout", "18.0")
-        (src / "sale_enterprise" / "new.xml").write_text("<odoo/>")
-        _git("add", "-A")
-        _git(*_GIT_ID, "commit", "-m", "18.0 update")
-        _git("checkout", "main")
-
-        wt = tmp_path / "wt"
-        create_worktree(team, "enterprise", "18.0", str(wt))
-
-        # new.xml was committed after the clone → only present if fetched.
-        assert (wt / "sale_enterprise" / "new.xml").is_file()
-
-
-class TestCloneSelectedBranches:
-    def test_clone_keeps_only_selected_branches(self, team, tmp_path):
+    def test_update_refreshes_downloaded_branch_incrementally(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        result = clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+        register_extra_repo(team, "enterprise", url)
+        old = ensure_shared_checkout(team, "enterprise", "18.0")["revision"]
+        _commit_on(tmp_path, "18.0", "one")
+        new = _commit_on(tmp_path, "18.0", "two")
+
+        summary = fetch_extra_repo(team, "enterprise")
+
+        assert summary["updated_branches"] == [{"branch": "18.0", "new_commits": 2}]
+        assert _bare_git(team, "rev-parse", "18.0").stdout.strip() == new
+        # The old tip stays an ancestor, so gc keeps the SHA rollback resets to.
+        assert _bare_git(team, "merge-base", "--is-ancestor", old, new).returncode == 0
+        # Branches never used stay undownloaded.
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+
+    def test_checkout_refetch_keeps_old_revision_reachable(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        first = ensure_shared_checkout(team, "enterprise", "18.0")
+        new = _commit_on(tmp_path, "18.0", "update")
+
+        second = ensure_shared_checkout(
+            team, "enterprise", "18.0", current_revision=first["revision"]
+        )
+
+        assert second["revision"] == new
+        assert (
+            _bare_git(
+                team, "merge-base", "--is-ancestor", first["revision"], new
+            ).returncode
+            == 0
+        )
+
+    def test_update_untracks_branch_deleted_on_remote(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        checkout = ensure_shared_checkout(team, "enterprise", "18.0")
+        _src_git(tmp_path, "branch", "-D", "18.0")
+
+        # A leftover refspec for the deleted branch would fail every fetch.
+        summary = fetch_extra_repo(team, "enterprise")
+
+        assert summary["deleted_branches"] == ["18.0"]
+        assert _refspecs(team) == []
+        assert list_extra_repos(team)[0]["branches"] == []
+        assert Path(checkout["path"], "sale_enterprise", "views.xml").is_file()
+        assert fetch_extra_repo(team, "enterprise")["up_to_date"] is True
+
+    def test_missing_branch_on_first_use_is_not_found(self, team, tmp_path):
+        from oduflow.errors import NotFoundError
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        with pytest.raises(NotFoundError, match="Branch '17.0'"):
+            ensure_shared_checkout(team, "enterprise", "17.0")
+        assert _refspecs(team) == []
+
+    def test_register_same_name_concurrently_conflicts(self, team, tmp_path):
+        from oduflow.errors import ConflictError
+
+        url = _make_git_source(tmp_path)
+
+        def _register(_index):
+            try:
+                register_extra_repo(team, "enterprise", url, branches=["18.0"])
+                return "ok"
+            except ConflictError:
+                return "conflict"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = sorted(pool.map(_register, range(2)))
+
+        assert outcomes == ["conflict", "ok"]
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+
+
+class TestRegisterSelectedBranches:
+    def test_register_downloads_selected_branches(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        result = register_extra_repo(team, "enterprise", url, branches=["18.0"])
 
         assert _is_shallow(result["path"])
         repos = list_extra_repos(team)
@@ -153,15 +248,36 @@ class TestCloneSelectedBranches:
     def test_invalid_branch_name_rejected(self, team, tmp_path):
         url = _make_git_source(tmp_path)
         with pytest.raises(ValueError):
-            clone_extra_repo(team, "enterprise", url, branches=["--upload-pack=x"])
+            register_extra_repo(team, "enterprise", url, branches=["--upload-pack=x"])
         # Nothing left behind: the repo can still be added afterwards.
         assert list_extra_repos(team) == []
 
+    def test_branch_missing_on_remote_rejected(self, team, tmp_path):
+        from oduflow.errors import NotFoundError
+
+        url = _make_git_source(tmp_path)
+        with pytest.raises(NotFoundError, match="17.0"):
+            register_extra_repo(team, "enterprise", url, branches=["17.0"])
+        assert list_extra_repos(team) == []
+
+    def test_failed_download_leaves_nothing_behind(self, team, tmp_path):
+        from oduflow.errors import ExternalCommandError
+
+        url = _make_git_source(tmp_path)
+        with patch(
+            "oduflow.extra_addons._fetch_branches_unlocked",
+            side_effect=ExternalCommandError("git fetch", -1, "Fetch timed out."),
+        ):
+            with pytest.raises(ExternalCommandError):
+                register_extra_repo(team, "enterprise", url, branches=["18.0"])
+        assert list_extra_repos(team) == []
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
+
     def test_update_only_touches_selected_branches(self, team, tmp_path):
         """fetch --all respects the restricted refspec: a branch created
-        upstream after the clone must not appear."""
+        upstream after registration must not be downloaded."""
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
 
         src = tmp_path / "source"
         subprocess.run(
@@ -181,7 +297,7 @@ class TestCloneSelectedBranches:
 
     def test_track_branch_adds_branch(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
 
         result = track_branch(team, "enterprise", "main")
         assert result["tracked"] is True
@@ -195,20 +311,105 @@ class TestCloneSelectedBranches:
             capture_output=True,
         )
         summary = fetch_extra_repo(team, "enterprise")
-        assert [b["branch"] for b in summary["updated_branches"]] == ["main"]
+        assert summary["updated_branches"] == [{"branch": "main", "new_commits": 1}]
 
     def test_worktree_from_selected_branch(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url, branches=["18.0"])
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
 
         checkout = ensure_shared_checkout(team, "enterprise", "18.0")
         assert (Path(checkout["path"]) / "sale_enterprise" / "views.xml").is_file()
 
-    def test_empty_branch_list_means_all_branches(self, team, tmp_path):
-        url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url, branches=[])
 
-        assert set(list_extra_repos(team)[0]["branches"]) == {"main", "18.0"}
+class TestLegacyAllBranchesRepo:
+    """Repos cloned before on-demand registration keep the wildcard refspec."""
+
+    def _legacy_clone(self, team, url):
+        path = os.path.join(team.shared_repos_dir, "enterprise")
+        os.makedirs(team.shared_repos_dir, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", "--bare", "--depth", "1", "--no-single-branch", url, path],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                path,
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_update_still_fetches_new_branches(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        self._legacy_clone(team, url)
+        _src_git(tmp_path, "checkout", "-b", "19.0")
+        _src_git(tmp_path, "checkout", "main")
+
+        summary = fetch_extra_repo(team, "enterprise")
+
+        assert summary["new_branches"] == ["19.0"]
+        assert _refspecs(team) == ["+refs/heads/*:refs/heads/*"]
+
+    def test_subset_repo_keeps_empty_tracked_set_after_branch_deletion(
+        self, team, tmp_path
+    ):
+        """A pre-marker subset repo whose last branch is deleted upstream must
+        not be mistaken for an old clone missing its wildcard refspec."""
+        url = _make_git_source(tmp_path)
+        path = os.path.join(team.shared_repos_dir, "enterprise")
+        os.makedirs(team.shared_repos_dir)
+        for args in (
+            ["init", "--bare", path],
+            ["-C", path, "config", "remote.origin.url", url],
+            [
+                "-C",
+                path,
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/18.0:refs/heads/18.0",
+            ],
+            ["-C", path, "fetch", "--depth", "1", "origin"],
+        ):
+            subprocess.run(["git", *args], check=True, capture_output=True)
+        _src_git(tmp_path, "branch", "-D", "18.0")
+
+        assert fetch_extra_repo(team, "enterprise")["deleted_branches"] == ["18.0"]
+        assert fetch_extra_repo(team, "enterprise")["new_branches"] == []
+
+        assert _refspecs(team) == []
+        assert list_extra_repos(team)[0]["branches"] == []
+
+    def test_first_use_of_branch_does_not_add_refspec(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        self._legacy_clone(team, url)
+
+        ensure_shared_checkout(team, "enterprise", "18.0")
+
+        assert _refspecs(team) == ["+refs/heads/*:refs/heads/*"]
+
+    def test_worktree_fetches_new_commits_on_branch(self, team, tmp_path):
+        """create_worktree's targeted single-branch fetch pulls updates."""
+        url = _make_git_source(tmp_path)
+        self._legacy_clone(team, url)
+
+        src = tmp_path / "source"
+        _src_git(tmp_path, "checkout", "18.0")
+        (src / "sale_enterprise" / "new.xml").write_text("<odoo/>")
+        _src_git(tmp_path, "add", "-A")
+        _src_git(tmp_path, *_GIT_ID, "commit", "-m", "18.0 update")
+        _src_git(tmp_path, "checkout", "main")
+
+        wt = tmp_path / "wt"
+        create_worktree(team, "enterprise", "18.0", str(wt))
+
+        # new.xml was committed after the clone → only present if fetched.
+        assert (wt / "sale_enterprise" / "new.xml").is_file()
 
 
 class TestListRemoteBranches:
@@ -221,7 +422,7 @@ class TestListRemoteBranches:
 class TestSharedCheckoutCache:
     def test_same_revision_reuses_one_checkout(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
+        register_extra_repo(team, "enterprise", url)
 
         first = ensure_shared_checkout(team, "enterprise", "18.0")
         second = ensure_shared_checkout(team, "enterprise", "18.0")
@@ -235,7 +436,7 @@ class TestSharedCheckoutCache:
         self, team, tmp_path
     ):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
+        register_extra_repo(team, "enterprise", url)
         first = ensure_shared_checkout(team, "enterprise", "18.0")
 
         src = tmp_path / "source"
@@ -270,7 +471,7 @@ class TestSharedCheckoutCache:
 
     def test_concurrent_requests_share_checkout(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
+        register_extra_repo(team, "enterprise", url)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(
@@ -284,7 +485,7 @@ class TestSharedCheckoutCache:
 
     def test_delete_repo_removes_all_cached_revisions(self, team, tmp_path):
         url = _make_git_source(tmp_path)
-        clone_extra_repo(team, "enterprise", url)
+        register_extra_repo(team, "enterprise", url)
         checkout = ensure_shared_checkout(team, "enterprise", "18.0")
         cache_root = tmp_path / "data" / "shared_extra_checkouts" / "enterprise"
         assert cache_root.is_dir()
@@ -300,11 +501,11 @@ class TestSharedCheckoutCache:
 
 
 def test_failed_track_branch_does_not_break_subsequent_updates(team, tmp_path):
-    from oduflow.errors import ExternalCommandError
+    from oduflow.errors import NotFoundError
 
     url = _make_git_source(tmp_path)
-    clone_extra_repo(team, "enterprise", url, branches=["18.0"])
-    with pytest.raises(ExternalCommandError):
+    register_extra_repo(team, "enterprise", url, branches=["18.0"])
+    with pytest.raises(NotFoundError):
         track_branch(team, "enterprise", "missing")
     fetch_extra_repo(team, "enterprise")
     assert set(list_extra_repos(team)[0]["branches"]) == {"18.0"}

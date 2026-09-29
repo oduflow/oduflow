@@ -35,6 +35,26 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 # in one place so the two sites cannot drift.
 DB_CONN_CONF_KEYS = ("db_host", "db_port", "db_user", "db_password")
 
+_WILDCARD_REFSPEC = "+refs/heads/*:refs/heads/*"
+# Marks a repo whose fetch refspecs list exactly the branches it tracks (every
+# repo registered on demand, and older subset repos once they untrack a branch),
+# so having none is a normal state, not a legacy clone that lost its wildcard.
+_ON_DEMAND_MARKER = ".on-demand"
+# Branch names last seen on the remote (git ls-remote), refreshed at
+# registration and on Update. Hints only: an environment may still request a
+# branch that is missing here.
+_REMOTE_BRANCHES_FILE = ".remote-branches.json"
+
+# The first download of a big branch can legitimately take many minutes. The
+# hard ceiling only stops runaway commands; a stalled HTTPS transfer aborts much
+# sooner through git's low-speed check (SSH has no equivalent).
+_FETCH_TIMEOUT = 3600
+_CHECKOUT_TIMEOUT = 600
+_LOW_SPEED_ENV = {
+    "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
+    "GIT_HTTP_LOW_SPEED_TIME": "120",
+}
+
 
 def validate_extra_repo_name(name: str) -> None:
     """Reject repo names unsafe as path components (used under workspaces)."""
@@ -99,20 +119,31 @@ def list_remote_branches(
     """List branch names of a remote repo (``git ls-remote --heads``).
 
     Used by the add-repo wizard to offer a branch selection before anything is
-    cloned; doubles as an early URL/credentials check.
+    downloaded; doubles as an early URL/credentials check.
     """
     from oduflow.git_ops import inject_credential_user
 
     remote_url = inject_credential_user(repo_url, git_user)
-    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+    return _ls_remote_heads(team, ["git", "ls-remote", "--heads", remote_url], repo_url)
+
+
+def _remote_git_env(team: TeamSettings) -> dict[str, str]:
+    """Environment for git commands that talk to a team's remotes."""
+    return {
+        **git_env_for_team(team.git_credentials_file(), team.ssh_dir()),
+        **_LOW_SPEED_ENV,
+    }
+
+
+def _ls_remote_heads(team: TeamSettings, args: list[str], repo_url: str) -> list[str]:
     try:
         result = subprocess.run(
-            ["git", "ls-remote", "--heads", remote_url],
+            args,
             check=True,
             capture_output=True,
             text=True,
             timeout=60,
-            env=cred_env,
+            env=_remote_git_env(team),
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
@@ -131,6 +162,102 @@ def list_remote_branches(
     return sorted(branches)
 
 
+def _read_remote_branches(repo_path: str) -> list[str]:
+    try:
+        with open(os.path.join(repo_path, _REMOTE_BRANCHES_FILE)) as f:
+            branches = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(branches, list):
+        return []
+    return [b for b in branches if isinstance(b, str)]
+
+
+def _write_remote_branches(repo_path: str, branches: list[str]) -> None:
+    target = os.path.join(repo_path, _REMOTE_BRANCHES_FILE)
+    tmp = f"{target}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(sorted(branches), f)
+    os.replace(tmp, target)
+
+
+def _refresh_remote_branches(team: TeamSettings, repo_path: str) -> list[str]:
+    url = _git_config(repo_path, "remote.origin.url")
+    branches = _ls_remote_heads(
+        team, ["git", "-C", repo_path, "ls-remote", "--heads", "origin"], url
+    )
+    _write_remote_branches(repo_path, branches)
+    return branches
+
+
+def _git_config(repo_path: str, key: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", repo_path, "config", "--get", key],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=GIT_ENV,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _configured_refspecs(repo_path: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", repo_path, "config", "--get-all", "remote.origin.fetch"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=GIT_ENV,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _branch_refspec(branch: str) -> str:
+    return f"+refs/heads/{branch}:refs/heads/{branch}"
+
+
+def _untrack_deleted_branches(
+    repo_path: str, name: str, remote_branches: list[str]
+) -> None:
+    """Stop tracking branches that no longer exist on the remote.
+
+    A configured refspec whose source ref is gone makes every ``git fetch``
+    fail before ``--prune`` could clean it up, so Update would stay broken for
+    good. Drop the refspec and the local branch; worktrees and cached
+    checkouts keep their commits.
+    """
+    for refspec in _configured_refspecs(repo_path):
+        if refspec == _WILDCARD_REFSPEC:
+            continue
+        match = re.fullmatch(r"\+refs/heads/(.+):refs/heads/\1", refspec)
+        if not match or match.group(1) in remote_branches:
+            continue
+        branch = match.group(1)
+        # Subset repos created before the marker existed may lose their last
+        # refspec here; mark them so the empty set stays intentional instead of
+        # being "repaired" into the all-branches wildcard.
+        open(os.path.join(repo_path, _ON_DEMAND_MARKER), "w").close()
+        # The value pattern is a POSIX ERE (--fixed-value needs git 2.30+).
+        pattern = "^" + re.sub(r"([.\[\](){}*+?|^$\\])", r"\\\1", refspec) + "$"
+        for args in (
+            ["config", "--unset", "remote.origin.fetch", pattern],
+            ["update-ref", "-d", f"refs/heads/{branch}"],
+        ):
+            subprocess.run(
+                ["git", "-C", repo_path, *args],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=GIT_ENV,
+            )
+        logger.info(
+            "Extra repo '%s': branch '%s' was deleted on the remote; untracked",
+            name,
+            branch,
+        )
+
+
 @contextmanager
 def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
     """Serialize fetch/worktree/cache mutations for one team's extra repo.
@@ -147,44 +274,78 @@ def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
         yield
 
 
-def clone_extra_repo(
+def register_extra_repo(
     team: TeamSettings,
     name: str,
     repo_url: str,
     git_user: str = "",
     branches: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Clone a bare shallow extra-addons repo.
+    """Register a remote extra-addons repo without downloading its code.
 
-    With *branches* empty/None the tip of every branch is kept
-    (``--no-single-branch``), so one bare repo serves any Odoo version. With a
-    non-empty *branches* list only those branches are fetched and tracked: the
-    fetch refspec is limited to them, so later ``git fetch --all`` (the
-    "Update" button / update_extra_repo) also touches only the selected
-    branches. Both variants are shallow (``--depth 1``) so large repos like
-    Odoo Enterprise clone fast instead of timing out.
+    Only the remote branch list is read (``git ls-remote``), which doubles as
+    the URL/credentials check; the bare repo starts empty. An environment
+    downloads a branch the first time it uses it, so a repo holding every Odoo
+    version costs only the versions actually in use. *branches* are downloaded
+    right away instead, to have them ready before the first environment.
     """
     validate_extra_repo_name(name)
     branches = [b.strip() for b in (branches or []) if b and b.strip()]
     for branch in branches:
         validate_branch_name(branch)
 
-    target = os.path.join(team.shared_repos_dir, name)
-    if os.path.exists(target):
-        raise ConflictError(f"Extra repo '{name}' already exists at {target}")
-
-    os.makedirs(team.shared_repos_dir, exist_ok=True)
-
     from oduflow.git_ops import inject_credential_user
 
-    clone_url = inject_credential_user(repo_url, git_user)
-    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+    remote_url = inject_credential_user(repo_url, git_user)
+    target = os.path.join(team.shared_repos_dir, name)
+    with _repo_operation_lock(team, name):
+        if os.path.exists(target):
+            raise ConflictError(f"Extra repo '{name}' already exists at {target}")
 
-    if branches:
-        # Selected branches only: git clone has no multi-branch selection, so
-        # build the repo by hand — init a bare repo, point one refspec at each
-        # chosen branch, then a single shallow fetch of just those tips.
-        def _setup(args: list[str]) -> None:
+        available = _ls_remote_heads(
+            team, ["git", "ls-remote", "--heads", remote_url], repo_url
+        )
+        missing = [b for b in branches if b not in available]
+        if missing:
+            raise NotFoundError(
+                f"Branch(es) not found in '{sanitize_repo_url(repo_url)}': "
+                f"{', '.join(missing)}."
+            )
+
+        os.makedirs(team.shared_repos_dir, exist_ok=True)
+        try:
+            _init_on_demand_repo(target, remote_url, available)
+            if branches:
+                _fetch_branches_unlocked(team, name, target, branches)
+        except BaseException:
+            # Leave nothing half-registered, so a retry does not hit
+            # "already exists" after a timeout or a failed download.
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+
+    logger.info(
+        "Registered extra repo '%s' from %s (downloaded: %s)",
+        name,
+        sanitize_repo_url(repo_url),
+        ", ".join(branches) or "nothing",
+    )
+    return {
+        "name": name,
+        "repo_url": repo_url,
+        "path": target,
+        "branches": branches,
+        "available_branches": available,
+    }
+
+
+def _init_on_demand_repo(target: str, remote_url: str, available: list[str]) -> None:
+    # `git remote add` would seed the wildcard refspec; setting only the URL
+    # leaves the refspec list empty until a branch is actually downloaded.
+    for args in (
+        ["git", "init", "--bare", target],
+        ["git", "-C", target, "config", "remote.origin.url", remote_url],
+    ):
+        try:
             subprocess.run(
                 args,
                 check=True,
@@ -193,121 +354,10 @@ def clone_extra_repo(
                 timeout=30,
                 env=GIT_ENV,
             )
-
-        try:
-            _setup(["git", "init", "--bare", target])
-            _setup(["git", "-C", target, "remote", "add", "origin", clone_url])
-            # `remote add` seeds the wildcard refspec; replace it with the
-            # first selected branch, then append the rest.
-            _setup(
-                [
-                    "git",
-                    "-C",
-                    target,
-                    "config",
-                    "remote.origin.fetch",
-                    f"+refs/heads/{branches[0]}:refs/heads/{branches[0]}",
-                ]
-            )
-            for branch in branches[1:]:
-                _setup(
-                    [
-                        "git",
-                        "-C",
-                        target,
-                        "config",
-                        "--add",
-                        "remote.origin.fetch",
-                        f"+refs/heads/{branch}:refs/heads/{branch}",
-                    ]
-                )
-            subprocess.run(
-                ["git", "-C", target, "fetch", "--depth", "1", "origin"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env=cred_env,
-            )
         except subprocess.CalledProcessError as e:
-            shutil.rmtree(target, ignore_errors=True)
-            stderr = e.stderr or ""
-            _raise_if_auth_error(repo_url, stderr)
-            raise ExternalCommandError(
-                "git fetch --depth 1 (selected branches)", e.returncode, stderr
-            )
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(target, ignore_errors=True)
-            raise ExternalCommandError(
-                "git fetch --depth 1 (selected branches)",
-                -1,
-                "Clone timed out (300s).",
-            )
-
-        logger.info(
-            "Cloned extra repo '%s' from %s (branches: %s)",
-            name,
-            repo_url,
-            ", ".join(branches),
-        )
-        return {
-            "name": name,
-            "repo_url": repo_url,
-            "path": target,
-            "branches": branches,
-        }
-
-    try:
-        # Shallow clone (--depth 1): drop history so large repos like Odoo
-        # Enterprise (years of commits) clone fast instead of timing out.
-        # --no-single-branch keeps the tip of *every* branch, so a single bare
-        # repo still serves worktrees for any branch/version (16.0, 17.0, 18.0,
-        # ...) exactly as the full clone did.
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "--bare",
-                "--depth",
-                "1",
-                "--no-single-branch",
-                clone_url,
-                target,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=cred_env,
-        )
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr or ""
-        _raise_if_auth_error(repo_url, stderr)
-        raise ExternalCommandError("git clone --bare", e.returncode, stderr)
-    except subprocess.TimeoutExpired:
-        raise ExternalCommandError("git clone --bare", -1, "Clone timed out (300s).")
-
-    # git clone --bare does not set a fetch refspec, so subsequent
-    # git fetch --all would only write to FETCH_HEAD without updating
-    # local branches.  Configure the refspec explicitly.
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            target,
-            "config",
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/heads/*",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env=GIT_ENV,
-    )
-
-    logger.info("Cloned extra repo '%s' from %s", name, repo_url)
-    return {"name": name, "repo_url": repo_url, "path": target}
+            raise ExternalCommandError(" ".join(args[:4]), e.returncode, e.stderr or "")
+    open(os.path.join(target, _ON_DEMAND_MARKER), "w").close()
+    _write_remote_branches(target, available)
 
 
 def create_local_repo(
@@ -452,7 +502,9 @@ def list_extra_repos(team: TeamSettings) -> list[dict[str, Any]]:
             {
                 "name": entry,
                 "repo_url": sanitize_repo_url(url),
+                # Downloaded branches; available_branches is the remote list.
                 "branches": branches,
+                "available_branches": _read_remote_branches(path),
                 "protected": protected,
                 "local": local,
             }
@@ -577,17 +629,89 @@ def _get_branch_refs(repo_path: str) -> dict[str, str]:
     return refs
 
 
+def _fetch_branches_unlocked(
+    team: TeamSettings, name: str, path: str, branches: list[str]
+) -> None:
+    """Download *branches* into the bare repo and keep them tracked.
+
+    A branch absent locally is fetched shallow (``--depth 1``), so the first use
+    of e.g. ``19.0`` in a big multi-version repo brings no history. A branch
+    already present is fetched incrementally: the new tip stays connected to
+    the old one, which keeps ``new_commits`` exact and keeps the older SHAs that
+    production rollback resets to reachable (a depth-1 refetch would orphan
+    them for ``git gc``). Each fetched branch then joins the fetch refspecs
+    (unless the wildcard already covers it), so Update keeps refreshing it.
+    """
+    present = _get_branch_refs(path)
+    env = _remote_git_env(team)
+    for group, depth in (
+        ([b for b in branches if b not in present], ["--depth", "1"]),
+        ([b for b in branches if b in present], []),
+    ):
+        if not group:
+            continue
+        label = f"git fetch origin {' '.join(group)}"
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    path,
+                    "fetch",
+                    *depth,
+                    "--no-tags",
+                    "--recurse-submodules=no",
+                    "origin",
+                    *(_branch_refspec(b) for b in group),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_FETCH_TIMEOUT,
+                env=env,
+            )
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr or ""
+            if "couldn't find remote ref" in stderr:
+                raise NotFoundError(
+                    f"Branch '{', '.join(group)}' not found in the remote of "
+                    f"extra repo '{name}'."
+                )
+            raise ExternalCommandError(label, e.returncode, stderr)
+        except subprocess.TimeoutExpired:
+            raise ExternalCommandError(
+                label, -1, f"Fetch timed out ({_FETCH_TIMEOUT}s)."
+            )
+
+    configured = _configured_refspecs(path)
+    if _WILDCARD_REFSPEC in configured:
+        return
+    for branch in branches:
+        refspec = _branch_refspec(branch)
+        if refspec in configured:
+            continue
+        subprocess.run(
+            ["git", "-C", path, "config", "--add", "remote.origin.fetch", refspec],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=GIT_ENV,
+        )
+        logger.info("Extra repo '%s': now tracking branch '%s'", name, branch)
+
+
 def _fetch_extra_repo_unlocked(
     team: TeamSettings, name: str, branch: str | None = None
 ) -> dict[str, Any]:
     """Fetch latest changes and return a summary of what changed.
 
-    When *branch* is given, only that one branch is fetched (a targeted
-    ``git fetch origin +refs/heads/<branch>:refs/heads/<branch>``) instead of
-    ``--all``. Creating/updating a worktree needs just its own branch, and
-    fetching every branch of a large repo like Odoo Enterprise otherwise times
-    out (issue: "Fetch timed out"). The explicit "update repo" path passes no
-    branch and still fetches everything to report changes across all branches.
+    When *branch* is given, only that one branch is fetched (see
+    :func:`_fetch_branches_unlocked`) instead of every tracked branch: creating
+    or updating a checkout needs just its own branch, and fetching every
+    branch of a large repo like Odoo Enterprise otherwise takes far longer.
+    The explicit "update repo" path passes no branch: it refreshes the remote
+    branch list and fetches every tracked branch to report changes.
 
     Returns a dict with keys: name, up_to_date, new_branches,
     deleted_branches, updated_branches.
@@ -609,77 +733,64 @@ def _fetch_extra_repo_unlocked(
             "updated_branches": [],
         }
 
-    # Ensure fetch refspec is configured (bare repos created before the fix lack it)
-    try:
-        result = subprocess.run(
-            ["git", "-C", path, "config", "--get", "remote.origin.fetch"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=GIT_ENV,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    path,
-                    "config",
-                    "remote.origin.fetch",
-                    "+refs/heads/*:refs/heads/*",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=GIT_ENV,
-            )
-            logger.info("Added missing fetch refspec for extra repo '%s'", name)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        pass  # best-effort; fetch will still run
+    # Bare repos cloned before the refspec fix lack one; restore the wildcard
+    # they were cloned with. Never for on-demand repos, where no refspec just
+    # means nothing has been downloaded yet.
+    if not os.path.exists(os.path.join(path, _ON_DEMAND_MARKER)):
+        try:
+            if not _configured_refspecs(path):
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        path,
+                        "config",
+                        "remote.origin.fetch",
+                        _WILDCARD_REFSPEC,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env=GIT_ENV,
+                )
+                logger.info("Added missing fetch refspec for extra repo '%s'", name)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass  # best-effort; fetch will still run
 
     refs_before = _get_branch_refs(path)
-    cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
 
     if branch:
-        # Targeted single-branch fetch: pull only the requested branch's tip so
-        # a large repo doesn't time out fetching every version branch. The '+'
-        # forces the local ref to match after a rebase/force-push upstream.
-        fetch_args = [
-            "git",
-            "-C",
-            path,
-            "fetch",
-            "origin",
-            f"+refs/heads/{branch}:refs/heads/{branch}",
-            "--recurse-submodules=no",
-        ]
-        fetch_label = f"git fetch origin {branch}"
+        _fetch_branches_unlocked(team, name, path, [branch])
     else:
-        fetch_args = [
-            "git",
-            "-C",
-            path,
-            "fetch",
-            "--all",
-            "--prune",
-            "--recurse-submodules=no",
-        ]
-        fetch_label = "git fetch --all --prune"
-
-    try:
-        subprocess.run(
-            fetch_args,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=cred_env,
-        )
-    except subprocess.CalledProcessError as e:
-        raise ExternalCommandError(fetch_label, e.returncode, e.stderr or "")
-    except subprocess.TimeoutExpired:
-        raise ExternalCommandError(fetch_label, -1, "Fetch timed out (120s).")
+        _untrack_deleted_branches(path, name, _refresh_remote_branches(team, path))
+        # With no refspec, `git fetch` would download the remote HEAD with its
+        # whole history — the very cost on-demand registration avoids.
+        if _configured_refspecs(path):
+            fetch_label = "git fetch --all --prune"
+            try:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        path,
+                        "fetch",
+                        "--all",
+                        "--prune",
+                        "--recurse-submodules=no",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=_FETCH_TIMEOUT,
+                    env=_remote_git_env(team),
+                )
+            except subprocess.CalledProcessError as e:
+                raise ExternalCommandError(fetch_label, e.returncode, e.stderr or "")
+            except subprocess.TimeoutExpired:
+                raise ExternalCommandError(
+                    fetch_label, -1, f"Fetch timed out ({_FETCH_TIMEOUT}s)."
+                )
 
     refs_after = _get_branch_refs(path)
 
@@ -732,11 +843,10 @@ def fetch_extra_repo(
 
 
 def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
-    """Start tracking *branch* in a selected-branches extra repo.
+    """Download *branch* now and keep it updated by later Updates.
 
-    Adds the branch to the fetch refspec (a no-op for all-branches repos,
-    whose wildcard refspec already covers it) and shallow-fetches its tip so
-    the branch is immediately usable by environments.
+    Environments download a branch on first use anyway; this warms it up
+    ahead of time (``update_extra_repo(add_branch=...)``).
     """
     validate_branch_name(branch)
     with _repo_operation_lock(team, name):
@@ -747,57 +857,26 @@ def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
             raise PrerequisiteNotMetError(
                 f"Extra repo '{name}' is local (no remote); branches cannot be fetched."
             )
-
-        refspec = f"+refs/heads/{branch}:refs/heads/{branch}"
-        result = subprocess.run(
-            ["git", "-C", path, "config", "--get-all", "remote.origin.fetch"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=GIT_ENV,
-        )
-        refspecs = [line.strip() for line in result.stdout.splitlines()]
-        cred_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
-        try:
-            # --depth 1: the repo is shallow; without it a branch new to the
-            # clone would drag in its entire history.
-            subprocess.run(
-                ["git", "-C", path, "fetch", "--depth", "1", "origin", refspec],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=cred_env,
-            )
-        except subprocess.CalledProcessError as e:
-            raise ExternalCommandError(
-                f"git fetch origin {branch}", e.returncode, e.stderr or ""
-            )
-        except subprocess.TimeoutExpired:
-            raise ExternalCommandError(
-                f"git fetch origin {branch}", -1, "Fetch timed out (120s)."
-            )
-
-        if "+refs/heads/*:refs/heads/*" not in refspecs and refspec not in refspecs:
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    path,
-                    "config",
-                    "--add",
-                    "remote.origin.fetch",
-                    refspec,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=GIT_ENV,
-            )
-
-        logger.info("Extra repo '%s': now tracking branch '%s'", name, branch)
+        _fetch_branches_unlocked(team, name, path, [branch])
         return {"name": name, "branch": branch, "tracked": True}
+
+
+def ensure_branch_revision(team: TeamSettings, repo_name: str, branch: str) -> str:
+    """Commit SHA of *branch*, downloading the branch first if it is missing.
+
+    Registered repos start empty, so a branch missing locally does not mean it
+    is missing on the remote. Local (remote-less) repos cannot fetch, so for
+    them a missing branch is final.
+    """
+    bare_path = os.path.join(team.shared_repos_dir, repo_name)
+    with _repo_operation_lock(team, repo_name):
+        try:
+            return _resolve_branch_revision(bare_path, repo_name, branch)
+        except NotFoundError:
+            if is_local_repo(team, repo_name):
+                raise
+        _fetch_extra_repo_unlocked(team, repo_name, branch)
+        return _resolve_branch_revision(bare_path, repo_name, branch)
 
 
 def _create_worktree_unlocked(
@@ -842,7 +921,7 @@ def _create_worktree_unlocked(
             check=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=_CHECKOUT_TIMEOUT,
             env=GIT_ENV,
         )
     except subprocess.CalledProcessError as e:
@@ -850,6 +929,10 @@ def _create_worktree_unlocked(
             "git worktree add",
             e.returncode,
             f"Failed to create worktree for branch '{branch}': {e.stderr or ''}",
+        )
+    except subprocess.TimeoutExpired:
+        raise ExternalCommandError(
+            "git worktree add", -1, f"Command timed out ({_CHECKOUT_TIMEOUT}s)."
         )
 
     logger.info(
@@ -1046,19 +1129,25 @@ def ensure_shared_checkout(
                     check=True,
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=_CHECKOUT_TIMEOUT,
                     env=GIT_ENV,
                 )
-            except subprocess.CalledProcessError as e:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                # A killed checkout may already point HEAD at the revision;
+                # drop it so the next attempt cannot reuse a half-written tree.
+                _remove_worktree_unlocked(team, repo_name, checkout_path)
+                shutil.rmtree(checkout_path, ignore_errors=True)
+                if isinstance(e, subprocess.TimeoutExpired):
+                    raise ExternalCommandError(
+                        "git worktree add",
+                        -1,
+                        f"Command timed out ({_CHECKOUT_TIMEOUT}s).",
+                    )
                 raise ExternalCommandError(
                     "git worktree add",
                     e.returncode,
                     f"Failed to create shared checkout for '{repo_name}' at "
                     f"{revision}: {e.stderr or ''}",
-                )
-            except subprocess.TimeoutExpired:
-                raise ExternalCommandError(
-                    "git worktree add", -1, "Command timed out (60s)."
                 )
             logger.info(
                 "Created shared extra-addons checkout %s/%s at %s",
