@@ -29,7 +29,7 @@
 
 FROM node:24-bookworm-slim
 
-ARG CODER_VERSION=0.3.1
+ARG CODER_VERSION=0.3.2
 LABEL org.opencontainers.image.title="oduflow-coder" \
       org.opencontainers.image.version="${CODER_VERSION}" \
       org.opencontainers.image.source="https://github.com/oduflow/oduflow"
@@ -42,6 +42,7 @@ LABEL org.opencontainers.image.title="oduflow-coder" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
+        openssh-client \
         ca-certificates \
         curl \
         fd-find \
