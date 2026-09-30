@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## v1.85.0
+
+### Breaking Changes
+
+- **PostgreSQL 16 for Odoo 20** — Odoo 20 requires PostgreSQL 16+, so the
+  development and production clusters both run the official image from
+  `[database].image` (default `postgres:16`, supported majors 16–17). The separate
+  production PostgreSQL image (`oduist/oduflow-postgres`) and
+  `[production].postgres_image` are removed. A one-time startup migration replaces
+  an existing PG15 cluster: it refuses to start while any environment, production
+  or service database still lives there — listing every blocker at once — and
+  `oduflow upgrade` runs the same read-only check with the new code, so a
+  self-update never restarts into a server that cannot start. Once clear, the old
+  clusters are deleted together with the PG15 WAL-G archive (PG15 base backups
+  cannot restore into PG16), new clusters are created, and template databases are
+  restored from their on-disk dumps behind a journal that resumes after a failure.
+  Only official PG15 clusters are reset; clusters carrying custom extensions need
+  operator handling. See the upgrade procedure in the installation, CLI and
+  production guides and decision record
+  [0074](https://github.com/oduflow/oduflow/blob/main/specs/0074-postgresql16-cluster-replacement.md).
+  (#283)
 
 ### Features
 
@@ -10,12 +30,31 @@
   uses it. Large multi-version repositories are added in seconds instead of
   timing out. Downloaded branches update incrementally; branches deleted on the
   remote are untracked. Repositories added by earlier versions keep fetching all
-  branches.
+  branches. (#282)
+- **Update single elements of JSON secrets** — `POST
+  /api/secrets/{name}/update-json` replaces one nested key or array element by
+  JSON Pointer instead of rewriting the whole document. Invalid paths or values
+  are rejected without touching storage, responses never expose secret values,
+  and secret writes no longer block dashboard requests while they hit disk. (#278)
 
-### Fixes
+### Dashboard
 
-- **SSH in the coder image** — `oduflow-coder:0.3.2` includes the OpenSSH
-  client so agent Git operations can use team SSH deploy keys.
+- **Tool-result images in Agent Chat** — screenshot-style tool results are shown
+  as inline pictures instead of a wall of base64 JSON, with the surrounding text
+  and metadata kept alongside them. `image/svg+xml` stays outside the MIME
+  allowlist and payloads are charset-validated, so a tool result cannot smuggle a
+  script-bearing data URL into the page. (#280)
+- **Shared links recover instead of dead-ending** — a visitor who navigates out
+  of a shared `/env/<name>` view is redirected back to it instead of seeing a raw
+  403 (API and state-changing requests keep the 403, WebSockets still close), the
+  landing page names both routes back — reopening the share link and signing in —
+  and Sign out is a real sign-out for an operator holding a revoked or rotated
+  share cookie. (#279)
+
+### Bug Fixes
+
+- **SSH in the coder image** — `oduflow-coder:0.3.2` includes the OpenSSH client
+  so agent Git operations can use team SSH deploy keys. (#281)
 
 ## v1.84.0
 
