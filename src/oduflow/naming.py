@@ -274,6 +274,26 @@ def validate_domain(domain: str) -> str:
     return normalized
 
 
+def odoo_major_from_image(image: str) -> int | None:
+    """Best-effort Odoo major version parsed from an image reference's tag.
+
+    Handles ``odoo:19.0``, ``odoo:19``, ``registry:5000/acme/odoo:19.0`` and
+    version-prefixed custom tags like ``acme/odoo:19.0-custom``. Returns None
+    when the tag carries no leading version (e.g. ``:latest`` or no tag) — the
+    port in ``registry:5000/odoo`` is never mistaken for a tag, and neither is
+    the hex of a digest-pinned reference (``odoo@sha256:98f...``) nor a
+    numeric build/date tag like ``:20260910`` (an Odoo major is 1-2 digits).
+    """
+    # name[:tag][@algo:digest] — drop the digest first so its hex is never
+    # parsed as a tag; a digest carries no version information anyway.
+    _, sep, tag = image.split("@", 1)[0].rpartition(":")
+    if sep and "/" not in tag:
+        match = re.match(r"(\d{1,2})(?:\D|$)", tag)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def slugify_branch(env_name: str) -> str:
     slug = env_name.replace("/", "-")
     slug = re.sub(r"[^a-zA-Z0-9_-]", "", slug)

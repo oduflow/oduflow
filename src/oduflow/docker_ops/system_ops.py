@@ -41,6 +41,7 @@ from oduflow.naming import (
     get_team_network_name,
     get_template_db_name,
     normalize_env_vars,
+    odoo_major_from_image,
     validate_template_name,
 )
 from oduflow.settings import Settings, TeamSettings
@@ -2917,7 +2918,17 @@ def init_template(
             "PASSWORD": settings.db_password,
         },
         volumes=volumes,
-        command=f"odoo -d {build_db} -i {modules} --stop-after-init --without-demo=all",
+        # Odoo 19 made --without-demo a boolean; "=all" (the pre-19 module
+        # list) still disables demo there but logs a deprecation warning,
+        # while bare/boolean forms don't exist before 19.
+        command=(
+            f"odoo -d {build_db} -i {modules} --stop-after-init "
+            + (
+                "--without-demo=True"
+                if (odoo_major_from_image(odoo_image) or 0) >= 19
+                else "--without-demo=all"
+            )
+        ),
         labels={settings.managed_label: "true"},
     )
 

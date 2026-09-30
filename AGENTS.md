@@ -252,10 +252,11 @@ Registry: hub.docker.com, repository: `oduist/oduflow`
 
 The per-team coding-agent image (the "coder", built from `docker/agent/`) is
 published **separately** to `oduist/oduflow-coder`; the dashboard's Agent Chat
-and Agent CLI run it. **Licensing:** the image bakes in only Apache-2.0
-components (OpenAI Codex CLI + the Codex ACP adapter). Claude Code and its ACP
-adapter are proprietary-adjacent (Anthropic Commercial Terms), so they are NOT
-redistributed — `entrypoint.sh` npm-installs them at first container start onto
+and Agent CLI run it. **Licensing:** the image bakes in only permissively
+licensed, redistributable open-source components (Apache-2.0: OpenAI Codex CLI,
+the Codex ACP adapter, Agent Browser; MIT: OpenCode, the GitHub CLI). Claude
+Code and its ACP adapter are proprietary-adjacent (Anthropic Commercial
+Terms), so they are NOT redistributed — `entrypoint.sh` npm-installs them at first container start onto
 the persistent home volume. Keep it that way when editing the Dockerfile.
 
 **Publication is automatic and merge-gated — never publish from a feature
