@@ -53,7 +53,7 @@ mode = "port"                   # "port" | "traefik"
 [database]
 user = "odoo"
 # password auto-generated on first launch. Set explicitly to override.
-image = "postgres:15"
+image = "postgres:16"
 
 # ── Storage ───────────────────────────────────────────
 [storage]
@@ -91,7 +91,6 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # enabled flag, then restart Oduflow. See https://docs.oduflow.dev/production/
 # [production]
 # enabled = true
-# postgres_image = ""             # managed PG15 with CA; inherits custom [database].image
 # workers_cap = 8                 # upper bound for auto-tuned Odoo workers
 
 # Production WAL safety (always active while production hosting is enabled).

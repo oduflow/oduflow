@@ -139,6 +139,13 @@ This command is separate from upgrading the Python package (for example,
 `uv tool upgrade oduflow`). It does not manage `postgresql.conf`; use
 `oduflow retune-postgres` for PostgreSQL planning and updates.
 
+Before reconciling, `oduflow upgrade` checks that the next server start can
+complete a pending PostgreSQL replacement (see
+[Upgrading to PostgreSQL 16](installation.md#upgrading-to-postgresql-16)). If
+environments, productions or service databases still block it, the command
+lists them all and exits with an error without changing anything, and
+`self-update` does not restart the service.
+
 `oduflow self-update` chains the whole documented upgrade: it compares the
 installed version with the latest GitHub release, upgrades the package through
 its own installer (`uv tool upgrade oduflow` for a uv tool install, otherwise

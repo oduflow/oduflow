@@ -169,7 +169,7 @@ This means no manual ownership fixups are ever needed on either platform.
 | Resource | Name | Description |
 |---|---|---|
 | **Network** | `oduflow-{team_id}-net` | Per-team isolated bridge network (only shared PostgreSQL and the Traefik bridge cross teams) |
-| **DB container** | `oduflow-db` | PostgreSQL 15, shared across all environments |
+| **DB container** | `oduflow-db` | PostgreSQL 16 (`[database].image`), shared across all environments |
 | **DB volume** | `oduflow-db-data` | Persistent database storage |
 | **Template DB** | `oduflow_template_{team_id}_{name}` | Created from the dump file, used as PostgreSQL template |
 | **Environment DB** | `oduflow_{team_id}_{branch}` | Created from template DB via `CREATE DATABASE ... TEMPLATE` |

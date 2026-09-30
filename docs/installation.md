@@ -162,6 +162,34 @@ add `# KEEP` as the **very first line**:
 Files marked with `# KEEP` are skipped and listed as `(kept)` in the upgrade
 output, including under `--force`.
 
+#### Upgrading to PostgreSQL 16
+
+Oduflow supports PostgreSQL 16 and 17 (Odoo 20 needs 16 or newer; the
+`postgres:18` images use a different data layout). The first start of
+a PostgreSQL 16 release replaces existing PostgreSQL 15 clusters instead of
+upgrading them in place: development data is not transferred. Prepare the
+server before upgrading:
+
+1. Push the code of every environment and back up anything you want to keep.
+   The production cluster's WAL-G archive (`<backup.prefix>/walg/` in the
+   bucket) is deleted during the replacement, because its PostgreSQL 15 base
+   backups cannot be restored into PostgreSQL 16.
+2. Delete all environments, productions and service databases, including
+   stopped ones.
+3. In `oduflow.toml`, set `[database].image = "postgres:16"` (or remove the
+   key to use the default) and remove `[production].postgres_image` if present.
+4. Upgrade and restart as usual. `oduflow upgrade`, which `oduflow self-update`
+   runs before restarting, lists anything from step 2 that still exists and
+   exits with an error, so the running server stays up while you delete it.
+
+On startup Oduflow verifies these conditions again before changing anything. It
+then deletes the old clusters with their data, creates new clusters and
+restores every template database from its dump on disk; template filestores and
+metadata are kept. If a template cannot be restored, startup stops with an
+error naming it. Fix its dump and restart, or delete the template with
+`oduflow delete-template <name> --team <id>` and restart; the replacement
+resumes where it stopped.
+
 ## Configuration Reference
 
 All settings are configured via a TOML file. Oduflow searches for `oduflow.toml` in the following order:
@@ -218,7 +246,7 @@ mode = "port"               # "port" (direct host port) | "traefik" (reverse pro
 [database]
 user = "odoo"               # PostgreSQL user for the shared database container
 # password = "..."          # auto-generated on first launch; set explicitly to override
-image = "postgres:15"       # PostgreSQL Docker image
+image = "postgres:16"       # PostgreSQL Docker image (16 or 17)
 
 # ── Storage ───────────────────────────────────────────
 [storage]
@@ -244,7 +272,6 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # ── Production hosting (optional) ─────────────────────
 # [production]
 # enabled = true            # opt in; requires routing.mode = "traefik"
-# postgres_image = ""       # managed PG15 with CA; inherits custom [database].image
 # walg_version = ""         # empty = Oduflow's pinned WAL-G version
 # workers_cap = 8           # upper bound for auto-tuned Odoo workers
 
@@ -324,7 +351,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 |---|---|---|
 | `[database].user` | `odoo` | PostgreSQL user for the shared database container |
 | `[database].password` | *(generated)* | PostgreSQL password. The bundled config omits it and one is auto-generated on first launch; set explicitly to override |
-| `[database].image` | `postgres:15` | PostgreSQL Docker image |
+| `[database].image` | `postgres:16` | PostgreSQL Docker image for both the development and production clusters: PostgreSQL 16 or 17. An existing cluster keeps its major version; startup refuses an image of another major |
 
 ### Storage settings
 
@@ -358,7 +385,6 @@ hosting at call time.
 | Key | Default | Description |
 |---|---|---|
 | `[production].enabled` | `false` | Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing |
-| `[production].postgres_image` | *(empty)* | PostgreSQL image for the production cluster. Empty uses `oduist/oduflow-postgres:15-bookworm-1` with CA certificates when `[database].image` is the default `postgres:15`; custom database images/majors are inherited |
 | `[production].walg_version` | *(empty)* | WAL-G release override. Empty uses the version pinned by Oduflow |
 | `[production].odumcp_repo_url` | `https://github.com/oduflow/oduflow-client-addons.git` | Fallback source for automatic OduMCP installation when production repositories do not provide the addon |
 | `[production].odumcp_ref` | `19.0` | Connector branch or tag; must contain Odoo 19 addon version 19.0.1.1.0 or later with managed-key support |

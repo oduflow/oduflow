@@ -185,6 +185,7 @@ def test_api_recreate_uses_recorded_git_branch(tmp_path):
         patch("oduflow.docker_ops.client.get_client") as mock_client,
         patch("oduflow.docker_ops.system_ops.check_disk_space"),
         patch("oduflow.docker_ops.system_ops.estimate_new_db_bytes", return_value=0),
+        patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
         patch("oduflow.docker_ops.env_ops.delete_environment") as delete,
         patch(
             "oduflow.docker_ops.env_ops.create_environment",
@@ -240,6 +241,7 @@ def test_api_recreate_restores_legacy_slot_to_branch_hostname(tmp_path):
         patch("oduflow.docker_ops.client.get_client") as mock_client,
         patch("oduflow.docker_ops.system_ops.check_disk_space"),
         patch("oduflow.docker_ops.system_ops.estimate_new_db_bytes", return_value=0),
+        patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
         patch("oduflow.docker_ops.env_ops.delete_environment") as delete,
         patch(
             "oduflow.docker_ops.env_ops.create_environment",

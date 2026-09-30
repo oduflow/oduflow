@@ -143,6 +143,11 @@ def _migrate_team_pg_tablespaces(settings: Settings) -> None:
         for m in pg.attrs.get("Mounts", [])
     )
     if not has_mount:
+        from dataclasses import replace
+
+        # This historical step may run before the PG16 reset. Adding a mount
+        # must keep the image that can read the existing data volume.
+        current_image = pg.attrs.get("Config", {}).get("Image", settings.postgres_image)
         logger.info(
             "Recreating %s with the tablespaces mount (data volume persists)",
             settings.shared_db_container,
@@ -153,7 +158,9 @@ def _migrate_team_pg_tablespaces(settings: Settings) -> None:
             settings.managed_label: "true",
             settings.system_label: "true",
         }
-        system_ops._ensure_pg_container(client, settings, system_labels)
+        system_ops._ensure_pg_container(
+            client, replace(settings, postgres_image=current_image), system_labels
+        )
     system_ops._wait_pg_ready(client, settings)
 
     rows = system_ops._exec_sql(
@@ -415,6 +422,12 @@ def _migrate_backfill_service_presets(settings: Settings) -> None:
                 backfill_service_preset(settings, team, name, container)
 
 
+def _migrate_postgres16(settings: Settings) -> None:
+    from oduflow.postgres_migration import migrate
+
+    migrate(settings)
+
+
 # Append-only registry, executed in list order. Ids are recorded in
 # migrations.json once applied; reordering or renaming entries would re-run
 # or skip steps on existing installs.
@@ -482,6 +495,14 @@ MIGRATIONS: list[Migration] = [
             "predates presets, so restore/update/edit read one source of truth"
         ),
         apply=_migrate_backfill_service_presets,
+    ),
+    Migration(
+        id="0009-postgresql16",
+        description=(
+            "Replace prepared PG15 clusters with PG16 and restore template databases "
+            "from their on-disk dumps (environments must be deleted beforehand)"
+        ),
+        apply=_migrate_postgres16,
     ),
 ]
 

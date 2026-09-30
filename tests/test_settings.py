@@ -968,7 +968,6 @@ class TestProductionSettings:
         assert s.prod_enabled is False
         assert s.prod_db_container == "oduflow-prod-db"
         assert s.prod_db_volume == "oduflow-prod-db-data"
-        assert s.prod_postgres_image == ""
         assert s.prod_workers_cap == 8
         assert s.backup is None
 
@@ -977,14 +976,21 @@ class TestProductionSettings:
         toml.write_text(
             "[production]\n"
             "enabled = true\n"
-            'postgres_image = "postgres:17"\n'
             "workers_cap = 12\n"
             '[team.1]\nhostname = "localhost"\n'
         )
         s = Settings.from_toml(str(toml))
         assert s.prod_enabled is True
-        assert s.prod_postgres_image == "postgres:17"
         assert s.prod_workers_cap == 12
+
+    def test_removed_production_image_requires_config_update(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            '[production]\npostgres_image = "postgres:15"\n'
+            '[team.1]\nhostname = "localhost"\n'
+        )
+        with pytest.raises(ValueError, match=r"Remove it.*\[database\]\.image"):
+            Settings.from_toml(str(toml))
 
     def test_production_section_without_enabled_stays_disabled(self, tmp_path):
         toml = tmp_path / "oduflow.toml"

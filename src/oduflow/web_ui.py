@@ -1665,6 +1665,9 @@ def _build_routes(
             # nothing — create_environment would only re-check after
             # delete_environment has already destroyed the working environment.
             secret_store.resolve_env_secrets(team, env_vars)
+            # Same for a stopped database server or a template without its
+            # database: create_environment would refuse only after the delete.
+            env_ops._ensure_system_ready(client, settings, team, template_name)
 
             env_ops.delete_environment(settings, team, branch, preserve_share=True)
             result = env_ops.create_environment(

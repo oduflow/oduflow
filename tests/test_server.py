@@ -122,6 +122,29 @@ class TestCLIInitDestroy:
 
 
 class TestCLIUpgrade:
+    @pytest.fixture(autouse=True)
+    def _no_postgres_preflight(self, monkeypatch):
+        # The PostgreSQL preflight inspects Docker; these tests cover files.
+        monkeypatch.setattr("oduflow.postgres_migration.preflight", lambda _: None)
+
+    def test_upgrade_refuses_before_reconciling_when_postgres_would_block(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        server, settings, deployed_guide = self._settings_with_changed_guide(
+            tmp_path, monkeypatch
+        )
+
+        from oduflow.errors import PrerequisiteNotMetError
+
+        def refuse(_settings):
+            raise PrerequisiteNotMetError("Delete these before upgrading PostgreSQL")
+
+        monkeypatch.setattr("oduflow.postgres_migration.preflight", refuse)
+
+        assert server._run_upgrade(settings, force=True) is False
+        assert "Delete these before upgrading" in capsys.readouterr().err
+        assert deployed_guide.read_text(encoding="utf-8") == "bundled v1\n"
+
     @staticmethod
     def _settings_with_changed_guide(tmp_path, monkeypatch):
         from oduflow import server

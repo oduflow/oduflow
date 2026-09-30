@@ -315,7 +315,8 @@ def run(*, force: bool = False, restart: bool = True) -> int:
     print(f"Reconciling bundled files: {' '.join(reconcile)}")
     if subprocess.run(reconcile).returncode != 0:
         print(
-            "Error: bundled-file reconciliation needs attention (see above).\n"
+            "Error: `oduflow upgrade` needs attention (see above); the service "
+            "was not restarted.\n"
             "Resolve it with `oduflow upgrade`, then restart the service:\n"
             f"  systemctl restart {SERVICE_NAME}",
             file=sys.stderr,

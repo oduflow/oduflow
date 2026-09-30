@@ -140,7 +140,6 @@ restart Oduflow; productions themselves are then created at runtime:
 ```toml
 [production]
 enabled = true          # required; restart Oduflow after changing
-postgres_image = ""     # default: [database].image
 workers_cap = 8         # upper bound for auto-tuned Odoo workers
 
 [backup]                # configures backups; production must also be enabled
@@ -447,14 +446,13 @@ fails; inventory commands have a 30-second timeout.
 
 ### Production readiness at deployment
 
-New installations using the default PostgreSQL 15 use
-`oduist/oduflow-postgres:15-bookworm-1`. This image includes `ca-certificates`
-and pins the upstream Debian Bookworm image by digest. A custom
-`[production].postgres_image` takes precedence; a non-default
-`[database].image` is still inherited for compatibility with other PostgreSQL
-majors. Existing containers are reused, never automatically replaced or
-upgraded across majors. Their WAL-G trust is repaired through the persistent
-mounted CA bundle described above.
+The production cluster uses the same image as the development cluster,
+`[database].image` (default: the official `postgres:16`). WAL-G trusts the
+persistent mounted CA bundle described above, so no custom PostgreSQL image is
+needed. Existing containers are reused, never automatically upgraded across
+majors; the one-time replacement of PostgreSQL 15 clusters, which also deletes
+the old WAL-G archive, is described in
+[Upgrading to PostgreSQL 16](installation.md#upgrading-to-postgresql-16).
 
 With `[backup]` configured, provisioning and production start/restart/deploy
 require a successful check **inside PostgreSQL as the postgres user**:
@@ -489,12 +487,6 @@ until provisioning decides. Existing working archiving continues during a
 preflight failure; the disk/queue guard remains responsible for emergency
 shutdown. Development environments can still start if production is unready.
 
-The PostgreSQL image is published for amd64 and arm64 by
-`.github/workflows/publish-postgres.yml` only from `main`, with an immutable
-version tag. Publish it successfully before releasing the Oduflow package;
-both the PyPI and application Docker release workflows verify its availability.
-For an image update, change the base digest, bump `POSTGRES_IMAGE_VERSION`
-and `DEFAULT_PROD_POSTGRES_IMAGE` together, merge, and wait for publication.
 No package installation is performed inside PostgreSQL during deployment or
 emergency recovery.
 

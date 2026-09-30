@@ -220,13 +220,21 @@ class TestWebUILiveMountTemplate:
         assert resp.status_code == 400
         assert "live-mounted environment" in resp.json()["error"]
 
+    @patch("oduflow.docker_ops.env_ops._ensure_system_ready")
     @patch("oduflow.docker_ops.system_ops.check_disk_space")
     @patch("oduflow.docker_ops.system_ops.estimate_new_db_bytes", return_value=0)
     @patch("oduflow.docker_ops.env_ops.create_environment")
     @patch("oduflow.docker_ops.env_ops.delete_environment")
     @patch("oduflow.docker_ops.client.get_client")
     def test_recreate_passes_local_path(
-        self, mock_client, mock_delete, mock_create, mock_est, mock_disk, tmp_path
+        self,
+        mock_client,
+        mock_delete,
+        mock_create,
+        mock_est,
+        mock_disk,
+        mock_ready,
+        tmp_path,
     ):
         from starlette.testclient import TestClient
 

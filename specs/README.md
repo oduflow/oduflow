@@ -94,6 +94,7 @@ precursors).
 | [0071](0071-manual-license-periods.md) | 2026-09-23 | Agreed legacy migration, manual periods and optional Paddle subscriptions |
 | [0072](0072-polyform-commercial-licensing.md) | 2026-09-23 | PolyForm public source license, internal evaluation and alternative commercial agreements |
 | [0073](0073-on-demand-extra-addons-branches.md) | 2026-09-29 | Extra-addons repos registered without download; branches fetched on first use |
+| [0074](0074-postgresql16-cluster-replacement.md) | 2026-09-29 | PostgreSQL 16 replacement of prepared clusters, manual configuration and template restoration |
 
 ## Design docs
 

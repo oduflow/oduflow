@@ -10,7 +10,7 @@ import pytest
 from oduflow import wal_monitor, walg
 from oduflow.docker_ops import production_ops, system_ops
 from oduflow.errors import PrerequisiteNotMetError
-from oduflow.settings import DEFAULT_PROD_POSTGRES_IMAGE, BackupSettings, Settings
+from oduflow.settings import BackupSettings, Settings
 
 
 @pytest.fixture
@@ -218,17 +218,6 @@ def test_provisioning_propagates_preflight_failure(settings):
         with pytest.raises(PrerequisiteNotMetError, match="upload denied"):
             system_ops.ensure_prod_infra(client, settings, force=True)
     command.assert_not_called()
-
-
-def test_production_image_matches_build_and_preserves_custom_major():
-    dockerfile = (Path(__file__).parents[1] / "docker/postgres/Dockerfile").read_text()
-    assert (
-        "ARG POSTGRES_IMAGE_VERSION=" + DEFAULT_PROD_POSTGRES_IMAGE.split(":")[1]
-        in dockerfile
-    )
-    assert Settings().production_pg_image == DEFAULT_PROD_POSTGRES_IMAGE
-    assert Settings(postgres_image="postgres:17").production_pg_image == "postgres:17"
-    assert Settings(prod_postgres_image="custom:15").production_pg_image == "custom:15"
 
 
 @pytest.mark.parametrize("operation", ["start_production", "restart_production"])

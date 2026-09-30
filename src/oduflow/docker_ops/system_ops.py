@@ -800,10 +800,12 @@ def _wait_pg_ready(
     deadline = time.monotonic() + timeout
     for _ in range(timeout):
         try:
+            # Over TCP: on a fresh volume the official entrypoint first runs a
+            # temporary socket-only server for its setup, then stops it.
             ready = _exec_exit_code(
                 client,
                 container,
-                ["pg_isready", "-U", settings.db_user],
+                ["pg_isready", "-h", "127.0.0.1", "-U", settings.db_user],
                 timeout=exec_timeout,
             )
             if ready == 0:
@@ -1958,7 +1960,7 @@ def _ensure_prod_pg_container(
     os.makedirs(walg.bin_host_dir(settings), exist_ok=True)
     os.makedirs(walg.conf_host_dir(settings), exist_ok=True)
     client.containers.run(
-        settings.production_pg_image,
+        settings.postgres_image,
         name=settings.prod_db_container,
         detach=True,
         network=settings.shared_network,
@@ -2549,6 +2551,7 @@ def reload_template(
     container_dump_path: str | None = None,
     *,
     persist_dump: bool = True,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Rebuild the template database from its dump.
 
@@ -2557,6 +2560,10 @@ def reload_template(
     layer. The caller owns that file; only dumps copied in here are cleaned up.
     ``persist_dump=False`` lets a caller install its staged file atomically after
     this restore succeeds instead of making a second full-size copy here.
+    ``strict=True`` makes archive restores stop at the first error and omit
+    ACLs, which may name roles missing from a new cluster. Plain SQL keeps the
+    tolerant psql behaviour: dumps from newer clients contain settings older
+    servers reject (e.g. ``SET transaction_timeout``), which are harmless.
     """
     client = get_client()
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -2615,6 +2622,7 @@ def reload_template(
         # at restore time for archive formats. The psql path for plain-SQL/
         # external dumps is left untouched.)
         restore_tool = "psql" if use_psql else "pg_restore"
+        archive_options = ["--no-acl", "--exit-on-error"] if strict else []
         if is_gzipped:
             if use_psql:
                 pipeline = f"gunzip -c {container_dump_path} | psql -U {settings.db_user} -d {tpl_db}"
@@ -2623,6 +2631,8 @@ def reload_template(
                     f"gunzip -c {container_dump_path} | "
                     f"pg_restore --no-owner -U {settings.db_user} -d {tpl_db}"
                 )
+                if strict:
+                    pipeline += " " + " ".join(archive_options)
             restore_cmd = ["bash", "-c", f"set -o pipefail; {pipeline}"]
         else:
             if use_psql:
@@ -2643,6 +2653,7 @@ def reload_template(
                 restore_cmd = [
                     "pg_restore",
                     "--no-owner",
+                    *archive_options,
                     "-U",
                     settings.db_user,
                     "-d",
