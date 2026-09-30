@@ -1008,7 +1008,13 @@ try:
         user = user_env['res.users'].browse(u.id)
         user_context = dict(user_env['res.users'].context_get() or {{}})
         user_context['uid'] = user.id
-        store = odoo.http.root.session_store
+        if hasattr(odoo.http, 'root'):
+            session_api = odoo.http
+            store = session_api.root.session_store
+        else:
+            # Odoo 20 moved the session store into a dedicated module.
+            from odoo.http import session as session_api
+            store = session_api.session_store()
         s = store.new()
         s.update({{
             'db': env.cr.dbname,
@@ -1022,7 +1028,7 @@ try:
         print('__ODUFLOW_LOGIN__' + user.login + '__END__')
         print('__ODUFLOW_UID__' + str(user.id) + '__END__')
         try:
-            print('__ODUFLOW_TTL__' + str(int(odoo.http.SESSION_LIFETIME)) + '__END__')
+            print('__ODUFLOW_TTL__' + str(int(session_api.SESSION_LIFETIME)) + '__END__')
         except Exception:
             pass
 except Exception:
@@ -1046,7 +1052,7 @@ def connect_as_user(
     framed-and-parsed via :func:`_extract_sentinel` because ``odoo shell`` output
     is noisy. The mint runs inside try/except and prints a sentinel-framed
     traceback on failure so drift in the internal session API — rewritten in the
-    Odoo 17.0 HTTP stack, and this tool must work across the supported 15–19 —
+    Odoo 17.0 and 20.0 HTTP stacks, across the supported 15–20 versions —
     surfaces as a debuggable error rather than a silent one.
     """
     import datetime
@@ -1074,7 +1080,7 @@ def connect_as_user(
         allow_fallback=False,
     )
 
-    # `env` and `odoo` are standard odoo-shell globals across 15–19. Session state
+    # `env` and `odoo` are standard odoo-shell globals across 15–20. Session state
     # is written to the filesystem store (no DB commit needed); values are printed
     # sentinel-framed so they survive the merged banner/log stream.
     mint_script = _build_connect_as_user_script(user)

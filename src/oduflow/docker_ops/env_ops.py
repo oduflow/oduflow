@@ -449,7 +449,10 @@ def _ensure_system_ready(
         tpl_db = get_template_db_name(template_name, team.team_id)
         if not _db_exists(client, settings, tpl_db):
             raise PrerequisiteNotMetError(
-                f"Template database '{tpl_db}' not found. Run init_template first."
+                f"Template '{template_name}' has no restored database ('{tpl_db}'). "
+                "Restore the template with import-template --refresh before "
+                "creating an environment, or explicitly choose template_name='none' "
+                "to initialize an empty database."
             )
 
     if settings.routing_mode == "traefik":
@@ -2100,15 +2103,6 @@ def _create_environment_impl(
         raise PrerequisiteNotMetError(
             f"Failed to connect to Docker daemon: {e}. Ensure Docker is running."
         )
-
-    if template_name is not None:
-        tpl_db = get_template_db_name(template_name, team.team_id)
-        if not _db_exists(client, settings, tpl_db):
-            logger.warning(
-                "Template DB '%s' not found, falling back to init from scratch",
-                tpl_db,
-            )
-            template_name = None
 
     _ensure_system_ready(client, settings, team, template_name)
 

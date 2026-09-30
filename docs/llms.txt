@@ -51,7 +51,7 @@ mode = "port"                         # "port" | "traefik" (auto-HTTPS)
 [database]
 user = "odoo"
 # password = "..."                    # auto-generated on first launch; set to override
-image = "postgres:15"
+image = "postgres:16"
 
 [storage]
 # data_dir = "/srv/oduflow"           # default: /srv/oduflow or ~/.oduflow/data

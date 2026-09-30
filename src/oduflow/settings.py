@@ -19,7 +19,7 @@ logger = logging.getLogger("oduflow")
 TRACE: bool = False
 
 DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.2"
-DEFAULT_PROD_POSTGRES_IMAGE = "oduist/oduflow-postgres:15-bookworm-1"
+DEFAULT_POSTGRES_IMAGE = "postgres:16"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 
 # Active MCP transport for the running server ("stdio" | "http").
@@ -328,7 +328,7 @@ class Settings:
     # Database
     db_user: str = "odoo"
     db_password: str = "odoo"
-    postgres_image: str = "postgres:15"
+    postgres_image: str = DEFAULT_POSTGRES_IMAGE
 
     # Storage
     base_data_dir: str = ""
@@ -377,7 +377,6 @@ class Settings:
     prod_odumcp_ref: str = "19.0"
     prod_db_container: str = "oduflow-prod-db"
     prod_db_volume: str = "oduflow-prod-db-data"
-    prod_postgres_image: str = ""  # empty = managed PG15, or custom [database].image
     prod_walg_version: str = ""  # empty = version pinned in walg.py
     prod_workers_cap: int = 8  # upper bound for auto-tuned Odoo workers
     # [production.wal]: cluster-wide disk protection, independent of backups.
@@ -408,15 +407,6 @@ class Settings:
 
     # Teams
     teams: dict[str, TeamSettings] = field(default_factory=dict)
-
-    @property
-    def production_pg_image(self) -> str:
-        # Keep existing non-default PostgreSQL majors/custom images compatible.
-        return self.prod_postgres_image or (
-            DEFAULT_PROD_POSTGRES_IMAGE
-            if self.postgres_image == "postgres:15"
-            else self.postgres_image
-        )
 
     def get_team(self, team_id: str) -> TeamSettings:
         if team_id not in self.teams:
@@ -852,6 +842,12 @@ class Settings:
         lifecycle = raw.get("lifecycle", {})
         agent = raw.get("agent", {})
         production = raw.get("production", {})
+        if "postgres_image" in production:
+            raise ValueError(
+                "[production].postgres_image is no longer supported. "
+                "Remove it from oduflow.toml and set [database].image instead; "
+                "both development and production use that image."
+            )
         wal = production.get("wal", {})
         if not isinstance(wal, dict):
             raise ValueError("[production.wal] must be a table")
@@ -1056,7 +1052,7 @@ class Settings:
             extra_routes=tuple(extra_routes),
             db_user=str(database.get("user", "odoo")),
             db_password=str(database.get("password", "odoo")),
-            postgres_image=str(database.get("image", "postgres:15")),
+            postgres_image=str(database.get("image", DEFAULT_POSTGRES_IMAGE)),
             base_data_dir=base_data_dir,
             overlay_threshold_mb=int(storage.get("overlay_threshold_mb", 50)),
             agent_image=_normalize_agent_image(agent.get("image")),
@@ -1074,7 +1070,6 @@ class Settings:
                 )
             ),
             prod_odumcp_ref=str(production.get("odumcp_ref", "19.0")),
-            prod_postgres_image=str(production.get("postgres_image", "")).strip(),
             prod_walg_version=str(production.get("walg_version", "")).strip(),
             prod_workers_cap=int(production.get("workers_cap", 8)),
             wal_upload_timeout=int(wal_values["wal_upload_timeout"]),

@@ -197,11 +197,11 @@ class TestProdPgContainer:
         assert "ports" not in kwargs
         assert kwargs["labels"]["oduflow.prod"] == "true"
 
-    def test_prod_image_override(self, settings, tmp_path):
+    def test_prod_uses_shared_database_image(self, settings, tmp_path):
         settings = Settings(
             base_data_dir=settings.base_data_dir,
             etc_dir=settings.etc_dir,
-            prod_postgres_image="postgres:17",
+            postgres_image="postgres:17",
             teams=settings.teams,
         )
         client = _client_without_prod()

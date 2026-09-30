@@ -6544,6 +6544,21 @@ def _ensure_initialized(settings: Settings) -> None:
 
 def _run_upgrade(settings: Settings, *, force: bool = False) -> bool:
     """Three-way merge deployed bundled files with the current package."""
+    from oduflow.postgres_migration import preflight
+
+    # self-update runs this with the new code before restarting the service:
+    # refusing here keeps the old server running instead of one that cannot
+    # start.
+    try:
+        preflight(settings)
+    except PrerequisiteNotMetError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return False
+    except Exception as exc:
+        print(
+            f"Warning: could not check the PostgreSQL upgrade prerequisites: {exc}",
+            file=sys.stderr,
+        )
     bundled_dir = pathlib.Path(__file__).resolve().parent / "templates"
     managed_files: list[bundled_upgrade.ManagedFile] = []
     for team_id, team in settings.teams.items():
@@ -8126,6 +8141,9 @@ def _run_cli() -> None:
 
         with guard_startup():
             wait_for_docker()
+            from oduflow.postgres_migration import validate_configuration
+
+            validate_configuration(_settings)
             migrations.run_pending(_settings)
             _ensure_initialized(_settings)
             quotas.apply_all(_settings)
