@@ -21,6 +21,8 @@
 #   --with-extra-addons  add the extra repos (OCA etc.): reachable ones are
 #                        cloned from their origin (stay updatable), private ones
 #                        are downloaded as local extra-addons repos
+#   --without-filestore  database (and addons) only: skip the filestore upload;
+#                        an existing template keeps its current filestore
 #
 # The --token is minted by the "Import from Odoo.sh" button in the Oduflow
 # dashboard and is valid for 15 minutes.
@@ -31,6 +33,7 @@ TOKEN=""
 WITH_ENTERPRISE=0
 WITH_THEMES=0
 WITH_EXTRA=0
+WITHOUT_FILESTORE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --server) SERVER="${2:-}"; shift 2 ;;
@@ -40,6 +43,7 @@ while [ $# -gt 0 ]; do
         --with-enterprise) WITH_ENTERPRISE=1; shift ;;
         --with-themes) WITH_THEMES=1; shift ;;
         --with-extra-addons) WITH_EXTRA=1; shift ;;
+        --without-filestore) WITHOUT_FILESTORE=1; shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -n 28
             exit 0 ;;
@@ -79,7 +83,7 @@ if [ ! -f "$SQL_GZ" ] || [ ! -f "$MANIFEST" ]; then
     echo "       trigger a backup from the Odoo.sh dashboard and try again." >&2
     exit 3
 fi
-if [ ! -d "$FS" ]; then
+if [ "$WITHOUT_FILESTORE" != 1 ] && [ ! -d "$FS" ]; then
     echo "ERROR: filestore directory not found: $FS" >&2
     exit 3
 fi
@@ -235,27 +239,6 @@ dir_bytes() {  # exact on GNU coreutils (du -sb); KB-approx fallback elsewhere
     fi
 }
 
-chunks=()
-total_bytes=0
-for path in "$FS"/*; do
-    [ -d "$path" ] || continue
-    name="$(basename "$path")"
-    if [[ "$name" =~ ^[0-9a-f]{2}$ ]] || [ "$name" = "checklist" ]; then
-        chunks+=("$name")
-        total_bytes=$((total_bytes + $(dir_bytes "$path")))
-    fi
-done
-
-done_bytes=0
-remaining=()
-for c in "${chunks[@]}"; do
-    if [[ "$done_chunks" == *" $c "* ]]; then
-        done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
-    else
-        remaining+=("$c")
-    fi
-done
-
 progress() {  # done total label
     local pct=0
     [ "$2" -gt 0 ] && pct=$(( $1 * 100 / $2 ))
@@ -279,20 +262,45 @@ upload_chunk() {  # name
     done
 }
 
-echo ">> filestore: $(human "$total_bytes") in ${#chunks[@]} chunks (${#remaining[@]} to upload)"
-for c in "${remaining[@]}"; do
-    progress "$done_bytes" "$total_bytes" "uploading $c"
-    if ! upload_chunk "$c"; then
-        echo >&2
-        echo "ERROR: failed to upload filestore chunk '$c' after retries." >&2
-        echo "       Re-run the same command to resume from here." >&2
-        exit 5
-    fi
-    done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
-    progress "$done_bytes" "$total_bytes" "done $c"
-done
-progress "$total_bytes" "$total_bytes" "complete"
-echo >&2
+if [ "$WITHOUT_FILESTORE" = 1 ]; then
+    echo ">> filestore: skipped (--without-filestore)"
+else
+    chunks=()
+    total_bytes=0
+    for path in "$FS"/*; do
+        [ -d "$path" ] || continue
+        name="$(basename "$path")"
+        if [[ "$name" =~ ^[0-9a-f]{2}$ ]] || [ "$name" = "checklist" ]; then
+            chunks+=("$name")
+            total_bytes=$((total_bytes + $(dir_bytes "$path")))
+        fi
+    done
+
+    done_bytes=0
+    remaining=()
+    for c in "${chunks[@]}"; do
+        if [[ "$done_chunks" == *" $c "* ]]; then
+            done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
+        else
+            remaining+=("$c")
+        fi
+    done
+
+    echo ">> filestore: $(human "$total_bytes") in ${#chunks[@]} chunks (${#remaining[@]} to upload)"
+    for c in "${remaining[@]}"; do
+        progress "$done_bytes" "$total_bytes" "uploading $c"
+        if ! upload_chunk "$c"; then
+            echo >&2
+            echo "ERROR: failed to upload filestore chunk '$c' after retries." >&2
+            echo "       Re-run the same command to resume from here." >&2
+            exit 5
+        fi
+        done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
+        progress "$done_bytes" "$total_bytes" "done $c"
+    done
+    progress "$total_bytes" "$total_bytes" "complete"
+    echo >&2
+fi
 
 # ---- addons (optional: enterprise / themes / extra repos) ------------------
 #
