@@ -1062,6 +1062,26 @@
   .svc-meta a { color: var(--accent); text-decoration: none; }
   .svc-meta a:hover { text-decoration: underline; }
   .svc-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* Extra repo branches: chips on the card, rows in the Branches dialog. */
+  .branch-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; }
+  .branch-chip {
+    font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 6px;
+  }
+  .xb-toolbar { display: flex; gap: 8px; align-items: center; }
+  .xb-toolbar input { flex: 1 1 auto; min-width: 0; }
+  .xb-toolbar .btn { flex: 0 0 auto; white-space: nowrap; }
+  .xb-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  .xb-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-bottom: 1px solid var(--border); font-size: var(--text-sm);
+  }
+  .xb-row:last-child { border-bottom: none; }
+  label.xb-row { cursor: pointer; }
+  .xb-name { font-family: var(--font-mono); font-size: var(--text-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .xb-usage { color: var(--text-dim); font-size: var(--text-xs); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .xb-row .btn { margin-left: auto; flex: 0 0 auto; }
+  .xb-empty { padding: 10px; color: var(--text-dim); font-size: var(--text-xs); }
   .license-badge {
     position: relative;
     isolation: isolate;
@@ -2240,6 +2260,30 @@
   <div class="min-dock" id="min-dock" role="group" aria-label="Minimized windows"></div>
 </div>
 
+<div class="modal-overlay" id="extra-branches-modal" onclick="closeExtraBranchesModal(event)">
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="xb-title">
+    <div class="modal-header">
+      <h2 id="xb-title">Branches</h2>
+      <button class="modal-close" aria-label="Close" onclick="closeExtraBranchesModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="xb-error"></div>
+      <div class="form-group">
+        <label for="xb-filter">Branches</label>
+        <div class="xb-toolbar">
+          <input type="text" id="xb-filter" placeholder="Filter, e.g. 17.0" autocomplete="off" oninput="renderExtraBranches()">
+          <button class="btn" id="xb-refresh" onclick="refreshExtraBranchesRemote()">Refresh list</button>
+        </div>
+        <span class="hint">Selected branches download now and are kept updated by Update. Others download when an environment first uses them. Removing a branch frees its disk space; branches in use cannot be removed.</span>
+      </div>
+      <div class="xb-list" id="xb-list"></div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeExtraBranchesModal()">Close</button>
+        <button class="btn-create" id="xb-download" onclick="downloadExtraBranches()" disabled>Download selected</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="confirm-modal" onclick="cancelConfirm(event)">
   <div class="modal modal-sm">
     <div class="modal-header">
@@ -7087,11 +7131,18 @@ function renderExtraRepos(repos) {
     return;
   }
   el.innerHTML = repos.map(function(r) {
-    var branches = (r.branches || []).slice(0, 10).map(function(b) { return esc(b); }).join(', ');
+    var downloaded = r.branches || [];
+    var branches = downloaded.length
+      ? '<span class="branch-chips">' + downloaded.slice(0, 12).map(function(b) {
+          return '<span class="branch-chip">' + esc(b) + '</span>';
+        }).join('') +
+        (downloaded.length > 12 ? '<span class="branch-chip">+' + (downloaded.length - 12) + ' more</span>' : '') +
+        '</span>'
+      : '';
     var remoteCount = (r.available_branches || []).length;
     var branchMeta = r.local
-      ? (branches ? '<div class="svc-meta"><span>Branches: <strong>' + branches + '</strong></span></div>' : '')
-      : '<div class="svc-meta"><span>Downloaded: <strong>' + (branches || 'none yet') + '</strong></span>' +
+      ? (branches ? '<div class="svc-meta"><span>Branches: ' + branches + '</span></div>' : '')
+      : '<div class="svc-meta"><span>Downloaded: ' + (branches || '<strong>none yet</strong>') + '</span>' +
           (remoteCount ? '<span>On remote: <strong>' + remoteCount + ' branch(es)</strong></span>' : '') +
         '</div>';
     return '<div class="svc-card">' +
@@ -7103,6 +7154,7 @@ function renderExtraRepos(repos) {
         '</div>' +
         '<div class="svc-actions">' +
           '<button class="btn btn-sync" onclick="doPullExtraRepo(\'' + escAttr(r.name) + '\', this)">Update</button> ' +
+          (r.local ? '' : '<button class="btn" onclick="openExtraBranchesModal(\'' + escAttr(r.name) + '\')">Branches</button> ') +
           '<button class="btn btn-protect" title="' + (r.protected ? 'Allow deleting this repository again' : 'Disable deleting this repository') + '" ' +
             'onclick="doProtectExtraRepo(\'' + escAttr(r.name) + '\',' + (r.protected ? 'true' : 'false') + ')">' +
             (r.protected ? 'Unprotect' : 'Protect') + '</button> ' +
@@ -7316,6 +7368,232 @@ async function doProtectExtraRepo(name, isProtected) {
     showToast('Connection error: ' + e.message, true);
   }
   await loadExtraRepos();
+}
+
+// --- Branches dialog: download more branches or remove downloaded ones ---
+// Branch names may hold quotes, so rows carry them in data-branch attributes
+// instead of inline JS-string arguments.
+var xbState = null;
+
+function _xbUrl(suffix) {
+  return API_EXTRA_REPOS + '/' + encodeURIComponent(xbState.name) + '/' + suffix;
+}
+
+function _xbError(msg) {
+  var errEl = document.getElementById('xb-error');
+  errEl.textContent = msg || '';
+  errEl.style.display = msg ? 'block' : 'none';
+}
+
+async function openExtraBranchesModal(name) {
+  xbState = {name: name, downloaded: [], available: [], availableKnown: false, protected: false,
+             usage: {}, selected: Object.create(null), loading: true};
+  document.getElementById('xb-title').textContent = 'Branches — ' + name;
+  document.getElementById('xb-filter').value = '';
+  _xbError('');
+  renderExtraBranches();
+  showModal('extra-branches-modal');
+  document.getElementById('xb-filter').focus();
+  await loadExtraBranches();
+}
+
+function closeExtraBranchesModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  hideModal('extra-branches-modal');
+  xbState = null;
+}
+
+async function loadExtraBranches() {
+  if (!xbState) return;
+  var state = xbState;
+  try {
+    var r = await fetch(_xbUrl('branches'));
+    var data = await readResult(r);
+    if (state !== xbState) return;
+    if (data.ok) {
+      state.downloaded = data.downloaded || [];
+      state.available = data.available || [];
+      state.availableKnown = !!data.available_known;
+      state.protected = !!data.protected;
+      state.usage = data.usage || {};
+      state.downloaded.forEach(function(b) { delete state.selected[b]; });
+    } else {
+      _xbError(data.error || 'Failed to load branches');
+    }
+  } catch (e) {
+    if (state === xbState) _xbError('Connection error: ' + e.message);
+  }
+  if (state !== xbState) return;
+  state.loading = false;
+  renderExtraBranches();
+  // Repos added before the remote list was stored have none yet; read it once
+  // instead of showing every downloaded branch as gone from the remote.
+  if (!state.availableKnown && !state.autoRefreshed) {
+    state.autoRefreshed = true;
+    await refreshExtraBranchesRemote();
+  }
+}
+
+function renderExtraBranches() {
+  var list = document.getElementById('xb-list');
+  var btn = document.getElementById('xb-download');
+  if (!xbState || xbState.loading) {
+    list.innerHTML = '<div class="xb-empty">Loading branches...</div>';
+    btn.disabled = true;
+    return;
+  }
+  var s = xbState;
+  var filter = document.getElementById('xb-filter').value.trim().toLowerCase();
+  var isDownloaded = Object.create(null);
+  s.downloaded.forEach(function(b) { isDownloaded[b] = true; });
+  var onRemote = Object.create(null);
+  s.available.forEach(function(b) { onRemote[b] = true; });
+  // Downloaded first, then the rest of the remote list.
+  var names = s.downloaded.slice().sort().concat(
+    s.available.filter(function(b) { return !isDownloaded[b]; }).sort()
+  ).filter(function(b) { return !filter || b.toLowerCase().indexOf(filter) !== -1; });
+
+  if (!names.length) {
+    list.innerHTML = '<div class="xb-empty">' +
+      (filter ? 'No branches match the filter.'
+        : s.availableKnown ? 'No branches on the remote. Refresh the list to check again.'
+        : 'The remote branch list has not been read yet. Refresh the list to read it.') +
+      '</div>';
+  } else {
+    list.innerHTML = names.map(function(b) {
+      if (isDownloaded[b]) {
+        var users = s.usage[b] || [];
+        return '<div class="xb-row">' +
+          '<span class="xb-name" title="' + escHtmlAttr(b) + '">' + esc(b) + '</span>' +
+          '<span class="badge badge-running">downloaded</span>' +
+          (onRemote[b] || !s.availableKnown ? '' : '<span class="badge badge-neutral" title="Deleted on the remote; the next Update drops it">not on remote</span>') +
+          '<span class="xb-usage" title="' + escHtmlAttr(users.join(', ')) + '">' +
+            (users.length ? 'Used by ' + esc(users.join(', ')) : 'Not in use') + '</span>' +
+          '<button class="btn btn-sm btn-delete" data-branch="' + escHtmlAttr(b) + '" ' +
+            'onclick="removeExtraBranch(this.dataset.branch, this)"' +
+            (users.length ? ' disabled title="In use by ' + escHtmlAttr(users.join(', ')) + '"'
+              : s.protected ? ' disabled title="The repository is protected; unprotect it to remove branches"' : '') +
+            '>Remove</button>' +
+        '</div>';
+      }
+      return '<label class="xb-row">' +
+        '<input type="checkbox" class="xb-cb" value="' + escHtmlAttr(b) + '"' +
+          (s.selected[b] ? ' checked' : '') + ' onchange="toggleExtraBranch(this)">' +
+        '<span class="xb-name" title="' + escHtmlAttr(b) + '">' + esc(b) + '</span>' +
+        '<span class="xb-usage">On remote</span>' +
+      '</label>';
+    }).join('');
+  }
+  var count = Object.keys(s.selected).length;
+  btn.disabled = !count || !!s.busy;
+  if (!s.busy) btn.textContent = count ? 'Download ' + count + ' selected' : 'Download selected';
+}
+
+function toggleExtraBranch(cb) {
+  if (!xbState) return;
+  if (cb.checked) xbState.selected[cb.value] = true;
+  else delete xbState.selected[cb.value];
+  renderExtraBranches();
+}
+
+async function refreshExtraBranchesRemote() {
+  if (!xbState) return;
+  var state = xbState;
+  var btn = document.getElementById('xb-refresh');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing...';
+  _xbError('');
+  try {
+    var r = await fetch(_xbUrl('remote-branches'), {method: 'POST'});
+    var data = await readResult(r);
+    if (state !== xbState) return;
+    if (data.ok) {
+      state.available = data.available || [];
+      state.availableKnown = true;
+      // A selected branch gone from the remote has no row to uncheck it.
+      var onRemote = Object.create(null);
+      state.available.forEach(function(b) { onRemote[b] = true; });
+      Object.keys(state.selected).forEach(function(b) {
+        if (!onRemote[b]) delete state.selected[b];
+      });
+      renderExtraBranches();
+      await loadExtraRepos();
+    } else {
+      _xbError(data.error || 'Failed to refresh the remote branch list');
+    }
+  } catch (e) {
+    if (state === xbState) _xbError('Connection error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh list';
+  }
+}
+
+async function downloadExtraBranches() {
+  if (!xbState) return;
+  var state = xbState;
+  var branches = Object.keys(state.selected);
+  if (!branches.length) return;
+  var btn = document.getElementById('xb-download');
+  state.busy = true;
+  btn.disabled = true;
+  btn.textContent = 'Downloading...';
+  _xbError('');
+  try {
+    var r = await fetch(_xbUrl('branches'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({branches: branches})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      showToast(state.name + ': downloaded ' + branches.join(', '));
+      state.selected = Object.create(null);
+      await loadExtraRepos();
+    } else if (state === xbState) {
+      _xbError(data.error || 'Download failed');
+    }
+  } catch (e) {
+    if (state === xbState) _xbError('Connection error: ' + e.message);
+  } finally {
+    state.busy = false;
+  }
+  if (state === xbState) await loadExtraBranches();
+}
+
+async function removeExtraBranch(branch, btn) {
+  if (!xbState) return;
+  var state = xbState;
+  if (!(await confirmDialog({
+    title: 'Remove branch',
+    message: 'Remove the downloaded branch "' + branch + '" of "' + state.name + '"? ' +
+      'Its files and unused cached checkouts are deleted from disk. ' +
+      'An environment that uses it later downloads it again.',
+    confirmLabel: 'Remove branch',
+    danger: true
+  }))) return;
+  if (state !== xbState) return;
+  btn.disabled = true;
+  btn.textContent = 'Removing...';
+  _xbError('');
+  try {
+    var r = await fetch(_xbUrl('branches/remove'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({branch: branch})
+    });
+    var data = await readResult(r);
+    if (data.ok) {
+      var freed = data.result.freed_bytes;
+      showToast('Branch "' + branch + '" removed' + (freed > 0 ? ', ' + fmtBytes(freed) + ' freed' : ''));
+      await loadExtraRepos();
+    } else if (state === xbState) {
+      _xbError(data.error || 'Remove failed');
+    }
+  } catch (e) {
+    if (state === xbState) _xbError('Connection error: ' + e.message);
+  }
+  if (state === xbState) await loadExtraBranches();
 }
 
 async function doDeleteExtraRepo(name) {
@@ -8182,6 +8460,7 @@ var MODAL_CLOSERS = {
   'license-modal': closeLicenseModal,
   'version-modal': closeVersionModal,
   'add-extra-repo-modal': closeAddExtraRepoModal,
+  'extra-branches-modal': closeExtraBranchesModal,
   'add-credential-modal': closeAddCredentialModal,
   'secret-modal': closeSecretModal,
   'import-from-odoo-modal': closeImportFromOdooModal,

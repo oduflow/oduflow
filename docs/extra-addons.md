@@ -58,8 +58,33 @@ actually use. Once downloaded, a branch is kept up to date by
 
 The first environment on a new branch waits for that download. To download a
 branch ahead of time, select it when adding the repository (the dashboard's
-**Load branches** picker, or `branches="18.0"` in `add_extra_repo`), or run
-`update_extra_repo(name, add_branch="18.0")` later.
+**Load branches** picker, or `branches="18.0"` in `add_extra_repo`). For a
+repository that is already added, open its **Branches** dialog in the
+dashboard, or run `update_extra_repo(name, add_branch=["17.0", "18.0"])`.
+
+### Managing branches in the dashboard
+
+The **Branches** button on a repository card in the **Extra Addons** tab opens
+a dialog that lists every branch: the downloaded ones first, with the
+environments and productions that use each of them, then the rest of the
+remote list.
+
+- **Download selected** downloads the selected remote branches now and keeps
+  them updated by later updates.
+- **Refresh list** re-reads the remote branch list (`git ls-remote`) without
+  downloading anything.
+- **Remove** deletes a downloaded branch to free disk space: its ref, the
+  cached checkouts that no environment pins, and the git objects nothing else
+  references. A branch that an environment or production uses cannot be
+  removed, and neither can any branch of a protected repository. Cached
+  checkouts handed out in the last six hours are kept, since an environment
+  being created holds one before it shows up as a user; so are objects
+  downloaded within the last hour. A later removal reclaims them. A removed
+  branch is downloaded again when an environment next uses it.
+
+Removing a branch from a repository added by an older Oduflow version (one that
+fetched every branch) switches that repository to the downloaded branches only,
+so the next update does not bring the branch back.
 
 A stalled HTTPS download is aborted after two minutes without progress; a slow
 but progressing one may run up to an hour.
