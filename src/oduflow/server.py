@@ -743,7 +743,7 @@ def delete_extra_repo(name: str, ctx: Context | None = None) -> str:
 @mcp.tool()
 @handle_errors
 def update_extra_repo(
-    name: str, add_branch: str = "", ctx: Context | None = None
+    name: str, add_branch: str | list[str] = "", ctx: Context | None = None
 ) -> str:
     """
     Pull latest changes from the remote for an extra addons repository.
@@ -754,14 +754,18 @@ def update_extra_repo(
 
     Args:
         name: Name of the extra repo to update (e.g. "enterprise").
-        add_branch: Optional branch to download now and keep updated, e.g.
-            "16.0", instead of waiting for its first use.
+        add_branch: Optional branch, or list of branches, to download now and
+            keep updated, e.g. "16.0" or ["16.0", "17.0"], instead of waiting
+            for their first use.
     """
-    from oduflow.extra_addons import fetch_extra_repo, track_branch
+    from oduflow.extra_addons import fetch_extra_repo, track_branches
 
     team = _resolve_team(ctx)
-    if add_branch.strip():
-        track_branch(team, name, add_branch.strip())
+    # No comma splitting: git allows commas in branch names.
+    requested = [add_branch] if isinstance(add_branch, str) else add_branch
+    branch_list = [b.strip() for b in requested if b.strip()]
+    if branch_list:
+        track_branches(team, name, branch_list)
     summary = fetch_extra_repo(team, name)
     return _format_fetch_summary(summary)
 

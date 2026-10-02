@@ -196,6 +196,10 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
 | `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
+| `GET` | `/api/extra-repos/{name}/branches` | Downloaded branches (`downloaded`), the remote list (`available`; `available_known` is false until it was first read), whether the repo is `protected`, and the environments/productions using each branch (`usage`) |
+| `POST` | `/api/extra-repos/{name}/branches` | Download branches now and keep them updated; body: `branches` (non-empty list of names) |
+| `POST` | `/api/extra-repos/{name}/branches/remove` | Remove a downloaded branch, its unused cached checkouts and unreferenced objects; body: `branch`. Refused for a protected repo and while an environment or production uses it |
+| `POST` | `/api/extra-repos/{name}/remote-branches` | Refresh the remote branch list (`git ls-remote`); downloads nothing |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
 | `POST` | `/api/extra-repos/{name}/delete` | Delete the repository and unused cached revisions |

@@ -72,7 +72,16 @@ builds on [[0039-shared-immutable-extra-addons-checkouts]], whose SHA-keyed
 checkouts are unchanged. Background downloads with progress are a possible next
 step if first-use waits become common.
 
+The dashboard's Branches dialog (and `update_extra_repo(add_branch=[...])`)
+later made the branch set user-managed in both directions: download chosen
+branches ahead of use, or remove an unused one to reclaim disk. Removal is
+refused for protected repos and branches in use; it keeps checkouts handed out
+in the last six hours (an environment being created has no container yet) and
+runs `git gc` outside the repo lock so it never stalls environment work.
+
 ## History
 
 - 2026-09-29 — register extra repos without downloading code; per-branch
   on-demand shallow fetch with incremental updates.
+- 2026-10-02 — Branches dialog: download or remove branches; removal frees
+  cached checkouts and git objects.

@@ -4163,6 +4163,112 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    async def api_extra_repo_branches(request: Request) -> JSONResponse:
+        """Downloaded and remote branches plus who uses each (Branches dialog)."""
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            from oduflow.extra_addons import branch_usage, get_extra_repo
+
+            repo = await _offload(get_extra_repo, team, name)
+            usage = await _offload(branch_usage, get_settings(), team, name)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "name": repo["name"],
+                    "local": repo["local"],
+                    "downloaded": repo["branches"],
+                    "available": repo["available_branches"],
+                    "available_known": repo["available_known"],
+                    "protected": repo["protected"],
+                    "usage": usage,
+                }
+            )
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_branches")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_remote_branches(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            from oduflow.extra_addons import refresh_remote_branches
+
+            branches = await _offload(refresh_remote_branches, team, name)
+            return JSONResponse({"ok": True, "available": branches})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_remote_branches")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_add_branches(request: Request) -> JSONResponse:
+        # No lock: extra_addons serialises every mutator per repo.
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            branches = body.get("branches") if isinstance(body, dict) else None
+            if (
+                not isinstance(branches, list)
+                or not branches
+                or any(not isinstance(b, str) for b in branches)
+            ):
+                return JSONResponse(
+                    {"ok": False, "error": "branches must be a non-empty list."},
+                    status_code=400,
+                )
+            from oduflow.extra_addons import track_branches
+
+            result = await _offload(track_branches, team, name, branches)
+            return JSONResponse({"ok": True, "result": result})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_add_branches")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_remove_branch(request: Request) -> JSONResponse:
+        # Branch names may contain "/", so the branch travels in the body.
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            branch = body.get("branch") if isinstance(body, dict) else None
+            if not isinstance(branch, str) or not branch.strip():
+                return JSONResponse(
+                    {"ok": False, "error": "branch is required."}, status_code=400
+                )
+            from oduflow.extra_addons import untrack_branch
+
+            result = await _offload(
+                untrack_branch, get_settings(), team, name, branch.strip()
+            )
+            return JSONResponse({"ok": True, "result": result})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_remove_branch")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
     def api_extra_repo_protect(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         try:
@@ -6702,6 +6808,26 @@ def _build_routes(
         Route("/api/extra-repos/add", api_extra_repo_add, methods=["POST"]),
         Route("/api/extra-repos/ls-remote", api_extra_repo_ls_remote, methods=["POST"]),
         Route("/api/extra-repos/{name}/pull", api_extra_repo_pull, methods=["POST"]),
+        Route(
+            "/api/extra-repos/{name}/branches",
+            api_extra_repo_branches,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/extra-repos/{name}/branches",
+            api_extra_repo_add_branches,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/extra-repos/{name}/branches/remove",
+            api_extra_repo_remove_branch,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/extra-repos/{name}/remote-branches",
+            api_extra_repo_remote_branches,
+            methods=["POST"],
+        ),
         Route(
             "/api/extra-repos/{name}/protect", api_extra_repo_protect, methods=["POST"]
         ),
