@@ -136,7 +136,7 @@ would let work in the environment.
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
 | `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
-| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
+| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token. Body: `template_name`, optional booleans `with_enterprise` / `with_themes` / `with_extra_addons` / `without_filestore`, optional `addon_error_policy` (`strict` or `best_effort`) |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
 | `POST` | `/api/templates/import/dump` | Stream/chunk the compressed SQL dump |
