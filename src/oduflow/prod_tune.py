@@ -185,12 +185,30 @@ def compute_odoo_worker_settings(
     *,
     workers_cap: int = 8,
     plan: ResourcePlan | None = None,
+    server_mode: str = "workers",
 ) -> dict[str, str]:
     """Auto-tuned [options] overrides for a production odoo.conf.
 
     Follows the standard Odoo sizing formula (workers ≈ 2*CPU + 1) using the
     CPU/RAM share assigned by the unified host plan, then bounds it by about
     1 GB per worker and by ``workers_cap``.
+
+    In ``gevent`` server mode Traefik sends every public request to the gevent
+    process on 8072, so the prefork HTTP workers only keep 8069 alive for
+    in-container calls: one is enough (prefork itself, which spawns the gevent
+    process and the cron workers, needs ``workers >= 1``). ``db_maxconn`` keeps
+    the full sizing either way — it is also the gevent process's connection
+    pool (``db_maxconn_gevent`` falls back to it), so it bounds how many
+    requests that process serves concurrently.
+
+    The memory limits are per process, and Odoo's gevent process recycles
+    itself past ``limit_memory_soft_gevent`` (falling back to
+    ``limit_memory_soft``; Odoo <=15 knows only the latter). In ``gevent``
+    mode that one process is the whole site, so it gets half the Odoo RAM
+    budget (never less than the 2 GB default) instead of a worker's share —
+    in both keys, since the Odoo version is not known here. The single HTTP
+    worker and the cron worker share the raised general limit; both are
+    nearly idle in this mode.
     Returned values are strings ready for ConfigParser interpolation.
     """
     plan = plan or build_resource_plan(
@@ -203,16 +221,29 @@ def compute_odoo_worker_settings(
     cpu = plan.production_odoo_cpu_count
     ram_budget_workers = max(plan.production_odoo_ram_budget_mb // 1024, 2)
     workers = int(_clamp(2 * cpu + 1, 2, min(int(workers_cap), ram_budget_workers)))
+    db_maxconn = max(2 * workers + 3, 16)
+    # Odoo defaults (2 GB soft / 2.5 GB hard), made explicit.
+    soft_mb, hard_mb = 2048, 2560
+    if server_mode == "gevent":
+        workers = 1
+        soft_mb = max(soft_mb, plan.production_odoo_ram_budget_mb // 2)
+        hard_mb = max(hard_mb, soft_mb * 5 // 4)
+    mb = 1024 * 1024
+    limits = {
+        "limit_memory_soft": str(soft_mb * mb),
+        "limit_memory_hard": str(hard_mb * mb),
+    }
+    if server_mode == "gevent":
+        limits["limit_memory_soft_gevent"] = limits["limit_memory_soft"]
+        limits["limit_memory_hard_gevent"] = limits["limit_memory_hard"]
     return {
         "workers": str(workers),
         "max_cron_threads": "1",
-        # Odoo defaults, made explicit (bytes).
-        "limit_memory_soft": str(2048 * 1024 * 1024),
-        "limit_memory_hard": str(2560 * 1024 * 1024),
+        **limits,
         "limit_time_cpu": "600",
         "limit_time_real": "1200",
         "limit_request": "65536",
-        "db_maxconn": str(max(2 * workers + 3, 16)),
+        "db_maxconn": str(db_maxconn),
         # Production runs behind Traefik.
         "proxy_mode": "True",
         "list_db": "False",

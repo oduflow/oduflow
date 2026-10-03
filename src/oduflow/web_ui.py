@@ -5755,6 +5755,9 @@ def _build_routes(
                 template_name=str(data.get("template_name", "")).strip() or None,
                 from_environment=from_environment or None,
                 env_lock=env_lock,
+                server_mode=production_ops.resolve_server_mode(
+                    data.get("server_mode"), production_ops.DEFAULT_SERVER_MODE
+                ),
             )
             return JSONResponse({"ok": True, **result})
         except FlowError as e:
@@ -6003,11 +6006,15 @@ def _build_routes(
             extra_addons=(
                 _normalize_extra_addons(raw_extra) if raw_extra is not None else None
             ),
+            server_mode=production_ops.resolve_server_mode(
+                data.get("server_mode"), None
+            ),
         )
 
     async def api_production_reconfigure(request: Request) -> JSONResponse:
-        """Change infra settings (domain/image/branch/repo/extra addons) and
-        recreate the production container to match; DB/filestore preserved."""
+        """Change infra settings (domain/image/branch/repo/extra addons/server
+        mode) and recreate the production container to match; DB/filestore
+        preserved."""
         return await _production_body_action(request, _reconfigure_action)
 
     def _odoo_conf_action(

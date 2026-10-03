@@ -233,3 +233,38 @@ class TestOdooWorkerSettings:
         # 6827 MB * 0.45 = 3072 MB -> exactly 3 GiB -> 3 workers, below both
         # the planned-CPU formula (13) and the cap (8).
         assert prod_tune.compute_odoo_worker_settings(8, 6827)["workers"] == "3"
+
+    def test_gevent_mode_keeps_one_http_worker(self):
+        # All public traffic goes to the gevent process; one prefork HTTP
+        # worker keeps 8069 up for in-container calls.
+        opts = prod_tune.compute_odoo_worker_settings(4, 32768, server_mode="gevent")
+        assert opts["workers"] == "1"
+        assert opts["max_cron_threads"] == "1"
+
+    def test_gevent_mode_keeps_the_full_connection_pool(self):
+        # db_maxconn is also the gevent process's pool: sized from the
+        # workers-mode budget (7 workers -> 17), not from the single worker.
+        workers = prod_tune.compute_odoo_worker_settings(4, 32768)
+        gevent = prod_tune.compute_odoo_worker_settings(4, 32768, server_mode="gevent")
+        assert gevent["db_maxconn"] == workers["db_maxconn"] == "17"
+
+    def test_gevent_process_memory_limit_covers_the_whole_site(self):
+        # In gevent mode one process serves every request: a per-worker 2 GB
+        # soft limit would recycle the whole site. Both the gevent-specific
+        # keys (Odoo 16+) and the general fallback (<=15) are raised.
+        mb = 1024 * 1024
+        workers = prod_tune.compute_odoo_worker_settings(4, 32768)
+        gevent = prod_tune.compute_odoo_worker_settings(4, 32768, server_mode="gevent")
+        assert workers["limit_memory_soft"] == str(2048 * mb)
+        assert "limit_memory_soft_gevent" not in workers
+        soft = int(gevent["limit_memory_soft_gevent"])
+        assert soft > 2048 * mb
+        assert gevent["limit_memory_soft"] == gevent["limit_memory_soft_gevent"]
+        assert int(gevent["limit_memory_hard_gevent"]) > soft
+        assert gevent["limit_memory_hard"] == gevent["limit_memory_hard_gevent"]
+
+    def test_gevent_memory_limit_never_below_odoo_default(self):
+        mb = 1024 * 1024
+        gevent = prod_tune.compute_odoo_worker_settings(2, 4096, server_mode="gevent")
+        assert int(gevent["limit_memory_soft_gevent"]) == 2048 * mb
+        assert int(gevent["limit_memory_hard_gevent"]) == 2560 * mb

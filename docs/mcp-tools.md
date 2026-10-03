@@ -2518,6 +2518,9 @@ Lock: production.
 `env_vars`
 :   *dict · default none* — User environment variables; values may be `secret:<name>` references. Omit to inherit the source environment's variables; pass `{}` to inherit none. Managed `HOST`/`PORT`/`USER`/`PASSWORD` cannot be overridden. References survive reconfiguration.
 
+`server_mode`
+:   *str · default `workers`* — How Odoo serves HTTP. `workers` (sync): worker processes on port 8069 serve the pages and Traefik sends only the live bus (`/websocket`, `/longpolling`) to the gevent port 8072. `gevent` (async): Traefik sends **all** traffic to the single gevent process on 8072 — suits many long-lived or I/O-bound requests, but one CPU-heavy request slows everyone. Crons run in both modes. See [Server mode](production.md#server-mode).
+
 **Use it when**
 
 - Going live with a customer after development settles.
@@ -2613,7 +2616,8 @@ Lock: production. **Takes the production offline.**
 
 ### `restart_production`
 
-Restart a production's Odoo container — brief downtime.
+Restart a production's Odoo container — brief downtime. A container whose
+Traefik routing is outdated is recreated instead (same downtime).
 
 Lock: production.
 { .odu-tool-meta }
@@ -2637,7 +2641,10 @@ replaced.
 
 Changeable: the public domain (Traefik host rule + Let's Encrypt), the extra
 domains, the Odoo image, the deployed branch or repository URL, the git
-credential user, the extra addon repos, and the user environment variables.
+credential user, the extra addon repos, the user environment variables, and
+the server mode. A call that changes nothing still recreates a container whose
+state drifted from the record (missing container or checkout, outdated
+Traefik routing).
 
 Lock: production.
 { .odu-tool-meta }
@@ -2670,6 +2677,9 @@ Lock: production.
 
 `env_vars`
 :   *dict · default none* — **Full replacement** user environment variables, including `secret:<name>` references. Omit to preserve; `{}` clears them.
+
+`server_mode`
+:   *str · default empty* — `workers` (sync: pages on 8069, bus on 8072) or `gevent` (async: everything on 8072). Re-tunes the `odoo.conf` workers and re-points Traefik. Omit to leave unchanged.
 
 **Use it when**
 

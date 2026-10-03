@@ -5391,6 +5391,7 @@ def create_production(
     template_name: str = "",
     from_environment: str = "",
     env_vars: dict[str, str] | None = None,
+    server_mode: str = "workers",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5442,6 +5443,13 @@ def create_production(
                 extra_addons default to the environment's own. Mutually
                 exclusive with template_name. No sanitization — the data
                 goes INTO production.
+        server_mode: How Odoo serves HTTP. "workers" (default, sync):
+                multi-process workers on port 8069 serve the pages, and
+                Traefik sends only the bus (/websocket, /longpolling) to the
+                gevent port 8072. "gevent" (async): Traefik sends ALL traffic
+                to the single gevent process on 8072 (suits many long-lived or
+                I/O-bound requests; one CPU-heavy request slows everyone).
+                Crons run in both modes.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
@@ -5480,10 +5488,14 @@ def create_production(
         from_environment=from_environment or None,
         env_vars=env_vars,
         env_lock=env_lock,
+        server_mode=production_ops.resolve_server_mode(
+            server_mode, production_ops.DEFAULT_SERVER_MODE
+        ),
     )
     lines = [
         f"Production '{name}' created in {result['elapsed_seconds']}s.",
         f"URL: {result['url']}",
+        f"Server mode: {result['server_mode']}",
         f"Database: {result['database']} (cluster: oduflow-prod-db)",
         f"Deployed commit: {result['commit'][:10]}",
         f"Container: {result['odoo_container']}",
@@ -5758,7 +5770,8 @@ def stop_production(name: str, ctx: Context | None = None) -> str:
 @with_prod_lock
 def restart_production(name: str, ctx: Context | None = None) -> str:
     """
-    Restart a production's Odoo container (brief downtime).
+    Restart a production's Odoo container (brief downtime). A container whose
+    Traefik routing is outdated is recreated instead.
 
     Args:
         name: The production name.
@@ -5766,6 +5779,11 @@ def restart_production(name: str, ctx: Context | None = None) -> str:
     settings = _get_settings()
     team = _resolve_team(ctx)
     result = production_ops.restart_production(settings, team, name)
+    if result.get("recreated"):
+        return (
+            f"Production '{name}' recreated ({result['odoo_container']}) to "
+            "apply its current Traefik routing."
+        )
     return f"Production '{name}' restarted ({result['odoo_container']})."
 
 
@@ -5807,21 +5825,24 @@ def reconfigure_production(
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
+    server_mode: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
     Change a production's infrastructure settings and recreate its container
     to match. Empty/omitted arguments are left unchanged. The database and
     filestore are preserved; expect a brief downtime while the container is
-    replaced.
+    replaced. A call with no changes still recreates a container whose state
+    drifted from the record (missing container or checkout, outdated Traefik
+    routing).
 
     Changeable: the public domain (Traefik Host rule + Let's Encrypt), the
     Odoo Docker image, the deployed git branch or repository URL, the git
-    credential user, and the extra addon repos. Changing the image does NOT
-    migrate the database — a major Odoo version bump additionally needs an
-    explicit module upgrade plan. After a branch/repo change, run
-    update_production(install=..., upgrade=...) if the new code needs module
-    changes.
+    credential user, the extra addon repos, and the server mode. Changing the
+    image does NOT migrate the database — a major Odoo version bump
+    additionally needs an explicit module upgrade plan. After a branch/repo
+    change, run update_production(install=..., upgrade=...) if the new code
+    needs module changes.
 
     Args:
         name: The production name.
@@ -5841,6 +5862,9 @@ def reconfigure_production(
                 secret:<name> references. Omit to preserve; {} clears them.
         extra_addons: New full set of extra addon repos {repo_name: branch};
                       pass {} to remove all. Omit to leave unchanged.
+        server_mode: "workers" (sync: pages on 8069, bus on 8072) or "gevent"
+                (async: everything on 8072). Re-tunes odoo.conf workers and
+                re-points Traefik. Omit to leave unchanged.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
@@ -5858,6 +5882,7 @@ def reconfigure_production(
         git_user=git_user,
         extra_addons=extra_addons,
         env_vars=env_vars,
+        server_mode=production_ops.resolve_server_mode(server_mode, None),
     )
     if result.get("message"):
         return str(result["message"])
@@ -5865,6 +5890,7 @@ def reconfigure_production(
     lines = [
         f"Reconfigured production '{name}' (changed: {changed}).",
         f"URL: {result['url']}",
+        f"Server mode: {result['server_mode']}",
         f"Healthy: {result['healthy']}",
     ]
     lines.extend(f"Note: {note}" for note in result.get("notes", []))
@@ -5919,8 +5945,10 @@ def set_production_odoo_conf(
     )
     if result["restarted"]:
         status += ", container restarted"
+    notes = "".join(f"\nNote: {note}" for note in result.get("notes", []))
     return (
-        f"odoo.conf overrides for '{name}' {status}.\nCurrent overrides:\n{conf_desc}"
+        f"odoo.conf overrides for '{name}' {status}.{notes}\n"
+        f"Current overrides:\n{conf_desc}"
     )
 
 

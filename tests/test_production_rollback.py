@@ -307,6 +307,7 @@ class TestProductionDatabaseRouting:
             patch.object(production_ops, "get_client", return_value=client),
             patch.object(production_ops, "_require_container", return_value=container),
             patch.object(production_ops, "wait_production_healthy", return_value=True),
+            patch.object(production_ops, "_has_routing_drift", return_value=False),
             patch("oduflow.docker_ops.env_ops.pull_environment", side_effect=fake_pull),
             patch.object(odoo_ops, "get_client", return_value=client),
             patch.object(

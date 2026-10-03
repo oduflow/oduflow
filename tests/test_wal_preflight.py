@@ -316,6 +316,7 @@ def test_only_running_productions_may_skip_the_verification_segment(
         patch.object(production_ops, "get_client", return_value=client),
         patch.object(production_ops, "ensure_prod_infra") as ensure,
         patch.object(production_ops, "_require_container"),
+        patch.object(production_ops, "_has_routing_drift", return_value=False),
     ):
         getattr(production_ops, operation)(settings, TeamSettings(team_id="1"), "erp")
     assert ensure.call_args.kwargs.get("accept_live_evidence", False) is accepts
