@@ -28,7 +28,7 @@ import docker
 from docker import DockerClient
 from oduflow import production_registry, s3_client, service_database_credentials
 from oduflow.docker_ops import system_ops
-from oduflow.docker_ops.client import get_client
+from oduflow.docker_ops.client import get_client, run_for_output
 from oduflow.errors import PrerequisiteNotMetError
 from oduflow.fsutil import atomic_write_private_json
 from oduflow.naming import get_template_db_name
@@ -156,11 +156,11 @@ def _download_image(client: DockerClient, image: str) -> None:
 
 
 def _binary_major(client: DockerClient, image: str) -> int:
-    output = client.containers.run(
+    output = run_for_output(
+        client,
         image,
         ["--version"],
         entrypoint="postgres",
-        remove=True,
         network_disabled=True,
     ).decode()
     match = re.search(r"PostgreSQL\) (\d+)\.", output)
