@@ -84,6 +84,6 @@ disabled, that reports only coarse lifecycle events to the project backend.
 - `16b9158` (2026-06-15) — send a branded `User-Agent` (to bypass edge
   bot-protection that was dropping every event) and an `X-Oduflow-Telemetry`
   marker header; no change to the privacy contract or the opt-out flag.
-- (2026-10-03) — add the global `--no-telemetry` CLI flag, a per-run
+- `#287` (2026-10-03) — add the global `--no-telemetry` CLI flag, a per-run
   override of `disable_telemetry`, so test runs stay out of usage stats
   without editing `oduflow.toml`.
