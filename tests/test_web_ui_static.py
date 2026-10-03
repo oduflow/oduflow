@@ -797,3 +797,192 @@ def test_prompt_dialog_escape_is_handled_on_the_overlay(tmp_path):
         r"if \(e\.key === 'Escape'\) \{ e\.stopPropagation\(\); close\(null\); \}",
         dashboard.text,
     )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_secret_editor_masks_values_and_keeps_update_and_replace_independent():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in (
+            "clearSecretKeyResult",
+            "canUpdateSecretKey",
+            "secretKeyPath",
+            "updateSecretValueMode",
+            "validateSecretKey",
+            "validateSecretValue",
+            "openSecretModal",
+            "closeSecretModal",
+            "submitSecret",
+        )
+    )
+    harness = (
+        functions
+        + r"""
+const assert = require('node:assert/strict');
+var API_SECRETS = '/api/secrets';
+var secretTypes = {config: 'json', plain: 'text'};
+var secretEditingName = '';
+var secretSaving = '';
+var fields = {};
+var resultWrites = [];
+var document = {getElementById: function(id) {
+  if (id === 'secret-key-result' && !fields[id]) {
+    var state = {hidden: true, text: ''};
+    fields[id] = {
+      get hidden() { return state.hidden; },
+      set hidden(v) { state.hidden = v; resultWrites.push('hidden=' + v); },
+      get textContent() { return state.text; },
+      set textContent(v) { state.text = v; resultWrites.push('text=' + (v ? 'set' : 'cleared')); }
+    };
+  }
+  if (!fields[id]) fields[id] = {
+    value: '', checked: false, disabled: false, hidden: false, textContent: '',
+    style: {}, setAttribute: function(k, v) { this[k] = v; }, focus: function() {}
+  };
+  return fields[id];
+}};
+function field(id) { return document.getElementById('secret-' + id); }
+var visible = false;
+function showModal() { visible = true; }
+function hideModal() { visible = false; }
+function showToast() {}
+async function loadSecrets() {}
+async function readResult(r) { return r; }
+var requests = [];
+var reply = {ok: true, result: {created: false, updated: true}};
+async function fetch(url, options) {
+  requests.push({url: url, body: JSON.parse(options.body)});
+  return reply;
+}
+(async function() {
+  openSecretModal('config');
+  assert.equal(field('name').value, 'config');
+  assert.equal(field('name').readOnly, true);
+  assert.equal(field('hide-value').checked, true);
+  assert.equal(field('hide-value').disabled, false);
+  assert.equal(field('key-value').type, 'password');
+  assert.equal(field('json-fields').hidden, false);
+  assert.equal(field('submit').hidden, true);
+  field('key').value = '/database/password';
+  field('key-value').value = 'true';
+  field('json-value').value = '{invalid replacement';
+  validateSecretValue();
+  assert.equal(field('update-submit').disabled, false);
+  assert.equal(field('replace-submit').disabled, true);
+  await submitSecret('update');
+  assert.deepEqual(requests.pop(), {
+    url: '/api/secrets/config/update-json',
+    body: {path: '/database/password', value: 'true'}
+  });
+  assert.equal(visible, true);
+  assert.equal(field('key-value').value, '');
+  assert.equal(field('key').value, '/database/password');
+  assert.equal(field('json-value').value, '{invalid replacement');
+  assert.equal(field('key-result').hidden, false);
+  assert.ok(field('key-result').textContent.startsWith('Key updated: /database/password.'));
+  // aria-live regions only announce mutations while rendered: unhide, then write.
+  assert.deepEqual(resultWrites.slice(-2), ['hidden=false', 'text=set']);
+  assert.equal(field('update-submit').disabled, true);
+
+  field('key').value = '  environment.OPENROUTER_API_KEY  ';
+  field('key-value').value = 'new-private';
+  validateSecretKey();
+  assert.equal(field('update-submit').disabled, false);
+  reply = {ok: true, result: {created: true, updated: false}};
+  await submitSecret('update');
+  assert.deepEqual(requests.pop(), {
+    url: '/api/secrets/config/update-json',
+    body: {path: 'environment.OPENROUTER_API_KEY', value: 'new-private'}
+  });
+  assert.equal(visible, true);
+  assert.ok(field('key-result').textContent.startsWith('Key created: environment.OPENROUTER_API_KEY.'));
+  assert.equal(field('key').value, 'environment.OPENROUTER_API_KEY');
+  assert.ok(!field('key-result').textContent.includes('new-private'));
+  assert.equal(field('key-value').value, '');
+  clearSecretKeyResult();
+  assert.equal(field('key-result').hidden, true);
+  assert.equal(field('key-result').textContent, '');
+  closeSecretModal();
+  ['value', 'key', 'key-value', 'json-value'].forEach(id => assert.equal(field(id).value, ''));
+
+  openSecretModal('config');
+  field('key').value = '   ';
+  field('key-value').value = 'must-not-submit';
+  assert.equal(validateSecretKey(), false);
+  field('key').value = 'invalid..path';
+  field('key-value').value = 'must-not-submit';
+  field('json-value').value = '{"number":123}';
+  validateSecretValue();
+  assert.equal(field('update-submit').disabled, true);
+  assert.equal(field('replace-submit').disabled, false);
+  await submitSecret();
+  assert.deepEqual(requests.pop(), {
+    url: '/api/secrets/config/set', body: {value: '{"number":123}', value_type: 'json'}
+  });
+
+  openSecretModal('plain');
+  field('value').value = 'masked-draft';
+  field('is-json').checked = true;
+  updateSecretValueMode();
+  assert.equal(field('json-value').value, '');
+  assert.equal(field('key').disabled, true);
+  assert.equal(field('update-submit').disabled, true);
+  field('hide-value').checked = false;
+  updateSecretValueMode();
+  assert.equal(field('key-value').type, 'text');
+  assert.equal(field('json-fields').hidden, false);
+  field('is-json').checked = false;
+  updateSecretValueMode();
+  assert.equal(field('value').value, 'masked-draft');
+  assert.equal(field('value').type, 'text');
+  assert.equal(field('submit').hidden, false);
+  await submitSecret();
+  assert.deepEqual(requests.pop(), {
+    url: '/api/secrets/plain/set', body: {value: 'masked-draft', value_type: 'text'}
+  });
+
+  openSecretModal();
+  field('name').value = 'new-secret';
+  field('is-json').checked = true;
+  updateSecretValueMode();
+  assert.equal(field('update-submit').disabled, true);
+  assert.equal(field('replace-submit').textContent, 'Save JSON');
+  closeSecretModal();
+
+  openSecretModal('config');
+  field('key').value = '/database/password';
+  field('key-value').value = 'retry-me';
+  reply = {ok: false, error: 'Rejected'};
+  await submitSecret('update');
+  assert.equal(visible, true);
+  assert.equal(field('key-value').value, 'retry-me');
+  assert.equal(field('error').textContent, 'Rejected');
+  assert.equal(field('update-submit').disabled, false);
+  assert.equal(secretSaving, '');
+  requests = [];
+  var finish;
+  fetch = function(url, options) {
+    requests.push({url: url, body: JSON.parse(options.body)});
+    return new Promise(resolve => { finish = resolve; });
+  };
+  var pending = submitSecret('update');
+  assert.equal(field('update-submit').textContent, 'Saving…');
+  assert.equal(field('replace-submit').disabled, true);
+  assert.equal(field('is-json').disabled, true);
+  await submitSecret('update');
+  closeSecretModal();
+  assert.equal(visible, true);
+  assert.equal(requests.length, 1);
+  finish({ok: true, result: {created: false, updated: true}});
+  await pending;
+  assert.equal(visible, true);
+  assert.ok(field('key-result').textContent.startsWith('Key updated:'));
+  closeSecretModal();
+  assert.equal(visible, false);
+  assert.equal(field('key-result').hidden, true);
+  process.stdout.write(JSON.stringify({ok: true}));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    )
+    assert _run_node(harness) == {"ok": True}

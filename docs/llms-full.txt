@@ -4574,7 +4574,7 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
 | `GET` | `/api/secrets` | List team secret names, types (`value_type`) and timestamps; stored values are never returned by any endpoint |
 | `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from string body field `value` (write-only); optional `value_type`: `text` or `json`. Omitted/null type preserves the existing type, defaulting to `text` for new secrets. Invalid JSON secret values or unknown types return HTTP 400 without changing the stored value |
-| `POST` | `/api/secrets/{name}/update-json` | Replace one existing element of a JSON secret; body: `path` (non-empty JSON Pointer, e.g. `/database/password` or `/accounts/0/token`) and `value` (a JSON value, including `null`). Returns only `{"ok":true,"result":{"name":"…","updated":true}}`. Text secrets, invalid paths/values and missing elements return HTTP 400; missing secrets return HTTP 404. Errors leave the stored value unchanged. See [JSON element updates](security.md#updating-one-json-element) |
+| `POST` | `/api/secrets/{name}/update-json` | Create or replace one object key in an existing JSON secret, or replace an existing array element; body: `path` (dot notation such as `environment.OPENROUTER_API_KEY`, or JSON Pointer such as `/environment/OPENROUTER_API_KEY`) and `value` (a JSON value, including `null`). Returns `name`, `created` and `updated` flags; `created: true` means a new key was added, otherwise `updated: true`. Missing parents, invalid paths/values and text secrets return HTTP 400; missing secrets return HTTP 404. Arrays are never extended. Errors leave storage unchanged. See [JSON element updates](security.md#updating-one-json-element) |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
@@ -9295,7 +9295,7 @@ Environment variables on services and environments are visible to coding agents 
 
 **Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
 
-When adding or replacing a secret, **Hide value** masks the input by default. **JSON value** opens a multiline field, turns off masking, and validates the JSON while you type. JSON secrets also undergo server-side validation before saving; invalid input leaves the previous value intact. The stored type (`text` or `json`) persists across replacements. Existing secrets default to `text`. JSON values retain their original formatting and may contain any valid JSON value, including arrays and scalars; `NaN` and `Infinity` are rejected.
+The secret form starts with **Name**, followed by the independent **Hide value** and **JSON value** switches. **Hide value** masks the ordinary text value and the individual key's **Value** by default. In JSON mode, **Replace Data** is always visible, even with masking enabled, and validates JSON while you type. Its warning makes clear that saving replaces all data in the secret. Text and JSON replacement drafts stay separate when switching modes. JSON secrets also undergo server-side validation before saving; invalid input leaves the previous value intact. The stored type (`text` or `json`) persists across replacements. Existing secrets default to `text`. JSON values retain their original formatting and may contain any valid JSON value, including arrays and scalars; `NaN` and `Infinity` are rejected.
 
 To use one, set the env-var value to a reference:
 
@@ -9316,23 +9316,53 @@ The store lives at `{team_data_dir}/secrets.json` with owner-only (0600) file pe
 
 ### Updating one JSON element
 
-To rotate one field without knowing or resubmitting the other values, send an
-authenticated request to `POST /api/secrets/{name}/update-json`:
+In the dashboard, choose **Edit secret** on an existing JSON secret. Above
+**Replace Data**, enter a path in **Update Key** (for example,
+`environment.OPENROUTER_API_KEY`) and the new non-empty text in **Value**, then
+click **Save key**. The value is saved as a string exactly as entered, without
+JSON quotes or automatic conversion of text such as `true` or `123`.
+**Hide value** controls masking for this field independently of the visible
+replacement JSON.
+
+After saving, the form stays open and displays **Key created** or **Key updated**
+with the submitted path. The value field is cleared, and the path remains for
+reuse. The result comes from the server, which checks whether the key existed
+under the same lock as the write. Editing the key or value clears the previous
+result. Stored secret values are never displayed.
+
+**Save key** and **Replace data** are separate actions: saving a key never
+submits or clears the replacement draft, and replacing data never submits the
+key fields. Individual key saves are disabled for new or text secrets until
+they have been saved as JSON.
+
+To save a field through the API, send an authenticated request to
+`POST /api/secrets/{name}/update-json`:
 
 ```json
-{"path": "/database/password", "value": "new-password"}
+{"path": "environment.OPENROUTER_API_KEY", "value": "new-api-key"}
 ```
 
-The secret must already have type `json`, and the element must exist. Text
-secrets return HTTP 400 even when their contents happen to be valid JSON;
+The secret must already have type `json`. A missing final object key is created;
+an existing key or array element is replaced. All parent containers must exist:
+`environment.OPENROUTER_API_KEY` requires an existing `environment` object.
+Text secrets return HTTP 400 even when their contents happen to be valid JSON;
 the method never changes a secret's type. A missing secret returns HTTP 404.
 
-`path` uses JSON Pointer syntax: `/password` selects a top-level key,
-`/database/password` selects a nested key, and `/accounts/0/token` selects a
-field in the first array element. Escape `/` within a key as `~1`, and `~` as
-`~0`. `/` selects an empty-string key. Array indices start at zero and cannot
-have leading zeros. Empty paths, missing keys, out-of-range indices, and array
-append (`-`) are rejected with HTTP 400, without modifying the secret.
+`path` accepts either syntax:
+
+- Dot notation: `password` selects a top-level key,
+  `environment.OPENROUTER_API_KEY` selects a nested key, and `accounts.0.token`
+  selects a field in the first array element. Segments must be non-empty;
+  leading/trailing dots, consecutive dots and slashes are rejected.
+- JSON Pointer: `/password`, `/environment/OPENROUTER_API_KEY`, and
+  `/accounts/0/token` select the same paths. In this syntax dots are literal:
+  `/environment.OPENROUTER_API_KEY` selects one top-level key whose name contains
+  a dot. Escape `/` within a key as `~1`, and `~` as `~0`. `/` selects an
+  empty-string key.
+
+Array indices start at zero and cannot have leading zeros. Empty paths, missing
+parents, scalar parents, out-of-range array indices and array append (`-`) are
+rejected with HTTP 400 without modifying the secret. Arrays are never extended.
 
 `value` is the new JSON value itself, not a JSON-encoded string. Strings,
 numbers, booleans, objects, arrays, and `null` are supported; `null` replaces
@@ -9344,10 +9374,12 @@ JSON parsing restores the same characters. `NaN` and `Infinity` are rejected.
 
 The server performs the read/modify/write under the same team lock as other
 secret writes. It preserves `created_at` and updates `updated_at`. Responses
-contain only the secret name and success status, never secret values:
+contain only the secret name and creation/update flags, never secret values.
+`created: true` means a new key was added; `created: false` means an existing
+element was replaced (`updated` is the inverse). For example, an update returns:
 
 ```json
-{"ok": true, "result": {"name": "my-secret", "updated": true}}
+{"ok": true, "result": {"name": "my-secret", "created": false, "updated": true}}
 ```
 
 Recreate consumers with `update_service` / `update_environment` to apply the
