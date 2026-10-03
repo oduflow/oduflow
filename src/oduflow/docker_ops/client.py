@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import time
+from typing import Any, cast
 
 import docker
 from docker import DockerClient
@@ -74,6 +75,28 @@ def get_client() -> DockerClient:
         ) from exc
 
 
+def run_for_output(
+    client: DockerClient, image: str, command: str | list[str], **kwargs: Any
+) -> bytes:
+    """Run a throwaway container to completion and return its stdout.
+
+    docker-py's ``containers.run()`` reads the output back only for containers
+    that log through ``json-file`` or ``journald``; under any other daemon
+    default (``local`` is a common one) it silently returns ``None``. Pin
+    ``json-file`` for these short-lived helpers so parsing never depends on the
+    host's logging configuration. A non-zero exit still raises
+    ``docker.errors.ContainerError``.
+    """
+    output = client.containers.run(
+        image,
+        command,
+        remove=True,
+        log_config={"type": "json-file"},
+        **kwargs,
+    )
+    return cast(bytes, output)
+
+
 def wait_for_docker(timeout: float = 60.0, poll_seconds: float = 2.0) -> None:
     """Block until the Docker daemon answers, or raise after *timeout*.
 
@@ -105,16 +128,7 @@ def get_odoo_uid_gid(client: DockerClient, image: str) -> str:
     if image in _uid_gid_cache:
         return _uid_gid_cache[image]
     try:
-        raw = (
-            client.containers.run(
-                image,
-                "id",
-                entrypoint="",
-                remove=True,
-            )
-            .decode()
-            .strip()
-        )
+        raw = run_for_output(client, image, "id", entrypoint="").decode().strip()
         import re
 
         uid_m = re.search(r"uid=(\d+)", raw)

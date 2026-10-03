@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import docker
-from oduflow.docker_ops.client import get_client
+from oduflow.docker_ops.client import get_client, run_for_output
 from oduflow.docker_ops.volume_ops import docker_volume_name
 from oduflow.errors import ConflictError, NotFoundError
 from oduflow.settings import Settings, TeamSettings
@@ -122,12 +122,12 @@ fi
 
     logger.info("Reading file in volume %s: %s", name, path)
     try:
-        output = client.containers.run(
+        output = run_for_output(
+            client,
             _HELPER_IMAGE,
             ["sh", "-c", script],
             entrypoint="",
             user="root",
-            remove=True,
             volumes={docker_name: {"bind": _MOUNT_POINT, "mode": "ro"}},
         )
     except docker.errors.ContainerError as exc:
@@ -296,12 +296,12 @@ def search_in_volume(
     )
 
     try:
-        output = client.containers.run(
+        output = run_for_output(
+            client,
             _HELPER_IMAGE,
             cmd,
             entrypoint="",
             user="root",
-            remove=True,
             volumes={docker_name: {"bind": _MOUNT_POINT, "mode": "ro"}},
         )
     except docker.errors.ContainerError as exc:
@@ -356,12 +356,12 @@ fi
 
     logger.info("Deleting in volume %s: %s", name, path)
     try:
-        output = client.containers.run(
+        output = run_for_output(
+            client,
             _HELPER_IMAGE,
             ["sh", "-c", script],
             entrypoint="",
             user="root",
-            remove=True,
             volumes={docker_name: {"bind": _MOUNT_POINT, "mode": "rw"}},
         )
     except docker.errors.ContainerError as exc:

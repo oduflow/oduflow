@@ -449,3 +449,64 @@ class TestDeleteFileInVolume:
             volume_file_ops.delete_file_in_volume(
                 TEST_SETTINGS, TEST_TEAM, "mydata", "../../etc/passwd"
             )
+
+
+# ---------------------------------------------------------------------------
+# Daemon logging driver
+# ---------------------------------------------------------------------------
+
+
+def _docker_py_run(output: bytes):
+    """Mimic docker-py on a daemon whose default log driver is ``local``.
+
+    ``containers.run()`` returns the output only for containers logging through
+    ``json-file`` or ``journald``; otherwise it returns ``None``.
+    """
+
+    def run(image, command, **kwargs):
+        log_type = (kwargs.get("log_config") or {}).get("type", "local")
+        return output if log_type in ("json-file", "journald") else None
+
+    return run
+
+
+class TestNonJsonFileLogDriver:
+    def test_read_returns_file_content(self, mock_docker_client):
+        mock_docker_client.containers.run.side_effect = _docker_py_run(
+            b"TYPE:FILE\nSIZE:6\nCONTENT_START\nhello\n"
+        )
+
+        result = volume_file_ops.read_file_in_volume(
+            TEST_SETTINGS, TEST_TEAM, "mydata", "file.txt"
+        )
+
+        assert result == {"type": "file", "output": "hello\n", "size": 6}
+
+    def test_search_reports_real_matches(self, mock_docker_client):
+        mock_docker_client.containers.run.side_effect = _docker_py_run(
+            f"{_MOUNT_POINT}/a.conf:1:needle\n".encode()
+        )
+
+        result = volume_file_ops.search_in_volume(
+            TEST_SETTINGS, TEST_TEAM, "mydata", "needle"
+        )
+
+        assert result["output"] == "a.conf:1:needle"
+
+    def test_delete_reports_success(self, mock_docker_client):
+        mock_docker_client.containers.run.side_effect = _docker_py_run(b"DELETED\n")
+
+        result = volume_file_ops.delete_file_in_volume(
+            TEST_SETTINGS, TEST_TEAM, "mydata", "old.txt"
+        )
+
+        assert result == {"path": "old.txt", "status": "deleted"}
+
+    def test_helper_containers_are_removed(self, mock_docker_client):
+        mock_docker_client.containers.run.return_value = b"TYPE:NOTFOUND\n"
+
+        volume_file_ops.read_file_in_volume(
+            TEST_SETTINGS, TEST_TEAM, "mydata", "missing.txt"
+        )
+
+        assert mock_docker_client.containers.run.call_args.kwargs["remove"] is True
