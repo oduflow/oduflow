@@ -196,6 +196,10 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
 | `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
+| `GET` | `/api/extra-repos/{name}/branches` | Downloaded branches (`downloaded`), the remote list (`available`; `available_known` is false until it was first read), whether the repo is `protected`, and the environments/productions using each branch (`usage`) |
+| `POST` | `/api/extra-repos/{name}/branches` | Download branches now and keep them updated; body: `branches` (non-empty list of names) |
+| `POST` | `/api/extra-repos/{name}/branches/remove` | Remove a downloaded branch, its unused cached checkouts and unreferenced objects; body: `branch`. Refused for a protected repo and while an environment or production uses it |
+| `POST` | `/api/extra-repos/{name}/remote-branches` | Refresh the remote branch list (`git ls-remote`); downloads nothing |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
 | `POST` | `/api/extra-repos/{name}/delete` | Delete the repository and unused cached revisions |
@@ -207,7 +211,7 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
 | `GET` | `/api/secrets` | List team secret names, types (`value_type`) and timestamps; stored values are never returned by any endpoint |
 | `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from string body field `value` (write-only); optional `value_type`: `text` or `json`. Omitted/null type preserves the existing type, defaulting to `text` for new secrets. Invalid JSON secret values or unknown types return HTTP 400 without changing the stored value |
-| `POST` | `/api/secrets/{name}/update-json` | Replace one existing element of a JSON secret; body: `path` (non-empty JSON Pointer, e.g. `/database/password` or `/accounts/0/token`) and `value` (a JSON value, including `null`). Returns only `{"ok":true,"result":{"name":"…","updated":true}}`. Text secrets, invalid paths/values and missing elements return HTTP 400; missing secrets return HTTP 404. Errors leave the stored value unchanged. See [JSON element updates](security.md#updating-one-json-element) |
+| `POST` | `/api/secrets/{name}/update-json` | Create or replace one object key in an existing JSON secret, or replace an existing array element; body: `path` (dot notation such as `environment.OPENROUTER_API_KEY`, or JSON Pointer such as `/environment/OPENROUTER_API_KEY`) and `value` (a JSON value, including `null`). Returns `name`, `created` and `updated` flags; `created: true` means a new key was added, otherwise `updated: true`. Missing parents, invalid paths/values and text secrets return HTTP 400; missing secrets return HTTP 404. Arrays are never extended. Errors leave storage unchanged. See [JSON element updates](security.md#updating-one-json-element) |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides

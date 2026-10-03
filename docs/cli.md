@@ -5,7 +5,15 @@
 ```bash
 # Show version
 oduflow --version
+
+# Disable anonymous usage telemetry for this run only (e.g. test or CI runs);
+# place it before any subcommand
+oduflow --no-telemetry --transport http
+oduflow --no-telemetry stack apply oduflow.yaml
 ```
+
+`--no-telemetry` overrides `disable_telemetry` in `oduflow.toml` for the
+current process only. See [Telemetry](installation.md#telemetry).
 
 ## Running the Server
 

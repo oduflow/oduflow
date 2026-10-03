@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import functools
 import inspect
 import json
@@ -133,6 +134,9 @@ _locks = LockManager()
 # multi-gigabyte filestore — and an instant BusyError would discard all of it.
 ATTACH_SWAP_LOCK_TIMEOUT = 300.0
 _settings: Settings | None = None
+# Set from the global --no-telemetry CLI flag. Applied inside _get_settings so
+# the override survives every reload of the cached Settings.
+_no_telemetry: bool = False
 _instance_id: str = ""
 # Where the dashboard is reachable, recorded when the HTTP transport starts.
 # Stays None under stdio, where no web server is mounted and therefore no
@@ -163,6 +167,8 @@ def _get_settings() -> Settings:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
+        if _no_telemetry:
+            settings = dataclasses.replace(settings, disable_telemetry=True)
         _settings = settings
     return _settings
 
@@ -743,7 +749,7 @@ def delete_extra_repo(name: str, ctx: Context | None = None) -> str:
 @mcp.tool()
 @handle_errors
 def update_extra_repo(
-    name: str, add_branch: str = "", ctx: Context | None = None
+    name: str, add_branch: str | list[str] = "", ctx: Context | None = None
 ) -> str:
     """
     Pull latest changes from the remote for an extra addons repository.
@@ -754,14 +760,18 @@ def update_extra_repo(
 
     Args:
         name: Name of the extra repo to update (e.g. "enterprise").
-        add_branch: Optional branch to download now and keep updated, e.g.
-            "16.0", instead of waiting for its first use.
+        add_branch: Optional branch, or list of branches, to download now and
+            keep updated, e.g. "16.0" or ["16.0", "17.0"], instead of waiting
+            for their first use.
     """
-    from oduflow.extra_addons import fetch_extra_repo, track_branch
+    from oduflow.extra_addons import fetch_extra_repo, track_branches
 
     team = _resolve_team(ctx)
-    if add_branch.strip():
-        track_branch(team, name, add_branch.strip())
+    # No comma splitting: git allows commas in branch names.
+    requested = [add_branch] if isinstance(add_branch, str) else add_branch
+    branch_list = [b.strip() for b in requested if b.strip()]
+    if branch_list:
+        track_branches(team, name, branch_list)
     summary = fetch_extra_repo(team, name)
     return _format_fetch_summary(summary)
 
@@ -7779,6 +7789,11 @@ def _run_cli() -> None:
         default="1",
         help="team for --stack startup reconciliation (default: 1)",
     )
+    parser.add_argument(
+        "--no-telemetry",
+        action="store_true",
+        help="disable anonymous usage telemetry for this run (e.g. test runs)",
+    )
     sub = parser.add_subparsers(dest="command", title="commands", metavar="")
 
     p_ui_2fa = sub.add_parser(
@@ -8143,7 +8158,9 @@ def _run_cli() -> None:
     except FileNotFoundError:
         _bootstrap_config()
 
-    global _settings
+    global _settings, _no_telemetry
+    # Lets test runs stay out of usage stats without editing oduflow.toml.
+    _no_telemetry = args.no_telemetry
     _settings = _get_settings()
     logger.info("conf=%s  data=%s", _settings.etc_dir, _settings.base_data_dir)
 

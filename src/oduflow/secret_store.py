@@ -161,20 +161,29 @@ def _json_element_key(container: Any, token: str) -> str | int:
 def update_secret_json(
     team: TeamSettings, name: str, path: str, value: Any
 ) -> dict[str, Any]:
-    """Replace an existing element using a non-empty JSON Pointer, write-only.
+    """Create or replace a key using JSON Pointer or dot notation, write-only.
 
     The read/modify/write shares the set/delete mutex so concurrent changes to
     other elements or secrets cannot be lost. An empty pointer (whole-document
     replacement) is deliberately excluded; use set_secret for that operation.
     """
     validate_secret_name(name)
-    if not isinstance(path, str) or not path.startswith("/"):
-        raise ValueError("path must be a non-empty JSON Pointer starting with '/'.")
-    if re.search(r"~(?:[^01]|$)", path):
-        raise ValueError("Invalid JSON Pointer escape; use ~0 for '~' and ~1 for '/'.")
-    tokens = [
-        token.replace("~1", "/").replace("~0", "~") for token in path[1:].split("/")
-    ]
+    if not isinstance(path, str) or not path:
+        raise ValueError("path must be a non-empty JSON Pointer or dot-separated path.")
+    if path.startswith("/"):
+        if re.search(r"~(?:[^01]|$)", path):
+            raise ValueError(
+                "Invalid JSON Pointer escape; use ~0 for '~' and ~1 for '/'."
+            )
+        tokens = [
+            token.replace("~1", "/").replace("~0", "~") for token in path[1:].split("/")
+        ]
+    else:
+        tokens = path.split(".")
+        if "/" in path or any(not token for token in tokens):
+            raise ValueError(
+                "Use non-empty dot-separated keys, or a JSON Pointer starting with '/'."
+            )
     with keyed_mutex(team_secrets_lock_key(team.team_id)):
         data = _load(team)
         record = data["secrets"].get(name)
@@ -191,7 +200,15 @@ def update_secret_json(
         parent = document
         for token in tokens[:-1]:
             parent = parent[_json_element_key(parent, token)]
-        parent[_json_element_key(parent, tokens[-1])] = value
+        created = isinstance(parent, dict) and tokens[-1] not in parent
+        # Only the final object key may be created. Parent containers and
+        # array elements must exist; never guess missing objects or grow arrays.
+        key = (
+            tokens[-1]
+            if isinstance(parent, dict)
+            else _json_element_key(parent, tokens[-1])
+        )
+        parent[key] = value
         try:
             updated = json.dumps(document, allow_nan=False, indent=2)
         except (ValueError, TypeError, RecursionError):
@@ -201,7 +218,7 @@ def update_secret_json(
         record["value"] = updated
         record["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         _save(team, data)
-    return {"name": name, "updated": True}
+    return {"name": name, "created": created, "updated": not created}
 
 
 def delete_secret(team: TeamSettings, name: str) -> None:

@@ -2438,7 +2438,7 @@ branches).
 :   *str · required* — The extra repo to update (e.g. `enterprise`).
 
 `add_branch`
-:   *str · default empty* — Download one more branch now and keep it updated, instead of waiting for its first use. A failed fetch leaves the tracked set unchanged.
+:   *str or list of str · default empty* — A branch, or a list of branches, to download now and keep updated (e.g. `17.0` or `["17.0", "18.0"]`), instead of waiting for their first use. A branch missing on the remote fails the call before anything is downloaded; a failed fetch leaves the tracked set unchanged.
 
 **Use it when**
 

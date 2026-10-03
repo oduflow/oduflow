@@ -535,6 +535,15 @@ Add to your `oduflow.toml`:
 disable_telemetry = true
 ```
 
+To disable telemetry for a single run only (for example, a test or CI run that
+should not count toward usage stats), pass the global `--no-telemetry` flag
+before any subcommand:
+
+```bash
+oduflow --no-telemetry --transport http
+oduflow --no-telemetry stack apply oduflow.yaml
+```
+
 ## Auto-start with systemd
 
 On Linux servers, Oduflow can be registered as a systemd service so it starts automatically on boot.

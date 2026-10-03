@@ -123,6 +123,7 @@ MCP Clients (Cursor, Claude, etc.)
 - Default `addopts` in `pyproject.toml` excludes heavyweight tests
 - Mocking pattern: patch `oduflow.docker_ops.*` functions, not Docker SDK directly
 - `conftest.py` at root ignores `src/**` for collection (tests live in `tests/`)
+- When you launch Oduflow itself for testing (starting the server, `stack apply`), always pass the global `--no-telemetry` flag before any subcommand — e.g. `oduflow --no-telemetry --transport http` — so test runs are not counted in usage telemetry
 
 ### Testing the FreeSWITCH auxiliary service
 

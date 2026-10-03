@@ -7,6 +7,7 @@ branch is fetched shallow on first use and incrementally afterwards.
 
 import os
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,14 +15,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from oduflow.extra_addons import (
+    branch_usage,
     create_worktree,
     delete_extra_repo,
     ensure_shared_checkout,
     fetch_extra_repo,
     list_extra_repos,
     list_remote_branches,
+    refresh_remote_branches,
     register_extra_repo,
     track_branch,
+    track_branches,
+    untrack_branch,
 )
 from oduflow.settings import Settings, TeamSettings
 
@@ -509,3 +514,265 @@ def test_failed_track_branch_does_not_break_subsequent_updates(team, tmp_path):
         track_branch(team, "enterprise", "missing")
     fetch_extra_repo(team, "enterprise")
     assert set(list_extra_repos(team)[0]["branches"]) == {"18.0"}
+
+
+def _age_checkouts(team, name="enterprise", seconds=7 * 3600):
+    """Push cached checkouts past the grace period that protects fresh ones."""
+    root = os.path.join(team.shared_extra_checkouts_dir, name)
+    past = time.time() - seconds
+    for entry in os.listdir(root):
+        os.utime(os.path.join(root, entry), (past, past))
+
+
+def _no_containers(*labels_list):
+    """A Docker client whose managed containers carry *labels_list*."""
+    client = MagicMock()
+    containers = []
+    for labels in labels_list:
+        c = MagicMock()
+        c.name = labels.get("oduflow.branch", "container")
+        c.labels = labels
+        containers.append(c)
+    client.containers.list.return_value = containers
+    return patch("oduflow.extra_addons.get_client", return_value=client)
+
+
+class TestTrackBranches:
+    def test_downloads_several_branches_at_once(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["main"])
+
+        result = track_branches(team, "enterprise", ["18.0", "main", "18.0"])
+
+        assert result["branches"] == ["18.0", "main"]
+        assert result["downloaded"] == ["18.0"]
+        assert result["updated"] == ["main"]
+        assert set(list_extra_repos(team)[0]["branches"]) == {"18.0", "main"}
+
+    def test_missing_branch_downloads_nothing(self, team, tmp_path):
+        from oduflow.errors import NotFoundError
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+
+        with pytest.raises(NotFoundError, match="nope"):
+            track_branches(team, "enterprise", ["18.0", "nope"])
+        assert list_extra_repos(team)[0]["branches"] == []
+
+    def test_refreshes_remote_list_before_checking(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        _src_git(tmp_path, "branch", "19.0", "main")
+
+        track_branches(team, "enterprise", ["19.0"])
+
+        assert "19.0" in list_extra_repos(team)[0]["available_branches"]
+
+    def test_refresh_remote_branches_downloads_nothing(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        _src_git(tmp_path, "branch", "19.0", "main")
+
+        assert refresh_remote_branches(team, "enterprise") == ["18.0", "19.0", "main"]
+        assert list_extra_repos(team)[0]["branches"] == []
+
+
+class TestUntrackBranch:
+    def test_removes_branch_and_its_unused_checkout(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0", "main"])
+        removed = ensure_shared_checkout(team, "enterprise", "18.0")
+        kept = ensure_shared_checkout(team, "enterprise", "main")
+        _age_checkouts(team)
+
+        with _no_containers():
+            result = untrack_branch(Settings(), team, "enterprise", "18.0")
+
+        assert result["removed_checkouts"] == [removed["revision"]]
+        assert result["freed_bytes"] > 0
+        assert not os.path.exists(removed["path"])
+        assert os.listdir(os.path.dirname(removed["path"])) == [kept["revision"]]
+        assert os.path.isdir(kept["path"])
+        assert "removed" not in _bare_git(team, "worktree", "list").stdout
+        assert list_extra_repos(team)[0]["branches"] == ["main"]
+        assert _refspecs(team) == ["+refs/heads/main:refs/heads/main"]
+        # Update keeps it gone; first use downloads it again.
+        assert fetch_extra_repo(team, "enterprise")["new_branches"] == []
+        assert (
+            ensure_shared_checkout(team, "enterprise", "18.0")["revision"]
+            == removed["revision"]
+        )
+
+    def test_refused_while_an_environment_uses_it(self, team, tmp_path):
+        from oduflow.errors import ConflictError
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
+        labels = {
+            "oduflow.branch": "feature-x",
+            "oduflow.extra_addons": '{"enterprise": "18.0"}',
+        }
+        with _no_containers(labels), pytest.raises(ConflictError, match="feature-x"):
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+
+    def test_refused_while_a_production_uses_it(self, team, tmp_path):
+        from oduflow import production_registry
+        from oduflow.errors import ConflictError
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
+        production_registry.create_production(
+            team, "erp", {"extra_addons": {"enterprise": "18.0"}}
+        )
+        with _no_containers(), pytest.raises(ConflictError, match="production erp"):
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+
+    def test_other_branch_in_use_does_not_block(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0", "main"])
+        labels = {
+            "oduflow.branch": "feature-x",
+            "oduflow.extra_addons": '{"enterprise": "main"}',
+        }
+        with _no_containers(labels):
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+        assert list_extra_repos(team)[0]["branches"] == ["main"]
+
+    def test_branch_not_downloaded(self, team, tmp_path):
+        from oduflow.errors import NotFoundError
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        with _no_containers(), pytest.raises(NotFoundError, match="not downloaded"):
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+
+    def test_legacy_all_branches_repo_switches_to_explicit_list(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        TestLegacyAllBranchesRepo()._legacy_clone(team, url)
+
+        with _no_containers():
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+
+        assert _refspecs(team) == ["+refs/heads/main:refs/heads/main"]
+        summary = fetch_extra_repo(team, "enterprise")
+        assert summary["new_branches"] == []
+        assert list_extra_repos(team)[0]["branches"] == ["main"]
+
+    def test_branch_usage_maps_consumers(self, team, tmp_path):
+        from oduflow import production_registry
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url)
+        production_registry.create_production(
+            team, "erp", {"extra_addons": {"enterprise": "18.0"}}
+        )
+        env = {
+            "oduflow.branch": "feature-x",
+            "oduflow.extra_addons": '{"enterprise": "18.0", "themes": "main"}',
+        }
+        prod = {
+            "oduflow.prod_name": "erp",
+            "oduflow.extra_addons": '{"enterprise": "18.0"}',
+        }
+        other = {"oduflow.branch": "y", "oduflow.extra_addons": '{"themes": "18.0"}'}
+        with _no_containers(env, prod, other):
+            usage = branch_usage(Settings(), team, "enterprise")
+        assert usage == {"18.0": ["feature-x", "production erp"]}
+
+    def test_keeps_a_checkout_handed_out_recently(self, team, tmp_path):
+        # create_environment holds its checkout before its container exists.
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0", "main"])
+        checkout = ensure_shared_checkout(team, "enterprise", "18.0")
+
+        with _no_containers():
+            result = untrack_branch(Settings(), team, "enterprise", "18.0")
+
+        assert result["removed_checkouts"] == []
+        assert os.path.isfile(
+            os.path.join(checkout["path"], "sale_enterprise", "views.xml")
+        )
+
+    def test_reusing_a_checkout_renews_its_grace_period(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0", "main"])
+        checkout = ensure_shared_checkout(team, "enterprise", "18.0")
+        _age_checkouts(team)
+        ensure_shared_checkout(team, "enterprise", "18.0")
+
+        with _no_containers():
+            result = untrack_branch(Settings(), team, "enterprise", "18.0")
+
+        assert result["removed_checkouts"] == []
+        assert os.path.isdir(checkout["path"])
+
+    def test_pinned_checkout_is_kept(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0", "main"])
+        checkout = ensure_shared_checkout(team, "enterprise", "18.0")
+        _age_checkouts(team)
+        labels = {
+            "oduflow.branch": "feature-x",
+            "oduflow.extra_addons": '{"enterprise": "main"}',
+            "oduflow.extra_addons_revisions": (
+                '{"enterprise": "%s"}' % checkout["revision"]
+            ),
+        }
+        with _no_containers(labels):
+            result = untrack_branch(Settings(), team, "enterprise", "18.0")
+
+        assert result["removed_checkouts"] == []
+        assert os.path.isdir(checkout["path"])
+
+    def test_refused_for_a_protected_repo(self, team, tmp_path):
+        from oduflow.errors import ProtectedError
+        from oduflow.extra_addons import protect_extra_repo
+
+        url = _make_git_source(tmp_path)
+        register_extra_repo(team, "enterprise", url, branches=["18.0"])
+        protect_extra_repo(team, "enterprise")
+
+        with _no_containers(), pytest.raises(ProtectedError, match="protected"):
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+
+    def test_branch_sharing_a_tag_name(self, team, tmp_path):
+        url = _make_git_source(tmp_path)
+        _src_git(tmp_path, "tag", "18.0", "main")
+        TestLegacyAllBranchesRepo()._legacy_clone(team, url)
+        _bare_git(team, "fetch", "--tags", "origin")
+        assert "18.0" in _bare_git(team, "tag").stdout
+
+        assert set(list_extra_repos(team)[0]["branches"]) == {"18.0", "main"}
+        with _no_containers():
+            untrack_branch(Settings(), team, "enterprise", "main")
+
+        assert _refspecs(team) == ["+refs/heads/18.0:refs/heads/18.0"]
+        assert list_extra_repos(team)[0]["branches"] == ["18.0"]
+
+    def test_interrupted_legacy_conversion_keeps_all_branches(self, team, tmp_path):
+        from oduflow import extra_addons
+
+        url = _make_git_source(tmp_path)
+        TestLegacyAllBranchesRepo()._legacy_clone(team, url)
+        real_run = subprocess.run
+
+        def failing_run(cmd, *args, **kwargs):
+            if "--add" in cmd:
+                raise subprocess.CalledProcessError(255, cmd, stderr="lock")
+            return real_run(cmd, *args, **kwargs)
+
+        with (
+            _no_containers(),
+            patch.object(extra_addons.subprocess, "run", side_effect=failing_run),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+
+        assert "+refs/heads/*:refs/heads/*" in _refspecs(team)
+        assert set(list_extra_repos(team)[0]["branches"]) == {"18.0", "main"}
+        # A retry completes the conversion.
+        with _no_containers():
+            untrack_branch(Settings(), team, "enterprise", "18.0")
+        assert _refspecs(team) == ["+refs/heads/main:refs/heads/main"]

@@ -7,11 +7,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
 from oduflow.docker_ops.client import get_client
+from oduflow.docker_ops.stats import _dir_size_bytes
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -50,6 +52,13 @@ _REMOTE_BRANCHES_FILE = ".remote-branches.json"
 # sooner through git's low-speed check (SSH has no equivalent).
 _FETCH_TIMEOUT = 3600
 _CHECKOUT_TIMEOUT = 600
+# Removing a branch keeps cached checkouts handed out this recently: an
+# environment being created or updated holds its checkout before its container
+# (the in-use record) exists.
+_CHECKOUT_GRACE_SECONDS = 6 * 3600
+# Cached checkouts are moved here (inside the repo's cache dir) under the repo
+# lock and deleted after it is released.
+_REMOVING_PREFIX = ".removing-"
 _LOW_SPEED_ENV = {
     "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
     "GIT_HTTP_LOW_SPEED_TIME": "120",
@@ -233,29 +242,44 @@ def _untrack_deleted_branches(
         if not match or match.group(1) in remote_branches:
             continue
         branch = match.group(1)
-        # Subset repos created before the marker existed may lose their last
-        # refspec here; mark them so the empty set stays intentional instead of
-        # being "repaired" into the all-branches wildcard.
-        open(os.path.join(repo_path, _ON_DEMAND_MARKER), "w").close()
-        # The value pattern is a POSIX ERE (--fixed-value needs git 2.30+).
-        pattern = "^" + re.sub(r"([.\[\](){}*+?|^$\\])", r"\\\1", refspec) + "$"
-        for args in (
-            ["config", "--unset", "remote.origin.fetch", pattern],
-            ["update-ref", "-d", f"refs/heads/{branch}"],
-        ):
-            subprocess.run(
-                ["git", "-C", repo_path, *args],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=GIT_ENV,
-            )
+        _forget_branch(repo_path, branch)
         logger.info(
             "Extra repo '%s': branch '%s' was deleted on the remote; untracked",
             name,
             branch,
         )
+
+
+def _forget_branch(repo_path: str, branch: str) -> None:
+    """Drop *branch*'s fetch refspec (if configured) and its local ref."""
+    # Subset repos created before the marker existed may lose their last
+    # refspec here; mark them so the empty set stays intentional instead of
+    # being "repaired" into the all-branches wildcard.
+    open(os.path.join(repo_path, _ON_DEMAND_MARKER), "w").close()
+    refspec = _branch_refspec(branch)
+    if refspec in _configured_refspecs(repo_path):
+        _unset_refspec(repo_path, refspec)
+    subprocess.run(
+        ["git", "-C", repo_path, "update-ref", "-d", f"refs/heads/{branch}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=GIT_ENV,
+    )
+
+
+def _unset_refspec(repo_path: str, refspec: str) -> None:
+    # The value pattern is a POSIX ERE (--fixed-value needs git 2.30+).
+    pattern = "^" + re.sub(r"([.\[\](){}*+?|^$\\])", r"\\\1", refspec) + "$"
+    subprocess.run(
+        ["git", "-C", repo_path, "config", "--unset", "remote.origin.fetch", pattern],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=GIT_ENV,
+    )
 
 
 @contextmanager
@@ -467,50 +491,67 @@ def list_extra_repos(team: TeamSettings) -> list[dict[str, Any]]:
     if not os.path.isdir(repos_dir):
         return []
 
-    result = []
-    for entry in sorted(os.listdir(repos_dir)):
-        path = os.path.join(repos_dir, entry)
-        if not os.path.isdir(path):
-            continue
+    return [
+        _repo_info(os.path.join(repos_dir, entry), entry)
+        for entry in sorted(os.listdir(repos_dir))
+        if os.path.isdir(os.path.join(repos_dir, entry))
+    ]
 
-        try:
-            url = subprocess.run(
-                ["git", "-C", path, "config", "--get", "remote.origin.url"],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=GIT_ENV,
-            ).stdout.strip()
-        except subprocess.CalledProcessError:
-            url = ""
 
-        try:
-            branches_raw = subprocess.run(
-                ["git", "-C", path, "branch", "-a", "--format=%(refname:short)"],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=GIT_ENV,
-            ).stdout.strip()
-            branches = [b for b in branches_raw.splitlines() if b]
-        except subprocess.CalledProcessError:
-            branches = []
+def get_extra_repo(team: TeamSettings, name: str) -> dict[str, Any]:
+    """One entry of :func:`list_extra_repos`."""
+    validate_extra_repo_name(name)
+    path = os.path.join(team.shared_repos_dir, name)
+    if not os.path.isdir(path):
+        raise NotFoundError(f"Extra repo '{name}' not found.")
+    return _repo_info(path, name)
 
-        protected = os.path.exists(os.path.join(path, ".protected"))
-        local = os.path.exists(os.path.join(path, ".local"))
-        result.append(
-            {
-                "name": entry,
-                "repo_url": sanitize_repo_url(url),
-                # Downloaded branches; available_branches is the remote list.
-                "branches": branches,
-                "available_branches": _read_remote_branches(path),
-                "protected": protected,
-                "local": local,
-            }
-        )
 
-    return result
+def _repo_info(path: str, entry: str) -> dict[str, Any]:
+    try:
+        url = subprocess.run(
+            ["git", "-C", path, "config", "--get", "remote.origin.url"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=GIT_ENV,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        url = ""
+
+    try:
+        # lstrip, not :short — short names turn into "heads/17.0" when a tag
+        # of the same name exists.
+        branches_raw = subprocess.run(
+            [
+                "git",
+                "-C",
+                path,
+                "for-each-ref",
+                "--format=%(refname:lstrip=2)",
+                "refs/heads/",
+                "refs/remotes/",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=GIT_ENV,
+        ).stdout.strip()
+        branches = [b for b in branches_raw.splitlines() if b]
+    except subprocess.CalledProcessError:
+        branches = []
+
+    return {
+        "name": entry,
+        "repo_url": sanitize_repo_url(url),
+        # Downloaded branches; available_branches is the remote list, unknown
+        # until the first refresh for repos registered before it was stored.
+        "branches": branches,
+        "available_branches": _read_remote_branches(path),
+        "available_known": os.path.exists(os.path.join(path, _REMOTE_BRANCHES_FILE)),
+        "protected": os.path.exists(os.path.join(path, ".protected")),
+        "local": os.path.exists(os.path.join(path, ".local")),
+    }
 
 
 def is_extra_repo_protected(team: TeamSettings, name: str) -> bool:
@@ -539,6 +580,53 @@ def unprotect_extra_repo(team: TeamSettings, name: str) -> dict[str, Any]:
     return {"name": name, "protected": False}
 
 
+def _extra_repo_consumers(
+    settings: Settings, team: TeamSettings, name: str
+) -> list[dict[str, str]]:
+    """Managed containers (running or stopped) that mount extra repo *name*.
+
+    Each entry names the consumer (environment branch label or container
+    name), the repo branch it uses and the checkout revision it is pinned to;
+    branch and revision are empty when the labels do not record them.
+    """
+    client = get_client()
+    filters = {
+        "label": [
+            f"{settings.managed_label}=true",
+            f"{settings.team_label}={team.team_id}",
+        ]
+    }
+    consumers: list[dict[str, str]] = []
+    for c in client.containers.list(all=True, filters=filters):
+        raw = c.labels.get("oduflow.extra_addons", "")
+        if not raw:
+            continue
+        try:
+            extras = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(extras, (dict, list)) or name not in extras:
+            continue
+        try:
+            revisions = json.loads(c.labels.get("oduflow.extra_addons_revisions", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            revisions = {}
+        branch = extras.get(name) if isinstance(extras, dict) else ""
+        revision = revisions.get(name) if isinstance(revisions, dict) else ""
+        prod_name = c.labels.get("oduflow.prod_name", "")
+        consumers.append(
+            {
+                # Production containers deliberately carry no branch label.
+                "consumer": f"production {prod_name}"
+                if prod_name
+                else c.labels.get(settings.branch_label, c.name),
+                "branch": branch if isinstance(branch, str) else "",
+                "revision": revision if isinstance(revision, str) else "",
+            }
+        )
+    return consumers
+
+
 def _delete_extra_repo_unlocked(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, Any]:
@@ -551,26 +639,7 @@ def _delete_extra_repo_unlocked(
             f"Extra repo '{name}' is protected. Unprotect it before deleting."
         )
 
-    client = get_client()
-    filters = {
-        "label": [
-            f"{settings.managed_label}=true",
-            f"{settings.team_label}={team.team_id}",
-        ]
-    }
-    dependent: list[str] = []
-    for c in client.containers.list(all=True, filters=filters):
-        raw = c.labels.get("oduflow.extra_addons", "")
-        if not raw:
-            continue
-        try:
-            extras = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if name in extras:
-            branch = c.labels.get(settings.branch_label, c.name)
-            dependent.append(branch)
-
+    dependent = [c["consumer"] for c in _extra_repo_consumers(settings, team, name)]
     if dependent:
         raise ConflictError(
             f"Cannot delete extra repo '{name}': used by environments: "
@@ -610,7 +679,7 @@ def _get_branch_refs(repo_path: str) -> dict[str, str]:
                 "-C",
                 repo_path,
                 "for-each-ref",
-                "--format=%(refname:short) %(objectname)",
+                "--format=%(refname) %(objectname)",
                 "refs/heads/",
             ],
             check=True,
@@ -622,10 +691,12 @@ def _get_branch_refs(repo_path: str) -> dict[str, str]:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return {}
     refs: dict[str, str] = {}
+    # Full ref names: %(refname:short) yields "heads/17.0" when a tag of the
+    # same name exists (legacy all-branches clones fetched tags too).
     for line in result.stdout.strip().splitlines():
         parts = line.split(None, 1)
-        if len(parts) == 2:
-            refs[parts[0]] = parts[1]
+        if len(parts) == 2 and parts[0].startswith("refs/heads/"):
+            refs[parts[0][len("refs/heads/") :]] = parts[1]
     return refs
 
 
@@ -842,23 +913,280 @@ def fetch_extra_repo(
         return _fetch_extra_repo_unlocked(team, name, branch)
 
 
-def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
-    """Download *branch* now and keep it updated by later Updates.
+def _remote_repo_path(team: TeamSettings, name: str) -> str:
+    validate_extra_repo_name(name)
+    path = os.path.join(team.shared_repos_dir, name)
+    if not os.path.isdir(path):
+        raise NotFoundError(f"Extra repo '{name}' not found.")
+    if os.path.exists(os.path.join(path, ".local")):
+        raise PrerequisiteNotMetError(
+            f"Extra repo '{name}' is local (no remote); its branches cannot be "
+            "downloaded or removed."
+        )
+    return path
 
-    Environments download a branch on first use anyway; this warms it up
-    ahead of time (``update_extra_repo(add_branch=...)``).
+
+def track_branches(
+    team: TeamSettings, name: str, branches: list[str]
+) -> dict[str, Any]:
+    """Download *branches* now and keep them updated by later Updates.
+
+    Environments download a branch on first use anyway; this warms them up
+    ahead of time (``update_extra_repo(add_branch=...)``, dashboard Branches).
+    The remote branch list is refreshed first, so a missing name fails with a
+    clear message before anything is fetched.
+    """
+    branches = list(dict.fromkeys(b.strip() for b in branches if b and b.strip()))
+    if not branches:
+        raise PrerequisiteNotMetError("No branch given to download.")
+    for branch in branches:
+        validate_branch_name(branch)
+    with _repo_operation_lock(team, name):
+        path = _remote_repo_path(team, name)
+        available = _refresh_remote_branches(team, path)
+        missing = [b for b in branches if b not in available]
+        if missing:
+            raise NotFoundError(
+                f"Branch(es) not found in the remote of extra repo '{name}': "
+                f"{', '.join(missing)}."
+            )
+        present = _get_branch_refs(path)
+        _fetch_branches_unlocked(team, name, path, branches)
+        return {
+            "name": name,
+            "branches": branches,
+            "downloaded": [b for b in branches if b not in present],
+            "updated": [b for b in branches if b in present],
+        }
+
+
+def track_branch(team: TeamSettings, name: str, branch: str) -> dict[str, Any]:
+    """Download one *branch* now (see :func:`track_branches`)."""
+    track_branches(team, name, [branch])
+    return {"name": name, "branch": branch, "tracked": True}
+
+
+def refresh_remote_branches(team: TeamSettings, name: str) -> list[str]:
+    """Re-read the remote branch list (``git ls-remote``); downloads nothing."""
+    with _repo_operation_lock(team, name):
+        return _refresh_remote_branches(team, _remote_repo_path(team, name))
+
+
+def branch_usage(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, list[str]]:
+    """Map each branch of extra repo *name* to the consumers that use it.
+
+    Consumers are environments and productions, from their containers
+    (running or stopped) plus the production registry, so a production whose
+    container is gone mid-deploy still counts.
+    """
+    return _branch_usage(team, name, _extra_repo_consumers(settings, team, name))
+
+
+def _branch_usage(
+    team: TeamSettings, name: str, consumers: list[dict[str, str]]
+) -> dict[str, list[str]]:
+    from oduflow import production_registry
+
+    usage: dict[str, set[str]] = {}
+    for c in consumers:
+        if c["branch"]:
+            usage.setdefault(c["branch"], set()).add(c["consumer"])
+    for prod_name, record in production_registry.list_productions(team).items():
+        extras = record.get("extra_addons") or {}
+        branch = extras.get(name) if isinstance(extras, dict) else None
+        if isinstance(branch, str) and branch:
+            usage.setdefault(branch, set()).add(f"production {prod_name}")
+    return {branch: sorted(consumers) for branch, consumers in usage.items()}
+
+
+def _reachable_from_branches(repo_path: str, revisions: set[str]) -> set[str]:
+    """The *revisions* some local branch contains, from one history walk.
+
+    On failure every revision counts as reachable: when in doubt, keep the
+    checkout.
+    """
+    if not revisions:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "rev-list", "--branches"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=GIT_ENV,
+        )
+    except subprocess.TimeoutExpired:
+        return set(revisions)
+    if result.returncode != 0:
+        return set(revisions)
+    return {line for line in result.stdout.splitlines() if line in revisions}
+
+
+def _detach_unused_checkouts(
+    team: TeamSettings, name: str, repo_path: str, pinned: set[str]
+) -> list[tuple[str, str]]:
+    """Move cached checkouts nothing needs any more out of the cache.
+
+    A checkout is kept while a container pins it, a remaining branch contains
+    it, or it was handed out within the grace period. The rest are renamed
+    into a ``.removing-*`` directory, so the caller can size and delete them
+    after releasing the repo lock; ``git worktree prune`` then drops their
+    registrations. Returns ``(revision, moved path)`` pairs, including
+    leftovers of an earlier removal that was interrupted.
+    """
+    cache_dir = os.path.join(team.shared_extra_checkouts_dir, name)
+    if not os.path.isdir(cache_dir):
+        return []
+    now = time.time()
+    candidates: list[str] = []
+    detached: list[tuple[str, str]] = []
+    for entry in sorted(os.listdir(cache_dir)):
+        entry_path = os.path.join(cache_dir, entry)
+        try:
+            age = now - os.path.getmtime(entry_path)
+        except OSError:
+            continue
+        if entry.startswith(_REMOVING_PREFIX):
+            # Fresh ones may belong to a removal still deleting outside the lock.
+            if age > _CHECKOUT_GRACE_SECONDS:
+                detached.append(("", entry_path))
+        elif (
+            _REVISION_RE.fullmatch(entry)
+            and entry not in pinned
+            and age > _CHECKOUT_GRACE_SECONDS
+        ):
+            candidates.append(entry)
+    reachable = _reachable_from_branches(repo_path, set(candidates))
+    for revision in candidates:
+        if revision in reachable:
+            continue
+        holder = tempfile.mkdtemp(prefix=_REMOVING_PREFIX, dir=cache_dir)
+        moved = os.path.join(holder, revision)
+        os.rename(os.path.join(cache_dir, revision), moved)
+        detached.append((revision, holder))
+    if detached:
+        subprocess.run(
+            ["git", "-C", repo_path, "worktree", "prune"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=GIT_ENV,
+        )
+    return detached
+
+
+def untrack_branch(
+    settings: Settings, team: TeamSettings, name: str, branch: str
+) -> dict[str, Any]:
+    """Remove a downloaded *branch* to free disk; it can be downloaded again.
+
+    Refused for a protected repo and while an environment or production uses
+    the branch. Drops the branch ref and its fetch refspec (a legacy
+    all-branches repo is converted to an explicit list of its other downloaded
+    branches, so Update does not bring the branch straight back) and the
+    cached checkouts nothing needs any more (see
+    :func:`_detach_unused_checkouts`). Deleting those checkouts and
+    garbage-collecting the repo happen after the repo lock is released, so
+    environment and production operations on the repo are not held up.
     """
     validate_branch_name(branch)
     with _repo_operation_lock(team, name):
-        path = os.path.join(team.shared_repos_dir, name)
-        if not os.path.isdir(path):
-            raise NotFoundError(f"Extra repo '{name}' not found.")
-        if os.path.exists(os.path.join(path, ".local")):
-            raise PrerequisiteNotMetError(
-                f"Extra repo '{name}' is local (no remote); branches cannot be fetched."
+        path = _remote_repo_path(team, name)
+        if is_extra_repo_protected(team, name):
+            raise ProtectedError(
+                f"Extra repo '{name}' is protected. Unprotect it before removing "
+                "branches."
             )
-        _fetch_branches_unlocked(team, name, path, [branch])
-        return {"name": name, "branch": branch, "tracked": True}
+        refs = _get_branch_refs(path)
+        if branch not in refs:
+            raise NotFoundError(
+                f"Branch '{branch}' is not downloaded in extra repo '{name}'."
+            )
+        consumers = _extra_repo_consumers(settings, team, name)
+        users = _branch_usage(team, name, consumers).get(branch, [])
+        if users:
+            raise ConflictError(
+                f"Cannot remove branch '{branch}' of extra repo '{name}': used by "
+                f"{', '.join(users)}."
+            )
+        pinned = {c["revision"] for c in consumers if c["revision"]}
+
+        configured = _configured_refspecs(path)
+        if _WILDCARD_REFSPEC in configured:
+            # Mark first and drop the wildcard last: until then the repo still
+            # tracks every branch, so a failure part way leaves it unchanged
+            # and a retry picks up where this one stopped.
+            open(os.path.join(path, _ON_DEMAND_MARKER), "w").close()
+            for other in sorted(refs):
+                refspec = _branch_refspec(other)
+                if other == branch or refspec in configured:
+                    continue
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        path,
+                        "config",
+                        "--add",
+                        "remote.origin.fetch",
+                        refspec,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env=GIT_ENV,
+                )
+            _unset_refspec(path, _WILDCARD_REFSPEC)
+            logger.info(
+                "Extra repo '%s': switched from all branches to the %d downloaded ones",
+                name,
+                len(refs) - 1,
+            )
+        _forget_branch(path, branch)
+        detached = _detach_unused_checkouts(team, name, path, pinned)
+
+    checkouts_size = 0
+    for _revision, holder in detached:
+        checkouts_size += _dir_size_bytes(holder)
+        shutil.rmtree(holder, ignore_errors=True)
+
+    # gc guards against concurrent writers by itself (gc.pid, and the prune
+    # grace period protects objects a parallel fetch has just written).
+    # Objects of a branch downloaded within that grace period stay until a
+    # later gc.
+    objects_dir = os.path.join(path, "objects")
+    size_before = _dir_size_bytes(objects_dir)
+    try:
+        subprocess.run(
+            ["git", "-C", path, "gc", "--prune=1.hour.ago", "--quiet"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_FETCH_TIMEOUT,
+            env=GIT_ENV,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        # The branch is already gone; a later gc reclaims the space.
+        logger.warning("Extra repo '%s': git gc failed: %s", name, e)
+
+    removed_checkouts = [revision for revision, _holder in detached if revision]
+    freed = max(size_before - _dir_size_bytes(objects_dir), 0) + checkouts_size
+    logger.info(
+        "Extra repo '%s': removed branch '%s' (%d cached checkout(s), %d bytes freed)",
+        name,
+        branch,
+        len(removed_checkouts),
+        freed,
+    )
+    return {
+        "name": name,
+        "branch": branch,
+        "removed_checkouts": removed_checkouts,
+        "freed_bytes": freed,
+    }
 
 
 def ensure_branch_revision(team: TeamSettings, repo_name: str, branch: str) -> str:
@@ -1155,6 +1483,13 @@ def ensure_shared_checkout(
                 revision,
                 checkout_path,
             )
+
+        # Handed out now: branch removal leaves recently used checkouts alone
+        # while the caller's container does not exist yet.
+        try:
+            os.utime(checkout_path)
+        except OSError:
+            pass
 
         changed_files = _changed_files_between(
             bare_path, current_revision.lower(), revision
