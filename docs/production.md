@@ -10,6 +10,8 @@ environments it was built for. Productions get special treatment:
   the same production (e.g. the client's own public domain);
 - an **auto-tuned production `odoo.conf`** (workers from host CPU/RAM, cron
   enabled, proxy mode) — never the dev profile;
+- a choice of **server mode**: sync multi-process workers or one async gevent
+  process, with Traefik routing to the matching Odoo port;
 - **no sanitization/neutralization**, no idle reaper, no `--dev=xml`;
 - deploys with **automatic code rollback** on failure;
 - **S3 backups**: continuous WAL archiving (WAL-G), scheduled snapshots
@@ -189,6 +191,7 @@ create_production(
     template_name="acme-prod",   # optional: seed DB+filestore from a template
     auto_update=False,
     allow_copy_to_dev_mcp=True,  # may agents copy this production into dev?
+    server_mode="workers",       # or "gevent", see Server mode below
 )
 ```
 
@@ -209,8 +212,8 @@ create_production(name="erp", domain="demo.example.com",
                   extra_domains=["myodoo.pl"], ...)
 ```
 
-All domains land in one Traefik router (`Host(a) || Host(b)`), each with its
-own Let's Encrypt certificate; every DNS record must point at this server.
+All domains share the production's Traefik routes (`Host(a) || Host(b)`),
+each with its own Let's Encrypt certificate; every DNS record must point at this server.
 Extra domains may be arbitrary FQDNs but must not fall inside another team's
 zone, and every domain — primary or extra — must be unused anywhere else in
 the deployment (other productions, team hostnames, static routes).
@@ -222,6 +225,45 @@ filestore into the production's plain (non-overlay) directory.
 
 The clone is **full** (not shallow): the branch's commit history is the
 production's deploy history and the source of rollback targets.
+
+### Server mode
+
+`server_mode` picks how Odoo serves HTTP and where Traefik sends the traffic:
+
+| Mode | Odoo | Traefik routes |
+|---|---|---|
+| `workers` (default, sync) | auto-tuned HTTP worker processes on 8069, plus the gevent process on 8072 | pages to **8069**; the live bus (`/websocket`, and `/longpolling` on Odoo ≤ 15) to **8072** |
+| `gevent` (async) | one HTTP worker on 8069 (kept for in-container calls) and the gevent process on 8072 | **everything to 8072** |
+
+Both modes run Odoo's multi-process server, so cron workers run either way,
+and the gevent process is always present. In `workers` mode it only holds the
+bus connections: a worker process refuses a websocket ("Is the connection
+opened on the evented port?"), so without the bus route Discuss and live
+notifications would not work. In `gevent` mode a single cooperative process
+serves every request: it handles many concurrent long-lived or I/O-bound
+requests (long polling, slow external calls) cheaply, but one CPU-heavy
+request stalls everyone else, and it uses one CPU core. `db_maxconn` keeps its
+full auto-tuned size in both modes; in `gevent` mode it is the connection
+pool that bounds how many requests that process serves at once. Because that
+one process is the whole site, `gevent` mode also raises its memory limits
+(`limit_memory_soft_gevent`/`limit_memory_hard_gevent`, and the general
+`limit_memory_*` for Odoo ≤ 15) to half the Odoo RAM budget instead of a
+worker's 2 GB, so it does not recycle itself — dropping every connection — under
+normal load.
+
+The listen settings are pinned in the generated `odoo.conf` whatever the base
+conf (team or repo `.oduflow/odoo.prod.conf`) says: `http_port = 8069`,
+`gevent_port`/`longpolling_port = 8072`, `http_enable = True`, and
+`http_interface`/`xmlrpc_*` are dropped; a base conf that set them is logged.
+The deploy health check requires **both** ports to answer `/web/health` in
+either mode, so a dead gevent process (a broken bus in `workers` mode, a
+dead site in `gevent` mode) fails the deploy and triggers the code rollback.
+
+Change the mode with `reconfigure_production(name="erp", server_mode="gevent")`
+(the container is recreated). The listen ports are managed keys (see
+[odoo.conf overrides](#odooconf-overrides)), and a `workers` override must stay
+at least 1: with `workers = 0` Odoo would switch to its threaded server, which
+does not listen on 8072.
 
 ### Promoting a dev environment
 
@@ -265,8 +307,8 @@ To promote into a production that **already exists**, use
 
 A production's settings are not frozen at creation.
 `reconfigure_production` changes any of the domain, extra domains, Odoo
-image, deployed branch, repository URL, git user, or the extra addon repos,
-then **recreates the container** to match — the database and filestore live outside the
+image, deployed branch, repository URL, git user, the extra addon repos, or
+the [server mode](#server-mode), then **recreates the container** to match — the database and filestore live outside the
 container and are preserved; expect a brief downtime:
 
 ```text
@@ -274,13 +316,19 @@ reconfigure_production(name="erp", domain="erp.newcustomer.com")
 reconfigure_production(name="erp", extra_domains=["myodoo.pl"])  # [] removes all
 reconfigure_production(name="erp", branch="18.0-stable")
 reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
+reconfigure_production(name="erp", server_mode="gevent")
 ```
 
 Omitted arguments are left unchanged (`git_user=""` explicitly clears the
 git user). The registry record is updated first and the workspace/container
 are converged to it, so re-running the same call after a mid-way failure
-repairs a missing container or checkout instead of reporting a no-op. Two
-things reconfigure deliberately does **not** do:
+repairs a missing container or checkout instead of reporting a no-op. The same
+applies to a container whose Traefik routing no longer matches the record
+(e.g. a production created before the bus route existed). Such a container is
+also recreated, without a separate maintenance window, by the next deploy
+that changes code (`update_production` or an auto-deploy) and by
+`restart_production`; a plain `reconfigure_production(name="erp")` does it
+immediately. Two things reconfigure deliberately does **not** do:
 
 - Changing `odoo_image` does not migrate the database. A minor image refresh
   is safe; a major Odoo version bump additionally needs an explicit module
@@ -305,9 +353,13 @@ set_production_odoo_conf(name="erp", options={"limit_time_real": "300"})
 set_production_odoo_conf(name="erp", unset="limit_time_real")
 ```
 
-An explicit override beats the auto-tuned value (e.g. pin `workers`). Keys
-managed by Oduflow are refused: `addons_path` and `data_dir` are generated,
-and the `db_*` connection keys come from container env vars (option names
+An explicit override beats the auto-tuned value (e.g. pin `workers`; it must
+be at least 1, see [Server mode](#server-mode)). Keys managed by Oduflow are
+refused: `addons_path` and `data_dir` are generated, the `db_*` connection
+keys come from container env vars, and the listen ports (`http_port`,
+`xmlrpc_port`, `gevent_port`, `longpolling_port`) are what Traefik routes to.
+Such keys saved before they became managed are ignored (and logged) and are
+removed from the record by the next override save or reconfigure (option names
 are compared case-insensitively and stored lowercased, matching how Odoo
 reads them). Current overrides are shown by `get_production_info`; the
 dashboard edits them in the same **Settings** panel. Applying restarts the

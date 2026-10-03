@@ -8890,6 +8890,7 @@ function renderProductions() {
       '<div class="env-meta">' +
         '<span>Branch: <strong class="prod-mono">' + esc(p.branch) + ' @ ' + esc(p.commit_short || '?') + '</strong></span>' +
         '<span>Image: <strong class="prod-mono">' + esc(p.odoo_image) + '</strong></span>' +
+        '<span>Server: <strong>' + esc(p.server_mode || 'workers') + '</strong></span>' +
         '<span>DB: <strong class="prod-mono">' + esc(p.db_name) + '</strong></span>' +
         lastHtml +
         snapHtml +
@@ -8970,6 +8971,23 @@ async function _loadProdSection(name, section) {
   }
 }
 
+// Server mode picker shared by the create modal and the settings panel. The
+// hint carries the trade-off; the choice itself is plain text, not color.
+// `id` must already be attribute-safe (callers pass escaped production names).
+function _prodServerModeSelect(id, current) {
+  var mode = current === 'gevent' ? 'gevent' : 'workers';
+  var opt = function(value, label) {
+    return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label + '</option>';
+  };
+  return '<select id="' + id + '">' +
+      opt('workers', 'Workers — sync, pages on port 8069') +
+      opt('gevent', 'Gevent — async, all traffic on port 8072') +
+    '</select>' +
+    '<div class="hint">Workers: multi-process, the live bus (/websocket) still goes to 8072. ' +
+    'Gevent: one async process serves everything — suits many long-lived or I/O-bound requests, ' +
+    'but one CPU-heavy request slows everyone. Crons run in both modes.</div>';
+}
+
 // Settings panel: oduflow-level options (applied via container recreation),
 // the MCP copy gate, and per-production odoo.conf overrides.
 function _prodSettingsHtml(p) {
@@ -8991,6 +9009,8 @@ function _prodSettingsHtml(p) {
     '<div class="form-group"><label for="ps-image-' + n + '">Odoo image</label>' +
       '<input type="text" id="ps-image-' + n + '" value="' + escHtmlAttr(p.odoo_image || '') + '">' +
       '<div class="hint">Changing the image does not migrate the database</div></div>' +
+    '<div class="form-group"><label for="ps-mode-' + n + '">Server mode</label>' +
+      _prodServerModeSelect('ps-mode-' + n, p.server_mode) + '</div>' +
     '<div class="form-group"><label for="ps-repo-' + n + '">Repository URL</label>' +
       '<input type="text" id="ps-repo-' + n + '" value="' + escHtmlAttr(p.repo_url || '') + '"></div>' +
     '<div class="form-group"><label for="ps-branch-' + n + '">Branch</label>' +
@@ -9007,7 +9027,7 @@ function _prodSettingsHtml(p) {
     '<div style="margin-bottom:16px"><button class="btn btn-start" onclick="prodApplySettings(\'' + n + '\')">Apply — recreates container</button></div>' +
     '<div class="form-group"><label for="ps-conf-' + n + '">odoo.conf overrides (one per line, key = value)</label>' +
       '<textarea id="ps-conf-' + n + '" rows="4" placeholder="limit_time_real = 300">' + esc(conf) + '</textarea>' +
-      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*) are refused.</div></div>' +
+      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*, listen ports) are refused; workers must stay at least 1.</div></div>' +
     '<div><button class="btn" onclick="prodSaveOdooConf(\'' + n + '\')">Save odoo.conf — restarts Odoo</button></div>' +
   '</div>';
 }
@@ -9042,7 +9062,8 @@ async function prodApplySettings(name) {
     repo_url: v('ps-repo'),
     branch: v('ps-branch'),
     git_user: v('ps-gituser'),
-    extra_addons: extras
+    extra_addons: extras,
+    server_mode: v('ps-mode')
   };
   if (!(await confirmDialog({
     title: 'Reconfigure production',
@@ -9056,10 +9077,15 @@ async function prodApplySettings(name) {
   _prodSettingsDirty[name] = false;
   var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/reconfigure', body, null);
   if (data) {
-    showToast(data.changed && data.changed.length
-      ? 'Reconfigured "' + name + '": ' + data.changed.join(', ') +
-        (data.healthy === false ? ' — NOT healthy yet, check logs' : '')
-      : (data.message || 'No settings changed'));
+    // A response without `message` recreated the container: either settings
+    // changed, or nothing changed but drifted state (e.g. outdated routing)
+    // was repaired. Only an explicit `message` means it was left alone.
+    var unhealthy = data.healthy === false ? ' — NOT healthy yet, check logs' : '';
+    showToast(data.message
+      ? data.message
+      : data.changed && data.changed.length
+        ? 'Reconfigured "' + name + '": ' + data.changed.join(', ') + unhealthy
+        : 'No settings changed; container recreated to repair drifted state' + unhealthy);
   } else {
     _prodSettingsDirty[name] = true;
   }
@@ -9321,6 +9347,8 @@ function openCreateProductionModal(fromEnv) {
           '<input type="text" id="cp-xdomains" placeholder="erp.customer.com">' +
           '<div class="hint">Additional public domains routed to this production, e.g. the client\'s own domain</div></div>' +
         '<div class="form-group"><label for="cp-image">Odoo image</label><input type="text" id="cp-image" placeholder="odoo:18.0"></div>' +
+        '<div class="form-group"><label for="cp-mode">Server mode</label>' +
+          _prodServerModeSelect('cp-mode', 'workers') + '</div>' +
         '<div class="form-group"><label for="cp-template">Template (optional)</label><input type="text" id="cp-template" placeholder="empty = fresh database"></div>' +
         '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-auto"> Deploy automatically on GitHub push</label></div>' +
       '</div>' +
@@ -9344,6 +9372,7 @@ async function submitCreateProduction() {
     odoo_image: v('cp-image'),
     template_name: v('cp-template'),
     from_environment: v('cp-fromenv'),
+    server_mode: v('cp-mode'),
     auto_update: document.getElementById('cp-auto').checked
   };
   if (!body.name || (!body.domain && !window._teamBaseDomain)) {

@@ -1602,7 +1602,15 @@ def generate_odoo_conf(
     extra_paths: list[str],
     main_addons_path: str = "/mnt/extra-addons",
     overrides: dict[str, str] | None = None,
+    pinned: dict[str, str] | None = None,
+    remove_keys: tuple[str, ...] = (),
 ) -> str:
+    """Merge *base_conf_path* into *output_path*.
+
+    ``overrides`` win over the base conf. ``pinned`` win over both and
+    ``remove_keys`` are dropped (both case-insensitive); a base conf that set
+    either to something else is logged, since its value is not what runs.
+    """
     parser = configparser.RawConfigParser()
     # Preserve option case (Odoo config keys are case-sensitive); the default
     # optionxform lowercases them. Assigning to this method is the documented
@@ -1625,6 +1633,25 @@ def generate_odoo_conf(
     # worker/limit settings that must win over whatever the base conf says.
     for key, value in (overrides or {}).items():
         parser.set("options", key, value)
+
+    pinned = {k.lower(): v for k, v in (pinned or {}).items()}
+    dropped = {k.lower() for k in remove_keys}
+    ignored = []
+    for key in list(parser.options("options")):
+        lowered = key.lower()
+        if lowered in dropped or (
+            lowered in pinned and parser.get("options", key) != pinned[lowered]
+        ):
+            ignored.append(key)
+            parser.remove_option("options", key)
+    for key, value in pinned.items():
+        parser.set("options", key, value)
+    if ignored:
+        logger.warning(
+            "Ignoring managed odoo.conf options from %s: %s",
+            base_conf_path,
+            ", ".join(sorted(ignored)),
+        )
 
     # Strip DB connection keys — these are managed via container env vars
     # (HOST, USER, PASSWORD).  If left in the conf file the Odoo entrypoint

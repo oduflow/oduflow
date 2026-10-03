@@ -1026,6 +1026,7 @@ class TestAllowCopyToDevFlag:
                 "database": "oduflow_1_prod-erp",
                 "commit": "c0ffee1234",
                 "odoo_container": "oduflow-1-prod-erp-odoo",
+                "server_mode": "workers",
             },
         ) as create:
             # Called directly: this tool has its own `name` parameter.

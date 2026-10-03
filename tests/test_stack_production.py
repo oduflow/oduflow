@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from oduflow import production_registry, stack_production
+from oduflow.docker_ops import production_ops
 from oduflow.errors import BusyError, ConflictError
 from oduflow.locking import LockManager, prod_lock_key
 from oduflow.settings import Settings, TeamSettings
@@ -104,6 +105,9 @@ def test_production_schema_requires_exactly_one_target(setup):
         ("name", "../../other"),
         ("odooConf", {"db_password": "secret"}),
         ("odooConf", {"workers": "2\ndb_host = evil"}),
+        ("odooConf", {"workers": "0"}),
+        ("odooConf", {"gevent_port": "9000"}),
+        ("serverMode", "threaded"),
         ("env", {"SELF": {"productionField": "url"}}),
         ("env", {"DB": {"database": "x", "databaseField": "url"}}),
     ],
@@ -271,6 +275,36 @@ def test_failed_reconfiguration_leaves_pending_state_and_retries(setup):
     assert not build_plan(*setup).actions
 
 
+def test_server_mode_change_reconfigures_production(setup):
+    register(setup, owned=True)
+    setup[2].spec.production.server_mode = "gevent"
+    plan = build_plan(*setup)
+    assert "server_mode" in plan.actions[0].detail
+    with patch(
+        "oduflow.stack_production.production_ops.reconfigure_production",
+        return_value={"healthy": True},
+    ) as reconfigure:
+        apply_stack(*setup)
+    assert reconfigure.call_args.kwargs["server_mode"] == "gevent"
+    assert reconfigure.call_args.kwargs["force_recreate"] is True
+
+
+def test_record_without_server_mode_is_not_drift(setup):
+    # Records created before server_mode existed carry no key and read as
+    # "workers"; a default manifest must not plan a perpetual update.
+    import json
+
+    register(setup, owned=True)
+    path = production_registry.registry_path(setup[1])
+    with open(path) as f:
+        state = json.load(f)
+    del state["productions"]["control"]["server_mode"]
+    with open(path, "w") as f:
+        json.dump(state, f)
+    assert "server_mode" not in production_registry.get_production(setup[1], "control")
+    assert not build_plan(*setup).actions
+
+
 def test_auto_update_toggle_does_not_restart_production(setup):
     register(setup, owned=True)
     setup[2].spec.production.auto_update = True
@@ -398,7 +432,8 @@ def test_runtime_inspection_detects_effective_drift(setup):
         "oduflow.domain": "example.org",
         "oduflow.git_branch": "production",
         "oduflow.env_vars": '{"MODE":"production"}',
-        "traefik.http.routers.oduflow-1-prod-control.rule": "Host(`example.org`)",
+        "oduflow.server_mode": "workers",
+        **production_ops.prod_routing_labels(settings, team, "control", record),
     }
     container = Mock(
         status="running",
@@ -418,6 +453,11 @@ def test_runtime_inspection_detects_effective_drift(setup):
         ),
     ):
         assert inspect_runtime(settings, team, record) == []
+        # A container created before the bus route existed must be recreated.
+        bus_rule = "traefik.http.routers.oduflow-1-prod-control_bus.rule"
+        saved_bus_rule = labels.pop(bus_rule)
+        assert inspect_runtime(settings, team, record) == ["container route"]
+        labels[bus_rule] = saved_bus_rule
         container.attrs["Config"]["Env"] = ["MODE=wrong", "HOST=oduflow-db"]
         assert inspect_runtime(settings, team, record) == [
             "container database host",
@@ -439,3 +479,60 @@ def test_odoo_conf_keys_follow_odoo_case_normalization(setup):
     raw["spec"]["production"]["odooConf"] = {"workers": "2", "Workers": "3"}
     with pytest.raises(ValidationError, match="Duplicate"):
         StackManifest.model_validate(raw)
+
+
+def test_default_server_mode_keeps_pre_existing_spec_hash(setup):
+    # Manifests applied before serverMode existed must keep their
+    # appliedHash, or every Stack production would be recreated on upgrade.
+    import hashlib
+    import json
+
+    manifest = setup[2]
+    legacy = manifest.spec.production.model_dump(
+        mode="json", by_alias=True, exclude={"adopt_existing", "server_mode"}
+    )
+    legacy["extraRepositories"] = {}
+    expected = hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
+    assert stack_production.spec_hash(manifest) == expected
+    manifest.spec.production.server_mode = "gevent"
+    assert stack_production.spec_hash(manifest) != expected
+
+
+def test_adoption_recreates_container_with_outdated_routing(setup):
+    register(setup)
+    setup[2].spec.production.adopt_existing = True
+    with patch(
+        "oduflow.stack_production.runtime_drift", return_value=["container route"]
+    ):
+        plan = build_plan(*setup)
+        assert not plan.has_conflicts
+        assert plan.actions[0].operation == "adopt"
+        assert "container route" in plan.actions[0].detail
+        with patch(
+            "oduflow.stack_production.production_ops.reconfigure_production",
+            return_value={"healthy": True},
+        ) as reconfigure:
+            apply_stack(*setup)
+    settings, team = setup[0], setup[1]
+    reconfigure.assert_called_once_with(settings, team, "control")
+    stack = production_registry.get_production(team, "control")["meta"]["stack"]
+    assert stack["appliedHash"] == stack_production.spec_hash(setup[2])
+
+
+def test_legacy_record_without_server_mode_is_not_reconfigured(setup):
+    # apply must judge server_mode like plan does: a missing key is "workers".
+    import json
+
+    register(setup, owned=True)
+    path = production_registry.registry_path(setup[1])
+    with open(path) as f:
+        state = json.load(f)
+    del state["productions"]["control"]["server_mode"]
+    with open(path, "w") as f:
+        json.dump(state, f)
+    setup[2].spec.production.auto_update = True
+    with patch(
+        "oduflow.stack_production.production_ops.reconfigure_production"
+    ) as reconfigure:
+        apply_stack(*setup)
+    reconfigure.assert_not_called()

@@ -15,11 +15,18 @@ from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import resolve_env_values
 from oduflow.stack_models import StackManifest
 
+ROUTE_DRIFT = "container route"
+
 
 def spec_hash(manifest: StackManifest) -> str:
     target = manifest.spec.production
     assert target is not None
-    value = target.model_dump(mode="json", by_alias=True, exclude={"adopt_existing"})
+    exclude = {"adopt_existing"}
+    if target.server_mode == production_ops.DEFAULT_SERVER_MODE:
+        # The default stays out of the hash, so manifests applied before
+        # serverMode existed keep their appliedHash (no spurious recreate).
+        exclude.add("server_mode")
+    value = target.model_dump(mode="json", by_alias=True, exclude=exclude)
     value["extraRepositories"] = {
         name: repo.branch for name, repo in manifest.spec.extra_repositories.items()
     }
@@ -50,6 +57,7 @@ def desired_record(
         "env_vars": env,
         "auto_update": target.auto_update,
         "allow_copy_to_dev_mcp": target.allow_copy_to_dev_mcp,
+        "server_mode": target.server_mode,
         "odoo_conf": target.odoo_conf,
     }
 
@@ -95,11 +103,8 @@ def runtime_drift(
         drift.append("container extra_addons")
     if labels.get("oduflow.git_user", "") != record.get("git_user", ""):
         drift.append("container git_user")
-    router = f"oduflow-{team.team_id}-prod-{record['name']}"
-    if labels.get(
-        f"traefik.http.routers.{router}.rule"
-    ) != production_ops.prod_host_rule(record):
-        drift.append("container route")
+    if production_ops.routing_drift(settings, team, record["name"], record, labels):
+        drift.append(ROUTE_DRIFT)
     if declared != record.get("env_vars", {}):
         drift.append("container env references")
     effective = dict(value.split("=", 1) for value in config.get("Env", []))
@@ -109,6 +114,18 @@ def runtime_drift(
     if any(effective.get(key) != value for key, value in resolved.items()):
         drift.append("container env")
     return drift
+
+
+def _field_drift(record: dict[str, Any], desired: dict[str, Any]) -> list[str]:
+    """Desired record fields the registry record does not match. Records
+    created before server_mode existed carry no key; the effective mode is
+    compared so they show no perpetual drift."""
+    current = {**record, "server_mode": production_ops.server_mode_of(record)}
+    return [
+        key
+        for key, value in desired.items()
+        if current.get(key, {} if isinstance(value, dict) else None) != value
+    ]
 
 
 def plan_production(
@@ -155,16 +172,15 @@ def plan_production(
         ]
     if record.get("deploy_in_progress"):
         return [("conflict", "production deploy is in progress")]
-    fields = [
-        key
-        for key, value in desired.items()
-        if record.get(key, {} if isinstance(value, dict) else None) != value
-    ]
+    fields = _field_drift(record, desired)
     runtime = runtime_drift(settings, team, record)
     if "container ownership" in runtime:
         return [("conflict", "existing container is not this team's production")]
     if not ownership:
-        if fields or runtime or target.template is not None or record.get("unhealthy"):
+        # Outdated Traefik routing alone (a container created before the
+        # current routing) is no reason to refuse: apply recreates it.
+        blocking = [item for item in runtime if item != ROUTE_DRIFT]
+        if fields or blocking or target.template is not None or record.get("unhealthy"):
             return [
                 (
                     "conflict",
@@ -172,6 +188,8 @@ def plan_production(
                     + ", ".join(fields + runtime),
                 )
             ]
+        if runtime:
+            return [("adopt", f"{target.name} (recreates container: {ROUTE_DRIFT})")]
         return [("adopt", target.name)]
     immutable = [
         key
@@ -244,11 +262,12 @@ def apply_production(
                 restart=False,
             )
         infrastructure = {
-            key: desired[key] for key in ("domain", "odoo_image", "env_vars")
+            key: desired[key]
+            for key in ("domain", "odoo_image", "env_vars", "server_mode")
         }
         must_reconfigure = operation == "update" and (
             conf_changed
-            or any(record.get(key) != value for key, value in infrastructure.items())
+            or bool(set(_field_drift(record, desired)) & set(infrastructure))
             or bool(runtime_drift(settings, team, record))
             or not record.get("meta", {}).get("stack", {}).get("appliedHash")
         )
@@ -277,5 +296,13 @@ def apply_production(
                 raise ConflictError(
                     "Production did not become healthy; Stack apply remains incomplete"
                 )
+    elif runtime_drift(settings, team, record):
+        # plan_production lets adoption through only with outdated routing;
+        # reconfigure recreates the container from the (matching) record.
+        result = production_ops.reconfigure_production(settings, team, target.name)
+        if not result.get("healthy"):
+            raise ConflictError(
+                "Adopted production did not become healthy; Stack apply remains incomplete"
+            )
     metadata["appliedHash"] = spec_hash(manifest)
     production_registry.set_nested(team, target.name, "meta", {"stack": metadata})
