@@ -2085,6 +2085,12 @@
           <div class="hint">Restores an Odoo.sh daily backup (database + filestore) into a new template of this name.</div>
         </div>
         <div class="form-group">
+          <div class="check-row">
+            <input type="checkbox" id="import-without-filestore">
+            <label for="import-without-filestore">Without filestore (database only) <span class="label-hint">— skips the attachments upload; an existing template keeps its current filestore</span></label>
+          </div>
+        </div>
+        <div class="form-group">
           <div class="hint" style="margin-top:0;">Enterprise and Themes are proprietary Odoo code. Before downloading them, review your rights and obligations: <a href="https://oduflow.dev/odoo-sh-import-notes" target="_blank" rel="noopener">oduflow.dev/odoo-sh-import-notes</a> (opens in a new tab).</div>
           <div class="check-row" style="margin-top:8px;">
             <input type="checkbox" id="import-ack" onchange="onImportAckChange()" aria-controls="import-addons-options">
@@ -4745,6 +4751,7 @@ function openImportOdooModal() {
     cb.checked = false;
     cb.disabled = true;
   });
+  document.getElementById('import-without-filestore').checked = false;
   document.getElementById('import-ack').checked = false;
   document.getElementById('import-addons-options').hidden = true;
   showModal('import-odoo-modal');
@@ -4805,6 +4812,7 @@ async function submitImportOdoo() {
         with_enterprise: document.getElementById('import-with-enterprise').checked,
         with_themes: document.getElementById('import-with-themes').checked,
         with_extra_addons: document.getElementById('import-with-extra').checked,
+        without_filestore: document.getElementById('import-without-filestore').checked,
         addon_error_policy: document.getElementById('import-best-effort').checked ? 'best_effort' : 'strict'
       })
     });

@@ -1850,6 +1850,35 @@ oduflow attach-filestore default /backups/filestore.zip --strip-prefix none
 
 Like `template-from-env`, this is non-destructive for live overlay environments by default: Oduflow remounts them against the new template filestore while preserving their `upper` changes. Pass `--reset-env-changes` only when you intentionally want those environments reset to the new baseline. Copy-mode environments are independent copies and are not changed by attaching a new template filestore.
 
+## Importing from Odoo.sh
+
+The dashboard's **Import from Odoo.sh** button mints a 15-minute token and
+prints a command to run inside the Odoo.sh **production** shell. The
+`import-odoo.sh` client finds the latest daily backup and streams the SQL dump,
+the filestore and, optionally, the addons Odoo.sh ran with to Oduflow, which
+restores them as a template. Uploads are resumable: re-running the command
+sends only what the server does not have yet.
+
+```bash
+curl -sSfL https://YOUR-ODUFLOW/import-odoo.sh | bash -s -- \
+     --server https://YOUR-ODUFLOW --token <TOKEN> \
+     [--with-enterprise] [--with-themes] [--with-extra-addons] \
+     [--without-filestore]
+```
+
+The dialog checkboxes add the optional flags for you:
+
+- `--with-enterprise` / `--with-themes` / `--with-extra-addons` bring over the
+  addons-path beyond the standard modules shipped in the image.
+- `--without-filestore` (*Without filestore (database only)*) imports the
+  database and addons only. Use it when the filestore is large and the template
+  is for development, where attachments are rarely needed. The template's
+  `metadata.json` records `includes_filestore: false`. If the template already
+  exists, its current filestore is kept untouched — live overlay environments
+  are not disturbed — while the database is replaced; a new template gets an
+  empty filestore. Attach the filestore later with `attach-filestore` (see
+  [Database Dump and Separate Filestore](#database-dump-and-separate-filestore)).
+
 ## Importing from an S3 Prefix
 
 For very large databases and filestores, skip archives entirely: upload the raw
@@ -4499,7 +4528,7 @@ would let work in the environment.
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
 | `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
-| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
+| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token. Body: `template_name`, optional booleans `with_enterprise` / `with_themes` / `with_extra_addons` / `without_filestore`, optional `addon_error_policy` (`strict` or `best_effort`) |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
 | `POST` | `/api/templates/import/dump` | Stream/chunk the compressed SQL dump |

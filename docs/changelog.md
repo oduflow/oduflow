@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Database-only Odoo.sh import** — the "Import from Odoo.sh" dialog has a
+  *Without filestore (database only)* option, and `import-odoo.sh` accepts
+  `--without-filestore`: the dump, manifest and selected addons are uploaded but
+  the filestore is skipped, which makes large production backups usable as
+  development templates in minutes. The template records
+  `includes_filestore: false`; re-importing into an existing template keeps its
+  current filestore untouched, so live overlay environments are not disturbed.
+  `attach-filestore` can add the filestore later.
+
 ## v1.85.0
 
 ### Breaking Changes
