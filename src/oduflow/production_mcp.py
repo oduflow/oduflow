@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import shlex
+import shutil
 import tarfile
 import tempfile
 import uuid
@@ -16,12 +17,16 @@ import httpx
 
 from oduflow import production_registry
 from oduflow.errors import FlowError, PrerequisiteNotMetError
-from oduflow.naming import get_repo_path, get_workspace_path, prod_env_name
+from oduflow.naming import (
+    get_repo_path,
+    get_workspace_path,
+    prod_env_name,
+    sanitize_repo_url,
+)
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
-MOUNT = "/mnt/oduflow-addons"
 MAX_RESPONSE_BYTES = 4_000_000
 READ_OPERATIONS = frozenset(
     {
@@ -35,13 +40,6 @@ READ_OPERATIONS = frozenset(
         "reports.render",
     }
 )
-
-
-def addon_checkout(team: TeamSettings, name: str) -> Path:
-    return (
-        Path(get_workspace_path(prod_env_name(name), team.workspaces_dir))
-        / "odumcp-addons"
-    )
 
 
 def _addons_root(repo: Path) -> Path:
@@ -61,10 +59,11 @@ def prepare_addon(
     name: str,
     extra_paths: list[tuple[str, str]],
 ) -> None:
-    """Use existing addon code when provided; otherwise fetch the configured release.
+    """Use existing addon code when provided; otherwise vendor the configured release.
 
-    Only odumcp is mounted from the fallback repository, not its other addons.
-    Reconfiguration reuses this checkout; it never silently pulls newer code.
+    A missing odumcp is copied into the production's main repository, committed
+    and pushed, so it is ordinary production code from then on: deployed,
+    rolled back and upgraded through the repository like any other module.
     """
     main = Path(get_repo_path(prod_env_name(name), team.workspaces_dir))
     roots = [main, *(Path(host) for host, _ in extra_paths)]
@@ -73,15 +72,13 @@ def prepare_addon(
     ):
         return
     from oduflow.docker_ops.env_ops import _clone_repo
+    from oduflow.git_ops import commit_and_push, reset_hard, rev_parse
 
-    checkout = addon_checkout(team, name)
-    if not checkout.exists():
-        checkout.parent.mkdir(parents=True, exist_ok=True)
-        # Publish only a complete checkout: a failed download must not poison
-        # production's addons path or prevent a subsequent synchronization.
-        with tempfile.TemporaryDirectory(
-            prefix=".odumcp-download-", dir=checkout.parent
-        ) as temporary:
+    branch = production_registry.get_production(team, name)["branch"]
+    target = _addons_root(main) / "odumcp"
+    old_head = rev_parse(str(main))
+    try:
+        with tempfile.TemporaryDirectory(prefix="oduflow-odumcp-") as temporary:
             source = Path(temporary) / "repo"
             _clone_repo(
                 settings.prod_odumcp_repo_url,
@@ -95,11 +92,29 @@ def prepare_addon(
                 raise PrerequisiteNotMetError(
                     "Configured OduMCP repository does not contain addons/odumcp."
                 )
-            source.rename(checkout)
-    if not (checkout / "addons/odumcp/__manifest__.py").is_file():
-        raise PrerequisiteNotMetError(
-            "Configured OduMCP repository does not contain addons/odumcp."
+            shutil.copytree(source / "addons/odumcp", target, symlinks=True)
+        commit_and_push(
+            str(main),
+            branch,
+            [str(target.relative_to(main))],
+            "Add odumcp connector for Oduflow production MCP\n\n"
+            f"Source: {sanitize_repo_url(settings.prod_odumcp_repo_url)} "
+            f"@ {settings.prod_odumcp_ref}",
+            team.git_credentials_file(),
+            team.ssh_dir(),
         )
+    except Exception as exc:
+        # pull_repo hard-resets to origin: an unpushed commit would silently
+        # vanish on the next deploy, so never leave one behind.
+        reset_hard(str(main), old_head)
+        shutil.rmtree(target, ignore_errors=True)
+        if isinstance(exc, PrerequisiteNotMetError):
+            raise
+        raise PrerequisiteNotMetError(
+            "Could not add odumcp to the production repository "
+            f"(branch '{branch}'). Grant Oduflow push access or commit "
+            f"the addon yourself, then retry sync_production_mcp. Cause: {exc}"
+        ) from exc
 
 
 _INSTALL = """
@@ -358,10 +373,4 @@ def synchronize(settings: Settings, team: TeamSettings, name: str) -> dict[str, 
         (str(workspace / "extra" / repo), "") for repo in record.get("extra_addons", {})
     ]
     prepare_addon(settings, team, name, extras)
-    if addon_checkout(team, name).is_dir():
-        mounts = container.attrs.get("Mounts", [])
-        if not any(mount.get("Destination") == MOUNT + "/odumcp" for mount in mounts):
-            production_ops.reconfigure_production(
-                settings, team, name, force_recreate=True
-            )
     return provision(settings, team, name)

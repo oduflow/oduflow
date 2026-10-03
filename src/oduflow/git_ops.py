@@ -1026,6 +1026,52 @@ def reset_hard(repo_path: str, ref: str) -> None:
         raise ExternalCommandError("git reset --hard", e.returncode, e.stderr or "")
 
 
+def commit_and_push(
+    repo_path: str,
+    branch: str,
+    paths: list[str],
+    message: str,
+    cred_file: str,
+    ssh_dir: str = "",
+) -> str:
+    """Commit *paths* as Oduflow and push to ``origin/<branch>``; return the commit.
+
+    Callers own the rollback: :func:`pull_repo` hard-resets to origin, so a
+    commit that was not pushed must not stay in the checkout.
+    """
+    env = {
+        **git_env_for_team(cred_file, ssh_dir),
+        "GIT_AUTHOR_NAME": "Oduflow",
+        "GIT_AUTHOR_EMAIL": "oduflow@oduflow.local",
+        "GIT_COMMITTER_NAME": "Oduflow",
+        "GIT_COMMITTER_EMAIL": "oduflow@oduflow.local",
+    }
+    steps = [
+        (["add", "--force", "--", *paths], 120),
+        (["commit", "--no-verify", "-m", message, "--", *paths], 120),
+        (["push", "origin", f"HEAD:refs/heads/{branch}"], 300),
+    ]
+    for args, timeout in steps:
+        try:
+            subprocess.run(
+                ["git", "-C", repo_path, *args],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.CalledProcessError as e:
+            raise ExternalCommandError(
+                f"git {args[0]}",
+                e.returncode,
+                redact_url_credentials(e.stderr or str(e)),
+            )
+        except subprocess.TimeoutExpired:
+            raise ExternalCommandError(f"git {args[0]}", -1, "Timed out.")
+    return rev_parse(repo_path)
+
+
 def log_commits(repo_path: str, n: int = 20) -> list[dict[str, str]]:
     """Recent commits of the checkout, newest first.
 
