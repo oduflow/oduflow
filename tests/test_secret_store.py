@@ -185,7 +185,7 @@ def test_update_json_preserves_other_values_and_metadata(team):
     record = after["secrets"]["config"]
     original["database"]["password"] = "new"
     assert json.loads(record["value"]) == original
-    assert result == {"name": "config", "updated": True}
+    assert result == {"name": "config", "created": False, "updated": True}
     assert record["value_type"] == "json"
     assert record["created_at"] == before["secrets"]["config"]["created_at"]
     assert record["updated_at"] > before["secrets"]["config"]["updated_at"]
@@ -227,7 +227,8 @@ def test_update_json_accepts_json_value_types(team, value):
 )
 def test_update_json_pointer(team, original, path, expected):
     secret_store.set_secret(team, "config", json.dumps(original), "json")
-    secret_store.update_secret_json(team, "config", path, "new")
+    result = secret_store.update_secret_json(team, "config", path, "new")
+    assert result == {"name": "config", "created": False, "updated": True}
     resolved = secret_store.resolve_env_secrets(team, {"CONFIG": "secret:config"})
     assert json.loads(resolved["CONFIG"]) == expected
 
@@ -240,11 +241,13 @@ def test_update_json_pointer(team, original, path, expected):
         [],
         {},
         "",
-        "key",
+        ".key",
+        "key.",
+        "key..nested",
+        "key/nested",
         "#/key",
         "/bad~",
         "/bad~2",
-        "/missing",
         "/missing/key",
         "/key/nested",
         "/items/-",
@@ -268,7 +271,7 @@ def test_update_json_invalid_path_changes_nothing(team, pointer):
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("original", ["null", "true", "42", '"private"', "[]", "{}"])
+@pytest.mark.parametrize("original", ["null", "true", "42", '"private"', "[]"])
 def test_update_json_requires_existing_element(team, original):
     secret_store.set_secret(team, "config", original, "json")
     with pytest.raises(ValueError, match="existing element"):
@@ -338,3 +341,80 @@ def test_concurrent_json_updates_preserve_each_other(team):
         list(pool.map(update, range(count)))
     resolved = secret_store.resolve_env_secrets(team, {"C": "secret:config"})
     assert json.loads(resolved["C"]) == {str(i): i for i in range(count)}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["environment.OPENROUTER_API_KEY", "/environment/OPENROUTER_API_KEY"],
+)
+def test_create_json_key_then_update_reports_actual_result(team, path):
+    secret_store.set_secret(team, "config", '{"environment":{"KEEP":"same"}}', "json")
+    before = secret_store.list_secrets(team)[0]
+    created = secret_store.update_secret_json(team, "config", path, "first")
+    assert created == {"name": "config", "created": True, "updated": False}
+    updated = secret_store.update_secret_json(team, "config", path, "second")
+    assert updated == {"name": "config", "created": False, "updated": True}
+    resolved = secret_store.resolve_env_secrets(team, {"C": "secret:config"})
+    assert json.loads(resolved["C"]) == {
+        "environment": {"KEEP": "same", "OPENROUTER_API_KEY": "second"}
+    }
+    assert secret_store.list_secrets(team)[0]["created_at"] == before["created_at"]
+
+
+@pytest.mark.parametrize(
+    "original,path,expected",
+    [
+        ({}, "password", {"password": "new"}),
+        ({}, "/", {"": "new"}),
+        ({}, "/a~1b~0c", {"a/b~c": "new"}),
+        ({"a": {}}, "a.b", {"a": {"b": "new"}}),
+        ({"a": {}}, "/a.b", {"a": {}, "a.b": "new"}),
+        ({"items": [{}]}, "items.0.token", {"items": [{"token": "new"}]}),
+    ],
+)
+def test_create_only_final_object_key(team, original, path, expected):
+    secret_store.set_secret(team, "config", json.dumps(original), "json")
+    assert secret_store.update_secret_json(team, "config", path, "new")["created"]
+    resolved = secret_store.resolve_env_secrets(team, {"C": "secret:config"})
+    assert json.loads(resolved["C"]) == expected
+
+
+@pytest.mark.parametrize("path", ["missing.key", "items.1", "items.-", "items.01"])
+def test_dot_paths_do_not_create_parents_or_array_elements(team, path):
+    secret_store.set_secret(team, "config", '{"items":["keep"]}', "json")
+    store_path = Path(secret_store.secrets_path(team))
+    before = store_path.read_bytes()
+    with pytest.raises(ValueError):
+        secret_store.update_secret_json(team, "config", path, "new")
+    assert store_path.read_bytes() == before
+
+
+def test_dot_path_updates_existing_array_element(team):
+    secret_store.set_secret(team, "config", '{"items":["old","keep"]}', "json")
+    result = secret_store.update_secret_json(team, "config", "items.0", "new")
+    assert result == {"name": "config", "created": False, "updated": True}
+    resolved = secret_store.resolve_env_secrets(team, {"C": "secret:config"})
+    assert json.loads(resolved["C"]) == {"items": ["new", "keep"]}
+
+
+def test_invalid_new_key_value_does_not_create_key(team):
+    secret_store.set_secret(team, "config", "{}", "json")
+    store_path = Path(secret_store.secrets_path(team))
+    before = store_path.read_bytes()
+    with pytest.raises(ValueError):
+        secret_store.update_secret_json(team, "config", "new", float("nan"))
+    assert store_path.read_bytes() == before
+
+
+def test_concurrent_creation_reports_created_only_once(team):
+    secret_store.set_secret(team, "config", "{}", "json")
+    barrier = Barrier(2)
+
+    def save(value):
+        barrier.wait(timeout=10)
+        return secret_store.update_secret_json(team, "config", "new", value)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(save, ["first", "second"]))
+    assert sorted(result["created"] for result in results) == [False, True]
+    assert all(result["updated"] is not result["created"] for result in results)

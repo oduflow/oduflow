@@ -122,7 +122,7 @@ def test_update_json_preserves_siblings_and_returns_no_values(tmp_path):
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "result": {"name": "config", "updated": True},
+        "result": {"name": "config", "created": False, "updated": True},
     }
     stored = json.loads((tmp_path / "secrets.json").read_text())
     original["database"]["password"] = "new-private"
@@ -149,7 +149,7 @@ def test_update_json_preserves_siblings_and_returns_no_values(tmp_path):
         {"path": "/key"},
         {"value": "private"},
         {"path": None, "value": "private"},
-        {"path": "/missing", "value": "private"},
+        {"path": "/missing/key", "value": "private"},
         {"path": "/key/private", "value": "private"},
     ],
 )
@@ -216,6 +216,34 @@ def test_update_json_missing_secret_returns_404(tmp_path):
     assert response.status_code == 404
     assert "private" not in response.text
     assert client.get("/api/secrets").json()["secrets"] == []
+
+
+def test_json_key_creation_and_update_return_distinct_results(tmp_path):
+    client = _client(tmp_path)
+    client.post(
+        "/api/secrets/config/set",
+        json={"value": '{"environment":{"KEEP":"private"}}', "value_type": "json"},
+    )
+    for path, created in [
+        ("environment.OPENROUTER_API_KEY", True),
+        ("/environment/OPENROUTER_API_KEY", False),
+        ("/environment.OPENROUTER_API_KEY", True),
+    ]:
+        response = client.post(
+            "/api/secrets/config/update-json",
+            json={"path": path, "value": "new-private"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "result": {"name": "config", "created": created, "updated": not created},
+        }
+        assert "private" not in response.text
+    stored = json.loads((tmp_path / "secrets.json").read_text())
+    assert json.loads(stored["secrets"]["config"]["value"]) == {
+        "environment": {"KEEP": "private", "OPENROUTER_API_KEY": "new-private"},
+        "environment.OPENROUTER_API_KEY": "new-private",
+    }
 
 
 @pytest.mark.parametrize(
