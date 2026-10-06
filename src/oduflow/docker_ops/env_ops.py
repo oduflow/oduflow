@@ -3848,7 +3848,12 @@ def get_environment_info(
             result["odoo"]["mem_usage_mb"] = stats["mem_usage_mb"]
             result["odoo"]["mem_percent"] = stats["mem_percent"]
     except docker.errors.NotFound:
-        pass
+        # Every field above is derived from the name alone, so without a
+        # container or a workspace there is nothing real to report on.
+        if not os.path.isdir(result["workspace"]):
+            raise NotFoundError(
+                f"Environment '{env_name}' does not exist. Use create_environment first."
+            )
 
     rec = activity.get_all(team).get(env_name, {})
     result["protected"] = is_protected(settings, team, env_name)

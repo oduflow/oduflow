@@ -346,7 +346,8 @@ ownership and operator note.
 
 Full details for one environment: lifecycle and reuse metadata, database name,
 URL, repository, image, template, extra addons, workspace path, container
-status, and CPU/RAM stats.
+status, and CPU/RAM stats. Fails with "does not exist" when the environment
+has neither an Odoo container nor a workspace.
 
 **Parameters**
 

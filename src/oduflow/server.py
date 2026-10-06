@@ -2370,6 +2370,8 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
     Returns database name, URL, repository, image, template, extra addons,
     workspace path, container status, and CPU/RAM stats.
 
+    Fails with a not-found error if the environment does not exist.
+
     Args:
         env_name: The name of the environment to check.
     """
