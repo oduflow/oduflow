@@ -2790,6 +2790,37 @@ class TestGetEnvironmentInfo:
 
         assert result["local_path"] == "/Users/dev/addons"
 
+    def test_unknown_env_raises_not_found(self, tmp_path, mock_docker_client):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound(
+            "missing"
+        )
+
+        with pytest.raises(NotFoundError, match="'ghost' does not exist"):
+            env_ops.get_environment_info(TEST_SETTINGS, team, "ghost")
+
+    @patch(
+        "oduflow.docker_ops.env_ops.load_credentials",
+        return_value={"pg_user": "u_1_half", "pg_password": "test-pw"},
+    )
+    def test_workspace_without_container_still_reported(
+        self, mock_load_creds, tmp_path, mock_docker_client
+    ):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        os.makedirs(os.path.join(team.workspaces_dir, "half"))
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound(
+            "missing"
+        )
+
+        with (
+            patch.object(env_ops.activity, "get_all", return_value={}),
+            patch.object(env_ops, "is_protected", return_value=False),
+        ):
+            result = env_ops.get_environment_info(TEST_SETTINGS, team, "half")
+
+        assert result["odoo"]["status"] == "not found"
+        assert result["all_running"] is False
+
 
 class TestRunDbQuery:
     def test_arbitrary_query_rejects_legacy_db_credentials(
