@@ -552,8 +552,8 @@ def test_extra_addon_pickers_offer_select_all_and_clear(tmp_path):
     assert 'id="cr-extra-clear"' in dashboard
     assert 'id="tset-extra-select-all"' in dashboard
     assert 'id="tset-extra-clear"' in dashboard
-    assert "setAllExtraRepos('.cr-extra-cb', true)" in dashboard
-    assert "setAllExtraRepos('.tset-extra-cb', false)" in dashboard
+    assert "setAllExtraRepos('cr-extra', true)" in dashboard
+    assert "setAllExtraRepos('tset-extra', false)" in dashboard
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
@@ -561,41 +561,63 @@ def test_extra_repo_bulk_actions_stay_inside_their_own_picker():
     dashboard = _DASHBOARD.read_text(encoding="utf-8")
     functions = "\n".join(
         _js_function(dashboard, name)
-        for name in ("setAllExtraRepos", "setExtraRepoActionsEnabled")
+        for name in (
+            "_extraRepoRows",
+            "updateExtraRepoStatus",
+            "setAllExtraRepos",
+            "setExtraRepoActionsEnabled",
+        )
     )
     harness = (
         functions
         + r"""
-var lists = {
-  '.cr-extra-cb': [{checked: false}, {checked: false}],
-  '.tset-extra-cb': [{checked: true}]
+var EXTRA_REPO_PICKERS = {
+  'cr-extra': {list: 'cr-extra-addons-checkboxes', checkbox: '.cr-extra-cb'},
+  'tset-extra': {list: 'tset-extra-addons', checkbox: '.tset-extra-cb'}
 };
-var buttons = {
+function row(checked, hidden) {
+  var cb = {checked: checked, type: 'checkbox'};
+  var r = {hidden: !!hidden, cb: cb, querySelector: function () { return cb; }};
+  cb.closest = function () { return r; };
+  return r;
+}
+// The third create-modal repo is checked and hidden by the name filter.
+var crRows = [row(false), row(false), row(true, true)];
+var tsetRows = [row(true)];
+var lists = {
+  '.cr-extra-cb': crRows.map(function (r) { return r.cb; }),
+  '.tset-extra-cb': tsetRows.map(function (r) { return r.cb; })
+};
+var els = {
+  'cr-extra-addons-checkboxes': {querySelectorAll: function () { return crRows; }},
   'cr-extra-select-all': {disabled: true},
-  'cr-extra-clear': {disabled: true}
+  'cr-extra-clear': {disabled: true},
+  'cr-extra-status': {hidden: true, textContent: ''}
 };
 var document = {
   querySelectorAll: function (selector) { return lists[selector] || []; },
-  getElementById: function (id) { return buttons[id]; }
+  getElementById: function (id) { return els[id]; }
 };
 
-setAllExtraRepos('.cr-extra-cb', true);
-var selected = lists['.cr-extra-cb'].map(function (cb) { return cb.checked; });
+setAllExtraRepos('cr-extra', true);
+var selected = crRows.map(function (r) { return r.cb.checked; });
 setExtraRepoActionsEnabled('cr-extra', true);
 var enabled = {
-  selectAll: buttons['cr-extra-select-all'].disabled,
-  clear: buttons['cr-extra-clear'].disabled
+  selectAll: els['cr-extra-select-all'].disabled,
+  clear: els['cr-extra-clear'].disabled
 };
-// The template picker's buttons are absent from this harness: a modal that is
+// The template picker's controls are absent from this harness: a modal that is
 // not on screen must not break the one that is.
 setExtraRepoActionsEnabled('tset-extra', true);
-setAllExtraRepos('.cr-extra-cb', false);
+setAllExtraRepos('cr-extra', false);
 
 process.stdout.write(JSON.stringify({
   selected: selected,
-  cleared: lists['.cr-extra-cb'].map(function (cb) { return cb.checked; }),
-  untouched: lists['.tset-extra-cb'].map(function (cb) { return cb.checked; }),
-  enabled: enabled
+  cleared: crRows.map(function (r) { return r.cb.checked; }),
+  untouched: tsetRows.map(function (r) { return r.cb.checked; }),
+  enabled: enabled,
+  status: els['cr-extra-status'].textContent,
+  statusHidden: els['cr-extra-status'].hidden
 }));
 """
     )
@@ -603,11 +625,198 @@ process.stdout.write(JSON.stringify({
     result = _run_node(harness)
 
     assert result == {
-        "selected": [True, True],
-        "cleared": [False, False],
+        "selected": [True, True, True],
+        # Clear leaves the hidden row checked, so the status line has to say so:
+        # the repo is invisible but still mounted.
+        "cleared": [False, False, True],
         "untouched": [True],
         "enabled": {"selectAll": False, "clear": False},
+        "status": (
+            "1 selected repo is hidden by the filter and still mounted; "
+            "Select all and Clear only touch visible rows."
+        ),
+        "statusHidden": False,
     }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_extra_repo_filter_and_default_branch():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    assert 'id="tset-extra-filter"' in dashboard
+    assert 'id="cr-extra-default-branch"' in dashboard
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in (
+            "escHtmlAttr",
+            "_tsetBranchOptions",
+            "extraRepoBranchChoices",
+            "extraRepoBranchNames",
+            "_extraRepoRows",
+            "updateExtraRepoStatus",
+            "filterExtraRepos",
+            "revealExtraRepos",
+            "initExtraRepoTools",
+            "applyDefaultExtraBranch",
+        )
+    )
+    harness = (
+        functions
+        + r"""
+// The dashboard's esc() goes through a DOM node; the attribute escaper is an
+// equivalent stand-in for these plain branch names.
+var esc = escHtmlAttr;
+var EXTRA_REPO_PICKERS = {'tset-extra': {list: 'tset-extra-addons', checkbox: '.tset-extra-cb'}};
+var cachedExtraRepos = [
+  {name: 'connect-addons', repo_url: 'https://example.test/connect.git',
+   branches: ['17.0'], available_branches: ['17.0', 'feature-x']},
+  {name: 'odusfera-addons', repo_url: 'https://example.test/odusfera.git',
+   branches: [], available_branches: ['origin/17.0', '9.0']},
+  {name: 'open-up', repo_url: 'https://example.test/OpenUpgrade.git',
+   branches: ['16.0'], available_branches: []}
+];
+function row(name, url, branch) {
+  var cb = {value: name, checked: false};
+  var input = {value: branch};
+  return {
+    hidden: false,
+    textContent: name + ' (' + url + ')',
+    cb: cb,
+    input: input,
+    querySelector: function (sel) { return sel === '.branch-input' ? input : cb; }
+  };
+}
+var rows = cachedExtraRepos.map(function (r) { return row(r.name, r.repo_url, ''); });
+rows.push(row('legacy', 'missing', 'keep-me'));
+// A repo the filter will hide, checked and therefore still mounted.
+rows[0].cb.checked = true;
+var els = {
+  'tset-extra-addons': {querySelectorAll: function () { return rows; }},
+  'tset-extra-filter': {value: 'stale'},
+  'tset-extra-default-branch': {value: '', innerHTML: ''},
+  'tset-extra-status': {hidden: true, textContent: ''}
+};
+var document = {getElementById: function (id) { return els[id]; }};
+
+initExtraRepoTools('tset-extra');
+var options = els['tset-extra-default-branch'].innerHTML;
+var afterInit = {filter: els['tset-extra-filter'].value, hidden: rows.map(function (r) { return r.hidden; })};
+
+els['tset-extra-filter'].value = 'UP';
+filterExtraRepos('tset-extra');
+var filtered = rows.map(function (r) { return r.hidden; });
+var statusWhenSome = els['tset-extra-status'].textContent;
+
+els['tset-extra-filter'].value = 'nothing-matches';
+filterExtraRepos('tset-extra');
+var statusWhenNone = els['tset-extra-status'].textContent;
+
+// Filtered-out rows still receive the branch.
+els['tset-extra-default-branch'].value = '17.0';
+applyDefaultExtraBranch('tset-extra');
+// One-shot: the control returns to its placeholder, so picking the same branch
+// again is a fresh change event rather than a no-op.
+var pickerAfterApply = els['tset-extra-default-branch'].value;
+rows[0].input.value = 'hand-edited';
+els['tset-extra-default-branch'].value = '17.0';
+applyDefaultExtraBranch('tset-extra');
+
+// Anything the form must act on is revealed again, filter and all.
+revealExtraRepos('tset-extra');
+
+process.stdout.write(JSON.stringify({
+  options: options,
+  afterInit: afterInit,
+  filtered: filtered,
+  statusWhenSome: statusWhenSome,
+  statusWhenNone: statusWhenNone,
+  pickerAfterApply: pickerAfterApply,
+  revealed: rows.map(function (r) { return r.hidden; }),
+  statusAfterReveal: {text: els['tset-extra-status'].textContent, hidden: els['tset-extra-status'].hidden},
+  branches: rows.map(function (r) { return r.input.value; }),
+  checked: rows.map(function (r) { return r.cb.checked; })
+}));
+"""
+    )
+
+    result = _run_node(harness)
+
+    hidden_selection = (
+        "1 selected repo is hidden by the filter and still mounted; "
+        "Select all and Clear only touch visible rows."
+    )
+    assert result == {
+        "options": (
+            '<option value="">Set branch\u2026</option>'
+            '<option value="9.0">9.0 (1 repo)</option>'
+            '<option value="16.0">16.0 (1 repo)</option>'
+            '<option value="17.0">17.0 (2 repos)</option>'
+            '<option value="feature-x">feature-x (1 repo)</option>'
+        ),
+        "afterInit": {"filter": "", "hidden": [False, False, False, False]},
+        "filtered": [True, True, False, True],
+        "statusWhenSome": hidden_selection,
+        "statusWhenNone": "No repos match the filter. " + hidden_selection,
+        "pickerAfterApply": "",
+        "revealed": [False, False, False, False],
+        "statusAfterReveal": {"text": "", "hidden": True},
+        # Only repos that have the branch get it; nothing gets ticked. The
+        # second apply restores the branch edited away by hand.
+        "branches": ["17.0", "17.0", "", "keep-me"],
+        "checked": [True, False, False, False],
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_create_modal_branch_suggestions_match_the_branch_picker():
+    """Both suggestion lists offer mountable names, not raw remote refs."""
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in (
+            "escAttr",
+            "_tsetBranchOptions",
+            "extraRepoBranchChoices",
+            "extraRepoBranchNames",
+            "extraRepoBranchDatalist",
+        )
+    )
+    harness = (
+        functions
+        + r"""
+// A repo cloned before on-demand registration lists refs/remotes/, so its
+// downloaded branches read "origin/17.0" and include origin/HEAD.
+var legacy = {name: 'legacy', branches: ['origin/17.0', 'origin/HEAD', '17.0'],
+              available_branches: ['18.0']};
+process.stdout.write(JSON.stringify({
+  datalist: extraRepoBranchDatalist(legacy),
+  picker: extraRepoBranchNames(legacy)
+}));
+"""
+    )
+
+    result = _run_node(harness)
+
+    assert result == {
+        "datalist": (
+            '<datalist id="extra-branches-legacy">'
+            '<option value="17.0"></option>'
+            '<option value="18.0"></option>'
+            "</datalist>"
+        ),
+        "picker": ["17.0", "18.0"],
+    }
+
+
+def test_branch_required_error_reveals_filtered_extra_repos():
+    """An error naming repos must not leave any of them behind the filter."""
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    errors = [
+        m.start()
+        for m in re.finditer(r"Branch is required for extra addon\(s\)", dashboard)
+    ]
+    assert len(errors) == 2  # create modal + template settings
+    for start in errors:
+        assert "revealExtraRepos(" in dashboard[start - 300 : start]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")

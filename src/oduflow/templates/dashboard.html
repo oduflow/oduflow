@@ -1257,6 +1257,15 @@
   .form-group input.branch-input { width: 120px; flex: 0 0 auto; padding: 2px 6px; font-size: var(--text-xs); }
   /* Long repo URLs truncate instead of scrolling the row sideways. */
   .form-group .check-item > .hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The flex rules above would otherwise override the UA's
+     [hidden] { display: none } for rows the name filter hides. */
+  .form-group .check-item[hidden] { display: none; }
+  /* The name filter and default-branch picker share the Select all / Clear
+     row and stay at the compact size of its buttons. */
+  .form-group .check-list-actions input.extra-filter,
+  .form-group .check-list-actions select.extra-default-branch {
+    flex: 1 1 0; min-width: 0; width: auto; padding: 3px 8px; font-size: var(--text-xs);
+  }
   .section-subtitle { font-size: var(--text-md); font-weight: 600; margin-bottom: 10px; color: var(--text-dim); }
   .section-toggle {
     background: none; border: none; padding: 0; cursor: pointer;
@@ -1585,12 +1594,18 @@
         <label>Extra Addons Repos</label>
         <div class="check-list-actions">
           <button class="btn btn-sm" type="button" id="cr-extra-select-all"
-                  onclick="setAllExtraRepos('.cr-extra-cb', true)">Select all</button>
+                  onclick="setAllExtraRepos('cr-extra', true)">Select all</button>
           <button class="btn btn-sm" type="button" id="cr-extra-clear"
-                  onclick="setAllExtraRepos('.cr-extra-cb', false)">Clear</button>
+                  onclick="setAllExtraRepos('cr-extra', false)">Clear</button>
+          <input type="search" class="extra-filter" id="cr-extra-filter" placeholder="Filter by name"
+                 aria-label="Filter extra repos by name" oninput="filterExtraRepos('cr-extra')">
+          <select class="extra-default-branch" id="cr-extra-default-branch"
+                  aria-label="Fill a branch into every repo that has it"
+                  onchange="applyDefaultExtraBranch('cr-extra')"></select>
         </div>
-        <div id="cr-extra-addons-checkboxes" class="check-list"></div>
-        <div class="hint">Select repos to mount in this environment</div>
+        <div id="cr-extra-addons-checkboxes" class="check-list" onchange="updateExtraRepoStatus('cr-extra')"></div>
+        <div class="hint" id="cr-extra-status" hidden></div>
+        <div class="hint">Select repos to mount in this environment; picking a branch fills it into every repo that has it.</div>
       </div>
       <div class="form-group">
         <label for="cr-auto-install">Auto-install modules</label>
@@ -2166,12 +2181,18 @@
           <label>Extra addons repos</label>
           <div class="check-list-actions">
             <button class="btn btn-sm" type="button" id="tset-extra-select-all"
-                    onclick="setAllExtraRepos('.tset-extra-cb', true)">Select all</button>
+                    onclick="setAllExtraRepos('tset-extra', true)">Select all</button>
             <button class="btn btn-sm" type="button" id="tset-extra-clear"
-                    onclick="setAllExtraRepos('.tset-extra-cb', false)">Clear</button>
+                    onclick="setAllExtraRepos('tset-extra', false)">Clear</button>
+            <input type="search" class="extra-filter" id="tset-extra-filter" placeholder="Filter by name"
+                   aria-label="Filter extra repos by name" oninput="filterExtraRepos('tset-extra')">
+            <select class="extra-default-branch" id="tset-extra-default-branch"
+                    aria-label="Fill a branch into every repo that has it"
+                    onchange="applyDefaultExtraBranch('tset-extra')"></select>
           </div>
-          <div id="tset-extra-addons" class="check-list"></div>
-          <div class="hint">Checked repos are mounted into environments created from this template. Each one needs a branch.</div>
+          <div id="tset-extra-addons" class="check-list" onchange="updateExtraRepoStatus('tset-extra')"></div>
+          <div class="hint" id="tset-extra-status" hidden></div>
+          <div class="hint">Checked repos are mounted into environments created from this template. Each one needs a branch; picking a branch fills it into every repo that has it.</div>
         </div>
         <div class="form-group">
           <label for="tset-auto-install">Auto-install modules</label>
@@ -4910,17 +4931,116 @@ function _tsetBranchOptions(branches) {
 }
 
 // The create-environment modal and the template settings form both render the
-// extra addon repos as a plain checkbox list, so one pair of helpers drives
-// either of them. Ticking every repo still leaves each branch to be filled in:
-// a repo without a branch cannot be mounted, and only the user knows which one.
-function setAllExtraRepos(selector, checked) {
-  document.querySelectorAll(selector).forEach(function(cb) { cb.checked = checked; });
+// extra addon repos as a plain checkbox list, so one set of helpers drives
+// either of them, addressed by the id prefix shared by all of its controls.
+var EXTRA_REPO_PICKERS = {
+  'cr-extra': {list: 'cr-extra-addons-checkboxes', checkbox: '.cr-extra-cb'},
+  'tset-extra': {list: 'tset-extra-addons', checkbox: '.tset-extra-cb'}
+};
+
+function _extraRepoRows(prefix) {
+  var list = document.getElementById(EXTRA_REPO_PICKERS[prefix].list);
+  return list ? Array.prototype.slice.call(list.querySelectorAll('.check-item')) : [];
+}
+
+// Ticking every repo still leaves each branch to be filled in: a repo without
+// a branch cannot be mounted, and only the user knows which one. While the name
+// filter is active only the rows still on screen are affected, so the status
+// line reports whatever selection the filter is hiding.
+function setAllExtraRepos(prefix, checked) {
+  document.querySelectorAll(EXTRA_REPO_PICKERS[prefix].checkbox).forEach(function(cb) {
+    if (!cb.closest('.check-item').hidden) cb.checked = checked;
+  });
+  updateExtraRepoStatus(prefix);
 }
 
 function setExtraRepoActionsEnabled(prefix, enabled) {
-  ['-select-all', '-clear'].forEach(function(suffix) {
-    var button = document.getElementById(prefix + suffix);
-    if (button) button.disabled = !enabled;
+  ['-select-all', '-clear', '-filter', '-default-branch'].forEach(function(suffix) {
+    var control = document.getElementById(prefix + suffix);
+    if (control) control.disabled = !enabled;
+  });
+}
+
+// Branch names a repo can be mounted at, without remote prefixes.
+function extraRepoBranchNames(r) {
+  return _tsetBranchOptions(extraRepoBranchChoices(r));
+}
+
+// A hidden row is still submitted and still mounted, so a selection the filter
+// hides has to be stated as a count: otherwise Clear looks like it emptied a
+// list that in fact still carries repos.
+function updateExtraRepoStatus(prefix) {
+  var rows = _extraRepoRows(prefix);
+  var hiddenRows = rows.filter(function(row) { return row.hidden; });
+  var hiddenChecked = hiddenRows.filter(function(row) {
+    var cb = row.querySelector('input[type="checkbox"]');
+    return cb && cb.checked;
+  }).length;
+  var parts = [];
+  if (rows.length && hiddenRows.length === rows.length) {
+    parts.push('No repos match the filter.');
+  }
+  if (hiddenChecked) {
+    parts.push(hiddenChecked + (hiddenChecked === 1 ? ' selected repo is' : ' selected repos are') +
+      ' hidden by the filter and still mounted; Select all and Clear only touch visible rows.');
+  }
+  var status = document.getElementById(prefix + '-status');
+  status.textContent = parts.join(' ');
+  status.hidden = parts.length === 0;
+}
+
+// Matches the repo name and URL, i.e. the row's visible text.
+function filterExtraRepos(prefix) {
+  var query = document.getElementById(prefix + '-filter').value.trim().toLowerCase();
+  _extraRepoRows(prefix).forEach(function(row) {
+    row.hidden = !!query && row.textContent.toLowerCase().indexOf(query) === -1;
+  });
+  updateExtraRepoStatus(prefix);
+}
+
+// Drops the filter so every row is back on screen. Used whenever something
+// other than the filter decides which rows matter: a template's own picks, or
+// a validation error naming repos the user has to reach.
+function revealExtraRepos(prefix) {
+  document.getElementById(prefix + '-filter').value = '';
+  filterExtraRepos(prefix);
+}
+
+// Offers every branch any registered repo has, with how many repos carry it.
+// Called once the rows are rendered, so it also clears the previous filter.
+function initExtraRepoTools(prefix) {
+  var counts = Object.create(null);
+  (cachedExtraRepos || []).forEach(function(r) {
+    extraRepoBranchNames(r).forEach(function(b) { counts[b] = (counts[b] || 0) + 1; });
+  });
+  var html = '<option value="">Set branch…</option>';
+  Object.keys(counts).sort(function(a, b) {
+    return a.localeCompare(b, undefined, {numeric: true});
+  }).forEach(function(b) {
+    html += '<option value="' + escHtmlAttr(b) + '">' + esc(b) +
+      ' (' + counts[b] + (counts[b] === 1 ? ' repo' : ' repos') + ')</option>';
+  });
+  document.getElementById(prefix + '-default-branch').innerHTML = html;
+  revealExtraRepos(prefix);
+}
+
+// Fills the chosen branch into every repo that has it, filtered out or not.
+// Ticking stays manual: a branch existing in a repo does not mean the repo
+// should be mounted. The control then snaps back to its placeholder, so it
+// reads as a one-shot action and the same branch can be applied again after a
+// row was edited by hand (re-picking a kept selection fires no change event).
+function applyDefaultExtraBranch(prefix) {
+  var picker = document.getElementById(prefix + '-default-branch');
+  var branch = picker.value;
+  picker.value = '';
+  if (!branch) return;
+  var repos = Object.create(null);
+  (cachedExtraRepos || []).forEach(function(r) { repos[r.name] = r; });
+  _extraRepoRows(prefix).forEach(function(row) {
+    var repo = repos[row.querySelector('input[type="checkbox"]').value];
+    if (repo && extraRepoBranchNames(repo).indexOf(branch) !== -1) {
+      row.querySelector('.branch-input').value = branch;
+    }
   });
 }
 
@@ -4960,6 +5080,7 @@ function _tsetRenderExtraAddons(extras) {
     ? rows.join('')
     : '<span class="hint" style="margin-top:0;">No extra repos available</span>';
   setExtraRepoActionsEnabled('tset-extra', rows.length > 0);
+  initExtraRepoTools('tset-extra');
 }
 
 function _tsetRenderCredentials(current) {
@@ -5034,6 +5155,8 @@ function _tsetCollectForm() {
     else { extras[repoName] = branch; }
   });
   if (missingBranch.length) {
+    // The error names repos by name, so none of them may be filtered out.
+    revealExtraRepos('tset-extra');
     errEl.textContent = 'Branch is required for extra addon(s): ' + missingBranch.join(', ') + '.';
     errEl.style.display = 'block';
     return null;
@@ -5465,6 +5588,10 @@ function populateTemplateSelect() {
         var brInput = document.querySelector('.cr-extra-branch-input[data-repo="' + cb.value + '"]');
         if (brInput) brInput.value = tplExtras[cb.value] || '';
       });
+      // The template just decided the whole selection (replacing whatever a
+      // branch was filled into); a filter left over from the previous one must
+      // not keep its picks off screen.
+      revealExtraRepos('cr-extra');
     }
     fillCreateTemplateEnvVars(tpl);
   };
@@ -5507,6 +5634,7 @@ function openCreateFromTemplate(templateName) {
     if (cachedExtraRepos.length === 0) {
       container.innerHTML = '<span class="hint" style="margin-top:0;">No extra repos available</span>';
       setExtraRepoActionsEnabled('cr-extra', false);
+      initExtraRepoTools('cr-extra');
       return;
     }
     var tplExtras = (tpl && tpl.extra_addons) ? tpl.extra_addons : {};
@@ -5523,6 +5651,7 @@ function openCreateFromTemplate(templateName) {
       '</label>';
     }).join('');
     setExtraRepoActionsEnabled('cr-extra', true);
+    initExtraRepoTools('cr-extra');
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
@@ -5574,6 +5703,7 @@ function openCreateModal(fromProduction) {
     if (cachedExtraRepos.length === 0) {
       container.innerHTML = '<span class="hint" style="margin-top:0;">No extra repos available</span>';
       setExtraRepoActionsEnabled('cr-extra', false);
+      initExtraRepoTools('cr-extra');
       return;
     }
     container.innerHTML = cachedExtraRepos.map(function(r) {
@@ -5586,6 +5716,7 @@ function openCreateModal(fromProduction) {
       '</label>';
     }).join('');
     setExtraRepoActionsEnabled('cr-extra', true);
+    initExtraRepoTools('cr-extra');
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
@@ -5693,6 +5824,8 @@ async function submitCreate() {
       else { extraAddonsObj[repoName] = br; }
     });
     if (missingBranch.length) {
+      // The error names repos by name, so none of them may be filtered out.
+      revealExtraRepos('cr-extra');
       errEl.textContent = 'Branch is required for extra addon(s): ' + missingBranch.join(', ') + '.';
       errEl.style.display = 'block';
       btn.disabled = false;
@@ -7145,8 +7278,10 @@ function extraRepoBranchChoices(r) {
 
 // Branch suggestions for a repo's branch input in the create wizard: repo
 // names are [a-zA-Z0-9_-] (validate_extra_repo_name), so they are id-safe.
+// Remote prefixes are stripped, so a row suggests the same names the branch
+// picker above the list offers — and the same names a mount accepts.
 function extraRepoBranchDatalist(r) {
-  var opts = extraRepoBranchChoices(r).map(function(b) {
+  var opts = extraRepoBranchNames(r).map(function(b) {
     return '<option value="' + escAttr(b) + '"></option>';
   }).join('');
   return '<datalist id="extra-branches-' + escAttr(r.name) + '">' + opts + '</datalist>';
