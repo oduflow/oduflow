@@ -1380,3 +1380,114 @@ process.stdout.write(JSON.stringify(out));
     assert result["escape"]["state"]["visible"] == 4
     assert result["escape"]["state"]["clamped"] is True
     assert result["pruned"] == {"filter": False, "open": False, "kept": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_production_env_vars_forms():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in (
+            "parseEnvLines",
+            "formatEnvLines",
+            "_parseProductionEnvLines",
+            "_parseKvLines",
+            "prodApplySettings",
+            "submitCreateProduction",
+            "_prodSettingsHtml",
+            "_prodServerModeSelect",
+            "esc",
+            "escAttr",
+            "escHtmlAttr",
+        )
+    )
+    result = _run_node(
+        functions
+        + r"""
+var fields = {};
+global.document = {
+  getElementById: id => fields[id],
+  createElement: () => ({textContent: '', get innerHTML() {
+    return this.textContent.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }})
+};
+global.window = {_teamBaseDomain: 'example.com'};
+var _prodSettingsDirty = {}, API_PRODUCTIONS = '/api/productions';
+var sent = [], errors = [];
+function showToast(msg, error) { if (error) errors.push(msg); }
+async function confirmDialog() { return true; }
+async function _prodPost(url, body) { sent.push(body); return null; }
+['cp-name', 'cp-repo', 'cp-branch', 'cp-domain', 'cp-xdomains', 'cp-image',
+ 'cp-template', 'cp-fromenv', 'cp-auto', 'cp-mode', 'cp-set-envvars', 'cp-envvars',
+ 'ps-domain-erp', 'ps-xdomains-erp', 'ps-image-erp', 'ps-repo-erp',
+ 'ps-branch-erp', 'ps-gituser-erp', 'ps-extras-erp', 'ps-envvars-erp'].forEach(
+ id => fields[id] = {value: '', defaultValue: '', checked: false, disabled: false});
+fields['cp-name'].value = 'erp';
+fields['cp-fromenv'].value = 'dev';
+(async () => {
+  await submitCreateProduction();
+  fields['cp-set-envvars'].checked = true;
+  await submitCreateProduction();
+  fields['cp-envvars'].value = 'TOKEN=secret:api\nOPTIONS=a,b,X=c';
+  await submitCreateProduction();
+  fields['cp-envvars'].value = 'BROKEN';
+  await submitCreateProduction();
+  fields['cp-envvars'].value = 'KEY = value';
+  await submitCreateProduction();
+  fields['cp-envvars'].value = 'KEY= value';
+  await submitCreateProduction();
+  fields['cp-envvars'].value = 'OPTIONS=a b,c';
+  await submitCreateProduction();
+  var env = fields['ps-envvars-erp'];
+  env.value = env.defaultValue = 'TOKEN=secret:api';
+  await prodApplySettings('erp');
+  env.value = '';
+  await prodApplySettings('erp');
+  env.value = 'TOKEN=secret:replacement';
+  await prodApplySettings('erp');
+  env.disabled = true;
+  await prodApplySettings('erp');
+  var rendered = _prodSettingsHtml({name: 'erp', env_vars: {
+    TOKEN: 'secret:api', HTML: '</textarea><script>bad</script>'
+  }});
+  var multiline = _prodSettingsHtml({name: 'erp', env_vars: {CERT: 'a\nb'}});
+  process.stdout.write(JSON.stringify({
+    variables: sent.map(body => Object.hasOwn(body, 'env_vars') ? body.env_vars : null),
+    errors: errors,
+    referenceShown: rendered.includes('TOKEN=secret:api'),
+    monoClass: rendered.includes('<textarea class="mono-input" id="ps-envvars-erp"'),
+    escaped: rendered.includes('&lt;/textarea&gt;&lt;script&gt;bad&lt;/script&gt;'),
+    multilineDisabled: /id="ps-envvars-erp"[^>]*disabled/.test(multiline)
+  }));
+})();
+"""
+    )
+    assert result == {
+        # A refused line sends nothing at all, so only the accepted submissions
+        # (and the four Settings applies) appear here.
+        "variables": [
+            None,
+            {},
+            {"TOKEN": "secret:api", "OPTIONS": "a,b,X=c"},
+            {"OPTIONS": "a b,c"},
+            None,
+            {},
+            {"TOKEN": "secret:replacement"},
+            None,
+        ],
+        # Spaces around the "=" are refused instead of ending up inside the
+        # value, which would disable the textarea for good.
+        "errors": [
+            "Environment variables: each line must be KEY=VALUE, with no "
+            'space around the "="'
+        ]
+        * 3,
+        "referenceShown": True,
+        "monoClass": True,
+        "escaped": True,
+        "multilineDisabled": True,
+    }
+    # .form-group textarea would otherwise override the class on font-family.
+    assert (
+        ".form-group textarea.mono-input { font-family: var(--font-mono);" in dashboard
+    )
