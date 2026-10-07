@@ -266,7 +266,7 @@ def execute(
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """No write retries: after an uncertain execute, retrieve changes.status."""
-    from oduflow.docker_ops.production_ops import prod_url
+    from oduflow.docker_ops.production_ops import prod_mcp_url
 
     if not team.production_token:
         raise PrerequisiteNotMetError(
@@ -288,7 +288,7 @@ def execute(
         ) as client:
             with client.stream(
                 "POST",
-                prod_url(settings, team, record).rstrip("/") + "/odumcp/v1/execute",
+                prod_mcp_url(settings, team, record).rstrip("/") + "/odumcp/v1/execute",
                 headers={
                     "Authorization": "Bearer " + team.production_token,
                     "X-Request-ID": request_id,

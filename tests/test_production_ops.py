@@ -1473,3 +1473,79 @@ class TestProductionEnvironmentVariables(TestCreateFromEnvironment):
             production_ops.reconfigure_production(settings, team, "erp", env_vars={})
         assert production_registry.get_production(team, "erp")["env_vars"] == {}
         assert "MODE" not in client.containers.run.call_args.kwargs["environment"]
+
+
+class TestMcpDomain:
+    def _container(self, settings, team):
+        record = production_registry.get_production(team, "erp")
+        container = MagicMock()
+        container.labels = {
+            settings.team_label: "1",
+            "oduflow.domain": record["domain"],
+        }
+        client = MagicMock()
+        client.containers.get.return_value = container
+        return client, container
+
+    def test_mcp_url_defaults_to_domain_and_follows_mcp_domain(self, settings, team):
+        record = {"domain": "erp.example.com", "extra_domains": ["manage.example.org"]}
+        assert production_ops.prod_mcp_url(settings, team, record) == (
+            "https://erp.example.com"
+        )
+        record["mcp_domain"] = "manage.example.org"
+        assert production_ops.prod_mcp_url(settings, team, record) == (
+            "https://manage.example.org"
+        )
+        assert production_ops.prod_url(settings, team, record) == (
+            "https://erp.example.com"
+        )
+
+    def test_only_mcp_domain_changes_without_recreating(self, settings, team):
+        _seed_prod_record(team, extra_domains=["manage.example.org"])
+        client, container = self._container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", mcp_domain="Manage.Example.org."
+            )
+        assert result["changed"] == ["mcp_domain"]
+        assert result["mcp_url"] == "https://manage.example.org"
+        container.remove.assert_not_called()
+        client.containers.run.assert_not_called()
+        record = production_registry.get_production(team, "erp")
+        assert record["mcp_domain"] == "manage.example.org"
+        assert record["domain"] == "erp.example.com"
+
+    def test_primary_or_empty_mcp_domain_clears_it(self, settings, team):
+        _seed_prod_record(
+            team, extra_domains=["manage.example.org"], mcp_domain="manage.example.org"
+        )
+        client, _container = self._container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            production_ops.reconfigure_production(
+                settings, team, "erp", mcp_domain="erp.example.com"
+            )
+        assert production_registry.get_production(team, "erp")["mcp_domain"] == ""
+
+    def test_foreign_mcp_domain_is_refused(self, settings, team):
+        _seed_prod_record(team, extra_domains=["manage.example.org"])
+        client, _container = self._container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(ValueError, match="extra_domains"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", mcp_domain="attacker.example.net"
+                )
+        assert not production_registry.get_production(team, "erp").get("mcp_domain")
+
+    def test_removing_the_mcp_extra_domain_is_refused(self, settings, team):
+        _seed_prod_record(
+            team, extra_domains=["manage.example.org"], mcp_domain="manage.example.org"
+        )
+        client, _container = self._container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(ValueError, match="no longer route"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", extra_domains=[]
+                )
+        record = production_registry.get_production(team, "erp")
+        assert record["extra_domains"] == ["manage.example.org"]
+        client.containers.run.assert_not_called()

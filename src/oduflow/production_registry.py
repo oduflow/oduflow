@@ -22,6 +22,7 @@ Top-level schema::
         "<name>": {
           "name": ..., "domain": ..., "repo_url": ..., "branch": ...,
           "odoo_image": ..., "git_user": ..., "extra_addons": {...},
+          "mcp_domain": "",  # OduMCP host: "" = domain, else one of extra_domains
           "auto_update": false, "created_at": "...",
           "allow_copy_to_dev_mcp": true,
           "odoo_conf": {},   # user [options] overrides (win over auto-tuning)

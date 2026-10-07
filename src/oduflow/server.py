@@ -5798,6 +5798,7 @@ def reconfigure_production(
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
+    mcp_domain: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5832,6 +5833,11 @@ def reconfigure_production(
                 secret:<name> references. Omit to preserve; {} clears them.
         extra_addons: New full set of extra addon repos {repo_name: branch};
                       pass {} to remove all. Omit to leave unchanged.
+        mcp_domain: Which of the production's own domains OduMCP calls use
+                (the primary domain or one of extra_domains), e.g. when the
+                primary is fronted by a proxy that blocks API POSTs. Pass ""
+                for the primary domain; omit to leave unchanged. Changing
+                only this does not recreate the container.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
@@ -5849,6 +5855,7 @@ def reconfigure_production(
         git_user=git_user,
         extra_addons=extra_addons,
         env_vars=env_vars,
+        mcp_domain=mcp_domain,
     )
     if result.get("message"):
         return str(result["message"])

@@ -125,6 +125,48 @@ def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> 
     return f"{settings.public_scheme_for(team)}://{record['domain']}"
 
 
+def prod_mcp_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
+    """Base URL for OduMCP calls: the record's ``mcp_domain``, else its domain.
+
+    ``mcp_domain`` is always the primary or one of the production's own extra
+    domains, so the production token only ever goes to a host Traefik routes to
+    this production.
+    """
+    host = record.get("mcp_domain") or record["domain"]
+    return f"{settings.public_scheme_for(team)}://{host}"
+
+
+def _resolve_mcp_domain(
+    record: dict[str, Any],
+    domain: str,
+    extra_domains: list[str],
+    requested: str | None,
+) -> str:
+    """Validate the OduMCP host against the production's own domains.
+
+    ``requested`` None keeps the stored value; "" or the primary domain means
+    "use the primary domain" and is stored as "".
+    """
+    if requested is None:
+        wanted = str(record.get("mcp_domain") or "")
+    else:
+        wanted = requested.strip().lower().rstrip(".")
+    if not wanted or wanted == domain:
+        return ""
+    if wanted not in extra_domains:
+        if requested is None:
+            raise ValueError(
+                f"OduMCP uses '{wanted}', which would no longer route to this "
+                'production. Keep it in extra_domains or pass mcp_domain="" '
+                "to use the primary domain."
+            )
+        raise ValueError(
+            f"mcp_domain '{wanted}' must be the production's domain or one of "
+            "its extra_domains."
+        )
+    return wanted
+
+
 def _odoo_container_name(settings: Settings, team: TeamSettings, name: str) -> str:
     return get_resource_name(prod_env_name(name), "odoo", settings.prefix, team.team_id)
 
@@ -1352,10 +1394,15 @@ def reconfigure_production(
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
+    mcp_domain: str | None = None,
     force_recreate: bool = False,
 ) -> dict[str, Any]:
     """Change a production's infrastructure settings and recreate its
     container to match. Only the passed (non-None) fields change.
+
+    ``mcp_domain`` selects which of the production's own domains OduMCP calls
+    use ("" for the primary). It is routing metadata only: changing it alone
+    leaves the container alone.
 
     The database and filestore live outside the container and are
     preserved; expect a brief downtime while the container is replaced.
@@ -1435,6 +1482,15 @@ def reconfigure_production(
         if env_vars != (record.get("env_vars") or {}):
             updates["env_vars"] = env_vars
 
+    new_mcp_domain = _resolve_mcp_domain(
+        record,
+        effective_domain,
+        updates.get("extra_domains", record.get("extra_domains") or []),
+        mcp_domain,
+    )
+    if new_mcp_domain != str(record.get("mcp_domain") or ""):
+        updates["mcp_domain"] = new_mcp_domain
+
     # No-op only when the request changes nothing AND actual state matches
     # the record; a missing container or checkout (a previous run failed
     # mid-way) is drift that the run below repairs from the record.
@@ -1447,6 +1503,18 @@ def reconfigure_production(
             "name": name,
             "changed": [],
             "message": "No settings changed; the container was left alone.",
+        }
+    if set(updates) == {"mcp_domain"} and not drift:
+        # OduMCP routing metadata only: Traefik already serves every domain.
+        record = production_registry.update_production(team, name, updates)
+        return {
+            "name": name,
+            "changed": ["mcp_domain"],
+            "mcp_url": prod_mcp_url(settings, team, record),
+            "message": (
+                f"OduMCP now uses {prod_mcp_url(settings, team, record)}; "
+                "the container was left alone."
+            ),
         }
 
     # Resolve before changing registry intent, the checkout or the live container.
@@ -2414,6 +2482,8 @@ def get_production_info(
         "domain": record.get("domain", ""),
         "extra_domains": record.get("extra_domains") or [],
         "url": prod_url(settings, team, record),
+        "mcp_domain": record.get("mcp_domain") or "",
+        "mcp_url": prod_mcp_url(settings, team, record),
         "status": _runtime_status(container, record),
         "healthy": healthy,
         "repo_url": record.get("repo_url", ""),
