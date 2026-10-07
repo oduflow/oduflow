@@ -55,6 +55,16 @@ def test_tolerates_transient_409_then_ready():
         system_ops._wait_pg_ready(client, Settings(), timeout=5)  # returns, no raise
 
 
+def test_readiness_is_probed_over_tcp():
+    # On a fresh volume the official entrypoint runs a temporary socket-only
+    # server for setup and then stops it; only TCP proves the final server.
+    client = _client(0)
+    with patch("oduflow.docker_ops.system_ops.time.sleep"):
+        system_ops._wait_pg_ready(client, Settings(), timeout=5)
+    first_probe = client.api.exec_create.call_args_list[0].args[1]
+    assert first_probe[:3] == ["pg_isready", "-h", "127.0.0.1"]
+
+
 def test_raises_clean_error_when_never_ready():
     client = _client(docker.errors.APIError("409 Client Error: Conflict"))  # always
     with patch("oduflow.docker_ops.system_ops.time.sleep"):

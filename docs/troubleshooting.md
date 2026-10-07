@@ -486,7 +486,7 @@ suspect module's assets.
 ## Reporting a bug or sending feedback
 
 If none of the above helps — or Oduflow itself is at fault — file an issue on
-[github.com/oduist/oduflow](https://github.com/oduist/oduflow/issues).
+[github.com/oduflow/oduflow](https://github.com/oduflow/oduflow/issues).
 
 Three ways to get there, all producing a prefilled issue form:
 

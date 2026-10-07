@@ -67,6 +67,23 @@ def service_registry_key(team_id: str, name: str = "") -> str:
     return f"svc-registry:{team_id}"
 
 
+def template_lock_key(team_id: str, name: str) -> str:
+    """One template — its directory, its PostgreSQL template DB, its metadata.
+
+    Narrower than the team lock, which stays reserved for template mutations
+    that remount *other* environments' filestores (see
+    ``specs/0050-granular-resource-locks.md``). Operations that only build or
+    edit a single template — importing a brand-new one, editing its
+    metadata.json — take this key instead, so they no longer freeze every
+    environment in the team. Mutations that do both take the team lock *and*
+    this key; the two are taken in either order (``delete_template`` team-first,
+    a staging ``attach_filestore`` key-first) without risk, because every
+    acquire here is non-blocking — a lock-order inversion surfaces as a
+    ``BusyError``, never as a deadlock.
+    """
+    return f"tpl:{team_id}:{name}"
+
+
 def volume_lock_key(team_id: str, name: str) -> str:
     """One managed Docker volume, including writes to files inside it."""
     return f"vol:{team_id}:{name}"
@@ -329,6 +346,34 @@ class LockManager:
             self._active_team_locks.add(team_id)
             self._team_holders[team_id] = _Holder(operation)
 
+    def acquire_team_blocking(
+        self, team_id: str, timeout: float, operation: str = "", poll: float = 0.5
+    ) -> None:
+        """Retry ``acquire_team`` until it succeeds or ``timeout`` expires.
+
+        For callers that have already done expensive, discardable work before
+        they need the team lock — ``attach_filestore`` stages a possibly
+        multi-gigabyte source outside the lock, so failing the swap instantly
+        would throw that staging away. Waiting a while for a concurrent
+        environment operation to finish is far cheaper than re-staging.
+
+        This polls rather than waiting on the mutex: a team acquire is gated
+        not only by the lock itself but by ``_active_env_counts_by_team``,
+        which is a counter, not something a thread can block on. On timeout the
+        last ``BusyError`` propagates, so the caller behaves exactly as it does
+        with the non-blocking acquire today.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self.acquire_team(team_id, operation=operation)
+                return
+            except BusyError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(poll, remaining))
+
     def release_team(self, team_id: str) -> None:
         with self._map_lock:
             lock = self._team_locks.get(team_id)
@@ -340,6 +385,29 @@ class LockManager:
                 lock.release()
             except RuntimeError:
                 pass
+
+    @contextmanager
+    def team_lock(self, team_id: str, operation: str = "") -> Iterator[None]:
+        """acquire_team/release_team as a context manager, for callers that
+        hold the team lock for only part of an operation — ``attach_filestore``
+        stages its (possibly very large) source outside it and takes it only
+        for the remount-and-swap window."""
+        self.acquire_team(team_id, operation=operation)
+        try:
+            yield
+        finally:
+            self.release_team(team_id)
+
+    @contextmanager
+    def team_lock_blocking(
+        self, team_id: str, timeout: float, operation: str = ""
+    ) -> Iterator[None]:
+        """``acquire_team_blocking``/``release_team`` as a context manager."""
+        self.acquire_team_blocking(team_id, timeout, operation=operation)
+        try:
+            yield
+        finally:
+            self.release_team(team_id)
 
     # -- system lock --
 

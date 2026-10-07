@@ -449,7 +449,10 @@ def _ensure_system_ready(
         tpl_db = get_template_db_name(template_name, team.team_id)
         if not _db_exists(client, settings, tpl_db):
             raise PrerequisiteNotMetError(
-                f"Template database '{tpl_db}' not found. Run init_template first."
+                f"Template '{template_name}' has no restored database ('{tpl_db}'). "
+                "Restore the template with import-template --refresh before "
+                "creating an environment, or explicitly choose template_name='none' "
+                "to initialize an empty database."
             )
 
     if settings.routing_mode == "traefik":
@@ -1772,6 +1775,22 @@ def _clone_repo(
         error_msg = redact_url_credentials(
             e.stderr.decode("utf-8") if e.stderr else str(e)
         )
+        # A missing branch is the user's mistake, not an infrastructure
+        # failure: raise NotFoundError so the actionable message reaches the
+        # dashboard instead of the generic ExternalCommandError banner
+        # (same translation as git_ops.fetch_branch does for switch_branch).
+        # Depending on git version the warning line ("Could not find remote
+        # branch ... to clone") may be absent, so also match the fatal line
+        # ("Remote branch ... not found in upstream ...").
+        lowered = error_msg.lower()
+        if (
+            "could not find remote branch" in lowered
+            or "not found in upstream" in lowered
+        ):
+            raise NotFoundError(
+                f"Branch '{branch}' does not exist on origin. Push it first "
+                f"(git push -u origin {branch}), then retry."
+            )
         if any(kw.lower() in error_msg.lower() for kw in auth_keywords):
             from oduflow.git_ops import is_ssh_url
 
@@ -2085,15 +2104,6 @@ def _create_environment_impl(
             f"Failed to connect to Docker daemon: {e}. Ensure Docker is running."
         )
 
-    if template_name is not None:
-        tpl_db = get_template_db_name(template_name, team.team_id)
-        if not _db_exists(client, settings, tpl_db):
-            logger.warning(
-                "Template DB '%s' not found, falling back to init from scratch",
-                tpl_db,
-            )
-            template_name = None
-
     _ensure_system_ready(client, settings, team, template_name)
 
     odoo_container_name = get_resource_name(
@@ -2319,7 +2329,7 @@ def _create_environment_impl(
     if template_name is not None:
         # A template DB's objects are owned by whatever role created them —
         # normally the superuser (pg_restore --no-owner), but the plain-SQL /
-        # import_template_from_odoo path (psql without --no-owner) can leave
+        # import_template path (psql without --no-owner) can leave
         # objects owned by the source env's per-env role (e.g. u_2_fs19). DDL
         # during module upgrades requires ownership; Odoo connects as the env
         # role and never SET ROLEs, so per-object ownership — not role
@@ -3838,7 +3848,12 @@ def get_environment_info(
             result["odoo"]["mem_usage_mb"] = stats["mem_usage_mb"]
             result["odoo"]["mem_percent"] = stats["mem_percent"]
     except docker.errors.NotFound:
-        pass
+        # Every field above is derived from the name alone, so without a
+        # container or a workspace there is nothing real to report on.
+        if not os.path.isdir(result["workspace"]):
+            raise NotFoundError(
+                f"Environment '{env_name}' does not exist. Use create_environment first."
+            )
 
     rec = activity.get_all(team).get(env_name, {})
     result["protected"] = is_protected(settings, team, env_name)

@@ -268,6 +268,7 @@ spec:
     odooImage: odoo:19.0
     autoUpdate: false
     allowCopyToDevMcp: false
+    serverMode: workers   # or gevent; see Production Hosting → Server mode
     env:
       APP_KEY: secret:control-key
     odooConf:
@@ -303,12 +304,15 @@ configuration overrides. Add `adoptExisting: true`, then review `stack plan`.
 `adopt production` records ownership in `productions.json` without restarting
 Odoo or copying its database/filestore. An absent production, configuration drift,
 a stopped/missing/foreign container, another Stack owner or an active deploy
-blocks adoption. Remove `adoptExisting` after adoption if desired; doing so does
+blocks adoption. The one exception is a container whose Traefik routing
+predates the current [server mode](production.md#server-mode) routes: the plan
+shows the adoption as recreating the container, and apply does so from the
+production's (matching) record. Remove `adoptExisting` after adoption if desired; doing so does
 not trigger an update. The flag never creates a missing production.
 
-Owned productions reconcile domain, image, variables, update/copy policies and
-`odooConf` overrides through production operations. Image/domain/environment/conf
-changes can restart Odoo; database and filestore persist. Major Odoo version
+Owned productions reconcile domain, image, variables, server mode, update/copy
+policies and `odooConf` overrides through production operations.
+Image/domain/environment/server-mode/conf changes can restart Odoo; database and filestore persist. Major Odoo version
 changes still require a separate migration. Source repository, branch, git user,
 extra repositories and seed-template changes are conflicts: use an explicit
 production workflow for these changes instead of silently running different code.

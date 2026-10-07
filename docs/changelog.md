@@ -1,5 +1,269 @@
 # Changelog
 
+## v1.85.0
+
+### Breaking Changes
+
+- **PostgreSQL 16 for Odoo 20** — Odoo 20 requires PostgreSQL 16+, so the
+  development and production clusters both run the official image from
+  `[database].image` (default `postgres:16`, supported majors 16–17). The separate
+  production PostgreSQL image (`oduist/oduflow-postgres`) and
+  `[production].postgres_image` are removed. A one-time startup migration replaces
+  an existing PG15 cluster: it refuses to start while any environment, production
+  or service database still lives there — listing every blocker at once — and
+  `oduflow upgrade` runs the same read-only check with the new code, so a
+  self-update never restarts into a server that cannot start. Once clear, the old
+  clusters are deleted together with the PG15 WAL-G archive (PG15 base backups
+  cannot restore into PG16), new clusters are created, and template databases are
+  restored from their on-disk dumps behind a journal that resumes after a failure.
+  Only official PG15 clusters are reset; clusters carrying custom extensions need
+  operator handling. See the upgrade procedure in the installation, CLI and
+  production guides and decision record
+  [0074](https://github.com/oduflow/oduflow/blob/main/specs/0074-postgresql16-cluster-replacement.md).
+  (#283)
+
+### Features
+
+- **On-demand extra-addons branches** — adding an extra-addons repository no
+  longer downloads code: Oduflow checks access and reads the branch list, and
+  each branch is downloaded (latest commit only) the first time an environment
+  uses it. Large multi-version repositories are added in seconds instead of
+  timing out. Downloaded branches update incrementally; branches deleted on the
+  remote are untracked. Repositories added by earlier versions keep fetching all
+  branches. (#282)
+- **Update single elements of JSON secrets** — `POST
+  /api/secrets/{name}/update-json` replaces one nested key or array element by
+  JSON Pointer instead of rewriting the whole document. Invalid paths or values
+  are rejected without touching storage, responses never expose secret values,
+  and secret writes no longer block dashboard requests while they hit disk. (#278)
+
+### Dashboard
+
+- **Tool-result images in Agent Chat** — screenshot-style tool results are shown
+  as inline pictures instead of a wall of base64 JSON, with the surrounding text
+  and metadata kept alongside them. `image/svg+xml` stays outside the MIME
+  allowlist and payloads are charset-validated, so a tool result cannot smuggle a
+  script-bearing data URL into the page. (#280)
+- **Shared links recover instead of dead-ending** — a visitor who navigates out
+  of a shared `/env/<name>` view is redirected back to it instead of seeing a raw
+  403 (API and state-changing requests keep the 403, WebSockets still close), the
+  landing page names both routes back — reopening the share link and signing in —
+  and Sign out is a real sign-out for an operator holding a revoked or rotated
+  share cookie. (#279)
+
+### Bug Fixes
+
+- **SSH in the coder image** — `oduflow-coder:0.3.2` includes the OpenSSH client
+  so agent Git operations can use team SSH deploy keys. (#281)
+
+## v1.84.0
+
+### Licensing
+
+- **PolyForm Noncommercial source license** - new releases use the unmodified
+  PolyForm Noncommercial License 1.0.0, with a separate free internal evaluation
+  permission and alternative Solo, Business, Integrator and Enterprise commercial
+  agreements. Earlier releases and perpetual commercial purchases retain
+  their original terms. All plans keep the same code, features and public updates.
+- **License terms in the dashboard** - the license details dialog now links to
+  the Oduflow Commercial License Agreement and the public source license alongside
+  the holder, validity period and renewal actions.
+
+## v1.83.0
+
+### Features
+
+- **Manual commercial periods and agreed annual migration** - existing customers
+  can retrieve an agreed annual term through **Update license status**. A stable
+  license identity allows a manually granted period before a Paddle subscription
+  exists. After expiry, **Subscribe annually** opens checkout for the same holder
+  and plan; completed payment links the subscription and enables paid renewal.
+  Other perpetual licenses remain valid, and expiration never restricts features.
+
+## v1.82.0
+
+### Features
+
+- **Annual commercial license details and renewal** - click the license banner
+  to see the named holder, plan and paid-through date. Expired licenses show a
+  red status and an **Update license status** action. A manual check retrieves
+  a signed extension after a completed Paddle payment. All product features
+  remain available, and existing perpetual keys remain valid. Checkout, key
+  delivery and renewal are hosted by the license server.
+- **Staging builds as services** - staging image builds run through the service
+  lifecycle, with image retention that preserves images still used by services
+  or staging environments. (#273)
+
+### Fixes
+
+- Validate JSON-typed team secrets before storing them, with clear errors for
+  malformed values. (#271)
+
+## v1.81.0
+
+### Breaking Changes
+
+- **`import_template_from_odoo` is now `import_template`** — the MCP tool is
+  renamed (first argument `odoo_url` → `source`), and the `reload-template` CLI
+  command is removed. Its jobs are covered by `import-template`: bare reload →
+  `--refresh`, `--dump-path` → a dump-file source with `--overwrite`,
+  `--source s3://…|/dir` → the same source with `--overwrite`. The old
+  `--source` implementation shelled out to `aws s3 sync`/`rsync` into the live
+  template directory (environments stayed unmounted for the whole download and
+  metadata went stale); the unified path needs no AWS CLI on the host and stages
+  before swapping. The REST endpoint `/api/templates/import-from-odoo` keeps its
+  path and accepts `odoo_url` as a legacy alias for `source`. (#257)
+
+### Features
+
+- **One unified template import** — `import_template` (MCP), `import-template`
+  (CLI) and the dashboard API are now the single door for template data,
+  dispatched on the shape of the source: an http(s) Odoo URL (database manager
+  API, `master_pwd` required, as before), an `s3://bucket/prefix`, a local
+  directory with the same raw layout, a single local dump file (database-only),
+  or `refresh=true` with no source to reload the template from files already
+  placed in its directory (an external rsync/scp drop). Every variant refreshes
+  `metadata.json` — Odoo version and modules read from the restored database,
+  sizes, overlay mode and data age. Decision record:
+  `specs/0069-unified-template-import.md`. (#257)
+
+- **Raw-layout import from S3 or a local path** — a `dump.pgdump`/
+  `dump.sql[.gz]` (hand-made `db.dump`/`db.dump.gz` names are accepted too and
+  installed under the canonical name; canonical wins when both are present) plus
+  an as-is `filestore/` copy (e.g. uploaded with `aws s3 sync`) is imported
+  without a master password or archiving. S3 downloads run in parallel and
+  resume after interruption; local files are hardlinked, which is near-instant on
+  the same filesystem. Nothing touches the live template until the staged copy
+  is promoted under the overlay remount guard, so live environments keep their
+  own changes. `overwrite=true` re-syncs an existing template incrementally —
+  only changed filestore files are fetched, files deleted at the source are
+  removed, and an unchanged dump (same S3 ETag, or local size+mtime) skips the
+  database reload, which makes a nightly "pull last night's backup into dev" job
+  cheap. S3 credentials come from explicit `s3_access_key`/`s3_secret_key`
+  (+ `s3_endpoint` for MinIO and similar), the `[backup]` settings when the
+  bucket matches, or anonymous access for public buckets. (#257)
+
+- **Branch picker for extra addon repos** — the dashboard's add-repo dialog can
+  list a remote's branches before cloning (`POST /api/extra-repos/ls-remote`,
+  `git ls-remote --heads`) and clone only a chosen subset; all branches remain
+  the default. `add_extra_repo` takes optional comma-separated `branches`, and
+  `update_extra_repo(add_branch=...)` starts tracking one more branch in a
+  subset clone later. Branch names are validated with `git check-ref-format`,
+  and git authentication failures now say what to fix: SSH remotes point at the
+  team deploy key (`get_ssh_public_key`), HTTPS remotes at `setup_repo_auth`.
+  (#257)
+
+### Bug Fixes
+
+- **Missing branch on environment create is reported as such** — creating an
+  environment for a branch that was never pushed failed with a `git clone` exit
+  128, which the dashboard masks behind the generic "Operation failed" banner.
+  The clone now raises `NotFoundError` with the same actionable message
+  `switch_branch` already uses ("Branch 'X' does not exist on origin. Push it
+  first…"), so the dashboard (404) and MCP callers see the real cause.
+  Production clones share the same path. (#269)
+
+## v1.80.0
+
+### Features
+
+- **`oduflow self-update`** — upgrade an installed Oduflow through its own
+  installer, reconcile bundled files in a fresh process on the same interpreter,
+  and restart the systemd service when running as root. pip and uv tool
+  installations are detected; containers, source/editable installs, ephemeral
+  uvx environments and uv tool directories that do not match the running
+  installation are refused rather than half-upgraded. The installed version is
+  verified after the installer exits, so an unavailable release, a retained
+  version pin or an unreadable version stops the command before reconciliation
+  or restart. `--force` forwards conflict handling to `oduflow upgrade --force`
+  and completes reconciliation even when the package is already current (the
+  recovery path after an interrupted upgrade); `--no-restart` leaves the restart
+  to the operator. (#268)
+
+- **Separate production MCP access** — production tools now live behind their own
+  `/production` endpoint with per-team production credentials; development
+  credentials no longer authorize them. New Odoo 19 productions get OduMCP
+  installed automatically and the configured key synchronized for the Odoo
+  administrator, so production records are reached through OduMCP policies,
+  approval plans and audit without standing up a separate MCP server. An addon
+  setup failure leaves production running with a warning and the Odoo tools
+  reporting unavailable; existing productions, retries and key rotations use
+  `sync_production_mcp`. (#260)
+
+- **Release check from the dashboard header** — clicking the version next to
+  **Oduflow** opens a dialog with the installed version, the latest published
+  release with its title and date, a link to its notes, and the upgrade commands
+  when a newer one exists. The lookup is strictly on demand: one unauthenticated
+  request to the GitHub Releases API per click, nothing cached between clicks, no
+  background polling, and no fact about the installation sent. Offline hosts,
+  rate limits and unreadable replies are shown as answers in the dialog, and a
+  source checkout reports `dev` as not comparable rather than guessing. (#261)
+
+- **Select all in the module and extra-addon pickers** — the dashboard's
+  **Upgrade modules** picker gains **Select all** and **Clear**, as do the
+  **Extra addons repos** checkbox lists in the create-environment modal and in
+  template settings (each ticked repo still needs its branch). Selecting every
+  installed module sends Odoo's own `odoo -u all` instead of a command line
+  listing each module, and `upgrade_odoo_modules` / `pull_and_apply(upgrade=...)`
+  accept `all` on its own for the same run. (#262)
+
+- **Template locks narrowed to the template being changed** — template mutations
+  used to take the team lock, stopping every environment operation in the team.
+  `import_template_from_odoo` and the dashboard's metadata editor now take a
+  template-scoped key instead, and `attach_filestore` enters the team lock only
+  for the remount-and-swap window, so staging a multi-gigabyte filestore runs
+  outside it. `delete_template` and `rename_template` keep the team lock, which
+  their dependent-environment scan genuinely needs. The import's download path is
+  unique per call with cleanup that cannot strand an orphan. (#264)
+
+### Security
+
+- **Generated secrets stay out of the log** — `[database].password`, `auth_token`
+  and `ui_password` were printed to the startup log, which is shipped off-host
+  and retained far longer than the secrets stay valid. They now live in
+  `oduflow.toml` only and the log points at the file. The config is created
+  `0600`, and an existing config that gains an auto-provisioned `ui_password` on
+  upgrade has a group/world-readable mode narrowed — never widened. Config
+  bootstrap opens the destination `O_EXCL`, so a missing `ODUFLOW_TOML` path can
+  no longer truncate a live `/etc/oduflow/oduflow.toml` and destroy its database
+  password, teams and tokens. A bad `oduflow.toml` now surfaces as one readable
+  `ConfigError` line instead of a traceback. (#266)
+
+### Bug Fixes
+
+- **One shared Odoo version parser** — the test runner (`--longpolling-port` vs
+  `--gevent-port`), the translation exporter (`--i18n-*` vs the 19-only `odoo
+  i18n` subcommand) and the sanitizer (does `odoo neutralize` exist?) each had
+  their own regex over the image reference, they disagreed, and guessing wrong
+  makes Odoo abort with `error: no such option`. `odoo_version.py` now owns the
+  parsing: official tags, custom repositories with a version tag, versioned
+  repository names, and a live `odoo --version` probe for images that carry no
+  version, anchored on the `Odoo Server N.M` banner. Every source is
+  plausibility-checked, so an image that versions itself on its own scheme falls
+  through to the probe instead of selecting a removed CLI option.
+  `create_environment`'s version-guide reminder uses the same parser. (#265)
+
+- **Coder image source label** — the image's `org.opencontainers.image.source`
+  label still named the old `oduist` org, so a pulled `oduist/oduflow-coder`
+  pointed back at an address the project no longer uses. Corrected and
+  republished as `oduflow-coder:0.3.1`; the Docker Hub namespace is unchanged.
+  (#263)
+
+### Documentation
+
+- **Architecture page** — a new `docs/architecture.md` with two Mermaid diagrams:
+  a system overview (MCP agents, browser and GitHub webhooks → the single-process
+  server → dev environments, production, auxiliary services, Traefik and the S3
+  bucket) and a backup-and-recovery diagram contrasting logical snapshots with
+  the WAL-G stream. Mermaid rendering is enabled in MkDocs Material. (#267)
+
+- **Indexed per-tool MCP tools reference** — `docs/mcp-tools.md` was one 102-row
+  table whose first column squeezed tool names mid-identifier. It is now a
+  clickable index of all 102 tools in 17 categories plus one section per tool,
+  each with its parameters as a definition list, "use it when" bullets, stated
+  lock scope and, where the invocation isn't obvious, an `oduflow call` example.
+  (#259)
+
 ## v1.79.0
 
 ### Features
@@ -1293,7 +1557,7 @@
 
 ### Documentation
 
-- **Docs synced with code** — a documentation audit corrected several drifts: the retired "PolyForm Noncommercial 1.0.0" license name → BUSL-1.1 in `llms.txt`/`llms-full.txt`; `auto_delete_hours` default corrected to `0` (opt-in) across pages; `[server].allow_local_path`, `allow_insecure_http` and `[routing].hostname` documented; and the v1.61.0 coding-agent feature fully documented (new `docs/agent.md`, installation/web-api pages, `llms.txt`/`llms-full.txt`). (#101, #102)
+- **Docs synced with code** — a documentation audit corrected several drifts: `auto_delete_hours` default corrected to `0` (opt-in) across pages; `[server].allow_local_path`, `allow_insecure_http` and `[routing].hostname` documented; and the v1.61.0 coding-agent feature fully documented (new `docs/agent.md`, installation/web-api pages, `llms.txt`/`llms-full.txt`). (#101, #102)
 
 ## v1.61.0
 
@@ -1338,7 +1602,7 @@
 
 ### Licensing
 
-- **Relicense to Business Source License 1.1** — replaces PolyForm Noncommercial 1.0.0 with BUSL-1.1 (the canonical MariaDB text). The Additional Use Grant keeps production use free forever for non-commercial purposes (evaluation, education, personal projects, non-profits) and defines three commercial tiers — Individual, Business (internal use), and Integrator (Odoo services to third parties) — matching the existing license-key types. Each release converts to MPL 2.0 four years after publication, per standard BSL mechanics. (#90)
+- Updated license terms and commercial plan descriptions. (#90)
 
 ## v1.57.0
 

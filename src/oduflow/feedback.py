@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from oduflow.settings import Settings
 
-REPO = "oduist/oduflow"
+REPO = "oduflow/oduflow"
 NEW_ISSUE_URL = f"https://github.com/{REPO}/issues/new"
 ISSUES_URL = f"https://github.com/{REPO}/issues"
 
@@ -89,7 +89,7 @@ def build_issue_url(
     settings: Settings | None = None,
     environment: str = "",
 ) -> str:
-    """Build a prefilled "new issue" URL for oduist/oduflow.
+    """Build a prefilled "new issue" URL for oduflow/oduflow.
 
     ``kind`` selects the issue form (and with it the labels applied on
     submission). ``environment`` overrides the auto-collected diagnostics block;

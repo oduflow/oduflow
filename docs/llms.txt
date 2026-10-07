@@ -51,7 +51,7 @@ mode = "port"                         # "port" | "traefik" (auto-HTTPS)
 [database]
 user = "odoo"
 # password = "..."                    # auto-generated on first launch; set to override
-image = "postgres:15"
+image = "postgres:16"
 
 [storage]
 # data_dir = "/srv/oduflow"           # default: /srv/oduflow or ~/.oduflow/data
@@ -63,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.2"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -233,7 +233,7 @@ sanitization scripts followed by project scripts from
 
 ## Links
 
-- Repository: <https://github.com/oduist/oduflow>
+- Repository: <https://github.com/oduflow/oduflow>
 - Documentation: <https://docs.oduflow.dev>
-- License: BUSL-1.1 (Business Source License 1.1) — free for non-commercial use; commercial use requires a paid license; converts to MPL 2.0 four years after publication
+- License: PolyForm-Noncommercial-1.0.0 from v1.84.0 — public noncommercial and organizational permissions, a separate internal evaluation grant, and alternative annual commercial licenses at https://oduflow.dev/eula. Earlier releases retain their original terms.
 - Website: <https://oduflow.dev>

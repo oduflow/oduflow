@@ -163,7 +163,7 @@ def sample_local(client: Any, settings: Settings) -> dict[str, Any]:
         # Docker's volume may live on another host/filesystem. Inspect it from
         # the daemon side, read-only, using the same postgres identity.
         helper = client.containers.run(
-            pg.attrs.get("Image") or settings.production_pg_image,
+            pg.attrs.get("Image") or settings.postgres_image,
             entrypoint=["timeout", "10s", "sh", "-c", script],
             detach=True,
             network_disabled=True,
@@ -390,7 +390,7 @@ def recovery_fence(client: Any, settings: Settings, *, enabled: bool) -> None:
         )
         pg = client.containers.get(settings.prod_db_container)
         helper = client.containers.run(
-            pg.attrs.get("Image") or settings.production_pg_image,
+            pg.attrs.get("Image") or settings.postgres_image,
             entrypoint=["timeout", "10s", "sh", "-c", script],
             detach=True,
             network_disabled=True,

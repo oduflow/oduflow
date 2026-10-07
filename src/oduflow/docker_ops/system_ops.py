@@ -17,7 +17,7 @@ import sys
 import tarfile
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -800,10 +800,12 @@ def _wait_pg_ready(
     deadline = time.monotonic() + timeout
     for _ in range(timeout):
         try:
+            # Over TCP: on a fresh volume the official entrypoint first runs a
+            # temporary socket-only server for its setup, then stops it.
             ready = _exec_exit_code(
                 client,
                 container,
-                ["pg_isready", "-U", settings.db_user],
+                ["pg_isready", "-h", "127.0.0.1", "-U", settings.db_user],
                 timeout=exec_timeout,
             )
             if ready == 0:
@@ -1958,7 +1960,7 @@ def _ensure_prod_pg_container(
     os.makedirs(walg.bin_host_dir(settings), exist_ok=True)
     os.makedirs(walg.conf_host_dir(settings), exist_ok=True)
     client.containers.run(
-        settings.production_pg_image,
+        settings.postgres_image,
         name=settings.prod_db_container,
         detach=True,
         network=settings.shared_network,
@@ -2549,6 +2551,7 @@ def reload_template(
     container_dump_path: str | None = None,
     *,
     persist_dump: bool = True,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Rebuild the template database from its dump.
 
@@ -2557,6 +2560,10 @@ def reload_template(
     layer. The caller owns that file; only dumps copied in here are cleaned up.
     ``persist_dump=False`` lets a caller install its staged file atomically after
     this restore succeeds instead of making a second full-size copy here.
+    ``strict=True`` makes archive restores stop at the first error and omit
+    ACLs, which may name roles missing from a new cluster. Plain SQL keeps the
+    tolerant psql behaviour: dumps from newer clients contain settings older
+    servers reject (e.g. ``SET transaction_timeout``), which are harmless.
     """
     client = get_client()
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -2615,6 +2622,7 @@ def reload_template(
         # at restore time for archive formats. The psql path for plain-SQL/
         # external dumps is left untouched.)
         restore_tool = "psql" if use_psql else "pg_restore"
+        archive_options = ["--no-acl", "--exit-on-error"] if strict else []
         if is_gzipped:
             if use_psql:
                 pipeline = f"gunzip -c {container_dump_path} | psql -U {settings.db_user} -d {tpl_db}"
@@ -2623,6 +2631,8 @@ def reload_template(
                     f"gunzip -c {container_dump_path} | "
                     f"pg_restore --no-owner -U {settings.db_user} -d {tpl_db}"
                 )
+                if strict:
+                    pipeline += " " + " ".join(archive_options)
             restore_cmd = ["bash", "-c", f"set -o pipefail; {pipeline}"]
         else:
             if use_psql:
@@ -2643,6 +2653,7 @@ def reload_template(
                 restore_cmd = [
                     "pg_restore",
                     "--no-owner",
+                    *archive_options,
                     "-U",
                     settings.db_user,
                     "-d",
@@ -3792,8 +3803,18 @@ def attach_filestore(
     *,
     reset_env_changes: bool = False,
     strip_prefix: str = "auto",
+    lock: Callable[[], contextlib.AbstractContextManager[Any]] | None = None,
 ) -> dict[str, object]:
-    """Attach or replace a template filestore from a directory, rsync source, or archive."""
+    """Attach or replace a template filestore from a directory, rsync source, or archive.
+
+    ``lock``, when given, is entered only around the remount-and-swap window —
+    never around staging. Staging pulls the source into place (an rsync of a
+    multi-gigabyte filestore, or unpacking an archive) and touches nothing but
+    a private staging directory, so the caller's team lock has no reason to
+    cover it; only replacing the lower layer under live overlays does. The
+    caller keeps a template-scoped lock for the whole call, which is what stops
+    a second attach or an import from racing on this same template.
+    """
     from oduflow.docker_ops import env_ops
 
     validate_template_name(template_name)
@@ -3836,13 +3857,19 @@ def attach_filestore(
 
         target_filestore = team.get_template_filestore_path(template_name)
         previous_filestore = os.path.join(staging_root, "previous")
-        with env_ops.remount_template_overlays(
-            client,
-            settings,
-            team,
-            template_name,
-            reset_upper=reset_env_changes,
-        ) as remount:
+        # Staging is done; from here the template's lower layer changes under
+        # live environments, which is exactly what the team lock exists for.
+        swap_lock = lock() if lock is not None else contextlib.nullcontext()
+        with (
+            swap_lock,
+            env_ops.remount_template_overlays(
+                client,
+                settings,
+                team,
+                template_name,
+                reset_upper=reset_env_changes,
+            ) as remount,
+        ):
             had_previous = os.path.exists(target_filestore)
             os.makedirs(os.path.dirname(target_filestore), exist_ok=True)
             if had_previous:
@@ -4065,26 +4092,98 @@ def destroy_system(settings: Settings) -> dict[str, str]:
     return {"status": "destroyed", "removed": ", ".join(removed)}
 
 
-def import_from_odoo(
+def import_template(
     settings: Settings,
     team: TeamSettings,
-    odoo_url: str,
-    master_pwd: str,
+    source: str = "",
+    master_pwd: str = "",
     db_name: str = "",
     template_name: str = "",
     without_filestore: bool = False,
+    overwrite: bool = False,
+    refresh: bool = False,
+    s3_endpoint: str = "",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
+    s3_region: str = "",
 ) -> dict[str, object]:
-    """Import a template from a running Odoo instance via its database manager API.
+    """Import a template — the single door for external data, dispatched on
+    the shape of ``source``:
 
-    Downloads a full ZIP backup or DB-only custom dump, saves metadata.json,
-    and loads the dump into PostgreSQL as a template DB.
+    - ``http(s)://`` — a running Odoo's database manager API (``master_pwd``
+      required): full ZIP backup or DB-only custom dump.
+    - ``s3://bucket/prefix`` — raw ``dump.*`` + ``filestore/`` layout synced
+      file-by-file (no master password); ``s3_*`` credential parameters
+      apply only here. See :mod:`oduflow.template_import`.
+    - a local directory with the same raw layout, or a single dump file
+      (database-only import).
+    - no source with ``refresh=True`` — the files already sit in the
+      template directory (an external rsync/scp drop): reload the template
+      DB from them and refresh metadata.
+
+    ``overwrite`` (s3/local) incrementally re-syncs an existing template.
     """
     import urllib.request
     import zipfile
 
+    from oduflow import template_import
     from oduflow.url_safety import assert_allowed_url
 
-    base = odoo_url.rstrip("/")
+    is_http = source.startswith(("http://", "https://"))
+    if not is_http and master_pwd:
+        raise PrerequisiteNotMetError(
+            "master_pwd is only used for http(s) Odoo sources; leave it empty."
+        )
+    if refresh:
+        if source:
+            raise PrerequisiteNotMetError(
+                "refresh=true reloads the template from its own files; "
+                "do not pass a source."
+            )
+        return template_import.refresh_from_own_files(
+            settings, team, template_name=template_name
+        )
+    if not source:
+        raise PrerequisiteNotMetError(
+            "source is required (http(s):// Odoo URL, s3://bucket/prefix, "
+            "or a local path) unless refresh=true."
+        )
+    if source.startswith("s3://"):
+        return template_import.import_from_s3_prefix(
+            settings,
+            team,
+            url=source,
+            template_name=template_name,
+            overwrite=overwrite,
+            without_filestore=without_filestore,
+            endpoint=s3_endpoint,
+            access_key=s3_access_key,
+            secret_key=s3_secret_key,
+            region=s3_region,
+        )
+    if s3_endpoint or s3_access_key or s3_secret_key or s3_region:
+        raise PrerequisiteNotMetError(
+            "The s3_* parameters are only valid for s3:// sources."
+        )
+    if not is_http:
+        return template_import.import_from_local_path(
+            settings,
+            team,
+            path=source,
+            template_name=template_name,
+            overwrite=overwrite,
+            without_filestore=without_filestore,
+        )
+    if not master_pwd:
+        raise PrerequisiteNotMetError(
+            "master_pwd is required for http(s) Odoo sources."
+        )
+    if overwrite:
+        raise PrerequisiteNotMetError(
+            "overwrite is only valid for s3:// and local-path sources."
+        )
+
+    base = source.rstrip("/")
     validate_template_name(template_name)
     template_dir = team.get_template_dir(template_name)
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -4154,48 +4253,58 @@ def import_from_odoo(
     )
 
     download_start = time.monotonic()
-    tmp_backup = os.path.join(team.data_dir, f"tmp_odoo_backup.{backup_format}")
+    # Unique per call: imports lock per *template* (locking.template_lock_key),
+    # not per team, so two imports into different templates run concurrently
+    # and must not share one download path. Removed in the finally below, which
+    # opens before the file is created and closes after the last read of it: the
+    # path is unique, so nothing would ever overwrite a leftover, and any failure
+    # in between — a quota-exhausted makedirs right after writing gigabytes, say
+    # — would orphan it permanently.
+    tmp_backup = os.path.join(
+        team.data_dir, f"tmp_odoo_backup.{uuid.uuid4().hex}.{backup_format}"
+    )
     os.makedirs(team.data_dir, exist_ok=True)
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            if "zip" not in content_type and "octet" not in content_type:
-                body = resp.read(2000).decode("utf-8", errors="replace")
-                raise ExternalCommandError(
-                    "odoo backup",
-                    -1,
-                    f"Unexpected response (Content-Type: {content_type}): {body}",
-                )
-            with open(tmp_backup, "wb") as f:
-                while True:
-                    chunk = resp.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-    except urllib.error.HTTPError as e:
-        body = e.read(2000).decode("utf-8", errors="replace")
-        raise ExternalCommandError("odoo backup", e.code, f"HTTP {e.code}: {body}")
-
-    download_elapsed = time.monotonic() - download_start
-    backup_size_mb = os.path.getsize(tmp_backup) / (1024 * 1024)
-    logger.info(
-        "Backup downloaded in %.1fs (%.1f MB)", download_elapsed, backup_size_mb
-    )
-
-    # 3. Stage dump/filestore files
-    from oduflow.docker_ops import env_ops
-
-    template_sql_path = os.path.join(
-        template_dir, "dump.pgdump" if without_filestore else "dump.sql"
-    )
-    template_filestore_path = team.get_template_filestore_path(template_name)
-
-    os.makedirs(template_dir, exist_ok=True)
 
     manifest = {}
     affected_envs: list[str] = []
     remount_failures: list[tuple[str, str]] = []
     try:
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "zip" not in content_type and "octet" not in content_type:
+                    body = resp.read(2000).decode("utf-8", errors="replace")
+                    raise ExternalCommandError(
+                        "odoo backup",
+                        -1,
+                        f"Unexpected response (Content-Type: {content_type}): {body}",
+                    )
+                with open(tmp_backup, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+        except urllib.error.HTTPError as e:
+            body = e.read(2000).decode("utf-8", errors="replace")
+            raise ExternalCommandError("odoo backup", e.code, f"HTTP {e.code}: {body}")
+
+        download_elapsed = time.monotonic() - download_start
+        backup_size_mb = os.path.getsize(tmp_backup) / (1024 * 1024)
+        logger.info(
+            "Backup downloaded in %.1fs (%.1f MB)", download_elapsed, backup_size_mb
+        )
+
+        # 3. Stage dump/filestore files
+        from oduflow.docker_ops import env_ops
+
+        template_sql_path = os.path.join(
+            template_dir, "dump.pgdump" if without_filestore else "dump.sql"
+        )
+        template_filestore_path = team.get_template_filestore_path(template_name)
+
+        os.makedirs(template_dir, exist_ok=True)
+
         # Swap the template's filestore (the overlay lower layer) non-destructively:
         # live overlay envs are unmounted (keeping their upper deltas) and remounted
         # against the new lower on exit. See issue #2.
@@ -4307,7 +4416,9 @@ def import_from_odoo(
 
     # 6. Load dump into PostgreSQL
     result = reload_template(settings, team, template_name=template_name)
-    if without_filestore:
+    # DB-only dumps carry no manifest, and a hand-built ZIP may omit it: in
+    # both cases read version/modules from the restored database instead.
+    if not manifest:
         manifest = _read_template_manifest_from_db(
             client, settings, str(result["template_db"])
         )
@@ -4510,9 +4621,10 @@ def _wire_imported_addons(
 
         # Already registered (e.g. a re-run, or the user added it manually):
         # reference it only if the requested branch is genuinely available.
+        # A registered repo downloads branches on demand, so fetch it if absent.
         if os.path.isdir(repo_path):
             try:
-                extra_addons._resolve_branch_revision(repo_path, name, branch)
+                extra_addons.ensure_branch_revision(team, name, branch)
             except Exception as exc:
                 if not best_effort:
                     raise
@@ -4526,10 +4638,27 @@ def _wire_imported_addons(
         local_fallback_reason = ""
         if kind == "remote" and origin_url:
             try:
-                extra_addons.clone_extra_repo(team, name, origin_url)
+                # Download only the branch this template needs, not every
+                # version branch of the remote.
+                extra_addons.register_extra_repo(
+                    team, name, origin_url, branches=[branch]
+                )
+                extra_addons._resolve_branch_revision(repo_path, name, branch)
+            except NotFoundError as exc:
+                # The remote is reachable but lacks the branch, so the repo can
+                # never serve it. Strict mode rejects this instead of settling
+                # for uploaded files that cannot receive remote updates.
+                shutil.rmtree(repo_path, ignore_errors=True)
+                if not best_effort:
+                    raise
+                if not os.path.isdir(src_dir):
+                    record_warning(name, "skipped", str(exc))
+                    continue
+                local_fallback_reason = str(exc)
             except Exception as exc:
-                # A failed clone may leave a partial bare repo. It belongs to
-                # this import attempt, so remove it before a retry or fallback.
+                # The download itself failed (network, auth, timeout). The bare
+                # repo belongs to this import attempt, so remove it before a
+                # retry or fallback.
                 shutil.rmtree(repo_path, ignore_errors=True)
                 if not os.path.isdir(src_dir):
                     if best_effort:
@@ -4538,27 +4667,12 @@ def _wire_imported_addons(
                     raise
                 local_fallback_reason = str(exc)
                 logger.warning(
-                    "Clone of extra repo '%s' failed; using uploaded files",
+                    "Download of extra repo '%s' failed; using uploaded files",
                     name,
                 )
             else:
-                try:
-                    extra_addons._resolve_branch_revision(repo_path, name, branch)
-                except Exception as exc:
-                    # Clone succeeded but the requested branch is missing on
-                    # the remote: the bare repo cannot serve this branch, so
-                    # discard the repo created by this import attempt.
-                    shutil.rmtree(repo_path, ignore_errors=True)
-                    if not best_effort:
-                        raise
-                    reason = str(exc)
-                    if not os.path.isdir(src_dir):
-                        record_warning(name, "skipped", reason)
-                        continue
-                    local_fallback_reason = reason
-                else:
-                    wired[name] = branch
-                    continue
+                wired[name] = branch
+                continue
         if not os.path.isdir(src_dir):
             error = PrerequisiteNotMetError(
                 f"Addon '{name}' has no uploaded files and no usable origin."
@@ -4597,7 +4711,7 @@ def finalize_imported_template(
 
     The push-based Odoo.sh import uploads into ``staging_dir`` (metadata.json,
     dump.sql.gz, filestore/); nothing touches the live template until now.
-    This mirrors the tail of :func:`import_from_odoo`: within the overlay
+    This mirrors the tail of :func:`import_template`: within the overlay
     remount guard (live envs keep their upper deltas), swap the staged
     filestore/dump/metadata into the template directory, chown the filestore
     for the odoo user, then refresh sizes and restore the dump into the
@@ -4920,6 +5034,13 @@ def delete_template(
     # the overlay lower layer for those envs (see env_ops._mount_filestore), so
     # deleting it would yank the base out from under a live overlay and break it.
     # Mirrors the same guard in rename_template.
+    #
+    # This scan is a check-then-act, and the window is real: create_environment
+    # clones the template database before its container exists, so an in-flight
+    # create is invisible here. Closing it is why the MCP tool holds the *team*
+    # lock — team↔environment mutual exclusion is the only thing that keeps a
+    # concurrent create out — even though this function remounts nothing. Call
+    # it from anywhere else and you inherit that race.
     filters = {
         "label": [
             f"{settings.managed_label}=true",
@@ -4993,6 +5114,8 @@ def rename_template(
     new_db = get_template_db_name(new_name, team.team_id)
 
     # Refuse if any environment references this template (immutable label).
+    # Same check-then-act window as delete_template above, closed by the same
+    # team lock on the caller's side.
     filters = {
         "label": [
             f"{settings.managed_label}=true",

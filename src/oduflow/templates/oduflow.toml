@@ -53,7 +53,7 @@ mode = "port"                   # "port" | "traefik"
 [database]
 user = "odoo"
 # password auto-generated on first launch. Set explicitly to override.
-image = "postgres:15"
+image = "postgres:16"
 
 # ── Storage ───────────────────────────────────────────
 [storage]
@@ -78,7 +78,7 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # deployment-wide bits; changes apply on server restart (the agent container
 # is recreated automatically when its config changed).
 # [agent]
-# image = "oduist/oduflow-coder:0.3.0"
+# image = "oduist/oduflow-coder:0.3.2"
 # claude_model = ""                # optional model override; empty = CLI default
 # codex_model = ""                 # optional model override; empty = CLI default
 # opencode_model = ""              # optional provider/model; empty = OpenCode default
@@ -91,7 +91,6 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # enabled flag, then restart Oduflow. See https://docs.oduflow.dev/production/
 # [production]
 # enabled = true
-# postgres_image = ""             # managed PG15 with CA; inherits custom [database].image
 # workers_cap = 8                 # upper bound for auto-tuned Odoo workers
 
 # Production WAL safety (always active while production hosting is enabled).
@@ -132,6 +131,7 @@ hostname = "localhost"            # required and unique; OAuth issuer host for t
 environment_slots = 20            # maximum concurrent environments; 0 = unlimited
 environment_hostname_mode = "branch" # "branch": feature.dev.example.com; "slots": dev1.example.com..devN.example.com
 service_slots = 10                # maximum managed auxiliary services; 0 = unlimited
+production_token = ""             # separate 32+ character Bearer key for /production; synchronized to odumcp
 auth_token = ""                   # MCP bearer token / OAuth client_secret (auto-generated on first run; HTTP refuses to start if empty)
 ui_password = ""                  # Web UI password (auto-generated on first run; HTTP refuses to start if empty unless allow_insecure_http)
 port_range = [50000, 50100]       # port range for Odoo containers

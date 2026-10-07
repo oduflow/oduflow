@@ -172,6 +172,9 @@ def create_production(
             # the key is missing so pre-existing records keep working; only the
             # dashboard can turn it off.
             "allow_copy_to_dev_mcp": True,
+            # "workers" (Traefik -> 8069, bus -> 8072) or "gevent" (everything
+            # -> 8072). Read as "workers" when the key is missing.
+            "server_mode": "workers",
             # User odoo.conf [options] overrides, applied on top of the base
             # conf chain and the auto-tuned worker settings.
             "odoo_conf": {},

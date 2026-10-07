@@ -29,10 +29,10 @@
 
 FROM node:24-bookworm-slim
 
-ARG CODER_VERSION=0.3.0
+ARG CODER_VERSION=0.3.2
 LABEL org.opencontainers.image.title="oduflow-coder" \
       org.opencontainers.image.version="${CODER_VERSION}" \
-      org.opencontainers.image.source="https://github.com/oduist/oduflow"
+      org.opencontainers.image.source="https://github.com/oduflow/oduflow"
 
 # Shell tools the coding agent reaches for from Bash: curl (ad-hoc HTTP), less
 # (pager other CLIs shell out to), ripgrep (rg; fast code search), fd-find +
@@ -42,6 +42,7 @@ LABEL org.opencontainers.image.title="oduflow-coder" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
+        openssh-client \
         ca-certificates \
         curl \
         fd-find \

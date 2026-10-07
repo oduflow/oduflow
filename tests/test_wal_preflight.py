@@ -10,7 +10,7 @@ import pytest
 from oduflow import wal_monitor, walg
 from oduflow.docker_ops import production_ops, system_ops
 from oduflow.errors import PrerequisiteNotMetError
-from oduflow.settings import DEFAULT_PROD_POSTGRES_IMAGE, BackupSettings, Settings
+from oduflow.settings import BackupSettings, Settings
 
 
 @pytest.fixture
@@ -220,17 +220,6 @@ def test_provisioning_propagates_preflight_failure(settings):
     command.assert_not_called()
 
 
-def test_production_image_matches_build_and_preserves_custom_major():
-    dockerfile = (Path(__file__).parents[1] / "docker/postgres/Dockerfile").read_text()
-    assert (
-        "ARG POSTGRES_IMAGE_VERSION=" + DEFAULT_PROD_POSTGRES_IMAGE.split(":")[1]
-        in dockerfile
-    )
-    assert Settings().production_pg_image == DEFAULT_PROD_POSTGRES_IMAGE
-    assert Settings(postgres_image="postgres:17").production_pg_image == "postgres:17"
-    assert Settings(prod_postgres_image="custom:15").production_pg_image == "custom:15"
-
-
 @pytest.mark.parametrize("operation", ["start_production", "restart_production"])
 def test_failed_admission_never_starts_or_restarts_application(settings, operation):
     from oduflow.settings import TeamSettings
@@ -327,6 +316,7 @@ def test_only_running_productions_may_skip_the_verification_segment(
         patch.object(production_ops, "get_client", return_value=client),
         patch.object(production_ops, "ensure_prod_infra") as ensure,
         patch.object(production_ops, "_require_container"),
+        patch.object(production_ops, "_has_routing_drift", return_value=False),
     ):
         getattr(production_ops, operation)(settings, TeamSettings(team_id="1"), "erp")
     assert ensure.call_args.kwargs.get("accept_live_evidence", False) is accepts

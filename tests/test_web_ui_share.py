@@ -176,12 +176,28 @@ def test_environment_list_is_filtered_to_the_shared_environment(app):
     assert [e["env_name"] for e in envs] == [_ENV]
 
 
-def test_full_dashboard_and_team_surfaces_are_denied(app):
+@pytest.mark.parametrize("path", ["/", "/bookmarked-page"])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_page_navigation_returns_to_the_shared_workspace(app, path, method):
     client = _visitor(app, _share_url(app))
-    assert client.get("/").status_code == 403
+    resp = client.request(method, path, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/env/{_ENV}"
+    page = client.get(resp.headers["location"])
+    assert page.status_code == 200
+    assert f'data-scoped-env="{_ENV}"' in page.text
+    assert 'onclick="logout()"' in page.text
+
+
+def test_team_surfaces_are_denied(app):
+    client = _visitor(app, _share_url(app))
     for path in ("/api/templates", "/api/services", "/api/volumes", "/api/stats"):
-        assert client.get(path).status_code == 403, path
+        resp = client.get(path, headers={"accept": "text/html"})
+        assert resp.status_code == 403, path
+        assert resp.json()["error"] == "Not available for a shared link."
     assert client.post("/api/environments/create", json={}).status_code == 403
+    assert client.post("/", follow_redirects=False).status_code == 403
 
 
 def test_destructive_actions_on_the_shared_environment_are_denied(app):
@@ -243,13 +259,26 @@ def test_revoking_the_link_invalidates_live_sessions(app):
     assert client.get("/api/environments").status_code == 401
 
 
-def test_logout_clears_the_scoped_session(app):
+def test_scoped_logout_explains_both_ways_back_in(app):
     client = _visitor(app, _share_url(app))
     resp = client.post("/logout", follow_redirects=False)
     assert resp.status_code == 303
-    # Back to their own page (they have no team password to log in with).
+    # Back to their own page, which tells them how to return.
     assert resp.headers["location"] == f"/env/{_ENV}"
+    assert ui_scope.SHARE_COOKIE not in client.cookies
     assert client.get("/api/environments").status_code == 401
+
+    page = client.get(resp.headers["location"])
+    assert page.status_code == 401
+    assert "?key=" in page.text
+    assert "/login" in page.text
+
+    # And an operator who previewed the link can still sign in from there.
+    resp = client.post("/login", data={"password": _PW})
+    assert resp.status_code == 200
+    assert resp.url.path == "/"
+    envs = client.get("/api/environments").json()["environments"]
+    assert [e["env_name"] for e in envs] == [_ENV, "other"]
 
 
 def test_scoped_logout_restores_an_existing_operator_session(app):
@@ -258,28 +287,38 @@ def test_scoped_logout_restores_an_existing_operator_session(app):
     path = str(result["url"]).split("/", 3)[3]
     assert client.get("/" + path, follow_redirects=False).status_code == 303
     assert len(client.get("/api/environments").json()["environments"]) == 1
+    page = client.get("/")
+    assert page.url.path == f"/env/{_ENV}"
+    assert page.status_code == 200
 
     resp = client.post("/logout", follow_redirects=False)
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "/"
+    assert ui_scope.SHARE_COOKIE not in client.cookies
+    assert client.get("/").status_code == 200
     envs = client.get("/api/environments").json()["environments"]
     assert [e["env_name"] for e in envs] == [_ENV, "other"]
 
 
-def test_scoped_logout_restores_operator_after_share_is_revoked(app):
+def test_logout_signs_out_an_operator_holding_a_revoked_share_cookie(app):
     client = _operator(app)
     result = client.post(f"/api/environments/{_ENV}/share").json()["result"]
     path = str(result["url"]).split("/", 3)[3]
     assert client.get("/" + path, follow_redirects=False).status_code == 303
     _operator(app).post(f"/api/environments/{_ENV}/share/revoke")
+    # The dead cookie no longer scopes anything: they are back on the full
+    # dashboard, so Logout has to mean a real sign-out.
+    envs = client.get("/api/environments").json()["environments"]
+    assert [e["env_name"] for e in envs] == [_ENV, "other"]
 
     resp = client.post("/logout", follow_redirects=False)
 
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/"
-    envs = client.get("/api/environments").json()["environments"]
-    assert [e["env_name"] for e in envs] == [_ENV, "other"]
+    assert resp.headers["location"] == "/login"
+    assert web_ui._AUTH_COOKIE not in client.cookies
+    assert ui_scope.SHARE_COOKIE not in client.cookies
+    assert client.get("/api/environments").status_code == 401
 
 
 def test_deleting_the_environment_drops_its_share(app, settings, monkeypatch):

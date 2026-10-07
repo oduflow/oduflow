@@ -11,7 +11,7 @@ Odoo/SQL terminals, Connect As, notes, protection, scoped MCP access,
 single-environment share links, and save-as-template actions.
 
 The header's **Feedback** action opens a prefilled issue form on
-`github.com/oduist/oduflow`. Oduflow holds no GitHub credentials and files
+`github.com/oduflow/oduflow`. Oduflow holds no GitHub credentials and files
 nothing itself: it builds the link with the description and a short
 version/platform/transport block, then the user reviews and submits it from
 their own GitHub account.
@@ -97,12 +97,18 @@ request:
   MCP endpoint and Secret Key;
 - use **Agent Chat**.
 
-Everything else is refused with HTTP 403 (WebSockets close with 1008): the full
-dashboard, any other environment, every team-wide surface (templates, services,
-volumes, extra addons, credentials, productions, host statistics, license), the
-provisioning actions on the shared environment itself (create, delete, update,
-recreate, switch branch, protect, save as template), the share routes, and
-**Agent CLI**.
+Everything else is out of scope: any other environment, every team-wide surface
+(templates, services, volumes, extra addons, credentials, productions, host
+statistics, license), the provisioning actions on the shared environment itself
+(create, delete, update, recreate, switch branch, protect, save as template),
+the share routes, and **Agent CLI**. API calls and state-changing requests are
+refused with HTTP 403 and WebSockets close with 1008; a browser *navigating* to
+another page — the full dashboard at `/`, a bookmark — is sent back to
+`/env/<name>` with a 303 instead of being shown a raw error.
+
+Leaving the shared view (**Logout**) clears the scoped cookie and returns to
+`/env/<name>`, which then explains how to get back in: reopen the full share
+link, or sign in at `/login` if you are an operator who was previewing it.
 
 Agent CLI is excluded because it is a terminal in the *per-team* agent
 container, whose workspace holds a checkout of every environment of the team.
@@ -129,7 +135,7 @@ would let work in the environment.
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
-| `POST` | `/api/templates/import-from-odoo` | UI-authenticated: pull a backup from a running Odoo. Body: `odoo_url`, `master_pwd`, `template_name`, optional `db_name`, optional boolean `without_filestore` |
+| `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
 | `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
@@ -187,8 +193,13 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
-| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user` |
+| `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
+| `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
+| `GET` | `/api/extra-repos/{name}/branches` | Downloaded branches (`downloaded`), the remote list (`available`; `available_known` is false until it was first read), whether the repo is `protected`, and the environments/productions using each branch (`usage`) |
+| `POST` | `/api/extra-repos/{name}/branches` | Download branches now and keep them updated; body: `branches` (non-empty list of names) |
+| `POST` | `/api/extra-repos/{name}/branches/remove` | Remove a downloaded branch, its unused cached checkouts and unreferenced objects; body: `branch`. Refused for a protected repo and while an environment or production uses it |
+| `POST` | `/api/extra-repos/{name}/remote-branches` | Refresh the remote branch list (`git ls-remote`); downloads nothing |
 | `POST` | `/api/extra-repos/{name}/protect` | Protect from deletion |
 | `POST` | `/api/extra-repos/{name}/unprotect` | Remove protection |
 | `POST` | `/api/extra-repos/{name}/delete` | Delete the repository and unused cached revisions |
@@ -198,8 +209,9 @@ supported because the cluster is not published on a host port.
 | `POST` | `/api/credentials/validate` | Validate by body `host` and `username` |
 | `GET` | `/api/ssh-key` | The team's SSH public key and fingerprint (only the public key is returned) |
 | `POST` | `/api/ssh-key/generate` | Create the team SSH key if absent; body `{"force": true}` regenerates it (the old key stops working) |
-| `GET` | `/api/secrets` | List team secret names and timestamps; stored values are never returned by any endpoint |
-| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from body `value` (write-only) |
+| `GET` | `/api/secrets` | List team secret names, types (`value_type`) and timestamps; stored values are never returned by any endpoint |
+| `POST` | `/api/secrets/{name}/set` | Create or replace a secret's value from string body field `value` (write-only); optional `value_type`: `text` or `json`. Omitted/null type preserves the existing type, defaulting to `text` for new secrets. Invalid JSON secret values or unknown types return HTTP 400 without changing the stored value |
+| `POST` | `/api/secrets/{name}/update-json` | Create or replace one object key in an existing JSON secret, or replace an existing array element; body: `path` (dot notation such as `environment.OPENROUTER_API_KEY`, or JSON Pointer such as `/environment/OPENROUTER_API_KEY`) and `value` (a JSON value, including `null`). Returns `name`, `created` and `updated` flags; `created: true` means a new key was added, otherwise `updated: true`. Missing parents, invalid paths/values and text secrets return HTTP 400; missing secrets return HTTP 404. Arrays are never extended. Errors leave storage unchanged. See [JSON element updates](security.md#updating-one-json-element) |
 | `POST` | `/api/secrets/{name}/delete` | Delete a secret; existing `secret:<name>` references stop resolving on the next create/update |
 
 ## System, licensing, and guides
@@ -210,9 +222,12 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
 | `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
+| `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
-| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduist/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
+| `POST` | `/api/license/checkout` | Exchange an expired manual license for a short-lived hosted annual checkout link; requires dashboard authentication and same-origin mutation checks |
+| `POST` | `/api/license/refresh` | Manually check the installed annual license for a paid renewal and save its signed extension; returns `license` and `renewed`. Requires dashboard authentication and the normal same-origin mutation checks. No request body is needed |
+| `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduflow/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
 | `GET` | `/api/agent-guides` | List available agent guides |
 | `GET` | `/api/agent-guides/{filename}` | Read a guide |
 
@@ -238,7 +253,7 @@ and delete operations require explicit confirmation in their JSON body.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/productions` | List productions and return webhook/backup state |
-| `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image) |
+| `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image). Optional `server_mode`: `workers` (default) or `gevent` |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
 | `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
 | `POST` | `/api/productions/wal-control` | Body `{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }`; cluster-wide action under the system lock |
@@ -251,7 +266,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
 | `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
 | `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
-| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`; recreates the container (database and filestore preserved). A present-but-empty `git_user` or `extra_domains` clears it; an absent key leaves it unchanged |
+| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`, `server_mode` (`workers`/`gevent`); recreates the container (database and filestore preserved). A present-but-empty `git_user` or `extra_domains` clears it; an absent key leaves it unchanged |
 | `POST` | `/api/productions/{name}/odoo-conf` | Set body `options` and remove body `unset` per-production `odoo.conf` overrides; optional `restart` (default true) and `replace` (body `options` become the complete override set) |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |

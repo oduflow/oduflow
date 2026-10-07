@@ -5,7 +5,15 @@
 ```bash
 # Show version
 oduflow --version
+
+# Disable anonymous usage telemetry for this run only (e.g. test or CI runs);
+# place it before any subcommand
+oduflow --no-telemetry --transport http
+oduflow --no-telemetry stack apply oduflow.yaml
 ```
+
+`--no-telemetry` overrides `disable_telemetry` in `oduflow.toml` for the
+current process only. See [Telemetry](installation.md#telemetry).
 
 ## Running the Server
 
@@ -98,6 +106,13 @@ oduflow retune-postgres
 
 # Back up and write configs; stage production Odoo configs in containers
 oduflow retune-postgres --apply
+
+# Upgrade the Oduflow package itself, reconcile bundled files, restart
+oduflow self-update
+
+# Non-interactive: overwrite bundle conflicts; or skip the service restart
+oduflow self-update --force
+oduflow self-update --no-restart
 ```
 
 `retune-postgres` accounts for `[production].enabled` and does not restart
@@ -132,6 +147,45 @@ This command is separate from upgrading the Python package (for example,
 `uv tool upgrade oduflow`). It does not manage `postgresql.conf`; use
 `oduflow retune-postgres` for PostgreSQL planning and updates.
 
+Before reconciling, `oduflow upgrade` checks that the next server start can
+complete a pending PostgreSQL replacement (see
+[Upgrading to PostgreSQL 16](installation.md#upgrading-to-postgresql-16)). If
+environments, productions or service databases still block it, the command
+lists them all and exits with an error without changing anything, and
+`self-update` does not restart the service.
+
+`oduflow self-update` chains the whole documented upgrade: it compares the
+installed version with the latest GitHub release, upgrades the package through
+its own installer (`uv tool upgrade oduflow` for a uv tool install, otherwise
+`pip install --upgrade oduflow` in the same environment), verifies the installed
+version, runs the bundled-file reconciliation above through a fresh process in
+that Python environment, and restarts the systemd service when the unit
+installed by `oduflow systemd-install` exists and the command runs as root.
+`--force` is forwarded to the reconciliation, and it
+also finishes an interrupted upgrade: if the package is already at the latest
+version — for example after a first run stopped on a bundle conflict — the
+command reconciles and restarts instead of reporting "already up to date" and
+doing nothing. `--no-restart` leaves the running server on the old version
+until you restart it yourself.
+
+If the installer succeeds but the advertised release is not installed (for
+example, uv has a version pin or the package index has not received the release
+yet), the command exits with an error before reconciliation or restart. Check
+the installer's constraints and index, then retry. A uv tool upgrade also checks
+that uv's tool directory contains the running installation; use the installing
+user and original `UV_TOOL_DIR` if they differ.
+
+It refuses, with an error, installations it cannot upgrade durably: **a
+container** (a package upgraded inside the `oduist/oduflow` container reverts
+when the container is recreated — pull the new image and recreate it instead,
+see [Docker](docker.md)), a source checkout or editable install (update those
+with `git pull`), an ephemeral `uvx` run (use `uvx oduflow@latest` to refresh the
+cached version), and an environment pip cannot upgrade in place — a virtualenv
+created without pip, or a `site-packages` the current user cannot
+write, where `pip install --upgrade` would install a second copy into
+`~/.local` that the running service never loads. Re-run those as the user that
+owns the installation.
+
 ## Template Commands
 
 All template commands accept `--team` to specify the team ID (default: `1`).
@@ -152,13 +206,6 @@ oduflow refresh-template <template_name> [--reset-env-changes] [--team 1]
 # Attach or replace a template filestore from a local dir, archive, rsync://, or SSH rsync source
 oduflow attach-filestore <template_name> <source> [--strip-prefix auto|none|PREFIX] [--reset-env-changes] [--team 1]
 
-# Reload template DB from a dump file
-oduflow reload-template <template_name> [--dump-path /path/to/new.dump] [--team 1]
-
-# Sync template from S3 or local path and reload DB
-oduflow reload-template <template_name> --source s3://bucket/path/ [--quiet] [--team 1]
-oduflow reload-template <template_name> --source /backups/prod-latest/ [--team 1]
-
 # List all template profiles
 oduflow list-templates [--team 1]
 
@@ -167,9 +214,18 @@ oduflow delete-template <template_name> [--team 1]
 
 # Import a template from a running Odoo instance
 oduflow import-template <odoo_url> <master_pwd> --template-name myproject [--db-name <db>] [--without-filestore] [--team 1]
+
+# Import (or incrementally re-sync with --overwrite) from an S3 prefix or a
+# local path holding dump.* + filestore/; a single dump file imports DB-only
+oduflow import-template s3://bucket/backups/mydb/ --template-name myproject [--overwrite] [--team 1]
+oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [--team 1]
+
+# Reload the template DB from files already placed in the template directory
+# (an external rsync/scp drop) and refresh its metadata
+oduflow import-template --template-name myproject --refresh [--team 1]
 ```
 
-`template-from-env`, `refresh-template`, `attach-filestore`, and `reload-template --source` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. `import-template` creates a new template and refuses an existing template name.
+`template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
 
 ## Service Commands
 

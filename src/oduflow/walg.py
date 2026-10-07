@@ -5,9 +5,9 @@ scheduled base backups, and cluster-level disaster recovery / PITR. It is
 delivered as the official static binary downloaded by the Oduflow server at
 bootstrap: the binary directory and a config directory are bind-mounted
 into the production PG container, so backups can be enabled, reconfigured,
-or upgraded without recreating the container. The managed PostgreSQL image
-adds system CA certificates; the mounted bundle also supports existing and
-custom images.
+or upgraded without recreating the container. The config directory also
+contains the server's trusted CA bundle, so official PostgreSQL images work
+without installing certificates inside the container.
 
 Container-side layout (both mounts are read-only directories, so their
 contents can change while the container runs):
@@ -367,7 +367,7 @@ def apply_walg_config_ownership(settings: Settings, client: Any) -> None:
     path = os.path.join(conf_host_dir(settings), "walg.json")
     if not os.path.isfile(path):
         return
-    image = settings.production_pg_image
+    image = settings.postgres_image
     try:
         running_image = client.containers.get(settings.prod_db_container).attrs.get(
             "Image"
@@ -897,7 +897,7 @@ def pitr_restore_cluster(
     # while the container and PGDATA are still intact.
     fetch_target = _select_pitr_base_backup(client, settings, target_time)
 
-    image = settings.production_pg_image
+    image = settings.postgres_image
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     old_dir = f".pitr-old-{stamp}"
 

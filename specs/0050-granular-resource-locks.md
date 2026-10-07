@@ -3,7 +3,7 @@
 **Status:** Adopted
 **Type:** Architecture
 **First introduced:** 2026-08-17
-**Key code today:** `locking.py` (resource key builders, `keyed_mutex`, `acquire_system`), `server.py` (`with_key_lock`), `web_ui.py`, `docker_ops/service_ops.py`, `docker_ops/volume_ops.py`
+**Key code today:** `locking.py` (resource key builders, `keyed_mutex`, `acquire_system`, `team_lock`), `server.py` (`with_key_lock`), `web_ui.py` (`_template_locks`), `docker_ops/service_ops.py`, `docker_ops/volume_ops.py`
 
 ## Context
 
@@ -88,6 +88,52 @@ keyed lock:
 - Locks remain in-process; cross-process safety on shared files stays with the
   registries' own flocks.
 
+## Evolution
+
+**2026-09-20 — the template family gets its own key.** "Team lock = template
+mutations" turned out to be one notch too coarse in one direction and one notch
+too vague in the other.
+
+Too coarse: `import_template_from_odoo` refuses to touch an existing template,
+so the template it builds is always brand new and no environment can reference
+it — its remount pass is structurally a no-op. It nonetheless held the team lock
+across an HTTP download of a full Odoo backup (a ten-minute timeout) plus the
+restore, bouncing every environment operation in the team for the duration. The
+dashboard's metadata editor had the same shape for a much smaller write: one
+`metadata.json`, already guarded by its own revision check. Both now take a
+**template-scoped key** (`tpl:{team}:{name}`) and no team lock. `attach_filestore`
+keeps the team lock but is handed it as a context manager and enters it only for
+the remount-and-swap window, so staging its source — an rsync of a
+multi-gigabyte filestore — runs outside it. That deferral is also the one place
+where a team acquire *blocks* (with a timeout): by the time it asks, the call
+has already paid for the staging, and refusing instantly would throw hours of
+transfer away over an environment operation that will be gone in seconds.
+
+Too vague: `delete_template` and `rename_template` remount nothing; they *refuse*
+while any environment uses the template. Their real reason for the team lock is
+that this dependent-environment scan is a check-then-act, and only
+team↔environment mutual exclusion keeps a concurrent `create_environment` — which
+clones the template database before its container exists, and is therefore
+invisible to the scan — out of the window. That is now written down at the guard
+rather than inferred from the ADR.
+
+The resulting rule: **every template mutation takes that template's key; the ones
+that remount live environments' filestores (or that need the create-environment
+exclusion) take the team lock as well.** Holding both is what keeps the narrowed
+operations from racing the wide ones — without the key, a team-locked publish and
+a key-locked import could have collided on the same template name. Order between
+the two varies by caller and cannot deadlock: every acquire here is
+non-blocking — except `attach_filestore`'s post-staging team acquire, which
+waits on a bounded timeout and holds no other lock that a team operation could
+want — so an inversion surfaces as `BusyError`. `rename_template` takes both
+names' keys, since its "is the target free?" check is a check-then-act too —
+unless the two names are equal, where the second acquire would be the same key
+and the caller would be told to wait for itself. Two
+consequences of narrowing had to be paid for directly: the import's download path
+was a fixed per-team filename (safe only because the team lock serialised
+imports) and is now unique per call, with explicit cleanup — a partial download
+is no longer self-healing.
+
 ## History
 
 - `3a26c70` (2026-02-06) — global mutex.
@@ -95,3 +141,7 @@ keyed lock:
   ([[0015-granular-locking]]).
 - 2026-08-17 — resource-scoped keys, template-only team lock, lock-free `odoo_*`
   and extra-repo tools, revived system lock for `restore_cluster_pitr`.
+- 2026-09-20 — `template_lock_key`; import and metadata editing drop the team
+  lock, `attach_filestore` defers it past staging (and waits, bounded, for it),
+  and the delete/rename team lock is documented as the create-environment
+  exclusion it actually is.

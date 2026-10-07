@@ -195,6 +195,13 @@ class OduflowTokenVerifier(TokenVerifier):
         self._settings = settings
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        from oduflow.production_access import PRODUCTION_SCOPE
+
+        team = self._settings.get_team_by_production_token(token)
+        if team is not None:
+            return AccessToken(
+                token=token, client_id=team.team_id, scopes=[PRODUCTION_SCOPE]
+            )
         resolved = await env_tokens.resolve_token_async(self._settings, token)
         if resolved is None:
             return None

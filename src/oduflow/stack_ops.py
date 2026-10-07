@@ -721,7 +721,7 @@ def apply_stack(
 
         for name, desired_repo in spec.extra_repositories.items():
             if ("create", f"extraRepositories.{name}") in operations:
-                extra_addons.clone_extra_repo(
+                extra_addons.register_extra_repo(
                     team,
                     name,
                     desired_repo.repo_url,

@@ -25,7 +25,6 @@ per write.
 from __future__ import annotations
 
 import fcntl
-import hmac
 import json
 import logging
 import os
@@ -36,7 +35,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
-from oduflow.settings import TeamSettings
+from oduflow.settings import TeamSettings, secret_matches
 
 logger = logging.getLogger("oduflow")
 
@@ -197,7 +196,7 @@ def verify(team: TeamSettings, env_name: str, key: str) -> bool:
     record = get(team, env_name)
     if not record:
         return False
-    return hmac.compare_digest(str(record["secret"]), key)
+    return secret_matches(str(record["secret"]), key)
 
 
 def remove(team: TeamSettings, env_name: str) -> None:

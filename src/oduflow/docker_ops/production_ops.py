@@ -36,7 +36,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from typing import Any, Callable, ContextManager
+from typing import Any, Callable, ContextManager, overload
 
 import docker
 from docker import DockerClient
@@ -110,12 +110,114 @@ pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 
 # odoo.conf [options] keys a per-production override may not touch:
 # addons_path is generated from the repo + extra addon worktrees, data_dir
-# anchors the filestore bind mount, and the db_* connection keys are managed
-# via container env vars (a conf value would override them inside Odoo).
+# anchors the filestore bind mount, the db_* connection keys are managed
+# via container env vars (a conf value would override them inside Odoo), and
+# the listen ports are what the Traefik routes target (see SERVER_MODES).
 # Compared lowercased: Odoo lowercases option names on read.
-RESERVED_ODOO_CONF_KEYS = frozenset({"addons_path", "data_dir"}) | frozenset(
-    DB_CONN_CONF_KEYS
+RESERVED_ODOO_CONF_KEYS = frozenset(
+    {
+        "addons_path",
+        "data_dir",
+        "http_port",
+        "xmlrpc_port",
+        "gevent_port",
+        "longpolling_port",
+    }
+) | frozenset(DB_CONN_CONF_KEYS)
+
+# How a production serves HTTP (record["server_mode"]; a missing key reads
+# as "workers"). Both run Odoo's prefork server, which always spawns the
+# gevent process on 8072 next to the HTTP workers on 8069:
+# - "workers" (sync): Traefik routes to the HTTP workers on 8069, except the
+#   bus paths, which only the gevent process can hold open (a prefork worker
+#   refuses /websocket: "Is the connection opened on the evented port?");
+# - "gevent" (async): Traefik routes everything to the gevent process on
+#   8072; a single HTTP worker keeps 8069 up for in-container calls.
+SERVER_MODES = ("workers", "gevent")
+DEFAULT_SERVER_MODE = "workers"
+_SERVER_MODE_LABEL = "oduflow.server_mode"
+_HTTP_PORT = "8069"
+_GEVENT_PORT = "8072"
+# Odoo 16+ bus websocket and the <=15 longpolling endpoint. Both are routed
+# regardless of version: the one a version lacks 404s on either port.
+_BUS_PATH_RULE = "PathPrefix(`/websocket`) || PathPrefix(`/longpolling`)"
+# Listen settings forced into every production conf, over the base conf chain
+# (repo .oduflow/odoo.prod.conf, team odoo.prod.conf) and the overrides:
+# Traefik and the health probe target these ports whatever the conf says.
+# gevent_port (16+) and longpolling_port (<=15) are both pinned; a version
+# ignores the key it does not know.
+_PINNED_LISTEN_CONF = {
+    "http_enable": "True",
+    "http_port": _HTTP_PORT,
+    "gevent_port": _GEVENT_PORT,
+    "longpolling_port": _GEVENT_PORT,
+}
+# Base-conf keys that could move a listener away from what Traefik targets
+# (legacy xmlrpc_* aliases, a loopback-only interface); dropped, so Odoo
+# listens on every interface.
+_DROPPED_LISTEN_CONF_KEYS = (
+    "http_interface",
+    "xmlrpc",
+    "xmlrpc_port",
+    "xmlrpc_interface",
 )
+# Both Odoo processes must answer for a production to be healthy: the
+# workers on 8069 and the gevent process on 8072, which carries the bus in
+# "workers" mode and every page in "gevent" mode.
+_HEALTH_PORTS = (_HTTP_PORT, _GEVENT_PORT)
+
+
+def validate_server_mode(value: str) -> str:
+    """Normalize a requested server mode; raise ValueError when unknown."""
+    mode = str(value).strip().lower()
+    if mode not in SERVER_MODES:
+        raise ValueError(
+            f"Invalid server_mode '{value}': expected one of {', '.join(SERVER_MODES)}."
+        )
+    return mode
+
+
+def server_mode_of(record: dict[str, Any]) -> str:
+    """The record's server mode; records created before the field read as
+    the default."""
+    return str(record.get("server_mode") or DEFAULT_SERVER_MODE)
+
+
+@overload
+def resolve_server_mode(value: str | None, default: str) -> str: ...
+@overload
+def resolve_server_mode(value: str | None, default: None) -> str | None: ...
+def resolve_server_mode(value: str | None, default: str | None) -> str | None:
+    """A server mode from an API argument: blank (None/"") means *default*
+    (the create default, or None = "leave unchanged" for reconfigure)."""
+    if value is None or not str(value).strip():
+        return default
+    return validate_server_mode(value)
+
+
+def reserved_odoo_conf_overrides(record: dict[str, Any]) -> list[str]:
+    """Stored odoo.conf overrides that Oduflow ignores because the key is
+    managed (e.g. a listen port saved before ports became reserved)."""
+    return sorted(
+        str(k).lower()
+        for k in (record.get("odoo_conf") or {})
+        if str(k).lower() in RESERVED_ODOO_CONF_KEYS
+    )
+
+
+def validate_workers_override(value: object) -> None:
+    """Both server modes need prefork: workers=0 would switch Odoo to the
+    threaded server, which never listens on the gevent port Traefik targets."""
+    try:
+        ok = int(str(value).strip()) >= 1
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError(
+            f"odoo.conf 'workers' must be a positive integer for a production, "
+            f"got '{value}': both server modes run Odoo's multi-process server, "
+            "which serves the gevent port Traefik routes to."
+        )
 
 
 def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
@@ -210,22 +312,45 @@ def _build_prod_odoo_conf(
             res["cpu_count"],
             production_enabled=True,
         )
+    from oduflow import production_registry
+
+    record = production_registry.get_production(team, name)
     overrides = compute_odoo_worker_settings(
         plan.host_cpu_count,
         plan.host_ram_mb,
         workers_cap=settings.prod_workers_cap,
         plan=plan,
+        server_mode=server_mode_of(record),
     )
     # Per-production user overrides (registry record) win over auto-tuning:
     # an explicit `workers = 2` must beat the computed value. Reserved keys
-    # are dropped defensively — set_production_odoo_conf refuses them, but
-    # a hand-edited productions.json must not break the managed conf.
-    from oduflow import production_registry
+    # and a non-positive workers value are dropped defensively —
+    # set_production_odoo_conf refuses them (and purges reserved keys stored
+    # before they were reserved), but a hand-edited productions.json must
+    # not break the managed conf.
+    reserved = reserved_odoo_conf_overrides(record)
+    if reserved:
+        logger.warning(
+            "Ignoring reserved odoo.conf overrides for '%s': %s",
+            name,
+            ", ".join(reserved),
+        )
+    for key, value in (record.get("odoo_conf") or {}).items():
+        key = str(key).lower()
+        if key in RESERVED_ODOO_CONF_KEYS:
+            continue
+        if key == "workers":
+            try:
+                validate_workers_override(value)
+            except ValueError as exc:
+                logger.warning("Ignoring odoo.conf override for '%s': %s", name, exc)
+                continue
+        overrides[key] = str(value)
+    from oduflow.production_mcp import MOUNT, addon_checkout
 
-    user_conf = production_registry.get_production(team, name).get("odoo_conf") or {}
-    for key, value in user_conf.items():
-        if str(key).lower() not in RESERVED_ODOO_CONF_KEYS:
-            overrides[str(key).lower()] = str(value)
+    extra_container_paths = list(extra_container_paths)
+    if (addon_checkout(team, name) / "addons/odumcp/__manifest__.py").is_file():
+        extra_container_paths.append(MOUNT)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
         _prod_base_conf_path(team, repo_path),
@@ -233,6 +358,8 @@ def _build_prod_odoo_conf(
         extra_container_paths,
         resolve_main_addons_path(repo_path),
         overrides=overrides,
+        pinned=_PINNED_LISTEN_CONF,
+        remove_keys=_DROPPED_LISTEN_CONF_KEYS,
     )
     return generated
 
@@ -336,18 +463,22 @@ def read_deploys(
 def _probe_odoo_health(container: Any) -> bool:
     """One-shot /web/health probe from inside the container.
 
-    In-container (localhost:8069) on purpose: the external URL depends on
-    DNS for the custom domain being set up, which must not fail a deploy
-    verification (or trigger a rollback) on a production whose DNS is still
-    propagating.
+    In-container on purpose: the external URL depends on DNS for the custom
+    domain being set up, which must not fail a deploy verification (or
+    trigger a rollback) on a production whose DNS is still propagating.
+    Every port in _HEALTH_PORTS must answer 200, whatever the server mode:
+    a dead gevent process breaks the bus even when the workers serve pages.
     """
     code, _ = container.exec_run(
         [
             "python3",
             "-c",
             "import urllib.request,sys;"
-            "r=urllib.request.urlopen('http://localhost:8069/web/health',timeout=5);"
-            "sys.exit(0 if r.status==200 else 1)",
+            f"ports={list(_HEALTH_PORTS)!r};"
+            "ok=all(urllib.request.urlopen("
+            "f'http://localhost:{p}/web/health',timeout=5).status==200"
+            " for p in ports);"
+            "sys.exit(0 if ok else 1)",
         ]
     )
     return bool(code == 0)
@@ -387,6 +518,69 @@ def prod_host_rule(record: dict[str, Any]) -> str:
     intent and container always compare the same expression."""
     names = [record.get("domain", ""), *(record.get("extra_domains") or [])]
     return " || ".join(f"Host(`{d}`)" for d in names if d)
+
+
+def _traefik_router(team: TeamSettings, name: str) -> str:
+    return f"oduflow-{team.team_id}-{prod_env_name(name)}"
+
+
+def prod_routing_labels(
+    settings: Settings, team: TeamSettings, name: str, record: dict[str, Any]
+) -> dict[str, str]:
+    """The complete set of ``traefik.*`` labels for a production container.
+
+    One router per target port, each with its own service (Traefik requires
+    an explicit router→service binding once a container defines several).
+    In "workers" mode a second router sends the bus paths to the gevent
+    port; its rule is longer than the catch-all's, so Traefik's default
+    rule-length priority picks it for those paths. Shared with the drift
+    checks: a container whose traefik labels differ from this set is
+    recreated by reconfigure_production / Stack apply.
+    """
+    router = _traefik_router(team, name)
+    host_rule = prod_host_rule(record)
+    if server_mode_of(record) == "gevent":
+        routes = [(router, host_rule, _GEVENT_PORT)]
+    else:
+        # "_bus" cannot collide with another production's router: production
+        # names are [a-z0-9-] only.
+        routes = [
+            (router, host_rule, _HTTP_PORT),
+            (f"{router}_bus", f"({host_rule}) && ({_BUS_PATH_RULE})", _GEVENT_PORT),
+        ]
+    labels = {
+        "traefik.enable": "true",
+        "traefik.docker.network": get_team_network_name(team.team_id, settings.prefix),
+    }
+    for route, rule, port in routes:
+        prefix = f"traefik.http.routers.{route}"
+        labels[f"{prefix}.rule"] = rule
+        labels[f"{prefix}.service"] = route
+        labels[f"traefik.http.services.{route}.loadbalancer.server.port"] = port
+        if settings.routing_tls:
+            labels[f"{prefix}.entrypoints"] = "websecure"
+            labels[f"{prefix}.tls"] = "true"
+            if settings.uses_acme:
+                labels[f"{prefix}.tls.certresolver"] = "letsencrypt"
+        else:
+            labels[f"{prefix}.entrypoints"] = "web"
+    return labels
+
+
+def routing_drift(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    record: dict[str, Any],
+    labels: dict[str, str],
+) -> bool:
+    """True when a container's traefik labels or server-mode label differ
+    from what the record dictates (e.g. a container created before the bus
+    route existed). Docker labels are immutable, so only a recreate fixes it."""
+    actual = {k: v for k, v in labels.items() if k.startswith("traefik.")}
+    return actual != prod_routing_labels(settings, team, name, record) or labels.get(
+        _SERVER_MODE_LABEL
+    ) != server_mode_of(record)
 
 
 def _assert_domain_free(
@@ -739,6 +933,11 @@ def _container_spec(
     odoo_volumes: dict[str, dict[str, str]] = {
         repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
     }
+    from oduflow.production_mcp import MOUNT, addon_checkout
+
+    connector = addon_checkout(team, name) / "addons/odumcp"
+    if (connector / "__manifest__.py").is_file():
+        odoo_volumes[str(connector)] = {"bind": MOUNT + "/odumcp", "mode": "ro"}
     for host_path, container_path in extra_mount_paths:
         odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
     odoo_volumes[prod_filestore_dir(team, name)] = {
@@ -752,9 +951,6 @@ def _container_spec(
 
     # Deliberately NO branch label (keeps dev listings/reaper blind) and
     # NO scoped-MCP token (productions are not agent playgrounds).
-    domain = record["domain"]
-    host_rule = prod_host_rule(record)
-    traefik_router = f"oduflow-{team.team_id}-{env_name}"
     labels = {
         settings.managed_label: "true",
         settings.team_label: team.team_id,
@@ -762,33 +958,18 @@ def _container_spec(
         settings.image_label: record["odoo_image"],
         "oduflow.prod": "true",
         "oduflow.prod_name": name,
-        "oduflow.domain": domain,
+        "oduflow.domain": record["domain"],
         "oduflow.git_branch": record["branch"],
         "oduflow.created_at": record["created_at"],
-        "traefik.enable": "true",
-        f"traefik.http.routers.{traefik_router}.rule": host_rule,
-        f"traefik.http.services.{traefik_router}.loadbalancer.server.port": "8069",
-        "traefik.docker.network": get_team_network_name(team.team_id, settings.prefix),
+        _SERVER_MODE_LABEL: server_mode_of(record),
     }
+    labels.update(prod_routing_labels(settings, team, name, record))
     if user_env:
         labels["oduflow.env_vars"] = json.dumps(user_env, sort_keys=True)
     if record.get("extra_addons"):
         labels["oduflow.extra_addons"] = json.dumps(record["extra_addons"])
     if record.get("git_user"):
         labels["oduflow.git_user"] = record["git_user"]
-    if settings.routing_tls:
-        labels.update(
-            {
-                f"traefik.http.routers.{traefik_router}.entrypoints": "websecure",
-                f"traefik.http.routers.{traefik_router}.tls": "true",
-            }
-        )
-        if settings.uses_acme:
-            labels[f"traefik.http.routers.{traefik_router}.tls.certresolver"] = (
-                "letsencrypt"
-            )
-    else:
-        labels[f"traefik.http.routers.{traefik_router}.entrypoints"] = "web"
     return odoo_env, odoo_volumes, labels
 
 
@@ -858,12 +1039,14 @@ def create_production(
     env_vars: dict[str, str] | None = None,
     env_lock: Callable[[], ContextManager[None]] | None = None,
     stack_metadata: dict[str, Any] | None = None,
+    server_mode: str = DEFAULT_SERVER_MODE,
 ) -> dict[str, Any]:
     """Provision a production environment.
 
     The registry record is created first (reserving the name and — on the
-    team's first production — generating the webhook secret); on any failure
-    the partial resources AND the record are rolled back.
+    team's first production — generating the webhook secret); on infrastructure
+    failure the partial resources AND the record are rolled back. Optional
+    OduMCP setup failures leave production running with a warning.
 
     ``from_environment`` promotes a dev environment: its database and
     filestore are copied (under a briefly stopped Odoo, for consistency) and
@@ -881,6 +1064,13 @@ def create_production(
     from oduflow.docker_ops.env_ops import _clone_repo, _init_empty_database
 
     validate_prod_name(name)
+    server_mode = validate_server_mode(server_mode)
+    if not team.production_token:
+        raise PrerequisiteNotMetError(
+            "Set [team."
+            + team.team_id
+            + "].production_token before creating production."
+        )
     if settings.routing_mode != "traefik":
         raise PrerequisiteNotMetError(
             'Production hosting requires routing_mode = "traefik" (custom '
@@ -970,6 +1160,7 @@ def create_production(
             "env_vars": env_vars,
             "auto_update": bool(auto_update),
             "allow_copy_to_dev_mcp": bool(allow_copy_to_dev_mcp),
+            "server_mode": server_mode,
             "meta": {"stack": stack_metadata} if stack_metadata else {},
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
@@ -1022,6 +1213,18 @@ def create_production(
                 create_worktree(team, repo_name, addon_branch, wt_path)
                 extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
                 extra_conf_paths.append(resolve_extra_addons_path(wt_path, repo_name))
+
+        from oduflow import production_mcp
+
+        mcp_warning = ""
+        try:
+            production_mcp.prepare_addon(settings, team, name, extra_mount_paths)
+        except Exception:
+            mcp_warning = (
+                "Production created, but OduMCP addon source preparation failed. "
+                "Odoo MCP tools are unavailable; check the connector repository "
+                "and retry sync_production_mcp."
+            )
 
         _exec_sql(
             client,
@@ -1138,6 +1341,26 @@ def create_production(
             extra_mount_paths,
         )
         setup_logs.extend(run_logs)
+        if not mcp_warning:
+            try:
+                production_mcp.provision(settings, team, name)
+            except Exception:
+                mcp_warning = (
+                    "Production created, but OduMCP installation or key setup failed. "
+                    "Odoo MCP tools are unavailable; check production logs and addon "
+                    "compatibility, then retry sync_production_mcp."
+                )
+        if mcp_warning:
+            production_registry.update_production(
+                team, name, {"mcp": {"status": "sync_failed"}}
+            )
+            logger.warning("%s: %s", name, mcp_warning)
+            promo_notes.append(mcp_warning)
+            setup_logs.append(mcp_warning)
+        else:
+            setup_logs.append(
+                "OduMCP installed and production credential synchronized."
+            )
 
         from oduflow.git_ops import rev_parse
 
@@ -1189,6 +1412,7 @@ def create_production(
         "name": name,
         "url": prod_url(settings, team, record),
         "domain": domain,
+        "server_mode": server_mode,
         "notes": notes,
         "odoo_container": container_name,
         "database": env_db,
@@ -1238,27 +1462,45 @@ def set_production_odoo_conf(
     unset_list = [
         str(k).strip().lower() for k in (unset_options or []) if str(k).strip()
     ]
+    old_conf = {
+        str(k).lower(): str(v) for k, v in (record.get("odoo_conf") or {}).items()
+    }
+    # Reserved keys stored before they became reserved are purged on every
+    # save; a client echoing such a stored value back (the dashboard sends
+    # the full set) is not refused for it.
+    purged = reserved_odoo_conf_overrides(record)
+    for key in purged:
+        if key in cleaned and cleaned[key] == old_conf.get(key):
+            del cleaned[key]
     reserved = sorted(k for k in cleaned if k in RESERVED_ODOO_CONF_KEYS)
     if reserved:
         raise ValueError(
             f"odoo.conf keys managed by Oduflow cannot be overridden: "
             f"{', '.join(reserved)}. addons_path and data_dir are generated; "
-            "db_* connection keys come from container env vars."
+            "db_* connection keys come from container env vars; the listen "
+            "ports are what Traefik routes to (choose server_mode instead)."
         )
     invalid = sorted(k for k in cleaned if not _ODOO_CONF_KEY_RE.match(k))
     if invalid:
         raise ValueError(f"Invalid odoo.conf option names: {', '.join(invalid)}.")
+    if "workers" in cleaned:
+        validate_workers_override(cleaned["workers"])
 
-    old_conf = {
-        str(k).lower(): str(v) for k, v in (record.get("odoo_conf") or {}).items()
-    }
     if replace:
         conf = dict(cleaned)
     else:
-        conf = dict(old_conf)
+        conf = {k: v for k, v in old_conf.items() if k not in RESERVED_ODOO_CONF_KEYS}
         conf.update(cleaned)
         for key in unset_list:
             conf.pop(key, None)
+    notes = (
+        [
+            f"Removed odoo.conf overrides Oduflow manages and ignores: "
+            f"{', '.join(purged)}."
+        ]
+        if purged
+        else []
+    )
     if conf == old_conf:
         return {
             "name": name,
@@ -1287,6 +1529,7 @@ def set_production_odoo_conf(
         "odoo_conf": conf,
         "applied": applied,
         "restarted": restarted,
+        "notes": notes,
     }
 
 
@@ -1303,6 +1546,7 @@ def reconfigure_production(
     git_user: str | None = None,
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
+    server_mode: str | None = None,
     force_recreate: bool = False,
 ) -> dict[str, Any]:
     """Change a production's infrastructure settings and recreate its
@@ -1313,8 +1557,11 @@ def reconfigure_production(
     The registry record (intent) is updated first, then the workspace and
     container are converged to it — on a mid-way failure re-running the
     same call resumes the convergence: a request that changes nothing
-    still repairs a missing container or repo checkout instead of
-    reporting a no-op. Changing ``odoo_image`` does NOT migrate the
+    still repairs a missing container or repo checkout, or a container
+    whose Traefik routing no longer matches the record (e.g. one created
+    before the bus route existed), instead of reporting a no-op. Changing
+    ``server_mode`` re-tunes odoo.conf and re-points Traefik at the other
+    Odoo port. Changing ``odoo_image`` does NOT migrate the
     database: a major Odoo version bump additionally needs an explicit
     module upgrade plan. The caller must hold the production's lock.
     ``force_recreate`` lets Stack repair verified runtime drift or complete an
@@ -1385,12 +1632,30 @@ def reconfigure_production(
         env_vars = _production_env_vars(env_vars)
         if env_vars != (record.get("env_vars") or {}):
             updates["env_vars"] = env_vars
+    server_mode = resolve_server_mode(server_mode, None)
+    if server_mode is not None and server_mode != server_mode_of(record):
+        updates["server_mode"] = server_mode
+    purged_conf = reserved_odoo_conf_overrides(record)
+    if purged_conf:
+        # Stored before those keys became reserved; the rebuilt conf ignores
+        # them, so the record must stop showing them.
+        updates["odoo_conf"] = {
+            k: v
+            for k, v in (record.get("odoo_conf") or {}).items()
+            if str(k).lower() not in RESERVED_ODOO_CONF_KEYS
+        }
 
     # No-op only when the request changes nothing AND actual state matches
     # the record; a missing container or checkout (a previous run failed
-    # mid-way) is drift that the run below repairs from the record.
+    # mid-way) or stale routing labels are drift that the run below repairs
+    # from the record.
     container = _get_container(client, settings, team, name)
-    drift = force_recreate or container is None or not os.path.isdir(repo_path)
+    drift = (
+        force_recreate
+        or container is None
+        or not os.path.isdir(repo_path)
+        or routing_drift(settings, team, name, record, container.labels or {})
+    )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
     if not updates and not drift:
@@ -1566,8 +1831,22 @@ def reconfigure_production(
     if not updates:
         notes.append(
             "No settings changed, but drifted state was repaired (the "
-            "container and/or repo checkout was missing and has been "
-            "recreated from the record)."
+            "container, its Traefik routing and/or the repo checkout did not "
+            "match the record and have been recreated from it)."
+        )
+    if purged_conf:
+        notes.append(
+            "Removed odoo.conf overrides Oduflow manages and ignores: "
+            f"{', '.join(purged_conf)}."
+        )
+    if "server_mode" in updates:
+        notes.append(
+            f"Server mode is now '{record['server_mode']}': Traefik routes "
+            + (
+                "all traffic to the gevent port 8072."
+                if record["server_mode"] == "gevent"
+                else "pages to the workers on 8069 and the bus to 8072."
+            )
         )
     if "odoo_image" in updates:
         notes.append(
@@ -1588,6 +1867,7 @@ def reconfigure_production(
         "name": name,
         "changed": sorted(updates),
         "domain": record["domain"],
+        "server_mode": server_mode_of(record),
         "url": prod_url(settings, team, record),
         "odoo_container": _odoo_container_name(settings, team, name),
         "commit": new_head,
@@ -1877,12 +2157,58 @@ def restart_production(
     if settings.backup is not None:
         ensure_prod_infra(client, settings, force=True, accept_live_evidence=True)
     container = _require_container(client, settings, team, name)
+    if _has_routing_drift(settings, team, name, container):
+        # Labels are immutable: a restart would keep the outdated routing.
+        # Recreating costs the same downtime the restart would.
+        reconfigure_production(settings, team, name)
+        logger.info(
+            "Production recreated instead of restarted (routing drift)",
+            extra={"env_name": prod_env_name(name)},
+        )
+        return {
+            "name": name,
+            "odoo_container": _odoo_container_name(settings, team, name),
+            "status": "running",
+            "recreated": True,
+        }
     from oduflow.wal_monitor import assert_writable
 
     assert_writable(settings)
     container.restart()
     logger.info("Production restarted", extra={"env_name": prod_env_name(name)})
     return {"name": name, "odoo_container": container.name, "status": "running"}
+
+
+def _has_routing_drift(
+    settings: Settings, team: TeamSettings, name: str, container: Any
+) -> bool:
+    from oduflow import production_registry
+
+    record = production_registry.get_production(team, name)
+    return routing_drift(settings, team, name, record, container.labels or {})
+
+
+def _repair_routing_after_deploy(
+    settings: Settings, team: TeamSettings, name: str, container: Any
+) -> str:
+    """Recreate a just-deployed container whose Traefik routing predates the
+    record (e.g. created before the bus route existed); return a note, or ""
+    when nothing was needed. Runs only after a deploy that restarted Odoo
+    anyway, so legacy productions converge without a separate maintenance
+    window. Never fails the (already successful) deploy."""
+    if not _has_routing_drift(settings, team, name, container):
+        return ""
+    try:
+        result = reconfigure_production(settings, team, name)
+    except Exception as exc:
+        logger.exception("Routing repair after deploy of '%s' failed", name)
+        return (
+            f"The container's Traefik routing is outdated and recreating it "
+            f"failed ({exc}); run reconfigure_production to retry."
+        )
+    return "Container recreated to apply its current Traefik routing" + (
+        "." if result.get("healthy", True) else ", but it is NOT healthy yet."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2081,6 +2407,11 @@ def update_production(
             # them), so a later rollback to new_head reverts them in lockstep.
             deploy["worktrees"] = _worktree_heads(team, name)
             append_deploy(team, name, deploy)
+            routing_note = _repair_routing_after_deploy(settings, team, name, container)
+            if routing_note:
+                result["message"] = " ".join(
+                    filter(None, [result.get("message", ""), routing_note])
+                )
             return {
                 **result,
                 "name": name,
@@ -2317,6 +2648,7 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
                 "repo_url": record.get("repo_url", ""),
                 "branch": record.get("branch", ""),
                 "odoo_image": record.get("odoo_image", ""),
+                "server_mode": server_mode_of(record),
                 "auto_update": bool(record.get("auto_update")),
                 "allow_copy_to_dev_mcp": bool(
                     record.get("allow_copy_to_dev_mcp", True)
@@ -2370,6 +2702,7 @@ def get_production_info(
         "repo_url": record.get("repo_url", ""),
         "branch": record.get("branch", ""),
         "odoo_image": record.get("odoo_image", ""),
+        "server_mode": server_mode_of(record),
         "git_user": record.get("git_user", ""),
         "extra_addons": record.get("extra_addons", {}),
         "auto_update": bool(record.get("auto_update")),

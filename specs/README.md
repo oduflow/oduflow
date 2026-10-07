@@ -42,7 +42,6 @@ precursors).
 | [0021](0021-code-delivery-modes.md) | 2026-06-12 | Code delivery modes: `repo_url` git push vs `local_path` live-mount + `pull_and_apply` guardrail |
 | [0022](0022-engineers-console-design-system.md) | 2026-06-12 | The Engineer's Console: dashboard design system + lifecycle automation |
 | [0023](0023-import-from-odoo-sh.md) | 2026-07-02 | Import a template from Odoo.sh via a push-based, resumable shell client |
-| [0024](0024-business-source-license.md) | 2026-07-02 | Relicense to Business Source License 1.1 with three commercial tiers |
 | [0025](0025-startup-data-migrations.md) | 2026-07-02 | Startup data migrations (Odoo-style upgrade steps) |
 | [0026](0026-per-team-pg-tablespaces.md) | 2026-07-02 | Per-team PostgreSQL tablespaces |
 | [0027](0027-hard-tenant-isolation.md) | 2026-07-02 | Hard tenant isolation: per-team networks, resource limits, disk quotas |
@@ -87,6 +86,16 @@ precursors).
 | [0065](0065-team-ssh-deploy-keys.md) | 2026-09-17 | Per-team SSH deploy keys: auto-generated keypair, public key in the dashboard, SSH repository URLs |
 | [0066](0066-production-wal-disk-protection.md) | 2026-09-19 | Production WAL monitoring, archive controls, persistent disk protection and fenced recovery |
 | [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
+| [0068](0068-production-mcp-credentials.md) | 2026-09-19 | Separate production MCP credentials, direct OduMCP access and automatic addon provisioning |
+
+| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite |
+
+| [0070](0070-annual-commercial-licenses.md) | 2026-09-23 | Annual commercial license terms, informational expiry, and manual Paddle renewal |
+| [0071](0071-manual-license-periods.md) | 2026-09-23 | Agreed legacy migration, manual periods and optional Paddle subscriptions |
+| [0072](0072-polyform-commercial-licensing.md) | 2026-09-23 | PolyForm public source license, internal evaluation and alternative commercial agreements |
+| [0073](0073-on-demand-extra-addons-branches.md) | 2026-09-29 | Extra-addons repos registered without download; branches fetched on first use |
+| [0074](0074-postgresql16-cluster-replacement.md) | 2026-09-29 | PostgreSQL 16 replacement of prepared clusters, manual configuration and template restoration |
+| [0075](0075-production-server-mode-routing.md) | 2026-10-03 | Production server mode (workers/gevent) with bus routing to the gevent port |
 
 ## Design docs
 

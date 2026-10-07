@@ -50,6 +50,10 @@ injected config as a label and is **recreated automatically** when the config
 changes. The only runtime state is a durable ACP conversation-history file in
 the team's data directory; transcripts remain owned by the agent adapters.
 
+The coder image includes OpenSSH client tools for Git remotes authenticated
+with a team SSH deploy key. Use an SSH repository URL for deploy-key access;
+HTTPS remotes still require HTTPS credentials.
+
 ## Enabling it
 
 Configuration lives entirely in `oduflow.toml` — there is no runtime editing.
@@ -59,7 +63,7 @@ enablement and credentials live in the `[team.*]` sections:
 ```toml
 # Deployment-wide (optional)
 [agent]
-image = "oduist/oduflow-coder:0.3.0"
+image = "oduist/oduflow-coder:0.3.2"
 # claude_model = ""     # optional Claude model override; empty = CLI default
 # codex_model = ""      # optional Codex model override; empty = CLI default
 # opencode_model = ""   # optional provider/model override; empty = OpenCode default

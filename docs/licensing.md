@@ -1,23 +1,46 @@
 # Licensing
 
-Oduflow is source-available under the [Business Source License 1.1](https://github.com/oduist/oduflow/blob/main/LICENSE) (BUSL-1.1).
+Starting with v1.84.0, Oduflow is source-available under
+[PolyForm Noncommercial License 1.0.0](https://github.com/oduflow/oduflow/blob/main/LICENSE)
+(`PolyForm-Noncommercial-1.0.0`).
 
-- **Free forever for non-commercial use**: evaluation, education, academic research, personal and hobby projects, non-profits.
-- **Commercial use requires a paid license** in one of three tiers (below).
-- Standard BUSL mechanics: each release converts to the open-source **MPL 2.0** four years after publication.
+- **Free public license:** noncommercial purposes, personal uses and the
+  organizations covered by the standard license, including its education,
+  research, public-sector and charitable-organization permissions.
+- **Free internal evaluation:** a separate
+  [evaluation permission](https://github.com/oduflow/oduflow/blob/main/EVALUATION-LICENSE.md)
+  lets a business assess Oduflow in isolation before buying. It does not cover
+  live business operations, commercial project development or paid client work.
+- **Alternative commercial license:** Solo, Business, Integrator or Enterprise
+  covers use outside those permissions, under the agreement and purchased scope.
 
-## License Types
+The standard PolyForm text is unmodified; preserve its required notice from
+`NOTICE` when distributing copies. Third-party components retain their own terms.
+PolyForm releases have no automatic conversion to an open-source license.
+Earlier releases retain their original terms. Existing perpetual commercial
+grants remain in effect.
 
-| Type | Label | Who needs it |
+## Annual Commercial Plans
+
+New purchases use the [Oduflow Commercial License Agreement](https://oduflow.dev/eula).
+The public license shipped with each release and prior perpetual commercial
+purchases retain their existing grants. Public source access and updates are
+available to everyone. All plans have the same functions, including Production.
+
+| Plan | Annual price (EUR, excluding tax) | License holder and scope |
 |---|---|---|
-| `unlicensed` | UNLICENSED — NON-COMMERCIAL USE ONLY | Default when no license key is installed; fine for evaluation, education, and other non-commercial use |
-| `individual` | Licensed to individual | One natural person (freelancer, sole developer) using Oduflow commercially on their own account |
-| `business` | Licensed to company (internal use only) | A company using Oduflow internally, for its own Odoo systems |
-| `integrator` | Licensed to Odoo integrator | A person or company using Oduflow to deliver Odoo services (implementation, development, support, hosting) to clients |
+| Free | Free | Public-license permissions and the separate internal evaluation grant |
+| Solo | 149 | One named developer, including personal client development and administration |
+| Business | 499 | Named company, internal use only |
+| Integrator | 999 | Named Odoo integrator's team delivering client services |
+| Enterprise | By agreement | Hosting, white label, or custom support requirements |
 
-### Business vs. Integrator
-
-The test is whose Odoo systems you point Oduflow at. If the environments you develop, test, and operate serve your own organization, a Business license covers you. If they belong to, or are used by, your clients — you are an integrator and need an Integrator license, regardless of company size.
+Solo, Business and Integrator renew annually through Paddle until canceled.
+Choose a plan on [oduflow.dev/pricing](https://oduflow.dev/pricing); secure checkout,
+key delivery and subscription checks are hosted on `license.oduist.com`.
+Canceling before renewal leaves the remainder of the paid year intact. Only
+completed payment extends the licensed term. Enterprise terms are agreed individually.
+Existing perpetual keys have no expiration and remain recognized as perpetual.
 
 ## Installing a License
 
@@ -51,3 +74,49 @@ License keys are RSA-signed and verified against a built-in public key. Invalid 
 ---
 
 For business use or integrator licenses, visit [oduflow.dev](https://oduflow.dev).
+
+## License Details and Renewal
+
+Click **Licensed to** in the dashboard header to see the holder, plan, status,
+valid-from date, paid-through timestamp and a link to the
+[Oduflow Commercial License Agreement](https://oduflow.dev/eula).
+An expired license is shown in red
+with the text **LICENSE EXPIRED**, while all functions and running systems remain
+available. The dashboard refreshes this local status once a minute.
+
+An expired annual license offers **Update license status**. This is a manual
+network action: the authenticated dashboard posts the installed signed key to
+`https://license.oduist.com/oduflow/check_license`. The server verifies its signature
+and checks completed Paddle payments for that subscription. If a newer paid term
+exists, Oduflow verifies and atomically installs the renewed key. Otherwise it
+keeps the existing key. No startup or background job contacts this service.
+
+The same action is available as authenticated `POST /api/license/refresh`.
+Shared environment links cannot read, activate or refresh the installation license.
+A renewal key also arrives by email after each paid annual transaction.
+
+Annual keys use the existing RSA-PSS/SHA-256 signature envelope, with signed
+`version: 2`, `plan`, `scope`, `subscription_id`, `paddle_environment`, `valid_from`
+and `expires` fields. `expires` is an exclusive timezone-aware timestamp. The
+built-in public key remains unchanged; unsigned or altered deadlines are rejected.
+
+
+## Agreed migration and manually granted periods
+
+A commercial license can have a manually granted period before a Paddle
+subscription exists. For customers who agreed to migrate, the license server
+records one calendar year from the original archived purchase timestamp. The
+license has a stable identity independent of its later Paddle subscription.
+
+After updating Oduflow, click the license banner and **Update license status** to
+retrieve the agreed term. Only explicitly imported legacy holders can migrate;
+other perpetual keys keep their existing status. The server verifies the old
+signature and matches the holder, plan and issue date when the original archive
+has no key copy. No periodic network check is added.
+
+After a manual period ends, **Subscribe annually** opens a short-lived checkout
+link with the existing holder and plan. The customer accepts the annual terms
+and pays through Paddle. The completed payment attaches the subscription to the
+same license. **Update license status** then installs the paid extension. An
+administrator can also extend an unlinked manual period from the license server's
+Oduflow admin page. Expiration never disables product features.

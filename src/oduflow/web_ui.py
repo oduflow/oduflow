@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import html
@@ -14,7 +15,7 @@ import socket
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -49,6 +50,7 @@ from oduflow import (
     secret_store,
     ui_scope,
     ui_totp,
+    updates,
 )
 from oduflow.docker_ops import (
     env_ops,
@@ -76,7 +78,12 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.licensing import get_license_info, install_license_from_text
+from oduflow.licensing import (
+    get_license_checkout_url,
+    get_license_info,
+    install_license_from_text,
+    refresh_license,
+)
 from oduflow.locking import (
     LockManager,
     credentials_lock_key,
@@ -85,6 +92,7 @@ from oduflow.locking import (
     service_database_lock_key,
     service_lock_key,
     service_preset_lock_key,
+    template_lock_key,
     volume_lock_key,
 )
 from oduflow.naming import (
@@ -404,6 +412,12 @@ class UIAuthMiddleware:
             ):
                 if scope["type"] == "websocket":
                     await WebSocket(scope, receive, send).close(code=1008)
+                elif method in ("GET", "HEAD") and not path.startswith("/api/"):
+                    # Recover browser navigation using the saved session; the
+                    # shared dashboard includes the control to leave this mode.
+                    target = ui_scope.PAGE_PREFIX + quote(scoped_env, safe="/")
+                    redirect = RedirectResponse(target, status_code=303)
+                    await redirect(scope, receive, send)
                 else:
                     denied: Response = JSONResponse(
                         {"ok": False, "error": "Not available for a shared link."},
@@ -1022,7 +1036,8 @@ def _build_routes(
             return HTMLResponse(_render_dashboard(settings, scoped_env=env_name))
         return _share_link_error(
             "This link is missing its key. Open the full share link you were "
-            "sent (it ends with ?key=...).",
+            "sent (it ends with ?key=...) to get back to this environment. "
+            "If you have a team password, sign in at /login instead.",
             401,
         )
 
@@ -1088,15 +1103,18 @@ def _build_routes(
         # already authenticated browser, leaving scoped mode restores that
         # operator session instead of signing it out too.
         settings = get_settings()
-        share_token = request.cookies.get(ui_scope.SHARE_COOKIE, "")
-        share = _check_share_token(share_token, settings)
+        share = _check_share_token(
+            request.cookies.get(ui_scope.SHARE_COOKIE, ""), settings
+        )
         session = request.cookies.get(_AUTH_COOKIE, "")
         operator = _check_cookie_token(session, settings) if session else None
-        if share_token and operator is not None:
+        if share and operator is not None:
             response = RedirectResponse("/", status_code=303)
             response.delete_cookie(ui_scope.SHARE_COOKIE, path="/", samesite="strict")
             return response
         if share:
+            # A visitor with no team credentials: land back on the scoped page,
+            # which now explains both ways back in (reopen the link, or sign in).
             target = ui_scope.PAGE_PREFIX + quote(share[1], safe="/")
             response = RedirectResponse(target, status_code=303)
             response.delete_cookie(ui_scope.SHARE_COOKIE, path="/", samesite="strict")
@@ -1339,6 +1357,13 @@ def _build_routes(
             result = await _offload(operation, settings, team, branch, *modules)
             exit_code = result["exit_code"]
             applied = result.get("modules", modules)
+            # "all" is Odoo's keyword for every installed module, not a module
+            # name, so the result reads as a phrase instead of a one-item list.
+            applied_label = (
+                "all installed modules"
+                if action == "upgrade" and applied == [odoo_ops.ALL_MODULES]
+                else ", ".join(applied)
+            )
             restart_warning = ""
             container_restarted: bool | None = None
             # A failed run is still a completed request: the Odoo log is the
@@ -1350,8 +1375,7 @@ def _build_routes(
                     await _offload(env_ops.restart_environment, settings, branch, team)
                     container_restarted = True
                     message = (
-                        f"{completed_verb}: {', '.join(applied)}. "
-                        "Odoo container restarted."
+                        f"{completed_verb}: {applied_label}. Odoo container restarted."
                     )
                 except FlowError as e:
                     container_restarted = False
@@ -1362,7 +1386,7 @@ def _build_routes(
                         f"Modules were {action}d, but the Odoo container could not "
                         f"be restarted. {restart_error}"
                     )
-                    message = f"{completed_verb}: {', '.join(applied)}. Restart failed."
+                    message = f"{completed_verb}: {applied_label}. Restart failed."
                 except Exception:
                     container_restarted = False
                     logger.exception(
@@ -1374,10 +1398,10 @@ def _build_routes(
                         f"Modules were {action}d, but the Odoo container could not "
                         "be restarted. Check server logs for details."
                     )
-                    message = f"{completed_verb}: {', '.join(applied)}. Restart failed."
+                    message = f"{completed_verb}: {applied_label}. Restart failed."
             else:
                 verb = "Install" if action == "install" else "Upgrade"
-                message = f"{verb} failed: {', '.join(applied)}."
+                message = f"{verb} failed: {applied_label}."
             payload: dict[str, Any] = {
                 "action": action,
                 "message": message,
@@ -1641,6 +1665,9 @@ def _build_routes(
             # nothing — create_environment would only re-check after
             # delete_environment has already destroyed the working environment.
             secret_store.resolve_env_secrets(team, env_vars)
+            # Same for a stopped database server or a template without its
+            # database: create_environment would refuse only after the delete.
+            env_ops._ensure_system_ready(client, settings, team, template_name)
 
             env_ops.delete_environment(settings, team, branch, preserve_share=True)
             result = env_ops.create_environment(
@@ -1669,6 +1696,36 @@ def _build_routes(
         finally:
             locks.release_env(branch)
 
+    @contextlib.contextmanager
+    def _template_locks(
+        team: TeamSettings, *names: str, operation: str, team_wide: bool
+    ) -> Iterator[None]:
+        """Take the same locks a template mutation takes on the MCP side.
+
+        Every mutation holds each touched template's own key, so the dashboard
+        and the MCP tools exclude each other on the template itself. Only
+        ``team_wide=True`` adds the team lock, and only two kinds of operation
+        need it: those that remount live environments' overlay filestores
+        (publish, refresh, attach, finalize) and delete/rename, whose
+        dependent-environment scan is a check-then-act against a concurrent
+        create_environment. Importing a brand-new template and editing
+        metadata.json are neither, and take the key alone.
+        """
+        with contextlib.ExitStack() as stack:
+            if team_wide:
+                stack.enter_context(locks.team_lock(team.team_id, operation=operation))
+            # dict.fromkeys de-duplicates while keeping order: a rename to the
+            # template's own name passes the same name twice, and entering one
+            # key twice would report a phantom concurrent operation instead of
+            # the ConflictError that rename really deserves.
+            for name in dict.fromkeys(names):
+                stack.enter_context(
+                    locks.env_lock(
+                        template_lock_key(team.team_id, name), operation=operation
+                    )
+                )
+            yield
+
     async def api_save_as_template(request: Request) -> JSONResponse:
         branch = request.path_params["branch"]
         team = _get_ui_team(request)
@@ -1690,21 +1747,21 @@ def _build_routes(
         # Team lock (not just the env): publishing can remount other envs' overlay
         # filestores, so it must serialize against the whole team like the MCP tool.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            activity.touch(team, branch)
-            # No overwrite from the UI: publishing over an existing template is a
-            # deliberate re-baseline reserved for the MCP tool, so a duplicate name
-            # here raises ConflictError (surfaced to the client by _error_response).
-            result = await _offload(
-                system_ops.publish_env_as_template,
-                get_settings(),
-                team,
-                branch,
-                template_name=template_name,
-            )
+            with _template_locks(
+                team, template_name, operation="save_as_template", team_wide=True
+            ):
+                activity.touch(team, branch)
+                # No overwrite from the UI: publishing over an existing template
+                # is a deliberate re-baseline reserved for the MCP tool, so a
+                # duplicate name here raises ConflictError (surfaced to the
+                # client by _error_response).
+                result = await _offload(
+                    system_ops.publish_env_as_template,
+                    get_settings(),
+                    team,
+                    branch,
+                    template_name=template_name,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -1726,8 +1783,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     async def _template_from_production(team: TeamSettings, prod_name: str) -> str:
         """Resolve ``from_production`` to its managed ``prod-<name>`` template.
@@ -2083,16 +2138,34 @@ def _build_routes(
                 status_code=400,
             )
 
-        odoo_url = str(body.get("odoo_url") or "").strip()
+        # "odoo_url" is the legacy field name the dashboard form still posts.
+        source = str(body.get("source") or body.get("odoo_url") or "").strip()
         master_pwd = str(body.get("master_pwd") or "")
         db_name = str(body.get("db_name") or "").strip()
         template_name = str(body.get("template_name") or "").strip()
         without_filestore = body.get("without_filestore", False)
-        if not odoo_url:
+        overwrite = body.get("overwrite", False)
+        refresh = body.get("refresh", False)
+        s3_endpoint = str(body.get("s3_endpoint") or "").strip()
+        s3_access_key = str(body.get("s3_access_key") or "")
+        s3_secret_key = str(body.get("s3_secret_key") or "")
+        s3_region = str(body.get("s3_region") or "").strip()
+        for flag_name, flag in (
+            ("without_filestore", without_filestore),
+            ("overwrite", overwrite),
+            ("refresh", refresh),
+        ):
+            if not isinstance(flag, bool):
+                return JSONResponse(
+                    {"ok": False, "error": f"{flag_name} must be a boolean"},
+                    status_code=400,
+                )
+        if not source and not refresh:
             return JSONResponse(
-                {"ok": False, "error": "odoo_url is required"}, status_code=400
+                {"ok": False, "error": "source is required"}, status_code=400
             )
-        if not master_pwd:
+        # Only the Odoo database-manager path needs the master password.
+        if not master_pwd and source.startswith(("http://", "https://")):
             return JSONResponse(
                 {"ok": False, "error": "master_pwd is required"}, status_code=400
             )
@@ -2100,52 +2173,64 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "template_name is required"}, status_code=400
             )
-        if not isinstance(without_filestore, bool):
-            return JSONResponse(
-                {"ok": False, "error": "without_filestore must be a boolean"},
-                status_code=400,
-            )
         try:
             validate_template_name(template_name)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+        # New templates need only their own key; replacements also protect
+        # environments while changing their overlay lower layer.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.import_from_odoo,
-                get_settings(),
+            with _template_locks(
                 team,
-                odoo_url=odoo_url,
-                master_pwd=master_pwd,
-                db_name=db_name,
-                template_name=template_name,
-                without_filestore=without_filestore,
-            )
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "result": {
-                        "template_name": result.get("template_name"),
-                        "source_url": result.get("source_url"),
-                        "source_db": result.get("source_db"),
-                        "odoo_version": result.get("odoo_version"),
-                        "odoo_image": result.get("odoo_image"),
-                        "template_db": result.get("template_db"),
-                        "includes_filestore": result.get("includes_filestore"),
-                        "zip_size_mb": result.get("zip_size_mb"),
-                        "restore_seconds": result.get("restore_seconds"),
-                        "affected_envs": result.get("affected_envs", []),
-                        "remount_failures": result.get("remount_failures", []),
-                    },
-                }
-            )
+                template_name,
+                operation="import_template",
+                team_wide=overwrite or refresh,
+            ):
+                result = await _offload(
+                    system_ops.import_template,
+                    get_settings(),
+                    team,
+                    source=source,
+                    master_pwd=master_pwd,
+                    db_name=db_name,
+                    template_name=template_name,
+                    without_filestore=without_filestore,
+                    overwrite=overwrite,
+                    refresh=refresh,
+                    s3_endpoint=s3_endpoint,
+                    s3_access_key=s3_access_key,
+                    s3_secret_key=s3_secret_key,
+                    s3_region=s3_region,
+                )
+            payload = {
+                "template_name": result.get("template_name"),
+                "source_url": result.get("source_url"),
+                "source_db": result.get("source_db"),
+                "odoo_version": result.get("odoo_version"),
+                "odoo_image": result.get("odoo_image"),
+                "template_db": result.get("template_db"),
+                "includes_filestore": result.get("includes_filestore"),
+                "zip_size_mb": result.get("zip_size_mb"),
+                "restore_seconds": result.get("restore_seconds"),
+                "affected_envs": result.get("affected_envs", []),
+                "remount_failures": result.get("remount_failures", []),
+            }
+            if "dump_reloaded" in result:  # s3 / local-path / refresh engine
+                payload.update(
+                    {
+                        "status": result.get("status"),
+                        "dump_reloaded": result.get("dump_reloaded"),
+                        "downloaded_files": result.get("downloaded_files"),
+                        "downloaded_mb": result.get("downloaded_mb"),
+                        "reused_files": result.get("reused_files"),
+                        "removed_files": result.get("removed_files"),
+                    }
+                )
+            return JSONResponse({"ok": True, "result": payload})
         except FlowError as e:
             logger.warning(
-                "import_from_odoo failed for template %s: %s", template_name, e
+                "import_template failed for template %s: %s", template_name, e
             )
             return _error_response(e)
         except Exception:
@@ -2156,18 +2241,15 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_template_delete(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         team = _get_ui_team(request)
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.delete_template(get_settings(), team, name)
+            with _template_locks(
+                team, name, operation="delete_template", team_wide=True
+            ):
+                result = system_ops.delete_template(get_settings(), team, name)
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2176,8 +2258,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     async def api_template_rename(request: Request) -> JSONResponse:
         name = request.path_params["name"]
@@ -2193,14 +2273,16 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "new_name is required"}, status_code=400
             )
+        # Both names: the destination needs a key too, or an import into
+        # `new_name` could create that template between rename_template's
+        # "does the target exist?" check and its os.rename.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.rename_template, get_settings(), team, name, new_name
-            )
+            with _template_locks(
+                team, name, new_name, operation="rename_template", team_wide=True
+            ):
+                result = await _offload(
+                    system_ops.rename_template, get_settings(), team, name, new_name
+                )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:  # invalid template name
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -2211,8 +2293,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_template_metadata(request: Request) -> JSONResponse:
         name = request.path_params["name"]
@@ -2265,12 +2345,17 @@ def _build_routes(
                 {"ok": False, "error": "revision must be a string"}, status_code=400
             )
 
+        # Template key, not the team lock: this rewrites one metadata.json and
+        # remounts nothing. Concurrent editors are already rejected by the
+        # revision check inside update_template_metadata; the key is what keeps
+        # a publish or an import into this template from interleaving.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.update_template_metadata(team, name, content, revision)
+            with _template_locks(
+                team, name, operation="update_template_metadata", team_wide=False
+            ):
+                result = system_ops.update_template_metadata(
+                    team, name, content, revision
+                )
             return JSONResponse({"ok": True, **result})
         except ConflictError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
@@ -2283,8 +2368,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     # --- Import from Odoo.sh (push-based template ingest) ------------------
 
@@ -2893,22 +2976,27 @@ def _build_routes(
                 },
                 status_code=400,
             )
+        # Team lock: unlike the pull-based import, finalize can promote into an
+        # existing template and so remounts live environments' overlays. The
+        # uploads that precede it stay lock-free — only this swap is team-wide.
         try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
-        try:
-            result = system_ops.finalize_imported_template(
-                get_settings(),
+            with _template_locks(
                 team,
                 template_name,
-                staging_dir=team.get_import_staging_dir(template_name),
-                addon_error_policy=str(
-                    record.get("addon_error_policy")
-                    or import_tokens.ADDON_ERROR_POLICY_STRICT
-                ),
-            )
-            import_tokens.invalidate(team, str(record["token"]))
+                operation="finalize_imported_template",
+                team_wide=True,
+            ):
+                result = system_ops.finalize_imported_template(
+                    get_settings(),
+                    team,
+                    template_name,
+                    staging_dir=team.get_import_staging_dir(template_name),
+                    addon_error_policy=str(
+                        record.get("addon_error_policy")
+                        or import_tokens.ADDON_ERROR_POLICY_STRICT
+                    ),
+                )
+                import_tokens.invalidate(team, str(record["token"]))
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2917,8 +3005,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_team(team.team_id)
 
     def api_service_databases(request: Request) -> JSONResponse:
         try:
@@ -3863,6 +3949,45 @@ def _build_routes(
         info = get_license_info(settings.etc_dir)
         return JSONResponse({"ok": True, "license": info.to_dict()})
 
+    async def api_license_refresh(request: Request) -> JSONResponse:
+        try:
+            info, renewed = await _offload(refresh_license, get_settings().etc_dir)
+            return JSONResponse(
+                {"ok": True, "license": info.to_dict(), "renewed": renewed}
+            )
+        except (ValueError, OSError):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Unable to update the license. Check your payment and retry, or contact support.",
+                },
+                status_code=400,
+            )
+
+    async def api_license_checkout(request: Request) -> JSONResponse:
+        try:
+            url = await _offload(get_license_checkout_url, get_settings().etc_dir)
+            return JSONResponse({"ok": True, "checkout_url": url})
+        except (ValueError, OSError):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Unable to open checkout. Update license status or contact support.",
+                },
+                status_code=400,
+            )
+
+    async def api_version(request: Request) -> JSONResponse:
+        """Compare the running version with the latest GitHub release.
+
+        Called only when a user clicks the version in the header, so the
+        outbound request to github.com is always something a person asked
+        for. Failures are reported in the payload, never as a 5xx: "could
+        not reach GitHub" is an answer the dialog shows, not a server error.
+        """
+        result = await _offload(updates.check_for_update)
+        return JSONResponse({"ok": True, "version": result.to_dict()})
+
     async def api_license_activate(request: Request) -> JSONResponse:
         try:
             body = await request.json()
@@ -3952,21 +4077,72 @@ def _build_routes(
             name = (body.get("name") or "").strip()
             repo_url = (body.get("repo_url") or "").strip()
             git_user = (body.get("git_user") or "").strip()
+            branches = body.get("branches") or []
             if not name or not repo_url:
                 return JSONResponse(
                     {"ok": False, "error": "name and repo_url are required."},
                     status_code=400,
                 )
-            from oduflow.extra_addons import clone_extra_repo
+            if not isinstance(branches, list) or any(
+                not isinstance(b, str) for b in branches
+            ):
+                return JSONResponse(
+                    {"ok": False, "error": "branches must be a list of names."},
+                    status_code=400,
+                )
+            # Same URL validation + SSRF guard as the MCP add_extra_repo path.
+            from oduflow.git_ops import validate_repo_url
+
+            validate_repo_url(repo_url)
+
+            from oduflow.extra_addons import register_extra_repo
 
             result = await _offload(
-                clone_extra_repo, team, name, repo_url, git_user=git_user
+                register_extra_repo,
+                team,
+                name,
+                repo_url,
+                git_user=git_user,
+                branches=branches,
             )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception:
             logger.exception("Unexpected error in api_extra_repo_add")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_ls_remote(request: Request) -> JSONResponse:
+        """List remote branches before adding (add-repo wizard branch picker)."""
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            repo_url = (body.get("repo_url") or "").strip()
+            git_user = (body.get("git_user") or "").strip()
+            if not repo_url:
+                return JSONResponse(
+                    {"ok": False, "error": "repo_url is required."}, status_code=400
+                )
+            # SSRF guard: ls-remote runs server-side with team credentials, so
+            # apply the same URL validation as the MCP add_extra_repo path.
+            from oduflow.git_ops import validate_repo_url
+
+            validate_repo_url(repo_url)
+
+            from oduflow.extra_addons import list_remote_branches
+
+            branches = await _offload(
+                list_remote_branches, team, repo_url, git_user=git_user
+            )
+            return JSONResponse({"ok": True, "branches": branches})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_ls_remote")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -3983,6 +4159,112 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("Unexpected error in api_extra_repo_pull")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_branches(request: Request) -> JSONResponse:
+        """Downloaded and remote branches plus who uses each (Branches dialog)."""
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            from oduflow.extra_addons import branch_usage, get_extra_repo
+
+            repo = await _offload(get_extra_repo, team, name)
+            usage = await _offload(branch_usage, get_settings(), team, name)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "name": repo["name"],
+                    "local": repo["local"],
+                    "downloaded": repo["branches"],
+                    "available": repo["available_branches"],
+                    "available_known": repo["available_known"],
+                    "protected": repo["protected"],
+                    "usage": usage,
+                }
+            )
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_branches")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_remote_branches(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            from oduflow.extra_addons import refresh_remote_branches
+
+            branches = await _offload(refresh_remote_branches, team, name)
+            return JSONResponse({"ok": True, "available": branches})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_remote_branches")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_add_branches(request: Request) -> JSONResponse:
+        # No lock: extra_addons serialises every mutator per repo.
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            branches = body.get("branches") if isinstance(body, dict) else None
+            if (
+                not isinstance(branches, list)
+                or not branches
+                or any(not isinstance(b, str) for b in branches)
+            ):
+                return JSONResponse(
+                    {"ok": False, "error": "branches must be a non-empty list."},
+                    status_code=400,
+                )
+            from oduflow.extra_addons import track_branches
+
+            result = await _offload(track_branches, team, name, branches)
+            return JSONResponse({"ok": True, "result": result})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_add_branches")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_extra_repo_remove_branch(request: Request) -> JSONResponse:
+        # Branch names may contain "/", so the branch travels in the body.
+        name = request.path_params["name"]
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            branch = body.get("branch") if isinstance(body, dict) else None
+            if not isinstance(branch, str) or not branch.strip():
+                return JSONResponse(
+                    {"ok": False, "error": "branch is required."}, status_code=400
+                )
+            from oduflow.extra_addons import untrack_branch
+
+            result = await _offload(
+                untrack_branch, get_settings(), team, name, branch.strip()
+            )
+            return JSONResponse({"ok": True, "result": result})
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception:
+            logger.exception("Unexpected error in api_extra_repo_remove_branch")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -4234,7 +4516,7 @@ def _build_routes(
             locks.release_env(key)
 
     def api_secrets(request: Request) -> JSONResponse:
-        """Names and timestamps only — secret values never leave the server."""
+        """Names, types and timestamps only — never secret values."""
         try:
             team = _get_ui_team(request)
             return JSONResponse(
@@ -4264,7 +4546,9 @@ def _build_routes(
                 {"ok": False, "error": "Invalid JSON body."}, status_code=400
             )
         try:
-            result = secret_store.set_secret(team, name, value)
+            result = await _offload(
+                secret_store.set_secret, team, name, value, body.get("value_type")
+            )
             return JSONResponse({"ok": True, "result": result})
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -4272,6 +4556,38 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("Unexpected error in api_secret_set")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_secret_update_json(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body."}, status_code=400
+            )
+        if not isinstance(body, dict) or "path" not in body or "value" not in body:
+            return JSONResponse(
+                {"ok": False, "error": "An object with path and value is required."},
+                status_code=400,
+            )
+        try:
+            team = _get_ui_team(request)
+            result = await _offload(
+                secret_store.update_secret_json,
+                team,
+                request.path_params["name"],
+                body["path"],
+                body["value"],
+            )
+            return JSONResponse({"ok": True, "result": result})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_secret_update_json")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -5545,6 +5861,9 @@ def _build_routes(
                 template_name=str(data.get("template_name", "")).strip() or None,
                 from_environment=from_environment or None,
                 env_lock=env_lock,
+                server_mode=production_ops.resolve_server_mode(
+                    data.get("server_mode"), production_ops.DEFAULT_SERVER_MODE
+                ),
             )
             return JSONResponse({"ok": True, **result})
         except FlowError as e:
@@ -5793,11 +6112,15 @@ def _build_routes(
             extra_addons=(
                 _normalize_extra_addons(raw_extra) if raw_extra is not None else None
             ),
+            server_mode=production_ops.resolve_server_mode(
+                data.get("server_mode"), None
+            ),
         )
 
     async def api_production_reconfigure(request: Request) -> JSONResponse:
-        """Change infra settings (domain/image/branch/repo/extra addons) and
-        recreate the production container to match; DB/filestore preserved."""
+        """Change infra settings (domain/image/branch/repo/extra addons/server
+        mode) and recreate the production container to match; DB/filestore
+        preserved."""
         return await _production_body_action(request, _reconfigure_action)
 
     def _odoo_conf_action(
@@ -5858,25 +6181,25 @@ def _build_routes(
         # serializes against the whole team like the save_production_as_template
         # MCP tool. The production's own key on top keeps deploys, restores and
         # deletes of this production out of the dump.
-        try:
-            locks.acquire_team(team.team_id)
-        except BusyError as e:
-            return _error_response(e)
         prod_key = _prod_lock_key(team, name)
         try:
-            locks.acquire_env(prod_key, operation="save_production_as_template")
-        except BusyError as e:
-            locks.release_team(team.team_id)
-            return _error_response(e)
-        try:
-            result = await _offload(
-                system_ops.publish_production_as_template,
-                get_settings(),
-                team,
-                name,
-                template_name=template_name,
-                overwrite=overwrite,
-            )
+            with (
+                _template_locks(
+                    team,
+                    template_name,
+                    operation="save_production_as_template",
+                    team_wide=True,
+                ),
+                locks.env_lock(prod_key, operation="save_production_as_template"),
+            ):
+                result = await _offload(
+                    system_ops.publish_production_as_template,
+                    get_settings(),
+                    team,
+                    name,
+                    template_name=template_name,
+                    overwrite=overwrite,
+                )
             return JSONResponse(
                 {
                     "ok": True,
@@ -5906,9 +6229,6 @@ def _build_routes(
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
-        finally:
-            locks.release_env(prod_key)
-            locks.release_team(team.team_id)
 
     def api_production_logs(request: Request) -> JSONResponse:
         try:
@@ -6285,8 +6605,11 @@ def _build_routes(
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/logo.png", logo, methods=["GET"]),
         Route("/static/{filename}", static_file, methods=["GET"]),
+        Route("/api/version", api_version, methods=["GET"]),
         Route("/api/license", api_license, methods=["GET"]),
         Route("/api/license/activate", api_license_activate, methods=["POST"]),
+        Route("/api/license/refresh", api_license_refresh, methods=["POST"]),
+        Route("/api/license/checkout", api_license_checkout, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),
         Route("/api/templates", api_templates, methods=["GET"]),
         Route("/import-odoo.sh", import_odoo_script, methods=["GET"]),
@@ -6490,7 +6813,28 @@ def _build_routes(
         Route("/api/volumes/{name}/delete", api_volume_delete, methods=["POST"]),
         Route("/api/extra-repos", api_extra_repos, methods=["GET"]),
         Route("/api/extra-repos/add", api_extra_repo_add, methods=["POST"]),
+        Route("/api/extra-repos/ls-remote", api_extra_repo_ls_remote, methods=["POST"]),
         Route("/api/extra-repos/{name}/pull", api_extra_repo_pull, methods=["POST"]),
+        Route(
+            "/api/extra-repos/{name}/branches",
+            api_extra_repo_branches,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/extra-repos/{name}/branches",
+            api_extra_repo_add_branches,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/extra-repos/{name}/branches/remove",
+            api_extra_repo_remove_branch,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/extra-repos/{name}/remote-branches",
+            api_extra_repo_remote_branches,
+            methods=["POST"],
+        ),
         Route(
             "/api/extra-repos/{name}/protect", api_extra_repo_protect, methods=["POST"]
         ),
@@ -6513,6 +6857,9 @@ def _build_routes(
         # the ui_scope allowlist, so scoped share sessions cannot touch them.
         Route("/api/secrets", api_secrets, methods=["GET"]),
         Route("/api/secrets/{name}/set", api_secret_set, methods=["POST"]),
+        Route(
+            "/api/secrets/{name}/update-json", api_secret_update_json, methods=["POST"]
+        ),
         Route("/api/secrets/{name}/delete", api_secret_delete, methods=["POST"]),
         Route("/api/environments/{branch:path}/logs", api_logs, methods=["GET"]),
         WebSocketRoute("/api/environments/{branch:path}/terminal", ws_terminal),

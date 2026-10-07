@@ -192,7 +192,23 @@ Options:
 - `--template-name <name>` — template profile name (default: `default`)
 - `--without-filestore` — request a database-only PostgreSQL custom dump without filestore files
 
-This is also available as an MCP tool (`import_template_from_odoo`) for AI agents; pass `without_filestore=true` for a database-only import.
+This is also available as an MCP tool (`import_template`) for AI agents; pass `without_filestore=true` for a database-only import.
+
+**From an S3 prefix (best for very large databases and filestores):**
+
+Building a ZIP backup of a huge production is slow and needs double disk space on the source. Instead, upload the raw artifacts as-is and point the same command at the prefix — no master password needed:
+
+```bash
+# On the source host:
+pg_dump -Fc mydb > dump.pgdump
+aws s3 cp dump.pgdump s3://mybucket/backups/mydb/
+aws s3 sync ~/.local/share/Odoo/filestore/mydb/ s3://mybucket/backups/mydb/filestore/
+
+# On the Oduflow host:
+oduflow import-template s3://mybucket/backups/mydb/ --template-name prod
+```
+
+Files are downloaded in parallel and one-to-one; an interrupted import resumes where it stopped. Re-running with `--overwrite` re-syncs an existing template incrementally: only changed filestore files are downloaded, and an unchanged dump skips the database reload entirely. Credentials come from `--s3-access-key`/`--s3-secret-key` (plus `--s3-endpoint` for MinIO and friends), or the `[backup]` settings when the bucket matches, or anonymous access for a public bucket. See [Template Management](templates.md#importing-from-an-s3-prefix) for details.
 
 If the database dump and filestore are delivered separately, import with `--without-filestore` first, then run `oduflow attach-filestore <template> <source>` when the filestore archive, local directory, or rsync/SSH source is ready. See [Database Dump and Separate Filestore](templates.md#database-dump-and-separate-filestore) for the full sequence.
 
@@ -213,20 +229,20 @@ cp -r filestore {data_dir}/team_{ID}/templates/myproject/
 5. Load the template into PostgreSQL:
 
 ```bash
-oduflow reload-template myproject
+oduflow import-template --template-name myproject --refresh
 ```
 
 **From another Oduflow workspace:**
 
-Simply copy the entire template directory and reload:
+Simply copy the entire template directory and refresh:
 
 ```bash
 cp -r /other/oduflow/templates/myproject {data_dir}/team_{ID}/templates/myproject
-oduflow reload-template myproject
+oduflow import-template --template-name myproject --refresh
 ```
 
 !!! warning
-    The SQL dump is loaded into the shared PostgreSQL instance by `reload-template`. Without this step, the template will appear in the list but show **DB NOT LOADED** and cannot be used to create environments.
+    The SQL dump is loaded into the shared PostgreSQL instance by the `--refresh` step. Without it, the template will appear in the list but show **DB NOT LOADED** and cannot be used to create environments.
 
 ## 🏗️ Template Evolution
 

@@ -584,6 +584,53 @@ def test_retention_uses_job_age_and_removes_unused_images(tmp_path):
     assert jobs[0].image_id in removed
 
 
+@pytest.mark.parametrize("status", ["running", "exited"])
+@pytest.mark.parametrize("uses_old_tag", [True, False])
+def test_retention_preserves_container_tag_after_cached_rebuild(
+    tmp_path, status, uses_old_tag
+):
+    from oduflow.docker_ops import build_ops
+
+    local_store = BuildJobStore()
+    team = _team(tmp_path)
+    jobs = []
+    for index in range(2):
+        job = local_store.create(
+            team, f"env-{index}", "main", "Dockerfile", ".", owner_id=_OWNER
+        )
+        job.local_tag = f"oduflow-build/team-1:{job.build_id}"
+        job.image_id = "sha256:cached"
+        local_store.finish(team, job, image_builds.STATUS_SUCCEEDED)
+        job.finished_at = f"2026-09-01T00:00:0{index}+00:00"
+        local_store.save(team, job)
+        jobs.append(job)
+
+    tags = [job.local_tag for job in jobs]
+    client = MagicMock()
+    client.images.get.return_value = SimpleNamespace(tags=tags)
+    client.images.remove.side_effect = tags.remove
+    container = SimpleNamespace(
+        status=status,
+        attrs={"Config": {"Image": jobs[0 if uses_old_tag else 1].local_tag}},
+    )
+    client.containers.list.side_effect = lambda all: (
+        [container] if all or status == "running" else []
+    )
+    with (
+        patch.object(build_ops, "store", local_store),
+        patch.object(build_ops, "get_client", return_value=client),
+    ):
+        build_ops._prune_staging_images(team, keep=1)
+
+    if uses_old_tag:
+        client.images.remove.assert_not_called()
+        assert jobs[0].local_tag in tags
+    else:
+        # Sharing the image ID does not pin an unrelated, unused build tag.
+        client.images.remove.assert_called_once_with(jobs[0].local_tag)
+        assert jobs[0].local_tag not in tags
+
+
 # -- version pinning between tool listing and docs is covered by
 #    test_documentation_sync; scoped exposure is checked here --
 

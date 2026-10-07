@@ -983,6 +983,7 @@ class TestCreateEnvironmentFromProduction:
 
 class TestAllowCopyToDevFlag:
     def test_create_production_stores_the_flag(self, settings, team):
+        team = replace(team, production_token="p" * 40)
         client = MagicMock()
         client.containers.get.side_effect = docker.errors.NotFound("nf")
         real_create = production_registry.create_production
@@ -1025,6 +1026,7 @@ class TestAllowCopyToDevFlag:
                 "database": "oduflow_1_prod-erp",
                 "commit": "c0ffee1234",
                 "odoo_container": "oduflow-1-prod-erp-odoo",
+                "server_mode": "workers",
             },
         ) as create:
             # Called directly: this tool has its own `name` parameter.

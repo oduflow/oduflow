@@ -38,7 +38,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
 )
 from oduflow.image_builds import BuildJob, store
-from oduflow.locking import image_build_lock_key, keyed_mutex
+from oduflow.locking import image_build_lock_key, keyed_mutex, service_registry_key
 from oduflow.naming import (
     get_repo_path,
     get_resource_name,
@@ -57,9 +57,12 @@ _FILTER_ERRORS: tuple[type[BaseException], ...] = tuple(
 )
 
 
+STAGING_REPOSITORY_PREFIX = "oduflow-build/"
+
+
 def staging_repository(team_id: str) -> str:
     """Local (daemon-only) repository holding a team's build candidates."""
-    return f"oduflow-build/team-{team_id}"
+    return f"{STAGING_REPOSITORY_PREFIX}team-{team_id}"
 
 
 def _environment_container(
@@ -475,7 +478,20 @@ def _prune_staging_images(team: TeamSettings, keep: int) -> None:
         ]
         jobs.sort(key=lambda job: job.finished_at or job.created_at, reverse=True)
         for job in jobs[keep:]:
-            with keyed_mutex(image_build_lock_key(team.team_id, job.build_id)):
+            with (
+                keyed_mutex(image_build_lock_key(team.team_id, job.build_id)),
+                keyed_mutex(service_registry_key(team.team_id)),
+            ):
+                # Docker can untag an in-use image when another tag exists
+                # (e.g. a cached rebuild). Preserve the exact reference used
+                # by running AND stopped containers, not just the image ID.
+                # Service creation/recreation holds this key across lookup
+                # and run, so that window cannot look unused to retention.
+                if any(
+                    container.attrs.get("Config", {}).get("Image") == job.local_tag
+                    for container in client.containers.list(all=True)
+                ):
+                    continue
                 try:
                     client.images.remove(job.local_tag)
                 except docker.errors.ImageNotFound:

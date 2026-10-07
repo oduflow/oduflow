@@ -72,11 +72,11 @@ src/oduflow/
   bundled_upgrade.py   # Three-way merge bundled files using persistent baselines
   port_registry.py     # Stable port allocation with JSON persistence
   web_ui.py            # Starlette dashboard, REST/WS API, session/TOTP auth middleware
-  extra_addons.py      # Extra addon repo management (clone, worktree, odoo.conf generation)
+  extra_addons.py      # Extra addon repo management (on-demand branch fetch, worktree, odoo.conf generation)
   env_credentials.py   # Per-environment PostgreSQL credentials
   pg_hba.py            # Managed PostgreSQL host rules rendered from Docker IPAM
   sanitizer.py         # DB sanitization (SQL/Python scripts)
-  sync.py              # Sync template data from S3 or local path (aws s3 sync / rsync)
+  template_import.py   # Template import engine: S3 prefix / local path / in-place refresh
   licensing.py         # License verification and installation (RSA signatures)
   systemd.py           # Systemd service install/uninstall
   production_registry.py # Per-team production metadata and deploy history
@@ -169,7 +169,7 @@ This means no manual ownership fixups are ever needed on either platform.
 | Resource | Name | Description |
 |---|---|---|
 | **Network** | `oduflow-{team_id}-net` | Per-team isolated bridge network (only shared PostgreSQL and the Traefik bridge cross teams) |
-| **DB container** | `oduflow-db` | PostgreSQL 15, shared across all environments |
+| **DB container** | `oduflow-db` | PostgreSQL 16 (`[database].image`), shared across all environments |
 | **DB volume** | `oduflow-db-data` | Persistent database storage |
 | **Template DB** | `oduflow_template_{team_id}_{name}` | Created from the dump file, used as PostgreSQL template |
 | **Environment DB** | `oduflow_{team_id}_{branch}` | Created from template DB via `CREATE DATABASE ... TEMPLATE` |
@@ -192,9 +192,11 @@ resource an operation actually touches:
 | Lock Level | Scope | Example Operations |
 |---|---|---|
 | **Per-branch** | One operation per branch at a time | `create_environment`, `delete_environment`, `install_odoo_modules`, `pull_and_apply`, `export_module_translations` |
-| **Per-resource** | One operation per service / volume / production / credential store | `create_service`, `delete_volume`, `setup_repo_auth`, `snapshot_production` |
-| **Per-team** | One team-wide operation at a time | template publishing (`save_as_template`, `refresh_template`, `delete_template`) — they remount other environments' overlay filestores |
+| **Per-resource** | One operation per service / volume / production / template / credential store | `create_service`, `delete_volume`, `setup_repo_auth`, `snapshot_production`, `import_template` |
+| **Per-team** | One team-wide operation at a time | template mutations that remount other environments' overlay filestores (`save_as_template`, `save_production_as_template`, `refresh_template`, `attach_filestore`), plus `delete_template` / `rename_template`, which must exclude a concurrent `create_environment` |
 | **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, `restore_cluster_pitr` (excludes every production lock) |
+
+Every template operation also takes that template's own key, so a publish and an import can never interleave on the same template name; only the ones listed above add the team lock on top. `attach_filestore` stages its source (an rsync or an archive unpack) before taking the team lock, so a large transfer does not hold the team; it is also the one operation whose team acquire *waits* (up to five minutes) instead of failing immediately, because by then the transfer is already done and discarding it would be far more expensive than queueing.
 
 Operations on **different resources** run in parallel. If a lock cannot be acquired, the tool immediately returns `BusyError` (no queuing). Some tools take no `LockManager` lock at all: pure reads, the `odoo_*` tools (PostgreSQL arbitrates concurrent ORM calls), and the extra-repo tools (`extra_addons.py` serialises per repo itself).
 

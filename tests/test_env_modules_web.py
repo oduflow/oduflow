@@ -119,6 +119,30 @@ def test_module_apply_reports_success_when_the_followup_restart_fails(
     assert "secret output" not in str(body)
 
 
+def test_upgrade_all_is_reported_as_every_installed_module(tmp_path):
+    client = _client(tmp_path)
+    result = {"modules": ["all"], "exit_code": 0, "output": "Modules loaded."}
+
+    with (
+        patch(
+            "oduflow.web_ui.odoo_ops.upgrade_odoo_modules", return_value=result
+        ) as upgrade,
+        patch("oduflow.web_ui.env_ops.restart_environment"),
+    ):
+        response = client.post(
+            "/api/environments/feature-x/modules",
+            json={"action": "upgrade", "modules": "all"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()["result"]
+    assert upgrade.call_args.args[3:] == ("all",)
+    assert body["modules_upgraded"] == ["all"]
+    assert body["message"] == (
+        "Upgraded: all installed modules. Odoo container restarted."
+    )
+
+
 def test_failed_install_returns_the_odoo_output_without_restarting(tmp_path):
     client = _client(tmp_path)
     result = {"modules": ["sale"], "exit_code": 1, "output": "CRITICAL failure"}

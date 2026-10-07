@@ -1,17 +1,19 @@
 [project]
 name = "oduflow"
-version = "1.79.0"
+version = "1.85.0"
 description = "AI-first Odoo development and CI tool with reusable database templates, powered by MCP"
 authors = [
     { name = "Oduist" }
 ]
 readme = "README.md"
-license = { text = "BUSL-1.1" }
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "NOTICE", "COMMERCIAL-LICENSE.md", "EVALUATION-LICENSE.md"]
 requires-python = ">=3.10"
 keywords = ["odoo", "mcp", "docker", "development", "ci"]
 dependencies = [
     "fastmcp==2.14.3",
     "docker>=3.3.0",
+    "httpx>=0.28,<1",
     # Declarative Oduflow Stack manifests: typed validation + YAML input.
     "pydantic>=2.10,<3",
     "PyYAML>=6.0,<7",
@@ -38,9 +40,9 @@ dev = [
 [project.urls]
 Homepage = "https://oduflow.dev"
 Documentation = "https://oduflow.dev"
-Repository = "https://github.com/oduist/oduflow"
-Issues = "https://github.com/oduist/oduflow/issues"
-Changelog = "https://github.com/oduist/oduflow/releases"
+Repository = "https://github.com/oduflow/oduflow"
+Issues = "https://github.com/oduflow/oduflow/issues"
+Changelog = "https://github.com/oduflow/oduflow/releases"
 
 [project.scripts]
 oduflow = "oduflow.server:main"

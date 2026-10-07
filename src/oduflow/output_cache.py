@@ -19,6 +19,8 @@ class CachedOutput:
     source_tool: str
     source_args: str
     error_line_indices: list[int] = field(default_factory=list)
+    team_id: str = ""
+    production: bool = False
 
     @property
     def total_lines(self) -> int:
@@ -47,7 +49,15 @@ class OutputCache:
         self._lock = threading.Lock()
         self._seq = 0
 
-    def store(self, output: str, source_tool: str, source_args: str) -> CachedOutput:
+    def store(
+        self,
+        output: str,
+        source_tool: str,
+        source_args: str,
+        *,
+        team_id: str = "",
+        production: bool = False,
+    ) -> CachedOutput:
         """Cache output, return CachedOutput with generated ID."""
         if len(output) > _MAX_OUTPUT_SIZE:
             output = output[:_MAX_OUTPUT_SIZE]
@@ -77,6 +87,8 @@ class OutputCache:
             source_tool=source_tool,
             source_args=source_args,
             error_line_indices=error_indices,
+            team_id=team_id,
+            production=production,
         )
 
         with self._lock:

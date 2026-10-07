@@ -28,7 +28,7 @@ import secrets
 import threading
 import time
 
-from oduflow.settings import Settings
+from oduflow.settings import Settings, secret_matches
 
 logger = logging.getLogger("oduflow")
 
@@ -91,7 +91,7 @@ def resolve_token(settings: Settings, token: str) -> tuple[str, str | None] | No
         return None
     # 1. Team tokens (static, from settings) — never touches Docker.
     for team_id, team in settings.teams.items():
-        if team.auth_token and secrets.compare_digest(token, team.auth_token):
+        if team.auth_token and secret_matches(team.auth_token, token):
             return (team_id, None)
     # 2. Env tokens: serve from cache; rescan at most once per interval.
     with _scan_condition:

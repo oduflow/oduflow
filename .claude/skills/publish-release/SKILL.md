@@ -7,9 +7,8 @@ description: >-
   GitHub Release (the step that actually ships to PyPI + Docker Hub), and verify
   the artifacts. Use this whenever the user wants to cut, prepare, or publish an
   Oduflow release — including "/publish-release", "make a release", "prepare the
-  next release", "cut a release", "сделай релиз", "подготовь следующий релиз",
-  "выпусти новую версию" — even if they don't name the exact steps. Triggers for
-  the oduflow project (pyproject.toml `name = "oduflow"`, publish.yml/docker.yml
+  next release", "cut a release" — even if they don't name the exact steps.
+  Triggers for the oduflow project (pyproject.toml `name = "oduflow"`, publish.yml/docker.yml
   on `release: published`).
 ---
 

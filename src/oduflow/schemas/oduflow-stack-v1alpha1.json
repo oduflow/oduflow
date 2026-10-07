@@ -195,6 +195,15 @@
           "title": "Allowcopytodevmcp",
           "type": "boolean"
         },
+        "serverMode": {
+          "default": "workers",
+          "enum": [
+            "workers",
+            "gevent"
+          ],
+          "title": "Servermode",
+          "type": "string"
+        },
         "odooConf": {
           "additionalProperties": {
             "type": "string"

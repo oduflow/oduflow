@@ -343,3 +343,66 @@ h4:hover .headerlink, h5:hover .headerlink, h6:hover .headerlink { opacity: 1; }
 @media screen and (max-width: 44.9em) {
   .odu-hero { padding: 3rem 1rem 2.5rem; margin: -1rem -.6rem 2rem; }
 }
+
+/* ===========================================================================
+   MCP tools reference — clickable tool index + per-tool sections
+   =========================================================================== */
+
+/* Index cards: tighter than feature cards, and never break an identifier. */
+.md-typeset .odu-tool-index.grid.cards > ul > li {
+  padding: .9rem 1rem;
+  font-size: .72rem;
+  line-height: 1.85;
+}
+.md-typeset .odu-tool-index.grid.cards > ul > li:hover {
+  transform: none;  /* a dense link list should not jump under the cursor */
+}
+.md-typeset .odu-tool-index.grid.cards > ul > li > hr {
+  margin: .6rem 0;
+}
+.md-typeset .odu-tool-index code {
+  white-space: nowrap;
+  font-size: .95em;
+  background: transparent;
+  padding: 0 .1em;
+}
+.md-typeset .odu-tool-index a {
+  text-decoration: none;
+}
+.md-typeset .odu-tool-index a:hover code {
+  background: var(--md-accent-fg-color--transparent);
+}
+
+/* Per-tool metadata line: lock scope, destructive marker, requirements. */
+.md-typeset .odu-tool-meta {
+  margin-top: -.6em;
+  font-size: .68rem;
+  letter-spacing: .02em;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Tool sections are dense; give each one a visible start. */
+.md-typeset h3 > code {
+  font-size: 1em;
+  background: transparent;
+  padding: 0;
+}
+
+/* Parameter definition lists: term on its own line, definition indented. */
+.md-typeset dl dt {
+  margin-top: .9em;
+  font-weight: 500;
+}
+.md-typeset dl dt code {
+  white-space: nowrap;
+}
+.md-typeset dl dd {
+  margin-top: .25em;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Identifiers in tables must never wrap mid-word (the old reference did). */
+.md-typeset table:not([class]) td code,
+.md-typeset table:not([class]) th code {
+  white-space: nowrap;
+}

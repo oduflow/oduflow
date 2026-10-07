@@ -18,7 +18,12 @@ from oduflow.settings import Settings, TeamSettings
 def team(tmp_path):
     data_dir = tmp_path / "team_1"
     data_dir.mkdir()
-    return TeamSettings(team_id="1", hostname="dev.example.com", data_dir=str(data_dir))
+    return TeamSettings(
+        team_id="1",
+        hostname="dev.example.com",
+        data_dir=str(data_dir),
+        production_token="p" * 40,
+    )
 
 
 @pytest.fixture
@@ -92,6 +97,8 @@ def _patch_create_stack(client, **overrides):
         os.makedirs(repo_path, exist_ok=True)
 
     patches = {
+        "prepare_odumcp": patch("oduflow.production_mcp.prepare_addon"),
+        "provision_odumcp": patch("oduflow.production_mcp.provision"),
         "get_client": patch.object(production_ops, "get_client", return_value=client),
         "ensure_prod_infra": patch.object(production_ops, "ensure_prod_infra"),
         "ensure_team_network": patch.object(production_ops, "ensure_team_network"),
@@ -151,6 +158,32 @@ class _PatchAll:
 
 
 class TestCreateProduction:
+    @pytest.mark.parametrize("stage", ["prepare_odumcp", "provision_odumcp"])
+    def test_odumcp_failure_preserves_production(self, settings, team, stage):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)) as mocks:
+            mocks[stage].side_effect = RuntimeError("internal-secret-error")
+            with patch.object(production_ops, "_cleanup_partial_production") as cleanup:
+                result = production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:19.0",
+                )
+            cleanup.assert_not_called()
+            if stage == "prepare_odumcp":
+                mocks["provision_odumcp"].assert_not_called()
+        assert result["name"] == "erp"
+        assert result["odoo_container"]
+        assert "sync_production_mcp" in result["notes"][0]
+        assert "internal-secret-error" not in str(result)
+        record = production_registry.get_production(team, "erp")
+        assert record["mcp"]["status"] == "sync_failed"
+        assert client.containers.run.called
+
     def test_requires_traefik_mode(self, settings, team):
         port_settings = Settings(
             routing_mode="port",
@@ -366,6 +399,7 @@ class TestBaseDomainProductions:
             team_id="1",
             hostname="oduflow.demo.example.com",
             base_domain="demo.example.com",
+            production_token="p" * 40,
             data_dir=str(data_dir),
         )
 
@@ -883,17 +917,23 @@ def _patch_reconfigure_stack(client):
 
 
 class TestReconfigureProduction:
-    def _client_with_container(self, settings):
-        # A present, team-owned container: no drift to repair.
+    def _client_with_container(self, settings, team):
+        # A present, team-owned container routed as the record dictates: no
+        # drift to repair. Call after _seed_prod_record.
+        record = production_registry.get_production(team, "erp")
         container = MagicMock()
-        container.labels = {settings.team_label: "1"}
+        container.labels = {
+            settings.team_label: "1",
+            "oduflow.server_mode": production_ops.server_mode_of(record),
+            **production_ops.prod_routing_labels(settings, team, "erp", record),
+        }
         client = MagicMock()
         client.containers.get.return_value = container
         return client
 
     def test_noop_leaves_container_alone(self, settings, team):
         _seed_prod_record(team)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         with _PatchAll(_patch_reconfigure_stack(client)):
             result = production_ops.reconfigure_production(settings, team, "erp")
         assert result["changed"] == []
@@ -901,7 +941,7 @@ class TestReconfigureProduction:
 
     def test_same_values_are_a_noop(self, settings, team):
         _seed_prod_record(team)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         with _PatchAll(_patch_reconfigure_stack(client)):
             result = production_ops.reconfigure_production(
                 settings, team, "erp", domain="erp.example.com", branch="production"
@@ -924,7 +964,7 @@ class TestReconfigureProduction:
         self, settings, team
     ):
         _seed_prod_record(team)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         with _PatchAll(_patch_reconfigure_stack(client)) as mocks:
             result = production_ops.reconfigure_production(
                 settings, team, "erp", force_recreate=True
@@ -1049,7 +1089,7 @@ class TestReconfigureProduction:
     def test_traversal_extra_addons_key_rejected(self, settings, team):
         # Keys become path components; ".." must never reach the rmtree.
         _seed_prod_record(team)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         with _PatchAll(_patch_reconfigure_stack(client)):
             with pytest.raises(ValueError, match="Invalid repo name"):
                 production_ops.reconfigure_production(
@@ -1077,7 +1117,7 @@ class TestReconfigureProduction:
         _seed_prod_record(team, extra_addons={"acme": "main"})
         workspace = production_ops._workspace(team, "erp")
         os.makedirs(os.path.join(workspace, "extra", "acme"), exist_ok=True)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         patches = _patch_reconfigure_stack(client)
         patches["create_worktree"] = patch(
             "oduflow.extra_addons.create_worktree",
@@ -1101,7 +1141,7 @@ class TestReconfigureProduction:
 
     def test_domain_only_change_does_not_pull_image(self, settings, team):
         _seed_prod_record(team)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         with _PatchAll(_patch_reconfigure_stack(client)):
             production_ops.reconfigure_production(
                 settings, team, "erp", domain="new.example.com"
@@ -1113,7 +1153,7 @@ class TestReconfigureProduction:
         workspace = production_ops._workspace(team, "erp")
         os.makedirs(os.path.join(workspace, "filestore"), exist_ok=True)
         os.makedirs(os.path.join(workspace, "sessions"), exist_ok=True)
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         patches = _patch_reconfigure_stack(client)
         patches["get_odoo_uid_gid"] = patch.object(
             production_ops, "get_odoo_uid_gid", return_value="1000:1000"
@@ -1129,13 +1169,396 @@ class TestReconfigureProduction:
 
     def test_git_user_empty_string_clears(self, settings, team):
         _seed_prod_record(team, git_user="bob")
-        client = self._client_with_container(settings)
+        client = self._client_with_container(settings, team)
         with _PatchAll(_patch_reconfigure_stack(client)):
             result = production_ops.reconfigure_production(
                 settings, team, "erp", git_user=""
             )
         assert result["changed"] == ["git_user"]
         assert production_registry.get_production(team, "erp")["git_user"] == ""
+
+
+class TestServerMode:
+    ROUTER = "traefik.http.routers.oduflow-1-prod-erp"
+    BUS = "traefik.http.routers.oduflow-1-prod-erp_bus"
+    SERVICE = "traefik.http.services.oduflow-1-prod-erp"
+    BUS_SERVICE = "traefik.http.services.oduflow-1-prod-erp_bus"
+
+    def _labels(self, settings, team, **record):
+        record = {"domain": "erp.example.com", **record}
+        return production_ops.prod_routing_labels(settings, team, "erp", record)
+
+    def test_workers_mode_routes_pages_to_8069_and_bus_to_8072(self, settings, team):
+        labels = self._labels(settings, team, extra_domains=["myodoo.pl"])
+        host = "Host(`erp.example.com`) || Host(`myodoo.pl`)"
+        assert labels[f"{self.ROUTER}.rule"] == host
+        assert labels[f"{self.ROUTER}.service"] == "oduflow-1-prod-erp"
+        assert labels[f"{self.SERVICE}.loadbalancer.server.port"] == "8069"
+        assert labels[f"{self.BUS}.rule"] == (
+            f"({host}) && (PathPrefix(`/websocket`) || PathPrefix(`/longpolling`))"
+        )
+        assert labels[f"{self.BUS}.service"] == "oduflow-1-prod-erp_bus"
+        assert labels[f"{self.BUS_SERVICE}.loadbalancer.server.port"] == "8072"
+        # Both routers serve the same TLS-terminated hosts.
+        for router in (self.ROUTER, self.BUS):
+            assert labels[f"{router}.entrypoints"] == "websecure"
+            assert labels[f"{router}.tls"] == "true"
+            assert labels[f"{router}.tls.certresolver"] == "letsencrypt"
+
+    def test_gevent_mode_routes_everything_to_8072(self, settings, team):
+        labels = self._labels(settings, team, server_mode="gevent")
+        assert labels[f"{self.ROUTER}.rule"] == "Host(`erp.example.com`)"
+        assert labels[f"{self.SERVICE}.loadbalancer.server.port"] == "8072"
+        assert not any("_bus" in key for key in labels)
+
+    def test_plain_http_routes_use_web_entrypoint(self, settings, team):
+        settings = replace(settings, routing_tls=False)
+        labels = self._labels(settings, team)
+        for router in (self.ROUTER, self.BUS):
+            assert labels[f"{router}.entrypoints"] == "web"
+            assert f"{router}.tls" not in labels
+
+    def test_record_without_mode_reads_as_workers(self):
+        assert production_ops.server_mode_of({}) == "workers"
+        assert production_ops.server_mode_of({"server_mode": "gevent"}) == "gevent"
+
+    def test_invalid_mode_rejected(self):
+        with pytest.raises(ValueError, match="server_mode"):
+            production_ops.validate_server_mode("threaded")
+        assert production_ops.validate_server_mode(" Gevent ") == "gevent"
+
+    def test_blank_mode_resolves_to_default(self):
+        assert production_ops.resolve_server_mode("", "workers") == "workers"
+        assert production_ops.resolve_server_mode(None, None) is None
+        assert production_ops.resolve_server_mode(" Gevent ", None) == "gevent"
+        with pytest.raises(ValueError, match="server_mode"):
+            production_ops.resolve_server_mode("threaded", "workers")
+
+    @pytest.mark.parametrize("mode", ["workers", "gevent", None])
+    def test_health_probe_requires_both_odoo_ports(self, mode):
+        # The gevent process carries the bus in workers mode and every page
+        # in gevent mode: either port down means unhealthy.
+        container = MagicMock()
+        container.labels = {"oduflow.server_mode": mode} if mode else {}
+        container.exec_run.return_value = (0, b"")
+        assert production_ops._probe_odoo_health(container) is True
+        script = container.exec_run.call_args[0][0][2]
+        assert "ports=['8069', '8072']" in script
+        assert "all(" in script
+        container.exec_run.return_value = (1, b"")
+        assert production_ops._probe_odoo_health(container) is False
+
+    def test_create_stores_mode_and_labels_container(self, settings, team):
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)):
+            result = production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "production",
+                "erp.example.com",
+                "odoo:18.0",
+                server_mode="gevent",
+            )
+        labels = client.containers.run.call_args.kwargs["labels"]
+        assert labels["oduflow.server_mode"] == "gevent"
+        assert labels[f"{self.SERVICE}.loadbalancer.server.port"] == "8072"
+        assert result["server_mode"] == "gevent"
+        record = production_registry.get_production(team, "erp")
+        assert record["server_mode"] == "gevent"
+
+    def test_create_rejects_unknown_mode_before_any_work(self, settings, team):
+        with patch.object(production_ops, "get_client") as get_client:
+            with pytest.raises(ValueError, match="server_mode"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "production",
+                    "erp.example.com",
+                    "odoo:18.0",
+                    server_mode="threaded",
+                )
+        get_client.assert_not_called()
+        assert "erp" not in production_registry.list_productions(team)
+
+    def test_reconfigure_switches_mode_and_recreates(self, settings, team):
+        _seed_prod_record(team)
+        client = _mock_client()
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", server_mode="gevent"
+            )
+        assert result["changed"] == ["server_mode"]
+        assert result["server_mode"] == "gevent"
+        assert any("8072" in note for note in result["notes"])
+        labels = client.containers.run.call_args.kwargs["labels"]
+        assert labels["oduflow.server_mode"] == "gevent"
+        assert labels[f"{self.SERVICE}.loadbalancer.server.port"] == "8072"
+        assert not any("_bus" in key for key in labels)
+        record = production_registry.get_production(team, "erp")
+        assert record["server_mode"] == "gevent"
+
+    def test_reconfigure_rejects_unknown_mode_without_touching_intent(
+        self, settings, team
+    ):
+        _seed_prod_record(team)
+        client = _mock_client()
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(ValueError, match="server_mode"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", server_mode="threaded"
+                )
+        client.containers.run.assert_not_called()
+        record = production_registry.get_production(team, "erp")
+        assert production_ops.server_mode_of(record) == "workers"
+
+    def test_legacy_container_without_bus_route_is_repaired(self, settings, team):
+        # A container created before the bus route existed: same record, but
+        # its traefik labels lack the _bus router. A plain reconfigure
+        # recreates it instead of reporting a no-op.
+        _seed_prod_record(team)
+        old = MagicMock()
+        old.labels = {
+            settings.team_label: "1",
+            f"{self.ROUTER}.rule": "Host(`erp.example.com`)",
+            f"{self.SERVICE}.loadbalancer.server.port": "8069",
+        }
+        client = MagicMock()
+        client.containers.get.return_value = old
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(settings, team, "erp")
+        assert result["changed"] == []
+        assert any("drifted" in note for note in result["notes"])
+        old.remove.assert_called_once()
+        labels = client.containers.run.call_args.kwargs["labels"]
+        assert labels[f"{self.BUS_SERVICE}.loadbalancer.server.port"] == "8072"
+
+    def test_gevent_conf_keeps_one_worker_and_full_db_pool(
+        self, settings, team, tmp_path
+    ):
+        production_registry.create_production(team, "erp", {"server_mode": "gevent"})
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        out = tmp_path / "generated.conf"
+        with patch(
+            "oduflow.pg_tune.detect_resources",
+            return_value={"total_ram_mb": 32768, "cpu_count": 4},
+        ):
+            production_ops._build_prod_odoo_conf(
+                settings, team, "erp", str(repo), [], output_path=str(out)
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.read(out)
+        assert cp.get("options", "workers") == "1"
+        # Sized from the workers-mode budget (7 workers), not from 1.
+        assert cp.get("options", "db_maxconn") == "17"
+
+    def test_hand_edited_zero_workers_override_is_ignored(
+        self, settings, team, tmp_path
+    ):
+        production_registry.create_production(
+            team, "erp", {"odoo_conf": {"workers": "0", "gevent_port": "9000"}}
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        out = tmp_path / "generated.conf"
+        with patch(
+            "oduflow.prod_tune.compute_odoo_worker_settings",
+            return_value={"workers": "7"},
+        ):
+            production_ops._build_prod_odoo_conf(
+                settings,
+                team,
+                "erp",
+                str(repo),
+                [],
+                plan=MagicMock(),
+                output_path=str(out),
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.read(out)
+        assert cp.get("options", "workers") == "7"
+        assert cp.get("options", "gevent_port") == "8072"
+
+    def test_base_conf_cannot_move_the_listeners(self, settings, team, tmp_path):
+        # A repo .oduflow/odoo.prod.conf is merged into the managed conf; its
+        # listen settings must not move Odoo off the ports Traefik targets.
+        production_registry.create_production(team, "erp", {})
+        repo = tmp_path / "repo"
+        (repo / ".oduflow").mkdir(parents=True)
+        (repo / ".oduflow" / "odoo.prod.conf").write_text(
+            "[options]\n"
+            "gevent_port = 8073\n"
+            "Longpolling_Port = 8090\n"
+            "http_port = 8069\n"
+            "http_interface = 127.0.0.1\n"
+            "xmlrpc_port = 9069\n"
+            "http_enable = False\n"
+            "limit_time_real = 300\n"
+        )
+        out = tmp_path / "generated.conf"
+        with patch(
+            "oduflow.prod_tune.compute_odoo_worker_settings",
+            return_value={"workers": "7"},
+        ):
+            production_ops._build_prod_odoo_conf(
+                settings,
+                team,
+                "erp",
+                str(repo),
+                [],
+                plan=MagicMock(),
+                output_path=str(out),
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.optionxform = str  # type: ignore[assignment,method-assign]
+        cp.read(out)
+        options = dict(cp.items("options"))
+        assert options["gevent_port"] == "8072"
+        assert options["longpolling_port"] == "8072"
+        assert "Longpolling_Port" not in options
+        assert options["http_port"] == "8069"
+        assert options["http_enable"] == "True"
+        assert "http_interface" not in options
+        assert "xmlrpc_port" not in options
+        assert options["limit_time_real"] == "300"
+
+    def test_set_odoo_conf_purges_legacy_reserved_overrides(self, settings, team):
+        # Stored before listen ports became reserved; the dashboard echoes
+        # the full set back, which must not be refused for those keys.
+        production_registry.create_production(
+            team,
+            "erp",
+            {"odoo_conf": {"longpolling_port": "8090", "limit_time_real": "300"}},
+        )
+        with (
+            patch.object(production_ops, "get_client"),
+            patch.object(production_ops, "_get_container", return_value=None),
+        ):
+            result = production_ops.set_production_odoo_conf(
+                settings,
+                team,
+                "erp",
+                set_options={"longpolling_port": "8090", "limit_time_real": "600"},
+                replace=True,
+            )
+        assert result["odoo_conf"] == {"limit_time_real": "600"}
+        assert any("longpolling_port" in note for note in result["notes"])
+        record = production_registry.get_production(team, "erp")
+        assert record["odoo_conf"] == {"limit_time_real": "600"}
+
+    def test_reconfigure_purges_legacy_reserved_overrides(self, settings, team):
+        _seed_prod_record(team)
+        production_registry.update_production(
+            team, "erp", {"odoo_conf": {"gevent_port": "9000", "workers": "3"}}
+        )
+        client = _mock_client()
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(settings, team, "erp")
+        assert "odoo_conf" in result["changed"]
+        assert any("gevent_port" in note for note in result["notes"])
+        record = production_registry.get_production(team, "erp")
+        assert record["odoo_conf"] == {"workers": "3"}
+
+    def test_restart_recreates_container_with_outdated_routing(self, settings, team):
+        _seed_prod_record(team)
+        old = MagicMock()
+        old.labels = {f"{self.ROUTER}.rule": "Host(`erp.example.com`)"}
+        with (
+            patch.object(production_ops, "get_client"),
+            patch.object(production_ops, "_require_container", return_value=old),
+            patch.object(
+                production_ops, "reconfigure_production", return_value={"healthy": True}
+            ) as reconfigure,
+        ):
+            result = production_ops.restart_production(settings, team, "erp")
+        reconfigure.assert_called_once_with(settings, team, "erp")
+        old.restart.assert_not_called()
+        assert result["recreated"] is True
+
+    def test_restart_keeps_restarting_current_container(self, settings, team):
+        _seed_prod_record(team)
+        record = production_registry.get_production(team, "erp")
+        current = MagicMock()
+        current.labels = {
+            "oduflow.server_mode": "workers",
+            **production_ops.prod_routing_labels(settings, team, "erp", record),
+        }
+        with (
+            patch.object(production_ops, "get_client"),
+            patch.object(production_ops, "_require_container", return_value=current),
+            patch.object(production_ops, "reconfigure_production") as reconfigure,
+        ):
+            result = production_ops.restart_production(settings, team, "erp")
+        reconfigure.assert_not_called()
+        current.restart.assert_called_once()
+        assert "recreated" not in result
+
+    @pytest.mark.parametrize(
+        "outcome,expected",
+        [
+            ({"healthy": True}, "recreated to apply"),
+            ({"healthy": False}, "NOT healthy"),
+            (RuntimeError("boom"), "failed (boom)"),
+        ],
+    )
+    def test_deploy_repairs_outdated_routing(self, settings, team, outcome, expected):
+        _seed_prod_record(team)
+        old = MagicMock()
+        old.labels = {f"{self.ROUTER}.rule": "Host(`erp.example.com`)"}
+        kwargs = (
+            {"side_effect": outcome}
+            if isinstance(outcome, Exception)
+            else {"return_value": outcome}
+        )
+        with patch.object(production_ops, "reconfigure_production", **kwargs):
+            note = production_ops._repair_routing_after_deploy(
+                settings, team, "erp", old
+            )
+        assert expected in note
+
+    def test_deploy_leaves_current_routing_alone(self, settings, team):
+        _seed_prod_record(team)
+        record = production_registry.get_production(team, "erp")
+        current = MagicMock()
+        current.labels = {
+            "oduflow.server_mode": "workers",
+            **production_ops.prod_routing_labels(settings, team, "erp", record),
+        }
+        with patch.object(production_ops, "reconfigure_production") as reconfigure:
+            note = production_ops._repair_routing_after_deploy(
+                settings, team, "erp", current
+            )
+        assert note == ""
+        reconfigure.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "options,match",
+        [
+            ({"workers": "0"}, "positive integer"),
+            ({"workers": "many"}, "positive integer"),
+            ({"gevent_port": "9000"}, "gevent_port"),
+            ({"http_port": "8080"}, "http_port"),
+        ],
+    )
+    def test_set_odoo_conf_refuses_values_that_break_routing(
+        self, settings, team, options, match
+    ):
+        production_registry.create_production(team, "erp", {})
+        with pytest.raises(ValueError, match=match):
+            production_ops.set_production_odoo_conf(
+                settings, team, "erp", set_options=options
+            )
+        assert production_registry.get_production(team, "erp")["odoo_conf"] == {}
 
 
 class TestCreateFromEnvironment:
