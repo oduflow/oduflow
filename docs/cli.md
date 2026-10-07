@@ -61,6 +61,30 @@ Changes take effect without a restart. Shared links and MCP clients are
 unaffected. See [UI 2FA](security.md#enable-authenticator-app-2fa) for enrollment,
 session expiry, and recovery details.
 
+## License Commands
+
+Manage the commercial license on the server. This is the only license interface
+under a [Custom license](licensing.md#custom-license-white-label), where the
+dashboard shows no license dialog to your clients.
+
+```bash
+# Holder, validity, and for a Custom license the brand, domains and white-label state
+oduflow license status
+
+# Verify and install a key file into the config directory
+oduflow license install ./license.key
+
+# Install a renewed key from the license server, if one was paid
+oduflow license refresh
+
+# Print a payment link when the license period ended without a subscription
+oduflow license subscribe
+```
+
+The commands read the existing configuration only and do not require Docker.
+Restart the service after installing or renewing a license so MCP clients see
+the change; the dashboard picks it up within a minute.
+
 ## Declarative Stack Commands
 
 ```bash

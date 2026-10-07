@@ -106,8 +106,15 @@ def team_ssh_command(ssh_dir: str) -> str:
 
 
 def ssh_key_comment(team_id: str) -> str:
-    """The comment baked into a team's key (identifies it on the git host)."""
-    return f"oduflow-{team_id}"
+    """The comment baked into a team's key (identifies it on the git host).
+
+    Under white label the brand replaces the product name for newly generated
+    keys; an existing key keeps the comment it was created with.
+    """
+    from oduflow import branding
+
+    brand = branding.current()
+    return f"{brand.slug if brand.white_label else 'oduflow'}-{team_id}"
 
 
 def ensure_ssh_key(ssh_dir: str, comment: str = "oduflow", force: bool = False) -> bool:

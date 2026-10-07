@@ -10,7 +10,7 @@ evaluation grant in `EVALUATION-LICENSE.md`, obtain a commercial license:
   administration on client infrastructure.
 - **Business:** internal use by the named company.
 - **Integrator:** team development, implementation and administration for clients.
-- **Enterprise:** hosting, white label or other individually agreed use and support.
+- **Custom:** hosting, white label or other individually agreed use and support.
 
 The full **Oduflow Commercial License Agreement** is published at
 <https://oduflow.dev/eula>. Plans and purchase options are at

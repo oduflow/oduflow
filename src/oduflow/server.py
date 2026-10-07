@@ -32,6 +32,7 @@ from fastmcp.server.dependencies import get_access_token, get_http_request
 from oduflow import (
     activity,
     artifact_tokens,
+    branding,
     bundled_upgrade,
     git_ops,
     image_builds,
@@ -354,17 +355,20 @@ def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
                 if fn.__name__.startswith("production_odoo_"):
                     preview = "OduMCP call completed (business response omitted from server log)"
                 logger.info("[%s] -> %s", fn.__name__, preview)
-                return result
+                # White label: show the brand instead of the product name.
+                return branding.rebrand(result) if isinstance(result, str) else result  # type: ignore[return-value]
+            except ToolError as e:
+                raise ToolError(branding.rebrand(str(e))) from e
             except FlowError as e:
                 logger.error("[%s] Error: %s", fn.__name__, e)
-                raise ToolError(str(e))
+                raise ToolError(branding.rebrand(str(e)))
             except ValueError as e:
                 # Intentional, developer-authored input validation (invalid
                 # env/module/template names, bad request path, …). These messages
                 # are safe to surface and helpful; every OTHER exception stays
                 # masked by mask_error_details=True so internal detail never leaks.
                 logger.error("[%s] Invalid input: %s", fn.__name__, e)
-                raise ToolError(str(e))
+                raise ToolError(branding.rebrand(str(e)))
 
         return await anyio.to_thread.run_sync(_run)
 
@@ -6468,11 +6472,33 @@ def _apply_agent_feedback(settings: Settings) -> None:
     logger.info("Agent feedback enabled (submit_agent_feedback exposed)")
 
 
+def _apply_branding() -> None:
+    """White label (custom license): present the MCP server under the brand.
+
+    Applied once at startup to the server name, the instructions and the tool
+    descriptions; installing or renewing a license takes effect on restart.
+    Tool results and errors are rebranded per call in ``handle_errors``. The
+    tools that point at the vendor (GitHub issues, product feedback) are hidden.
+    """
+    brand = branding.current()
+    if not brand.white_label:
+        return
+    mcp._mcp_server.name = brand.name
+    mcp.instructions = brand.rebrand(mcp.instructions or "")
+    for tool in mcp._tool_manager._tools.values():
+        if tool.description:
+            tool.description = brand.rebrand(tool.description)
+    report_issue.disable()
+    submit_agent_feedback.disable()
+    logger.info("MCP server presented as %s (white label)", brand.name)
+
+
 def _ensure_initialized(settings: Settings) -> None:
     """Ensure shared infrastructure and per-team directories exist (idempotent)."""
     from oduflow import prereqs
 
     _apply_agent_feedback(settings)
+    _apply_branding()
     _copy_bundled_configs()
     prereqs.ensure_fuse_overlayfs()
     prereqs.ensure_rsync()
@@ -7765,6 +7791,20 @@ def _run_cli() -> None:
         command = ui_2fa_sub.add_parser(action)
         command.add_argument("--team", default="1", help="Team ID (default: 1)")
 
+    p_license = sub.add_parser(
+        "license", help="Show, install, renew or subscribe the commercial license"
+    )
+    license_sub = p_license.add_subparsers(dest="license_action", required=True)
+    for action, action_help in {
+        "status": "Show the installed license",
+        "refresh": "Install a renewed key from the license server, if any",
+        "install": "Verify and install a license key file",
+        "subscribe": "Print a payment link after the license period ended",
+    }.items():
+        p_license_action = license_sub.add_parser(action, help=action_help)
+        if action == "install":
+            p_license_action.add_argument("file", help="Path to the license key file")
+
     # --- System commands ---
     sub.add_parser("destroy", help="Destroy all shared infrastructure")
     p_upgrade = sub.add_parser(
@@ -8047,6 +8087,7 @@ def _run_cli() -> None:
     )
 
     args = parser.parse_args()
+    branding.configure(_get_settings)
 
     # --- Commands that don't need Settings -----------------------
 
@@ -8091,6 +8132,13 @@ def _run_cli() -> None:
         from oduflow.systemd import uninstall as systemd_uninstall
 
         systemd_uninstall()
+        return
+
+    if args.command == "license":
+        # Reads the existing configuration only; never bootstraps an install
+        # or touches Docker. The operator's tool under white label, where the
+        # dashboard has no license dialog.
+        _run_license_cli(_get_settings(), args)
         return
 
     if args.command == "ui-2fa":
@@ -8350,6 +8398,7 @@ def _start_stdio() -> None:
     _warn_local_path_security(settings)
     reaper.start_reaper(_get_settings, _locks)
     start_backup_scheduler(_get_settings, _locks)
+    branding.start_grace_renewal(_get_settings)
     from oduflow.wal_monitor import start_monitor
 
     start_monitor(_get_settings)
@@ -8483,6 +8532,7 @@ def _start_http() -> None:
     from oduflow.backup_scheduler import start_backup_scheduler
 
     start_backup_scheduler(_get_settings, _locks)
+    branding.start_grace_renewal(_get_settings)
     from oduflow.wal_monitor import start_monitor
 
     start_monitor(_get_settings)
@@ -8576,6 +8626,58 @@ def _build_auth(settings: Settings):  # type: ignore[no-untyped-def]
 
     logger.warning("HTTP auth DISABLED (no team auth_token set)")
     return None
+
+
+def _run_license_cli(settings: Settings, args: argparse.Namespace) -> None:
+    from oduflow import licensing
+
+    etc_dir = settings.etc_dir
+    action = args.license_action
+    try:
+        if action == "install":
+            info = licensing.install_license(args.file, etc_dir)
+            print(f"Installed: {info.label}")
+            print("Restart the Oduflow service to apply it to MCP clients.")
+        elif action == "refresh":
+            result = licensing.refresh_license(etc_dir)
+            if result.renewed:
+                print(f"Renewed: valid until {result.info.expires}")
+                print("Restart the Oduflow service to apply it to MCP clients.")
+            elif result.subscription_required:
+                print("No active subscription. Run `oduflow license subscribe`.")
+            else:
+                print("No newer paid period is available yet.")
+        elif action == "subscribe":
+            print(licensing.get_license_checkout_url(etc_dir))
+            return
+    except (OSError, ValueError) as exc:
+        raise FlowError(f"License: {exc}") from exc
+    info = licensing.get_license_info(etc_dir)
+    print(f"License: {info.label}")
+    for title, value in (
+        ("Holder", info.name),
+        ("Email", info.email),
+        ("Valid from", info.valid_from),
+        ("Expires", info.expires),
+    ):
+        if value:
+            print(f"{title}: {value}")
+    if info.type == licensing.TYPE_CUSTOM:
+        brand = branding.compute(settings)
+        print(f"Brand: {info.brand_name}")
+        print(f"Domains: {', '.join(info.domains)}")
+        if brand.white_label:
+            print("White label: active")
+        else:
+            print(f"White label: off ({brand.reason})")
+        days_left = branding.grace_days_left(settings)
+        if days_left is not None:
+            print(
+                f"Expired: white label turns off in {days_left} day(s) unless "
+                "renewed (`oduflow license refresh`)."
+            )
+        branding_dir = os.path.join(etc_dir, branding.BRANDING_DIRNAME)
+        print(f"Logo and icon: {branding_dir}/{{logo.png,icon.png}}")
 
 
 def main() -> None:

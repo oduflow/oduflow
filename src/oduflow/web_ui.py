@@ -40,6 +40,7 @@ from oduflow import (
     agent_config,
     agent_uploads,
     artifact_tokens,
+    branding,
     connect_tokens,
     env_share,
     feedback,
@@ -458,13 +459,40 @@ def _is_secure_request(request: Request) -> bool:
 _TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent / "templates"
 
 
+def _apply_branding(page: str) -> str:
+    """Render the brand into a page template (see oduflow.branding).
+
+    ``<!--IF-STOCK-->`` blocks hold vendor surfaces (license, updates, docs,
+    feedback) and are removed from the HTML under white label, so nothing of
+    them reaches the browser; ``<!--IF-WHITE-LABEL-->`` blocks are the
+    opposite.
+    """
+    brand = branding.current()
+    keep, drop = (
+        ("WHITE-LABEL", "STOCK") if brand.white_label else ("STOCK", "WHITE-LABEL")
+    )
+    page = re.sub(rf"<!--IF-{drop}-->.*?<!--/IF-{drop}-->", "", page, flags=re.S)
+    page = page.replace(f"<!--IF-{keep}-->", "").replace(f"<!--/IF-{keep}-->", "")
+    asset_paths = [p for p in (brand.logo_path, brand.icon_path) if p]
+    try:
+        asset_version = str(int(max(os.stat(p).st_mtime for p in asset_paths)))
+    except (OSError, ValueError):
+        asset_version = feedback.oduflow_version()
+    return (
+        page.replace("__BRAND_NAME__", html.escape(brand.name, quote=True))
+        .replace("__WHITE_LABEL__", "1" if brand.white_label else "")
+        .replace("__LOGO_CLASS__", "custom-logo" if brand.logo_path else "")
+        .replace("__ASSET_VERSION__", html.escape(asset_version, quote=True))
+    )
+
+
 def _render_login(error: str = "") -> str:
     """Render the login page, optionally with a server-controlled error banner."""
     page = (_TEMPLATE_DIR / "login.html").read_text(encoding="utf-8")
     # Escape the message so the banner stays safe even if a future caller passes
     # user-influenced text (today's callers pass static literals).
     banner = f'<div class="error">{html.escape(error)}</div>' if error else ""
-    return page.replace("<!--ERROR-->", banner)
+    return _apply_branding(page.replace("<!--ERROR-->", banner))
 
 
 async def _read_login_credentials(request: Request) -> tuple[str, str]:
@@ -931,7 +959,7 @@ def _build_routes(
         allowlist, not this rendering, is the boundary."""
         html_path = _TEMPLATE_DIR / "dashboard.html"
         return (
-            html_path.read_text(encoding="utf-8")
+            _apply_branding(html_path.read_text(encoding="utf-8"))
             .replace(
                 "__PRODUCTION_TAB_HIDDEN__",
                 "" if settings.prod_enabled and not scoped_env else "hidden",
@@ -1127,11 +1155,27 @@ def _build_routes(
         response.delete_cookie(ui_scope.SHARE_COOKIE, path="/", samesite="strict")
         return response
 
+    def _brand_image(path: str) -> Response | None:
+        """A white-label image from the config dir, if one is installed."""
+        if not path:
+            return None
+        try:
+            data = pathlib.Path(path).read_bytes()
+        except OSError:
+            return None
+        return Response(data, media_type="image/png")
+
     def favicon(request: Request) -> Response:
+        custom = _brand_image(branding.current().icon_path)
+        if custom:
+            return custom
         ico_path = _TEMPLATE_DIR / "favicon.ico"
         return Response(ico_path.read_bytes(), media_type="image/x-icon")
 
     def logo(request: Request) -> Response:
+        custom = _brand_image(branding.current().logo_path)
+        if custom:
+            return custom
         logo_path = _TEMPLATE_DIR / "logo.png"
         return Response(logo_path.read_bytes(), media_type="image/png")
 
@@ -1145,6 +1189,11 @@ def _build_routes(
 
     def static_file(request: Request) -> Response:
         filename = request.path_params["filename"]
+        if filename in ("icon.png", "apple-icon.png"):
+            custom = _brand_image(branding.current().icon_path)
+            if custom:
+                custom.headers["Cache-Control"] = "public, max-age=86400"
+                return custom
         static_dir = (_TEMPLATE_DIR / "static").resolve()
         file_path = (static_dir / filename).resolve()
         media_type = _STATIC_MEDIA_TYPES.get(file_path.suffix)
@@ -3944,16 +3993,32 @@ def _build_routes(
         finally:
             locks.release_env(branch)
 
+    def _white_label_hidden() -> JSONResponse | None:
+        # Under white label the operator's clients use this dashboard; the
+        # operator manages the license with `oduflow license` on the server.
+        if branding.is_white_label():
+            return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+        return None
+
     def api_license(request: Request) -> JSONResponse:
+        if hidden := _white_label_hidden():
+            return hidden
         settings = get_settings()
         info = get_license_info(settings.etc_dir)
         return JSONResponse({"ok": True, "license": info.to_dict()})
 
     async def api_license_refresh(request: Request) -> JSONResponse:
+        if hidden := _white_label_hidden():
+            return hidden
         try:
-            info, renewed = await _offload(refresh_license, get_settings().etc_dir)
+            result = await _offload(refresh_license, get_settings().etc_dir)
             return JSONResponse(
-                {"ok": True, "license": info.to_dict(), "renewed": renewed}
+                {
+                    "ok": True,
+                    "license": result.info.to_dict(),
+                    "renewed": result.renewed,
+                    "subscription_required": result.subscription_required,
+                }
             )
         except (ValueError, OSError):
             return JSONResponse(
@@ -3965,6 +4030,8 @@ def _build_routes(
             )
 
     async def api_license_checkout(request: Request) -> JSONResponse:
+        if hidden := _white_label_hidden():
+            return hidden
         try:
             url = await _offload(get_license_checkout_url, get_settings().etc_dir)
             return JSONResponse({"ok": True, "checkout_url": url})
@@ -3989,6 +4056,8 @@ def _build_routes(
         return JSONResponse({"ok": True, "version": result.to_dict()})
 
     async def api_license_activate(request: Request) -> JSONResponse:
+        if hidden := _white_label_hidden():
+            return hidden
         try:
             body = await request.json()
             key_text = (body.get("key") or "").strip()
@@ -6869,6 +6938,7 @@ def mount_web_ui(
 ) -> None:
     from starlette.routing import Router
 
+    branding.configure(get_settings)
     routes = _build_routes(get_settings, locks)
     sub_app: ASGIApp = Router(routes=routes)
 

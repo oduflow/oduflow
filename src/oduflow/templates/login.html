@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Oduflow — Sign in</title>
+  <title>__BRAND_NAME__ — Sign in</title>
   <script>
     // Resolve the active theme before first paint (follows the OS unless the dashboard
     // toggle stored a choice). See DESIGN.md §2 (Light theme).
@@ -19,8 +19,8 @@
     })();
   </script>
   <link rel="preload" href="/static/source-sans-3-latin.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32">
-  <link rel="icon" href="/static/icon.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="/favicon.ico?v=__ASSET_VERSION__" sizes="16x16 32x32">
+  <link rel="icon" href="/static/icon.png?v=__ASSET_VERSION__" type="image/png" sizes="32x32">
   <style>
     @font-face {
       font-family: "Source Sans 3";
@@ -87,7 +87,7 @@
     }
     .card img.logo { height: 36px; align-self: center; }
     /* Logo is a white glyph on transparent — darken it to ink on the light card */
-    :root[data-theme="light"] .card img.logo { filter: brightness(0); }
+    :root[data-theme="light"] .card img.logo:not(.custom-logo) { filter: brightness(0); }
     .card h1 {
       font-size: 18px;
       font-weight: 600;
@@ -138,7 +138,7 @@
 </head>
 <body>
   <form class="card" method="post" action="/login">
-    <img class="logo" src="/logo.png" alt="Oduflow logo">
+    <img class="logo __LOGO_CLASS__" src="/logo.png?v=__ASSET_VERSION__" alt="__BRAND_NAME__ logo">
     <h1>Sign in</h1>
     <!--ERROR-->
     <label for="password">Password</label>

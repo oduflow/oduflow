@@ -12,7 +12,12 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from oduflow import web_ui
-from oduflow.licensing import TYPE_INDIVIDUAL, TYPE_UNLICENSED, LicenseInfo
+from oduflow.licensing import (
+    TYPE_INDIVIDUAL,
+    TYPE_UNLICENSED,
+    LicenseInfo,
+    RefreshResult,
+)
 from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings
 from oduflow.web_ui import (
@@ -685,7 +690,9 @@ def test_api_license_refresh_requires_session_and_uses_config_dir(
 
     def refresh(etc_dir):
         seen.append(etc_dir)
-        return LicenseInfo(TYPE_INDIVIDUAL, "Ada", "ada@example.com"), True
+        return RefreshResult(
+            LicenseInfo(TYPE_INDIVIDUAL, "Ada", "ada@example.com"), True
+        )
 
     monkeypatch.setattr(web_ui, "refresh_license", refresh)
     settings = _settings(etc_dir=str(tmp_path / "conf"))

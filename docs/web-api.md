@@ -226,10 +226,14 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/license` | License information |
 | `POST` | `/api/license/activate` | Activate body `key` |
 | `POST` | `/api/license/checkout` | Exchange an expired manual license for a short-lived hosted annual checkout link; requires dashboard authentication and same-origin mutation checks |
-| `POST` | `/api/license/refresh` | Manually check the installed annual license for a paid renewal and save its signed extension; returns `license` and `renewed`. Requires dashboard authentication and the normal same-origin mutation checks. No request body is needed |
+| `POST` | `/api/license/refresh` | Manually check the installed annual license for a paid renewal and save its signed extension; returns `license`, `renewed` and `subscription_required` (the license server found no active subscription, so checkout is the next step). Requires dashboard authentication and the normal same-origin mutation checks. No request body is needed |
 | `POST` | `/api/feedback/link` | Build a prefilled `github.com/oduflow/oduflow` issue URL. Body: required `details`; optional `kind` (`bug`, `feature`, or `feedback`) and `title` |
 | `GET` | `/api/agent-guides` | List available agent guides |
 | `GET` | `/api/agent-guides/{filename}` | Read a guide |
+
+Under an active [Custom license](licensing.md#custom-license-white-label) the
+`/api/license*` endpoints answer `404`: the operator manages the license with
+`oduflow license` on the server.
 
 ## Coding agent endpoints
 

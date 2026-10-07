@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preload" href="/static/source-sans-3-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/source-code-pro-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="icon" href="/favicon.ico" sizes="16x16 32x32">
-<link rel="icon" href="/static/icon.png" type="image/png" sizes="32x32">
-<link rel="apple-touch-icon" href="/static/apple-icon.png">
-<title>Oduflow</title>
+<link rel="icon" href="/favicon.ico?v=__ASSET_VERSION__" sizes="16x16 32x32">
+<link rel="icon" href="/static/icon.png?v=__ASSET_VERSION__" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/apple-icon.png?v=__ASSET_VERSION__">
+<title>__BRAND_NAME__</title>
 <script>
   // Resolve the active theme before first paint to avoid a flash of the wrong theme.
   // Stored mode is 'light' | 'dark' (absent = follow the OS). The effective theme is
@@ -138,8 +138,9 @@
   }
   .brand-lockup { display: flex; align-items: center; gap: 10px; }
   .brand-lockup img { height: 28px; }
-  /* Logo is a white glyph on transparent — darken it to ink on the light field */
-  :root[data-theme="light"] .brand-lockup img { filter: brightness(0); }
+  /* Logo is a white glyph on transparent — darken it to ink on the light field.
+     A white-label logo from the config dir keeps its own colors. */
+  :root[data-theme="light"] .brand-lockup img:not(.custom-logo) { filter: brightness(0); }
   .brand-copy { display: flex; flex-direction: column; gap: 1px; }
   header h1 { font-size: var(--text-xl); font-weight: 600; line-height: 1.05; }
   /* Machine artifact, so mono per The Console Voice Rule — and small enough to
@@ -157,7 +158,9 @@
     padding: 0;
     cursor: pointer;
   }
-  .brand-version:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  button.brand-version:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  /* White label: the version is plain text, there is no release dialog. */
+  span.brand-version { border-bottom: none; cursor: default; }
   /* Release check dialog */
   .version-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
   .version-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -1372,28 +1375,29 @@
   }
 </style>
 </head>
-<body data-scoped-env="__SCOPED_ENV__" data-team-base-domain="__TEAM_BASE_DOMAIN__">
+<body data-scoped-env="__SCOPED_ENV__" data-team-base-domain="__TEAM_BASE_DOMAIN__" data-brand-name="__BRAND_NAME__" data-white-label="__WHITE_LABEL__">
 
 <header>
   <div class="brand-lockup">
-    <img src="/logo.png" alt="Oduflow logo">
+    <img src="/logo.png?v=__ASSET_VERSION__" class="__LOGO_CLASS__" alt="__BRAND_NAME__ logo">
     <div class="brand-copy">
-      <h1>Oduflow
-        <button type="button"
+      <h1>__BRAND_NAME__
+        <!--IF-STOCK--><button type="button"
                 class="brand-version"
                 id="brand-version"
                 aria-haspopup="dialog"
                 title="Check for a newer release"
-                onclick="openVersionModal()">v__ODUFLOW_VERSION__</button>
+                onclick="openVersionModal()">v__ODUFLOW_VERSION__</button><!--/IF-STOCK-->
+        <!--IF-WHITE-LABEL--><span class="brand-version" id="brand-version">v__ODUFLOW_VERSION__</span><!--/IF-WHITE-LABEL-->
       </h1>
-      <div class="brand-byline">a product by <a href="https://oduist.com" target="_blank" rel="noopener">Oduist</a></div>
+      <!--IF-STOCK--><div class="brand-byline">a product by <a href="https://oduist.com" target="_blank" rel="noopener">Oduist</a></div><!--/IF-STOCK-->
     </div>
   </div>
   <span class="scoped-chip" id="scoped-chip" hidden></span>
-  <button id="license-badge" class="license-badge" style="display:none"></button>
+  <!--IF-STOCK--><button id="license-badge" class="license-badge" style="display:none"></button><!--/IF-STOCK-->
   <div class="actions">
-    <a class="docs-link" href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Open the Oduflow documentation">Docs &#8599;</a>
-    <button type="button" class="docs-link" onclick="openFeedbackModal()" title="Report a bug, request a feature, or send feedback on GitHub">Feedback &#8599;</button>
+    <!--IF-STOCK--><a class="docs-link" href="https://docs.oduflow.dev" target="_blank" rel="noopener" title="Open the Oduflow documentation">Docs &#8599;</a>
+    <button type="button" class="docs-link" onclick="openFeedbackModal()" title="Report a bug, request a feature, or send feedback on GitHub">Feedback &#8599;</button><!--/IF-STOCK-->
     <button id="theme-toggle" type="button" onclick="cycleTheme()" aria-label="Theme"></button>
     <label class="auto-label" for="refresh-interval">Auto-refresh
       <input type="number" id="refresh-interval" value="60" min="5" step="5"
@@ -1495,7 +1499,7 @@
   <div id="credentials-list"></div>
   <div id="ssh-key-section" style="margin-top:24px;">
     <h2 class="section-subtitle">SSH deploy key</h2>
-    <div class="hint">The team's SSH public key, generated and kept by Oduflow (only the public key is shown here). Add it to your git hosting as a repository deploy key (read access is enough) or to a machine-user account, then use SSH repository URLs such as <code>git@github.com:owner/repo.git</code>. Note: GitHub allows a deploy key on one repository only — use a machine user to cover several.</div>
+    <div class="hint">The team's SSH public key, generated and kept by __BRAND_NAME__ (only the public key is shown here). Add it to your git hosting as a repository deploy key (read access is enough) or to a machine-user account, then use SSH repository URLs such as <code>git@github.com:owner/repo.git</code>. Note: GitHub allows a deploy key on one repository only — use a machine user to cover several.</div>
     <div id="ssh-key-body"></div>
   </div>
   <div id="secrets-section" style="margin-top:24px;">
@@ -1605,7 +1609,7 @@
     </div>
   </div>
 </div>
-<div class="modal-overlay" id="feedback-modal" onclick="closeFeedbackModal(event)">
+<!--IF-STOCK--><div class="modal-overlay" id="feedback-modal" onclick="closeFeedbackModal(event)">
   <div class="modal modal-md">
     <div class="modal-header">
       <h2>Send feedback</h2>
@@ -1644,7 +1648,7 @@
       </div>
     </div>
   </div>
-</div>
+</div><!--/IF-STOCK-->
 <div class="modal-overlay" id="logs-modal" onclick="closeLogsModal(event)">
   <div class="modal">
     <div class="modal-header">
@@ -2081,11 +2085,11 @@
       <div id="import-odoo-form">
         <div class="form-group">
           <label for="import-tpl-name">Template name</label>
-          <input type="text" id="import-tpl-name" placeholder="e.g. oduist-prod">
+          <input type="text" id="import-tpl-name" placeholder="e.g. acme-prod">
           <div class="hint">Restores an Odoo.sh daily backup (database + filestore) into a new template of this name.</div>
         </div>
         <div class="form-group">
-          <div class="hint" style="margin-top:0;">Enterprise and Themes are proprietary Odoo code. Before downloading them, review your rights and obligations: <a href="https://oduflow.dev/odoo-sh-import-notes" target="_blank" rel="noopener">oduflow.dev/odoo-sh-import-notes</a> (opens in a new tab).</div>
+          <div class="hint" style="margin-top:0;">Enterprise and Themes are proprietary Odoo code. Before downloading them, review your rights and obligations<!--IF-STOCK-->: <a href="https://oduflow.dev/odoo-sh-import-notes" target="_blank" rel="noopener">oduflow.dev/odoo-sh-import-notes</a> (opens in a new tab)<!--/IF-STOCK--> under your Odoo subscription.</div>
           <div class="check-row" style="margin-top:8px;">
             <input type="checkbox" id="import-ack" onchange="onImportAckChange()" aria-controls="import-addons-options">
             <label for="import-ack">I have read the import notes and accept responsibility for the addons I download.</label>
@@ -2329,7 +2333,7 @@
       <button class="modal-close" onclick="closeSwitchBranch()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Reuse this environment for another branch instead of creating a new one. The database, filestore, hostname and URL are kept — only the code changes. The branch must already exist on origin; Oduflow then installs, upgrades or restarts as the difference between the two branches requires.</p>
+      <p class="modal-note">Reuse this environment for another branch instead of creating a new one. The database, filestore, hostname and URL are kept — only the code changes. The branch must already exist on origin; __BRAND_NAME__ then installs, upgrades or restarts as the difference between the two branches requires.</p>
       <div class="form-group">
         <label for="switch-branch-input">Target branch</label>
         <input id="switch-branch-input" class="mono-input" type="text" placeholder="feature/next-task"
@@ -2509,7 +2513,7 @@
     </div>
   </div>
 </div>
-<div class="modal-overlay" id="license-modal" onclick="closeLicenseModal(event)">
+<!--IF-STOCK--><div class="modal-overlay" id="license-modal" onclick="closeLicenseModal(event)">
   <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="license-modal-title">
     <div class="modal-header">
       <h2 id="license-modal-title">License details</h2>
@@ -2572,7 +2576,7 @@
       </div>
     </div>
   </div>
-</div>
+</div><!--/IF-STOCK-->
 <div class="modal-overlay" id="add-extra-repo-modal" onclick="closeAddExtraRepoModal(event)">
   <div class="modal modal-md">
     <div class="modal-header">
@@ -2685,6 +2689,10 @@
 // server enforces the scope in oduflow/ui_scope.py; everything this flag does
 // on the page is presentation — hiding controls whose endpoints are denied.
 var SCOPED_ENV = document.body.getAttribute('data-scoped-env') || '';
+// White label (custom license): the brand replaces the product name and the
+// vendor surfaces (license, updates, docs, feedback) are not rendered at all.
+var BRAND_NAME = document.body.getAttribute('data-brand-name') || 'Oduflow';
+var WHITE_LABEL = document.body.getAttribute('data-white-label') === '1';
 // Ships with the page so the create-production modal knows the team zone
 // no matter which tab opened it; loadProductions refreshes it later.
 window._teamBaseDomain = document.body.getAttribute('data-team-base-domain') || '';
@@ -2725,7 +2733,7 @@ function scopedPagePath() {
 
 if (SCOPED_ENV) {
   document.body.classList.add('scoped');
-  document.title = 'Oduflow — ' + SCOPED_ENV;
+  document.title = BRAND_NAME + ' — ' + SCOPED_ENV;
   var _scopedChip = document.getElementById('scoped-chip');
   _scopedChip.textContent = 'Shared environment ';
   var _scopedName = document.createElement('strong');
@@ -6923,6 +6931,7 @@ async function loadLicense() {
     var lic = data.license;
     currentLicense = lic;
     var badge = document.getElementById('license-badge');
+    if (!badge) return;
     var label = document.createElement('span');
     var isLicensed = lic.status === 'active';
     var shouldReveal = isLicensed && badge.dataset.licenseRevealed !== 'true';
@@ -7003,7 +7012,9 @@ function renderLicenseDetails() {
   if (lic.expires) row('Paid through', new Date(lic.expires).toLocaleString());
   else if (lic.perpetual) row('Term', 'Perpetual (legacy license)');
   document.getElementById('lic-refresh').style.display = lic.can_refresh ? '' : 'none';
-  document.getElementById('lic-subscribe').style.display = lic.can_subscribe ? '' : 'none';
+  // Shown only after the license server said a new subscription is needed;
+  // how payments work is the license server's business.
+  document.getElementById('lic-subscribe').style.display = lic.subscription_required ? '' : 'none';
   document.getElementById('license-status-note').textContent = lic.status === 'expired'
     ? 'Your commercial license has expired. All features remain available. Update the status after payment to install the renewed license.'
     : 'License status does not restrict product features. Subscription checks run only when you request them.';
@@ -7020,10 +7031,13 @@ async function refreshLicenseStatus() {
     var data = await readResult(response);
     if (!data.ok) throw new Error(data.error || 'Unable to update the license');
     await loadLicense();
+    if (currentLicense) currentLicense.subscription_required = !!data.subscription_required;
     renderLicenseDetails();
     result.textContent = data.renewed
       ? 'License updated. The current commercial period is installed.'
-      : 'No newer paid period is available. Check your Paddle payment or contact support.';
+      : data.subscription_required
+        ? 'No active subscription. Subscribe to continue the commercial license.'
+        : 'No newer paid period is available. Check your payment or contact support.';
   } catch (e) {
     result.textContent = e.message || 'Unable to check the subscription. Please retry.';
   } finally {
@@ -8232,7 +8246,7 @@ async function openConsole(branch) {
   term.loadAddon(fitAddon);
   term.open(container);
   fitAddon.fit();
-  term.write('\x1b[90m# oduflow console \u2014 ' + branch + '\x1b[0m\r\n');
+  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' console \u2014 ' + branch + '\x1b[0m\r\n');
 
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/terminal');
@@ -8304,7 +8318,7 @@ async function openSqlConsole(branch) {
   term.loadAddon(fitAddon);
   term.open(container);
   fitAddon.fit();
-  term.write('\x1b[90m# oduflow sql \u2014 ' + branch + '\x1b[0m\r\n');
+  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' sql \u2014 ' + branch + '\x1b[0m\r\n');
 
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/sql');
@@ -8373,7 +8387,7 @@ async function openAgentConsole(branch, agentType) {
   term.loadAddon(fitAddon);
   term.open(container);
   fitAddon.fit();
-  term.write('\x1b[90m# oduflow agent (' + label + ') — ' + branch + '\x1b[0m\r\n');
+  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' agent (' + label + ') — ' + branch + '\x1b[0m\r\n');
 
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/agent?type=' + encodeURIComponent(agentType));
@@ -8592,11 +8606,13 @@ _prefersLight.addEventListener('change', function () {
 });
 updateThemeToggle(getThemeMode());
 
+/* <!--IF-STOCK--> */
 console.log(
   '%coduflow%c The Engineer\'s Console \u2014 https://docs.oduflow.dev',
   'background: oklch(0.6 0.2 260); color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: 700;',
   'color: #9b9fa5; padding-left: 6px;'
 );
+/* <!--/IF-STOCK--> */
 
 // --- Production hosting ---------------------------------------------------
 
@@ -9300,10 +9316,10 @@ async function loadHealth() {
 }
 
 if (!SCOPED_ENV) {
-  loadLicense();
+  if (!WHITE_LABEL) loadLicense();
   // Refresh the local status so an open dashboard notices expiration. This
   // endpoint only reads the local key; it never contacts the license server.
-  setInterval(loadLicense, 60000);
+  if (!WHITE_LABEL) setInterval(loadLicense, 60000);
   loadStats();
   loadHealth();
   loadServicePresets();

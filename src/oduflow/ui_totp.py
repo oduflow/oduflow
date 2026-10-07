@@ -21,6 +21,7 @@ from typing import Iterator, TypedDict, cast
 
 import pyotp
 
+from oduflow import branding
 from oduflow.errors import FlowError
 from oduflow.settings import Settings, TeamSettings
 
@@ -238,7 +239,7 @@ def run_cli(settings: Settings, team: TeamSettings, action: str) -> None:
 
         secret = pyotp.random_base32()
         uri = pyotp.TOTP(secret).provisioning_uri(
-            name=f"{team.hostname} / team {team.team_id}", issuer_name="Oduflow"
+            name=f"{team.hostname} / team {team.team_id}", issuer_name=branding.name()
         )
         qr = qrcode.QRCode(border=4)
         qr.add_data(uri)
