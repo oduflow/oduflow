@@ -1862,3 +1862,22 @@ class TestProductionEnvironmentVariables(TestCreateFromEnvironment):
             production_ops.reconfigure_production(settings, team, "erp", env_vars={})
         assert production_registry.get_production(team, "erp")["env_vars"] == {}
         assert "MODE" not in client.containers.run.call_args.kwargs["environment"]
+
+
+@pytest.mark.parametrize(
+    "env_vars", [None, {}, {"TOKEN": "secret:api", "OPTIONS": "a,b"}]
+)
+def test_production_info_returns_persisted_env_references(settings, team, env_vars):
+    record = {"domain": "erp.example.com"}
+    if env_vars is not None:
+        record["env_vars"] = env_vars
+    production_registry.create_production(team, "erp", record)
+    with (
+        patch(
+            "oduflow.docker_ops.production_ops.get_client", return_value=_mock_client()
+        ),
+        patch("oduflow.secret_store.resolve_env_secrets") as resolve,
+    ):
+        info = production_ops.get_production_info(settings, team, "erp")
+    assert info["env_vars"] == (env_vars or {})
+    resolve.assert_not_called()

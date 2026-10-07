@@ -1302,6 +1302,10 @@
   .modal-note { font-size: var(--text-sm); color: var(--text-dim); margin-bottom: 16px; }
   .modal-note a { color: var(--accent); }
   .mono-input { font-family: var(--font-mono); font-size: var(--text-xs); }
+  /* .form-group textarea sets font-family: inherit and outweighs a lone class
+     selector, so a monospace form textarea needs the same specificity. The
+     size stays var(--text-sm) like its sibling fields in the panel. */
+  .form-group textarea.mono-input { font-family: var(--font-mono); font-size: var(--text-sm); }
   .copy-row { display: flex; gap: 8px; align-items: stretch; }
   .copy-row input { flex: 1 1 auto; min-width: 0; }
   .guide-viewer-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
@@ -9393,6 +9397,10 @@ function _prodServerModeSelect(id, current) {
 function _prodSettingsHtml(p) {
   var n = escAttr(p.name);
   var extras = formatEnvLines(p.extra_addons || {});
+  var envVars = p.env_vars || {};
+  var envEditable = !Object.keys(envVars).some(function(k) {
+    return /[\r\n]/.test(envVars[k]) || envVars[k] !== envVars[k].trim();
+  });
   var conf = Object.keys(p.odoo_conf || {}).sort().map(function(k) {
     return k + ' = ' + p.odoo_conf[k];
   }).join('\n');
@@ -9418,6 +9426,11 @@ function _prodSettingsHtml(p) {
       '<div class="hint">Switching deploys the new branch as-is; run Update afterwards if modules need install/upgrade</div></div>' +
     '<div class="form-group"><label for="ps-gituser-' + n + '">Git user (credential matching, optional)</label>' +
       '<input type="text" id="ps-gituser-' + n + '" value="' + escHtmlAttr(p.git_user || '') + '"></div>' +
+    '<div class="form-group"><label for="ps-envvars-' + n + '">Environment variables</label>' +
+      '<textarea class="mono-input" id="ps-envvars-' + n + '" rows="4" spellcheck="false"' +
+        (envEditable ? '' : ' disabled') + '>' + esc(formatEnvLines(envVars)) + '</textarea>' +
+      '<div class="hint">One KEY=VALUE per line. Use KEY=secret:&lt;name&gt; for secrets from Credentials → Secrets; secret values are never shown. Clearing this field removes all user variables. HOST, USER and PASSWORD are set automatically from the database credentials; those three and PORT are reserved names.' +
+        (envEditable ? '' : ' Values with line breaks or surrounding spaces must be edited over MCP.') + '</div></div>' +
     '<div class="form-group"><label for="ps-extras-' + n + '">Extra addon repos (one per line, repo=branch)</label>' +
       '<textarea id="ps-extras-' + n + '" rows="3">' + esc(extras) + '</textarea></div>' +
     '<div class="form-group"><label class="select-box"><input type="checkbox" id="ps-copy-' + n + '"' +
@@ -9465,6 +9478,11 @@ async function prodApplySettings(name) {
     extra_addons: extras,
     server_mode: v('ps-mode')
   };
+  var envEl = document.getElementById('ps-envvars-' + name);
+  if (!envEl.disabled && envEl.value !== envEl.defaultValue) {
+    body.env_vars = _parseProductionEnvLines(envEl.value);
+    if (body.env_vars === null) return;
+  }
   if (!(await confirmDialog({
     title: 'Reconfigure production',
     message: 'Apply the settings to "' + name + '"? The container is recreated (brief downtime); the database and filestore are preserved.',
@@ -9725,6 +9743,22 @@ function _prodEnabled() {
   return PROD_ENABLED;
 }
 
+function _parseProductionEnvLines(raw) {
+  // Spaces around the "=" are refused, not silently absorbed: parseEnvLines
+  // trims only the key, so "KEY = value" would store " value" and the textarea
+  // (which cannot round-trip edge whitespace) would then lock itself as
+  // read-only for good. Such a value has to be set over MCP.
+  var invalid = raw.split(/\r?\n/).some(function(line) {
+    return line.trim() && !/^[A-Za-z_][A-Za-z0-9_]*=(?!\s)/.test(line.trim());
+  });
+  if (invalid) {
+    showToast('Environment variables: each line must be KEY=VALUE, with no space ' +
+      'around the "="', true);
+    return null;
+  }
+  return parseEnvLines(raw);
+}
+
 function openCreateProductionModal(fromEnv) {
   var overlay = document.createElement('div');
   overlay.className = 'modal-overlay show';
@@ -9749,6 +9783,9 @@ function openCreateProductionModal(fromEnv) {
         '<div class="form-group"><label for="cp-image">Odoo image</label><input type="text" id="cp-image" placeholder="odoo:18.0"></div>' +
         '<div class="form-group"><label for="cp-mode">Server mode</label>' +
           _prodServerModeSelect('cp-mode', 'workers') + '</div>' +
+        '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-set-envvars" onchange="document.getElementById(\'cp-envvars\').disabled = !this.checked"> Set production environment variables</label>' +
+          '<label for="cp-envvars">Environment variables</label><textarea class="mono-input" id="cp-envvars" rows="4" spellcheck="false" disabled placeholder="API_TOKEN=secret:my_token"></textarea>' +
+          '<div class="hint">Unchecked: inherit variables when promoting from an environment. Checked: use only the variables below; empty means none. One KEY=VALUE per line. Manage named secrets in Credentials → Secrets. HOST, USER and PASSWORD are set automatically from the database credentials; those three and PORT are reserved names.</div></div>' +
         '<div class="form-group"><label for="cp-template">Template (optional)</label><input type="text" id="cp-template" placeholder="empty = fresh database"></div>' +
         '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-auto"> Deploy automatically on GitHub push</label></div>' +
       '</div>' +
@@ -9786,6 +9823,10 @@ async function submitCreateProduction() {
   if (body.from_environment && body.template_name) {
     showToast('Pick either a template or an environment to seed from, not both', true);
     return;
+  }
+  if (document.getElementById('cp-set-envvars').checked) {
+    body.env_vars = _parseProductionEnvLines(document.getElementById('cp-envvars').value);
+    if (body.env_vars === null) return;
   }
   showToast('Creating production "' + body.name + '"… this can take a few minutes');
   var data = await _prodPost(API_PRODUCTIONS + '/create', body,

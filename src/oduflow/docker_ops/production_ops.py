@@ -2705,6 +2705,7 @@ def get_production_info(
         "server_mode": server_mode_of(record),
         "git_user": record.get("git_user", ""),
         "extra_addons": record.get("extra_addons", {}),
+        "env_vars": record.get("env_vars") or {},
         "auto_update": bool(record.get("auto_update")),
         "odoo_conf": record.get("odoo_conf", {}),
         "allow_copy_to_dev_mcp": bool(record.get("allow_copy_to_dev_mcp", True)),

@@ -5860,6 +5860,11 @@ def _build_routes(
                 auto_update=bool(data.get("auto_update")),
                 template_name=str(data.get("template_name", "")).strip() or None,
                 from_environment=from_environment or None,
+                env_vars=(
+                    _env_vars_from_body(data["env_vars"])
+                    if "env_vars" in data
+                    else None
+                ),
                 env_lock=env_lock,
                 server_mode=production_ops.resolve_server_mode(
                     data.get("server_mode"), production_ops.DEFAULT_SERVER_MODE
@@ -6109,6 +6114,9 @@ def _build_routes(
             # Present-but-empty means "clear" (the dashboard always submits
             # the field); only an absent key means "leave unchanged".
             git_user=(str(data["git_user"]).strip() if "git_user" in data else None),
+            env_vars=(
+                _env_vars_from_body(data["env_vars"]) if "env_vars" in data else None
+            ),
             extra_addons=(
                 _normalize_extra_addons(raw_extra) if raw_extra is not None else None
             ),

@@ -489,3 +489,35 @@ def test_dashboard_copies_work_when_mcp_copies_are_disabled(tmp_path):
     assert published.json()["ok"] is True
     assert created.status_code == 200
     assert created.json()["ok"] is True
+
+
+@pytest.mark.parametrize("action", ["create", "reconfigure"])
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({}, None),
+        ({"env_vars": {}}, {}),
+        ({"env_vars": ""}, {}),
+        (
+            {"env_vars": {"TOKEN": "secret:api", "OPTIONS": "a,b,X=c"}},
+            {"TOKEN": "secret:api", "OPTIONS": "a,b,X=c"},
+        ),
+        (
+            {"env_vars": "TOKEN=secret:api\nWORKERS=2"},
+            {"TOKEN": "secret:api", "WORKERS": "2"},
+        ),
+    ],
+)
+def test_production_env_vars_forwarded(tmp_path, action, payload, expected):
+    client, _, _ = _client(tmp_path)
+    path = (
+        "/api/productions/create"
+        if action == "create"
+        else "/api/productions/erp/reconfigure"
+    )
+    with patch(
+        f"oduflow.web_ui.production_ops.{action}_production", return_value={}
+    ) as operation:
+        response = client.post(path, json={"name": "erp", **payload})
+    assert response.status_code == 200, response.text
+    assert operation.call_args.kwargs["env_vars"] == expected
