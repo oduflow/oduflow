@@ -450,3 +450,21 @@ def test_status_bookkeeping_never_masks_the_provisioning_error(configured, monke
     monkeypatch.setattr(production_registry, "update_production", vanished)
     with pytest.raises(PrerequisiteNotMetError, match="module unavailable"):
         connector.provision(settings, team, "erp")
+
+
+def test_http_uses_the_configured_mcp_domain(configured, monkeypatch):
+    settings, team = configured
+    production_registry.update_production(
+        team,
+        "erp",
+        {"extra_domains": ["manage.example.org"], "mcp_domain": "manage.example.org"},
+    )
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True, "data": {"name": "erp"}})
+
+    transport(monkeypatch, handler)
+    connector.execute(settings, team, "erp", "system.info")
+    assert urls == ["https://manage.example.org/odumcp/v1/execute"]

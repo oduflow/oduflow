@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Separate OduMCP address for a production** —
+  `reconfigure_production(mcp_domain=...)` points production Odoo tools at one
+  of the production's own extra domains instead of the primary domain, for a
+  primary fronted by a proxy that blocks API POSTs. Only the production's own
+  domains are accepted, so the production key stays on hosts routed to it;
+  changing it alone does not recreate the container. `get_production_info`
+  reports `mcp_domain` and `mcp_url`.
+
 ## v1.85.0
 
 ### Breaking Changes

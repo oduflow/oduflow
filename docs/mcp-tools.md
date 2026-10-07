@@ -2679,6 +2679,9 @@ Lock: production.
 `env_vars`
 :   *dict · default none* — **Full replacement** user environment variables, including `secret:<name>` references. Omit to preserve; `{}` clears them.
 
+`mcp_domain`
+:   *str · default none* — Which of the production's own domains OduMCP calls use: the primary domain or one of `extra_domains`. Pass `""` for the primary; omit to leave unchanged. Changing only this does not recreate the container, and removing its host from `extra_domains` is refused while it is selected.
+
 `server_mode`
 :   *str · default empty* — `workers` (sync: pages on 8069, bus on 8072) or `gevent` (async: everything on 8072). Re-tunes the `odoo.conf` workers and re-points Traefik. Omit to leave unchanged.
 

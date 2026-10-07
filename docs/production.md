@@ -92,7 +92,15 @@ Configure write/model/method policies in Odoo before requesting business changes
 ### Business operations and approval
 
 No standalone `odumcp_server` is needed. Oduflow calls `/odumcp/v1/execute`
-directly using the configured production key. Model and field policies, Odoo ACLs,
+directly using the configured production key, on the production's primary
+domain by default. When that domain sits behind a proxy that blocks API POSTs
+(for example a public website rule), point OduMCP at one of the production's
+own extra domains with `reconfigure_production(name="erp",
+mcp_domain="manage.example.com")`; `mcp_domain=""` returns to the primary. Only
+the primary or an extra domain is accepted, so the production key never leaves
+the hosts Traefik routes to this production, and changing it alone does not
+recreate the container. `get_production_info` shows `mcp_domain` and `mcp_url`.
+Model and field policies, Odoo ACLs,
 approvals and audit records remain enforced by the addon. Calls authenticated
 with the managed key have `source = oduflow` in the Odoo audit log.
 
@@ -317,6 +325,7 @@ reconfigure_production(name="erp", extra_domains=["myodoo.pl"])  # [] removes al
 reconfigure_production(name="erp", branch="18.0-stable")
 reconfigure_production(name="erp", extra_addons={"acme-addons": "production"})
 reconfigure_production(name="erp", server_mode="gevent")
+reconfigure_production(name="erp", mcp_domain="manage.example.com")  # metadata only
 ```
 
 Omitted arguments are left unchanged (`git_user=""` explicitly clears the

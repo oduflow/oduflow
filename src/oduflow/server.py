@@ -5838,6 +5838,7 @@ def reconfigure_production(
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
     server_mode: str = "",
+    mcp_domain: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5877,6 +5878,11 @@ def reconfigure_production(
         server_mode: "workers" (sync: pages on 8069, bus on 8072) or "gevent"
                 (async: everything on 8072). Re-tunes odoo.conf workers and
                 re-points Traefik. Omit to leave unchanged.
+        mcp_domain: Which of the production's own domains OduMCP calls use
+                (the primary domain or one of extra_domains), e.g. when the
+                primary is fronted by a proxy that blocks API POSTs. Pass ""
+                for the primary domain; omit to leave unchanged. Changing
+                only this does not recreate the container.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
@@ -5895,6 +5901,7 @@ def reconfigure_production(
         extra_addons=extra_addons,
         env_vars=env_vars,
         server_mode=production_ops.resolve_server_mode(server_mode, None),
+        mcp_domain=mcp_domain,
     )
     if result.get("message"):
         return str(result["message"])
