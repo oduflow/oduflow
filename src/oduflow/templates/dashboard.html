@@ -393,6 +393,32 @@
     margin-bottom: 10px;
   }
   .env-meta strong { color: var(--text); font-weight: 500; font-family: var(--font-mono); font-size: var(--text-xs); }
+  /* Extra addon repos: a long list folds to two lines. The controls (filter +
+     Show all) appear only when the list really overflows (see measureExtras).
+     The clamp sits on .extras-list, while the items live in an inner
+     .extras-items wrapper that is never clamped: its height always reflects
+     the full list, which is what measureExtras reads and what the
+     ResizeObserver watches. */
+  .env-extras { font-size: var(--text-xs); color: var(--text-dim); margin-bottom: 10px; }
+  .extras-list { line-height: 1.6; overflow: hidden; }
+  .env-extras.is-clamped .extras-list { max-height: calc(2 * 1.6em); }
+  .extras-label { margin-right: 8px; }
+  .extra-item {
+    display: inline-block; vertical-align: top; max-width: 100%; margin-right: 14px;
+    color: var(--text); font-weight: 500; font-family: var(--font-mono); overflow-wrap: anywhere;
+  }
+  .extra-item[hidden] { display: none; }
+  .extra-branch { color: var(--text-dim); font-weight: 400; }
+  .extras-controls { display: none; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .env-extras.has-overflow .extras-controls { display: flex; }
+  .extras-filter {
+    width: 220px; max-width: 100%; padding: 3px 8px;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-xs);
+  }
+  .extras-filter:focus { border-color: var(--accent); }
+  .extras-match { font-variant-numeric: tabular-nums; }
+  .extras-match.is-none { color: var(--text); font-weight: 500; }
   .repo-links { display: inline-flex; align-items: center; gap: 2px; }
   .repo-link {
     display: inline-flex;
@@ -3213,6 +3239,155 @@ async function refreshStorage(branch) {
   applyStats();
 }
 
+// Extra addon repos on an environment card. A long list folds to two lines and
+// gains a filter, so "is repo X in this environment?" is answered without
+// unfolding ninety names. The fold and filter state lives here, not in the
+// rendered HTML: the auto-refresh skip (_lastHtml) keeps working and a refresh
+// never wipes what is being typed.
+var _extrasOpen = Object.create(null);    // branch -> true while unfolded
+var _extrasFilter = Object.create(null);  // branch -> filter text
+var _extrasObserver = null;
+
+function extrasHtml(branch, extras, idx) {
+  var names = Object.keys(extras);
+  if (!names.length) return '';
+  // An item reads "name (branch)" and the whole label is searchable: a repo
+  // is looked up by name, but "which repos are still on 16.0?" is just as
+  // natural a question, and a filter that silently ignored the branch would
+  // answer it with a wrong "not included".
+  var items = names.map(function(name) {
+    var label = name + ' (' + extras[name] + ')';
+    return '<span class="extra-item" data-search="' + esc(label.toLowerCase()) + '">' + esc(name) +
+      ' <span class="extra-branch">(' + esc(extras[name]) + ')</span></span>';
+  }).join('');
+  return '<div class="env-extras" data-extras-for="' + esc(branch) + '">' +
+    '<div class="extras-list" id="extras-list-' + idx + '">' +
+      '<div class="extras-items"><span class="extras-label">Extra:</span>' + items + '</div>' +
+    '</div>' +
+    '<div class="extras-controls">' +
+      '<input type="text" class="extras-filter" placeholder="Filter repo or branch&hellip;" autocomplete="off" spellcheck="false" ' +
+        'aria-label="Filter extra addon repos of ' + esc(branch) + ' by name or branch" ' +
+        'oninput="extrasFilterInput(this)" onkeydown="extrasFilterKey(event, this)">' +
+      '<span class="extras-match" aria-live="polite"></span>' +
+      '<button type="button" class="btn btn-sm extras-toggle" aria-expanded="false" ' +
+        'aria-controls="extras-list-' + idx + '" onclick="toggleExtras(this)">Show all (' + names.length + ')</button>' +
+    '</div>' +
+  '</div>';
+}
+
+// Fold and filter state is keyed by branch, so drop the entries of branches
+// that are gone (cf. updateBulkBar): deleting an environment and recreating it
+// under the same name must not resurrect an old filter.
+function pruneExtrasState(live) {
+  var keep = Object.create(null);
+  live.forEach(function(branch) { keep[branch] = true; });
+  [_extrasOpen, _extrasFilter].forEach(function(store) {
+    Object.keys(store).forEach(function(branch) {
+      if (!keep[branch]) delete store[branch];
+    });
+  });
+}
+
+// Wire every extras block under root to its stored state. A ResizeObserver
+// re-measures on window resizes and when a hidden tab becomes visible (a
+// display:none list has no height to measure). It watches the unclamped
+// .extras-items wrapper, not the clamped .extras-list: the clamp pins that
+// box, so growth after the first measurement — a web font swapping in and
+// pushing two lines to three — would otherwise go unnoticed and leave the
+// third line clipped with no "Show all" to reveal it.
+function applyExtras(root) {
+  if (!_extrasObserver && typeof ResizeObserver !== 'undefined') {
+    _extrasObserver = new ResizeObserver(function(entries) {
+      entries.forEach(function(entry) {
+        var box = entry.target.closest('.env-extras');
+        if (box) measureExtras(box);
+      });
+    });
+  }
+  if (_extrasObserver) _extrasObserver.disconnect();
+  var live = [];
+  root.querySelectorAll('.env-extras').forEach(function(box) {
+    live.push(box.getAttribute('data-extras-for'));
+  });
+  pruneExtrasState(live);
+  root.querySelectorAll('.env-extras').forEach(function(box) {
+    applyExtrasState(box);
+    if (_extrasObserver) _extrasObserver.observe(box.querySelector('.extras-items'));
+  });
+}
+
+function _extrasQuery(branch) {
+  return (_extrasFilter[branch] || '').trim().toLowerCase();
+}
+
+function applyExtrasState(box) {
+  var branch = box.getAttribute('data-extras-for');
+  var input = box.querySelector('.extras-filter');
+  var toggle = box.querySelector('.extras-toggle');
+  var match = box.querySelector('.extras-match');
+  var items = box.querySelectorAll('.extra-item');
+  var query = _extrasQuery(branch);
+  var open = !!_extrasOpen[branch];
+  var text = _extrasFilter[branch] || '';
+  if (input.value !== text) input.value = text;
+
+  var shown = 0;
+  items.forEach(function(item) {
+    var hit = !query || item.getAttribute('data-search').indexOf(query) !== -1;
+    item.hidden = !hit;
+    if (hit) shown++;
+  });
+  box.querySelector('.extras-list').hidden = shown === 0;
+  // Matches are always shown in full: the fold must not hide the answer.
+  box.classList.toggle('is-clamped', !open && !query);
+
+  match.textContent = !query ? '' : shown ? shown + ' of ' + items.length : 'No match — not included';
+  match.classList.toggle('is-none', !!query && shown === 0);
+  // Folding has no visible effect while a filter is active.
+  toggle.hidden = !!query;
+  toggle.textContent = open ? 'Collapse' : 'Show all (' + items.length + ')';
+  toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  measureExtras(box);
+}
+
+// Controls appear only when the full list is taller than the two-line fold.
+function measureExtras(box) {
+  // While filtering, the list height reflects the matches, not the full list;
+  // keep the controls so the filter can be cleared.
+  if (_extrasQuery(box.getAttribute('data-extras-for'))) {
+    box.classList.add('has-overflow');
+    return;
+  }
+  // The wrapper is never clamped, so its height is the full list's height.
+  var items = box.querySelector('.extras-items');
+  if (!items.getClientRects().length) return;  // hidden tab: keep the last verdict
+  var lineHeight = parseFloat(getComputedStyle(items).lineHeight) || 0;
+  box.classList.toggle('has-overflow', items.scrollHeight > 2 * lineHeight + 1);
+}
+
+function extrasFilterInput(input) {
+  var box = input.closest('.env-extras');
+  _extrasFilter[box.getAttribute('data-extras-for')] = input.value;
+  applyExtrasState(box);
+}
+
+function extrasFilterKey(e, input) {
+  // Escape clears a non-empty filter; on an empty one it falls through to the
+  // global handler (close menus / modals).
+  if (e.key !== 'Escape' || !input.value) return;
+  e.preventDefault();
+  e.stopPropagation();
+  input.value = '';
+  extrasFilterInput(input);
+}
+
+function toggleExtras(btn) {
+  var box = btn.closest('.env-extras');
+  var branch = box.getAttribute('data-extras-for');
+  _extrasOpen[branch] = !_extrasOpen[branch];
+  applyExtrasState(box);
+}
+
 function renderEnvironments(envs, force) {
   const el = document.getElementById('env-list');
   if (!envs || envs.length === 0) {
@@ -3279,13 +3454,9 @@ function renderEnvironments(envs, force) {
         '</div>'
       : '';
 
-    var extraHtml = '';
-    if (env.extra_addons && typeof env.extra_addons === 'object' && Object.keys(env.extra_addons).length > 0) {
-      var parts = Object.entries(env.extra_addons).map(function(e) {
-        return esc(e[0]) + ' <span style="color:var(--text-dim);">(' + esc(e[1]) + ')</span>';
-      });
-      extraHtml = '<div class="env-meta"><span>Extra: <strong>' + parts.join(', ') + '</strong></span></div>';
-    }
+    var extraHtml = (env.extra_addons && typeof env.extra_addons === 'object')
+      ? extrasHtml(env.branch, env.extra_addons, idx)
+      : '';
 
     // Agent actions are a hosting feature: hidden when the team's agent is
     // disabled, and pointless for live-mount environments (the developer has
@@ -3409,9 +3580,25 @@ function renderEnvironments(envs, force) {
     applyStats();
     return;
   }
+  // A refresh that lands while someone is typing in an extras filter must not
+  // steal the caret: remember it and put it back on the re-rendered input.
+  var ae = document.activeElement;
+  var refocus = (ae && ae.classList && ae.classList.contains('extras-filter') && el.contains(ae))
+    ? { branch: ae.closest('.env-extras').getAttribute('data-extras-for'),
+        start: ae.selectionStart, end: ae.selectionEnd }
+    : null;
   el._lastHtml = html;
   el.innerHTML = html;
   applyStats();
+  applyExtras(el);
+  if (refocus) {
+    el.querySelectorAll('.env-extras').forEach(function(box) {
+      if (box.getAttribute('data-extras-for') !== refocus.branch) return;
+      var input = box.querySelector('.extras-filter');
+      input.focus();
+      input.setSelectionRange(refocus.start, refocus.end);
+    });
+  }
 
   // A state change between renders gets one visible pulse in its signal
   // color: the moment "it came up" (or went down) should be felt, not hunted.

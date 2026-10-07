@@ -1195,3 +1195,188 @@ async function fetch(url, options) {
 """
     )
     assert _run_node(harness) == {"ok": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_long_extra_repo_list_folds_and_filters_without_losing_state():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    functions = "\n".join(
+        _js_function(dashboard, name)
+        for name in (
+            "extrasHtml",
+            "_extrasQuery",
+            "applyExtrasState",
+            "measureExtras",
+            "pruneExtrasState",
+            "extrasFilterInput",
+            "extrasFilterKey",
+            "toggleExtras",
+        )
+    )
+    harness = (
+        functions
+        + r"""
+var _extrasOpen = Object.create(null);
+var _extrasFilter = Object.create(null);
+function getComputedStyle() { return {lineHeight: '20px'}; }
+// Stand-in for the dashboard's DOM-based esc(): enough to inspect the markup.
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+function classes() {
+  var set = new Set();
+  return {
+    toggle: function (name, on) { if (on) set.add(name); else set.delete(name); },
+    add: function (name) { set.add(name); },
+    contains: function (name) { return set.has(name); }
+  };
+}
+function makeBox(branch, repos, fullHeight) {
+  var attrs = {'data-extras-for': branch};
+  var items = repos.map(function (repo) {
+    var attrs = {'data-search': (repo[0] + ' (' + repo[1] + ')').toLowerCase()};
+    return {hidden: false, getAttribute: function (key) { return attrs[key]; }};
+  });
+  var nodes = {
+    '.extras-filter': {value: ''},
+    '.extras-toggle': {
+      hidden: false, textContent: '', attrs: {},
+      setAttribute: function (k, v) { this.attrs[k] = v; }
+    },
+    '.extras-match': {textContent: '', classList: classes()},
+    '.extras-list': {hidden: false},
+    // The wrapper is never clamped, so it is what carries the full height.
+    '.extras-items': {
+      scrollHeight: fullHeight,
+      getClientRects: function () { return [1]; }
+    }
+  };
+  var box = {
+    classList: classes(),
+    getAttribute: function (k) { return attrs[k]; },
+    querySelector: function (sel) { return nodes[sel]; },
+    querySelectorAll: function () { return items; }
+  };
+  nodes['.extras-filter'].closest = function () { return box; };
+  nodes['.extras-toggle'].closest = function () { return box; };
+  box.nodes = nodes;
+  box.items = items;
+  return box;
+}
+function snapshot(box) {
+  return {
+    overflow: box.classList.contains('has-overflow'),
+    clamped: box.classList.contains('is-clamped'),
+    visible: box.items.filter(function (i) { return !i.hidden; }).length,
+    listHidden: box.nodes['.extras-list'].hidden,
+    match: box.nodes['.extras-match'].textContent,
+    toggleHidden: box.nodes['.extras-toggle'].hidden,
+    toggle: box.nodes['.extras-toggle'].textContent,
+    expanded: box.nodes['.extras-toggle'].attrs['aria-expanded']
+  };
+}
+
+var out = {};
+// The rendered item is "name (branch)" and both halves are searchable.
+var markup = extrasHtml('work', {'web-OCA': '16.0'}, 3);
+out.markup = {
+  search: /data-search="([^"]*)"/.exec(markup)[1],
+  wrapped: markup.indexOf('<div class="extras-items">') !== -1
+};
+
+var short = makeBox('short', [['web-OCA', '16.0'], ['queue-OCA', '16.0']], 40);
+applyExtrasState(short);
+out.short = snapshot(short);
+
+var repos = [
+  ['account-payment-OCA', '17.0'],
+  ['account-invoicing-OCA', '17.0'],
+  ['web-OCA', '16.0'],
+  ['queue-OCA', '16.0']
+];
+var long = makeBox('work', repos, 200);
+applyExtrasState(long);
+out.folded = snapshot(long);
+
+toggleExtras(long.nodes['.extras-toggle']);
+out.unfolded = snapshot(long);
+toggleExtras(long.nodes['.extras-toggle']);
+
+var input = long.nodes['.extras-filter'];
+input.value = 'Account';
+extrasFilterInput(input);
+out.filtered = snapshot(long);
+
+input.value = '16.0';
+extrasFilterInput(input);
+out.byBranch = snapshot(long);
+
+input.value = 'stock';
+extrasFilterInput(input);
+out.missing = snapshot(long);
+
+// A re-render builds a fresh box: the stored filter is applied back to it.
+var rerendered = makeBox('work', repos, 200);
+applyExtrasState(rerendered);
+out.rerenderValue = rerendered.nodes['.extras-filter'].value;
+
+var stopped = false;
+extrasFilterKey({
+  key: 'Escape',
+  preventDefault: function () {},
+  stopPropagation: function () { stopped = true; }
+}, input);
+out.escape = {stopped: stopped, value: input.value, state: snapshot(long)};
+
+// A deleted environment leaves no state behind: recreating it under the same
+// name must not inherit the old fold/filter.
+_extrasFilter['gone'] = 'web';
+_extrasOpen['gone'] = true;
+pruneExtrasState(['work', 'short']);
+out.pruned = {
+  filter: 'gone' in _extrasFilter,
+  open: 'gone' in _extrasOpen,
+  kept: 'work' in _extrasFilter
+};
+
+process.stdout.write(JSON.stringify(out));
+"""
+    )
+
+    result = _run_node(harness)
+
+    assert result["markup"]["search"] == "web-oca (16.0)"
+    assert result["markup"]["wrapped"] is True
+    assert result["short"]["overflow"] is False
+    assert result["short"]["visible"] == 2
+    assert result["folded"] == {
+        "overflow": True,
+        "clamped": True,
+        "visible": 4,
+        "listHidden": False,
+        "match": "",
+        "toggleHidden": False,
+        "toggle": "Show all (4)",
+        "expanded": "false",
+    }
+    assert result["unfolded"]["clamped"] is False
+    assert result["unfolded"]["toggle"] == "Collapse"
+    assert result["unfolded"]["expanded"] == "true"
+    # Matches are shown in full even though the list is folded.
+    assert result["filtered"]["visible"] == 2
+    assert result["filtered"]["clamped"] is False
+    assert result["filtered"]["match"] == "2 of 4"
+    assert result["filtered"]["toggleHidden"] is True
+    # A branch is as good a filter as a repo name.
+    assert result["byBranch"]["visible"] == 2
+    assert result["byBranch"]["match"] == "2 of 4"
+    assert result["missing"]["visible"] == 0
+    assert result["missing"]["listHidden"] is True
+    assert result["missing"]["overflow"] is True
+    assert "not included" in result["missing"]["match"]
+    assert result["rerenderValue"] == "stock"
+    assert result["escape"]["stopped"] is True
+    assert result["escape"]["value"] == ""
+    assert result["escape"]["state"]["visible"] == 4
+    assert result["escape"]["state"]["clamped"] is True
+    assert result["pruned"] == {"filter": False, "open": False, "kept": True}
