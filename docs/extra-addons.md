@@ -169,6 +169,10 @@ commits arrived and older commits stay available for production rollback.
 Repositories added before on-demand downloads (Oduflow versions that cloned
 every branch) keep that behaviour: their update still fetches all branches.
 
+In the Web Dashboard's "Extra Addons" tab, each repo has an **Update** button,
+and **Update all** fetches every repo that has a remote, one after another,
+then shows a single summary of updated, unchanged and failed repos.
+
 ### Updating an environment
 
 Run the normal sync operation:

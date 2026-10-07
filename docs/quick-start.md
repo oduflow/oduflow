@@ -37,7 +37,8 @@ The config file is created with mode `0600`. The generated secrets are never
 printed to the log — read them from the file itself:
 
 ```bash
-sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
+  || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
 
 ## Single-user mode (stdio)

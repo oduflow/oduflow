@@ -74,7 +74,8 @@ otherwise to `~/.oduflow/conf/oduflow.toml`. Fresh configs include generated
 secrets for HTTP access: `[team.1].auth_token` for MCP clients and
 `[team.1].ui_password` for the Web Dashboard. The file is created with mode
 `0600`; the secrets are never printed to the log, so read them from the config
-itself (`sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml`).
+itself: `sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml`
+(or the same `grep` on `~/.oduflow/conf/oduflow.toml` for a non-root install).
 
 By default, the server starts in **stdio** mode (for local MCP clients). For remote/multi-user deployments:
 

@@ -426,7 +426,8 @@ The config file is created with mode `0600`. The generated secrets are never
 printed to the log — read them from the file itself:
 
 ```bash
-sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
+  || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
 
 ## Single-user mode (stdio)
@@ -864,7 +865,8 @@ values for `[database].password`, `[team.1].auth_token`, and
 secrets are never printed to the log — read them from the config file:
 
 ```bash
-sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
+  || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
 
 ### Minimal configuration
@@ -4064,6 +4066,10 @@ commits arrived and older commits stay available for production rollback.
 
 Repositories added before on-demand downloads (Oduflow versions that cloned
 every branch) keep that behaviour: their update still fetches all branches.
+
+In the Web Dashboard's "Extra Addons" tab, each repo has an **Update** button,
+and **Update all** fetches every repo that has a remote, one after another,
+then shows a single summary of updated, unchanged and failed repos.
 
 ### Updating an environment
 

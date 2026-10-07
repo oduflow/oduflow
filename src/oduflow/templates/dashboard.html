@@ -1496,6 +1496,7 @@
 
 <div id="tab-extra-addons" class="tab-content">
   <div class="tab-toolbar">
+    <button class="btn btn-sync" title="Fetch the latest changes for every repository with a remote" onclick="doPullAllExtraRepos(this)">Update all</button>
     <button class="btn-create" onclick="openAddExtraRepoModal()">+ Add Repo</button>
   </div>
   <div id="extra-repos-list"></div>
@@ -7480,34 +7481,111 @@ async function doPullExtraRepo(name, btn) {
   }
 }
 
-function showExtraRepoUpdateResult(name, result) {
-  if (result.up_to_date) {
-    showToast('Extra repo "' + name + '": already up to date');
-    return;
-  }
+// Prefix (e.g. a repo name) labels each section when several repos share one modal.
+function extraRepoChangesHtml(result, prefix) {
+  var pre = prefix ? esc(prefix) + ' — ' : '';
   var html = '';
   if (result.updated_branches && result.updated_branches.length) {
-    html += '<div class="sync-section"><div class="sync-section-title">Updated branches</div><div class="sync-modules">';
+    html += '<div class="sync-section"><div class="sync-section-title">' + pre + 'Updated branches</div><div class="sync-modules">';
     result.updated_branches.forEach(function(b) {
       html += '<span class="sync-module-tag">' + esc(b.branch) + ' — ' + b.new_commits + ' new commit(s)</span>';
     });
     html += '</div></div>';
   }
   if (result.new_branches && result.new_branches.length) {
-    html += '<div class="sync-section"><div class="sync-section-title">New branches</div><div class="sync-modules">';
+    html += '<div class="sync-section"><div class="sync-section-title">' + pre + 'New branches</div><div class="sync-modules">';
     result.new_branches.forEach(function(b) {
       html += '<span class="sync-module-tag">' + esc(b) + '</span>';
     });
     html += '</div></div>';
   }
   if (result.deleted_branches && result.deleted_branches.length) {
-    html += '<div class="sync-section"><div class="sync-section-title">Deleted branches</div><div class="sync-modules">';
+    html += '<div class="sync-section"><div class="sync-section-title">' + pre + 'Deleted branches</div><div class="sync-modules">';
     result.deleted_branches.forEach(function(b) {
       html += '<span class="sync-module-tag" style="opacity:0.6;text-decoration:line-through">' + esc(b) + '</span>';
     });
     html += '</div></div>';
   }
+  return html;
+}
+
+function showExtraRepoUpdateResult(name, result) {
+  if (result.up_to_date) {
+    showToast('Extra repo "' + name + '": already up to date');
+    return;
+  }
   document.getElementById('sync-result-title').textContent = 'Update — ' + name;
+  document.getElementById('sync-result-body').innerHTML = extraRepoChangesHtml(result);
+  showModal('sync-result-modal');
+}
+
+// Fetch every repo with a remote, one at a time: parallel fetches of large
+// repos (Enterprise) would compete for bandwidth and the proxy timeout.
+async function doPullAllExtraRepos(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Updating...';
+  // The cache may be empty or stale (tab just opened, repo added from another
+  // session): refresh before deciding there is nothing to do.
+  await loadExtraRepos();
+  var names = (cachedExtraRepos || [])
+    .filter(function(r) { return !r.local; })
+    .map(function(r) { return r.name; });
+  if (names.length === 0) {
+    btn.disabled = false;
+    btn.textContent = 'Update all';
+    showToast('No extra repos with a remote to update');
+    return;
+  }
+  var changed = [], upToDate = [], failed = [];
+  // Freeze the per-repo buttons while the loop runs: a delete or a second
+  // fetch of the same repo mid-run is exactly the contention the sequential
+  // design exists to avoid.
+  var frozen = [];
+  document.querySelectorAll('#extra-repos-list button:not([disabled])').forEach(function(b) {
+    b.disabled = true;
+    frozen.push(b);
+  });
+  try {
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      btn.textContent = 'Updating ' + (i + 1) + '/' + names.length + '...';
+      try {
+        var r = await fetch(API_EXTRA_REPOS + '/' + encodeURIComponent(name) + '/pull', {method:'POST'});
+        var data = await readResult(r);
+        if (!data.ok) failed.push({name: name, error: data.error || 'Update failed'});
+        else if (data.result.up_to_date) upToDate.push(name);
+        else changed.push({name: name, result: data.result});
+      } catch (e) {
+        failed.push({name: name, error: 'Connection error: ' + e.message});
+      }
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Update all';
+    frozen.forEach(function(b) { b.disabled = false; });
+  }
+  await loadExtraRepos();
+  if (changed.length === 0 && failed.length === 0) {
+    showToast('All extra repos are up to date');
+    return;
+  }
+  var summary = [];
+  if (changed.length) summary.push(changed.length + ' updated');
+  if (upToDate.length) summary.push(upToDate.length + ' already up to date');
+  if (failed.length) summary.push(failed.length + ' failed');
+  var html = '<div class="sync-message">' + summary.join(', ') + '.</div>';
+  if (failed.length) {
+    html += '<div class="sync-section"><div class="sync-section-title">Failed</div><ul class="sync-warnings">';
+    failed.forEach(function(f) { html += '<li>' + esc(f.name) + ': ' + esc(f.error) + '</li>'; });
+    html += '</ul></div>';
+  }
+  changed.forEach(function(c) { html += extraRepoChangesHtml(c.result, c.name); });
+  if (upToDate.length) {
+    html += '<div class="sync-section"><div class="sync-section-title">Already up to date</div><div class="sync-modules">';
+    upToDate.forEach(function(n) { html += '<span class="sync-module-tag">' + esc(n) + '</span>'; });
+    html += '</div></div>';
+  }
+  document.getElementById('sync-result-title').textContent = 'Update — all repos';
   document.getElementById('sync-result-body').innerHTML = html;
   showModal('sync-result-modal');
 }

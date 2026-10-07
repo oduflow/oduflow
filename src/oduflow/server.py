@@ -162,8 +162,12 @@ def _get_settings() -> Settings:
         try:
             settings = Settings.from_toml(toml_path)
             settings.validate()
-        # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here too.
-        except (ValueError, TypeError, OverflowError) as exc:
+        # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here
+        # too. TypeError/AttributeError/KeyError/OverflowError cover wrong-typed
+        # TOML values (a list where an int belongs, a scalar where a table
+        # belongs): still an operator mistake, so still one line, not a
+        # traceback.
+        except (ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
@@ -8154,11 +8158,15 @@ def _run_cli() -> None:
 
     # Bootstrap: if no config exists, create it from the bundled default with an
     # auto-generated PostgreSQL password and a random MCP auth_token, so a fresh
-    # install is authenticated by default even over HTTP (#37).
+    # install is authenticated by default even over HTTP (#37). Never bootstrap
+    # when ODUFLOW_TOML is set: find_toml() only ever reads that path, so a
+    # config written to the default location would be an orphaned secrets file
+    # — let _get_settings() report the missing path instead.
     try:
         find_toml()
     except FileNotFoundError:
-        _bootstrap_config()
+        if not os.getenv("ODUFLOW_TOML", "").strip():
+            _bootstrap_config()
 
     global _settings, _no_telemetry
     # Lets test runs stay out of usage stats without editing oduflow.toml.
