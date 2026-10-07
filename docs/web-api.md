@@ -221,6 +221,7 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/stats` | Container/system metrics plus cached environment storage |
 | `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
 | `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
+| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries and PostgreSQL roles, plus server-wide unused Docker images (`id`, `tags`, `size_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. Failures are listed in `errors` and `images.errors` |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
 | `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |

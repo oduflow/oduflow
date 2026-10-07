@@ -7511,9 +7511,13 @@ def _run_cleanup(
     workspaces = result["orphan_workspaces"]
     ports = result["orphan_ports"]
     roles = result["orphan_roles"]
+    # Failed removals are absent from the lists above; report them separately.
+    errors = result.get("errors", [])
 
     if not dbs and not workspaces and not ports and not roles:
-        print(f"[{mode}] No orphaned resources found.")
+        print(f"[{mode}] No orphaned resources {'removed' if errors else 'found'}.")
+        for error in errors:
+            print(f"[{mode}] Error: {error}")
         return
 
     print(f"[{mode}] Orphaned resources:")
@@ -7539,6 +7543,8 @@ def _run_cleanup(
         print(f"\n  {total} resource(s) would be removed. Run with --force to apply.")
     else:
         print(f"\n  {total} resource(s) removed.")
+    for error in errors:
+        print(f"[{mode}] Error: {error}")
 
 
 def _run_destroy(settings: Settings) -> None:

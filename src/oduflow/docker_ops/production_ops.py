@@ -41,6 +41,7 @@ from typing import Any, Callable, ContextManager, overload
 import docker
 from docker import DockerClient
 from oduflow import secret_store
+from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -1304,6 +1305,7 @@ def create_production(
             extra_conf_paths,
         )
 
+        image_cleanup.note_image_requested(odoo_image)
         try:
             logger.info("Pulling image %s", odoo_image)
             client.images.pull(odoo_image)
@@ -1742,6 +1744,7 @@ def reconfigure_production(
         settings, team, name, record, env_creds, extra_mount_paths
     )
     odoo_image_new = record["odoo_image"]
+    image_cleanup.note_image_requested(odoo_image_new)
     # Pull only when the image actually changed (or is absent locally) — an
     # unrelated reconfigure must not silently move the production onto a
     # newer build of the same tag, nor pay a registry round-trip.

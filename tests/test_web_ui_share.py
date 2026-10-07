@@ -202,6 +202,7 @@ def test_team_surfaces_are_denied(app):
 
 def test_destructive_actions_on_the_shared_environment_are_denied(app):
     client = _visitor(app, _share_url(app))
+    assert client.post("/api/cleanup", json={"force": True}).status_code == 403
     for action in ("delete", "recreate", "update", "protect", "save-as-template"):
         resp = client.post(f"/api/environments/{_ENV}/{action}")
         assert resp.status_code == 403, action

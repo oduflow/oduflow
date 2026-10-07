@@ -21,6 +21,7 @@ from typing import Any
 import docker
 from docker import DockerClient
 from oduflow import activity, env_share, secret_store, settings
+from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -2434,6 +2435,7 @@ def _create_environment_impl(
     if settings.routing_mode == "port":
         run_kwargs["ports"] = {"8069/tcp": host_port}
 
+    image_cleanup.note_image_requested(odoo_image)
     try:
         logger.info("Pulling image %s", odoo_image)
         client.images.pull(odoo_image)
@@ -5115,6 +5117,7 @@ def update_environment(
     # at all (#49). If the pull fails, fall back to a local copy; if there is
     # none, abort with the existing environment left untouched.
     image_updated = False
+    image_cleanup.note_image_requested(odoo_image)
     if pull_image:
         try:
             logger.info("Pulling image %s", odoo_image)
