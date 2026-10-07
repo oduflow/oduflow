@@ -144,8 +144,11 @@ def _get_settings() -> Settings:
         try:
             settings = Settings.from_toml(toml_path)
             settings.validate()
-        # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here too.
-        except ValueError as exc:
+        # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here
+        # too. TypeError/AttributeError/KeyError cover wrong-typed TOML values
+        # (a list where an int belongs, a scalar where a table belongs): still
+        # an operator mistake, so still one line, not a traceback.
+        except (ValueError, TypeError, AttributeError, KeyError) as exc:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
@@ -6818,29 +6821,30 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
         )
         if not generated:
             return settings
+        # The config is about to hold a secret it does not hold yet, so narrow
+        # a group/world-readable mode BEFORE the write — otherwise there is a
+        # window (or, if chmod fails, forever) where the live dashboard
+        # credential sits in a world-readable file. Never widen: an operator
+        # who chose 0400 keeps it. Guarded separately on purpose: a chmod
+        # failure (config owned by another user, or a mount that rejects
+        # chmod) must NOT abort provisioning — that would make _start_http
+        # refuse to boot and ask for a ui_password we could have written.
+        # Tightening the mode is hardening, not a condition for provisioning.
+        try:
+            mode = os.stat(cfg_path).st_mode & 0o777
+            if mode & 0o077:
+                os.chmod(cfg_path, mode & 0o700)
+        except OSError:
+            logger.warning(
+                "Auto-provisioning a web-UI password in %s but could not "
+                "restrict its permissions; tighten them manually (chmod 0600).",
+                cfg_path,
+                exc_info=True,
+            )
         pathlib.Path(cfg_path).write_text(updated, encoding="utf-8")
     except Exception:
         logger.exception("Could not auto-provision a web-UI password")
         return settings
-    # The config now holds a secret it did not hold a moment ago, so narrow a
-    # group/world-readable mode. Never widen: an operator who chose 0400 keeps
-    # it. Guarded separately from the write above on purpose: the password is
-    # already persisted at this point, so a chmod failure (config owned by
-    # another user, or a mount that rejects chmod) must NOT fall back to the
-    # stale passwordless settings — that would make _start_http refuse to boot
-    # and ask for a ui_password the file already contains. Tightening the mode
-    # is hardening on top of a completed provisioning, not a condition for it.
-    try:
-        mode = os.stat(cfg_path).st_mode & 0o777
-        if mode & 0o077:
-            os.chmod(cfg_path, mode & 0o700)
-    except OSError:
-        logger.warning(
-            "Auto-provisioned a web-UI password in %s but could not restrict "
-            "its permissions; tighten them manually (chmod 0600).",
-            cfg_path,
-            exc_info=True,
-        )
     # Only the count is logged. Printing the password itself would persist it in
     # the journal (shipped off-host, retained for months) long after it is the
     # live dashboard credential; oduflow.toml is where it belongs.
@@ -7734,11 +7738,15 @@ def _run_cli() -> None:
 
     # Bootstrap: if no config exists, create it from the bundled default with an
     # auto-generated PostgreSQL password and a random MCP auth_token, so a fresh
-    # install is authenticated by default even over HTTP (#37).
+    # install is authenticated by default even over HTTP (#37). Never bootstrap
+    # when ODUFLOW_TOML is set: find_toml() only ever reads that path, so a
+    # config written to the default location would be an orphaned secrets file
+    # — let _get_settings() report the missing path instead.
     try:
         find_toml()
     except FileNotFoundError:
-        _bootstrap_config()
+        if not os.getenv("ODUFLOW_TOML", "").strip():
+            _bootstrap_config()
 
     global _settings
     _settings = _get_settings()

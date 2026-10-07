@@ -157,7 +157,8 @@ values for `[database].password`, `[team.1].auth_token`, and
 secrets are never printed to the log — read them from the config file:
 
 ```bash
-sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml
+sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
+  || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
 
 ### Minimal configuration

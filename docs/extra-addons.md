@@ -116,6 +116,10 @@ oduflow call update_extra_repo enterprise
 This runs `git fetch --all --prune` on the **shared bare repository** only. It
 does **not** change the checkout mounted by any running environment.
 
+In the Web Dashboard's "Extra Addons" tab, each repo has an **Update** button,
+and **Update all** fetches every repo that has a remote, one after another,
+then shows a single summary of updated, unchanged and failed repos.
+
 ### Updating an environment
 
 Run the normal sync operation:
