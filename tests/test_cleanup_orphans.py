@@ -55,6 +55,72 @@ def test_cleanup_orphans_removes_orphan_workspace(tmp_path):
     assert not os.path.exists(orphan_dir)
 
 
+def test_cleanup_reports_failed_workspace_without_claiming_it_was_removed(tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    orphan_dir = os.path.join(team.workspaces_dir, "feature-x")
+    os.makedirs(orphan_dir)
+    with (
+        patch.object(system_ops, "get_client", return_value=_FakeClient()),
+        patch.object(system_ops, "_exec_sql", return_value=""),
+        patch("oduflow.port_registry._load_registry", return_value={}),
+        patch(
+            "oduflow.docker_ops.env_ops._unmount_filestore",
+            side_effect=RuntimeError("private details"),
+        ),
+    ):
+        result = system_ops.cleanup_orphans(settings, team, dry_run=False)
+    assert result["orphan_workspaces"] == []
+    assert os.path.isdir(orphan_dir)
+    assert result["errors"] == [
+        "Workspace feature-x: removal failed. Check server logs."
+    ]
+
+
+def test_cleanup_removes_only_reviewed_orphans(tmp_path):
+    team, settings = _team_and_settings(tmp_path)
+    for entry in ("reviewed", "appeared-after-preview"):
+        os.makedirs(os.path.join(team.workspaces_dir, entry))
+
+    def sql_result(_client, _settings, statement, **_kwargs):
+        return "oduflow_1_unreviewed" if "FROM pg_database" in statement else ""
+
+    with (
+        patch.object(system_ops, "get_client", return_value=_FakeClient()),
+        patch.object(system_ops, "_exec_sql", side_effect=sql_result) as sql,
+        patch("oduflow.port_registry._load_registry", return_value={}),
+    ):
+        result = system_ops.cleanup_orphans(
+            settings,
+            team,
+            dry_run=False,
+            only={"orphan_workspaces": ["reviewed", "no-longer-orphaned"]},
+        )
+    assert result["orphan_workspaces"] == ["reviewed"]
+    assert not os.path.exists(os.path.join(team.workspaces_dir, "reviewed"))
+    assert os.path.isdir(os.path.join(team.workspaces_dir, "appeared-after-preview"))
+    assert result["orphan_databases"] == []
+    assert not any("DROP" in c.args[2] for c in sql.call_args_list)
+
+
+def test_run_cleanup_prints_removal_errors(tmp_path, capsys):
+    team, settings = _team_and_settings(tmp_path)
+    result = {
+        "dry_run": False,
+        "orphan_databases": [],
+        "orphan_workspaces": [],
+        "orphan_ports": [],
+        "orphan_roles": [],
+        "errors": ["Workspace feature-x: removal failed. Check server logs."],
+    }
+
+    with patch.object(system_ops, "cleanup_orphans", return_value=result):
+        server._run_cleanup(settings, team, dry_run=False)
+
+    output = capsys.readouterr().out
+    assert "No orphaned resources removed." in output
+    assert "Error: Workspace feature-x: removal failed" in output
+
+
 def test_cleanup_orphans_unmount_receives_teamsettings(tmp_path):
     team, settings = _team_and_settings(tmp_path)
 

@@ -953,6 +953,7 @@
   }
   .system-bar .sys-label { font-weight: 600; color: var(--text); margin-right: 4px; }
   .system-bar .sys-val { color: var(--text); font-weight: 500; }
+  #cleanup-output { max-height: 45vh; overflow-y: auto; margin-bottom: 16px; }
   /* Dock of minimized log/console windows — a taskbar in the system bar. */
   .min-dock { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
   .min-chip {
@@ -1352,6 +1353,7 @@
   body.scoped .env-card .select-box { display: none !important; }
   /* Hide the host metrics but keep the bar: it docks minimized consoles. */
   body.scoped .system-bar > span { display: none; }
+  body.scoped #cleanup-open { display: none; }
   .scoped-chip {
     display: inline-flex;
     align-items: center;
@@ -2314,6 +2316,7 @@
   <span>RAM: <span class="sys-val" id="sys-ram">—</span></span>
   <span>Load: <span class="sys-val" id="sys-load">—</span></span>
   <span id="health-chips"></span>
+  <button class="btn" id="cleanup-open" onclick="openCleanupModal()">Cleanup</button>
   <div class="min-dock" id="min-dock" role="group" aria-label="Minimized windows"></div>
 </div>
 
@@ -2341,6 +2344,30 @@
     </div>
   </div>
 </div>
+
+<div class="modal-overlay" id="cleanup-modal" onclick="closeCleanupModal(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cleanup-title">
+    <div class="modal-header">
+      <h2 id="cleanup-title">Cleanup unused resources</h2>
+      <button class="modal-close" id="cleanup-close" aria-label="Close" onclick="closeCleanupModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-note">Orphaned resources belong to this team. Docker images are shared across the server.</p>
+      <pre id="cleanup-output" tabindex="-1" aria-live="polite"></pre>
+      <div class="form-group check-row">
+        <input type="checkbox" id="cleanup-images" onchange="updateCleanupConfirm()" disabled>
+        <label for="cleanup-images">Remove unused Docker images</label>
+      </div>
+      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed.</p>
+      <div class="form-actions">
+        <button class="btn" id="cleanup-cancel" onclick="closeCleanupModal()">Cancel</button>
+        <button class="btn" id="cleanup-scan" onclick="scanCleanup()">Scan again</button>
+        <button class="btn-create danger" id="cleanup-confirm" onclick="confirmCleanup()" disabled>Confirm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="confirm-modal" onclick="cancelConfirm(event)">
   <div class="modal modal-sm">
     <div class="modal-header">
@@ -4204,6 +4231,126 @@ async function loadEnvironments(force) {
     }
   } catch (e) {
     showToast('Connection error: ' + e.message, true);
+  }
+}
+
+var cleanupPreview = null;
+var cleanupBusy = false;
+var cleanupGroups = [
+  ['orphan_databases', 'Databases'],
+  ['orphan_workspaces', 'Workspaces'],
+  ['orphan_ports', 'Port registry entries'],
+  ['orphan_roles', 'PostgreSQL roles']
+];
+
+function cleanupCount(result) {
+  return cleanupGroups.reduce(function(n, group) { return n + (result[group[0]] || []).length; }, 0);
+}
+
+function updateCleanupConfirm() {
+  var images = document.getElementById('cleanup-images');
+  images.disabled = cleanupBusy || !cleanupPreview || !cleanupPreview.images.length;
+  document.getElementById('cleanup-confirm').disabled = cleanupBusy || !cleanupPreview ||
+    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length));
+}
+
+function setCleanupBusy(busy, applying) {
+  cleanupBusy = busy;
+  ['cleanup-close', 'cleanup-cancel', 'cleanup-scan'].forEach(function(id) {
+    document.getElementById(id).disabled = busy;
+  });
+  document.getElementById('cleanup-scan').textContent = busy && !applying ? 'Scanning…' : 'Scan again';
+  document.getElementById('cleanup-confirm').textContent = busy && applying ? 'Cleaning…' : 'Confirm';
+  document.getElementById('cleanup-output').setAttribute('aria-busy', String(busy));
+  updateCleanupConfirm();
+}
+
+function renderCleanup(result) {
+  var lines = [result.dry_run ? '[DRY RUN] Orphaned resources:' : '[CLEANUP] Removed resources:'];
+  cleanupGroups.forEach(function(group) {
+    var names = result[group[0]] || [];
+    if (!names.length) return;
+    lines.push('  ' + group[1] + ' (' + names.length + '):');
+    names.forEach(function(name) { lines.push('    - ' + name); });
+  });
+  var count = cleanupCount(result);
+  lines.push(count ? '\n' + count + ' resource(s) ' + (result.dry_run ? 'would be removed.' : 'removed.') :
+    (result.dry_run ? 'No orphaned resources found.' : 'No orphaned resources removed.'));
+  if (result.dry_run) {
+    lines.push('\nUnused Docker images (' + result.images.length + '):');
+    result.images.forEach(function(image) {
+      lines.push('  ' + (image.tags.length ? image.tags.join(', ') : '<untagged>') + ' — ' + fmtBytes(image.size_bytes));
+      lines.push('    ' + image.id);
+    });
+    if (!result.images.length) lines.push('  No unused images found.');
+    else lines.push('Select "Remove unused Docker images" to include these images.');
+  } else {
+    lines.push('\nDocker images removed (' + result.images.removed.length + '):');
+    result.images.removed.forEach(function(id) { lines.push('  ' + id); });
+    result.images.skipped.forEach(function(item) { lines.push('Skipped ' + item.id + ': ' + item.reason); });
+    result.images.errors.forEach(function(item) { lines.push('Error ' + item.id + ': ' + item.reason); });
+  }
+  (result.errors || []).forEach(function(error) { lines.push('Error: ' + error); });
+  document.getElementById('cleanup-output').textContent = lines.join('\n');
+}
+
+function openCleanupModal() {
+  if (SCOPED_ENV || cleanupBusy) return;
+  showModal('cleanup-modal');
+  document.getElementById('cleanup-output').focus();
+  scanCleanup();
+}
+
+function closeCleanupModal(event) {
+  if (cleanupBusy || (event && event.target !== event.currentTarget)) return;
+  hideModal('cleanup-modal');
+}
+
+async function scanCleanup() {
+  if (cleanupBusy) return;
+  cleanupPreview = null;
+  document.getElementById('cleanup-images').checked = false;
+  document.getElementById('cleanup-cancel').textContent = 'Cancel';
+  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources and unused Docker images…';
+  setCleanupBusy(true, false);
+  try {
+    var response = await fetch('/api/cleanup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: false })
+    });
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Scan failed.');
+    cleanupPreview = data.result;
+    renderCleanup(data.result);
+  } catch (e) {
+    document.getElementById('cleanup-output').textContent = 'Error: ' + e.message;
+  } finally {
+    setCleanupBusy(false, false);
+  }
+}
+
+async function confirmCleanup() {
+  if (cleanupBusy || !cleanupPreview || document.getElementById('cleanup-confirm').disabled) return;
+  var imageIds = document.getElementById('cleanup-images').checked ? cleanupPreview.images.map(function(image) { return image.id; }) : [];
+  // Send the reviewed names: the server removes only these, and only if still orphaned.
+  var orphans = {};
+  cleanupGroups.forEach(function(group) { orphans[group[0]] = cleanupPreview[group[0]] || []; });
+  setCleanupBusy(true, true);
+  try {
+    var response = await fetch('/api/cleanup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds })
+    });
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Cleanup failed.');
+    renderCleanup(data.result);
+  } catch (e) {
+    document.getElementById('cleanup-output').textContent = 'Error: ' + e.message + '\nScan again to see remaining resources.';
+  } finally {
+    cleanupPreview = null;
+    setCleanupBusy(false, false);
+    document.getElementById('cleanup-cancel').textContent = 'Close';
+    loadEnvironments();
+    loadStats();
   }
 }
 
@@ -8932,6 +9079,7 @@ window.addEventListener('resize', function() {
 });
 
 var MODAL_CLOSERS = {
+  'cleanup-modal': closeCleanupModal,
   // Created dynamically by openCreateProductionModal; promptDialog overlays
   // handle Escape themselves via their own overlay keydown listener.
   'create-prod-modal': function() {

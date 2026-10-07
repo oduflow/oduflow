@@ -119,6 +119,11 @@ def image_publish_lock_key(team_id: str, name: str) -> str:
     return f"imgpublish:{team_id}:{name}"
 
 
+def image_cleanup_lock_key() -> str:
+    """Removal of unused Docker images — server-wide, so not team-scoped."""
+    return "images:cleanup"
+
+
 def env_wake_key(team_id: str, env_name: str) -> str:
     """Auto-start of one environment (see :func:`keyed_mutex`)."""
     return f"wake:{team_id}:{env_name}"

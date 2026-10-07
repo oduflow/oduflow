@@ -24,6 +24,7 @@ from typing import Any
 import docker
 from docker import DockerClient
 from oduflow import pg_hba, service_database_credentials
+from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.errors import (
@@ -1470,6 +1471,7 @@ def _convert_custom_dump_to_sql_with_helper(
             container_path,
         ]
 
+    image_cleanup.note_image_requested(_PG_RESTORE_HELPER_IMAGE)
     with contextlib.suppress(Exception):
         client.images.pull(_PG_RESTORE_HELPER_IMAGE)
 
@@ -4835,7 +4837,10 @@ def finalize_imported_template(
 
 
 def cleanup_orphans(
-    settings: Settings, team: TeamSettings, dry_run: bool = True
+    settings: Settings,
+    team: TeamSettings,
+    dry_run: bool = True,
+    only: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Find and remove orphaned databases, workspaces, and port registry entries.
 
@@ -4852,6 +4857,9 @@ def cleanup_orphans(
 
     Returns a dict with keys: orphan_databases, orphan_workspaces, orphan_ports,
     and orphan_roles, each a list of removed (or would-be-removed) names.
+
+    ``only`` maps those keys to names the caller reviewed: when given, only
+    reviewed names that are still orphaned are removed.
     """
     from oduflow.port_registry import _load_registry, _save_registry
 
@@ -4955,6 +4963,14 @@ def cleanup_orphans(
         if not role.startswith(prod_role_prefix) and role not in live_roles
     ]
 
+    if only is not None:
+        orphan_dbs = [n for n in orphan_dbs if n in only.get("orphan_databases", [])]
+        orphan_workspaces = [
+            n for n in orphan_workspaces if n in only.get("orphan_workspaces", [])
+        ]
+        orphan_ports = [n for n in orphan_ports if n in only.get("orphan_ports", [])]
+        orphan_roles = [n for n in orphan_roles if n in only.get("orphan_roles", [])]
+
     if dry_run:
         logger.info(
             "Cleanup dry-run: %d orphan DBs, %d orphan workspaces, %d orphan ports, %d orphan roles",
@@ -4972,6 +4988,7 @@ def cleanup_orphans(
         }
 
     # --- Actually remove ---
+    errors: list[str] = []
     removed_dbs: list[str] = []
     for db_name in orphan_dbs:
         try:
@@ -4982,6 +4999,7 @@ def cleanup_orphans(
             logger.info("Dropped orphan database %s", db_name)
         except Exception as exc:
             logger.warning("Failed to drop orphan database %s: %s", db_name, exc)
+            errors.append(f"Database {db_name}: removal failed. Check server logs.")
 
     removed_workspaces: list[str] = []
     for entry in orphan_workspaces:
@@ -4999,6 +5017,7 @@ def cleanup_orphans(
             logger.info("Removed orphan workspace %s", entry_path)
         except Exception as exc:
             logger.warning("Failed to remove orphan workspace %s: %s", entry_path, exc)
+            errors.append(f"Workspace {entry}: removal failed. Check server logs.")
 
     removed_ports: list[str] = []
     for branch in orphan_ports:
@@ -5015,6 +5034,7 @@ def cleanup_orphans(
             removed_roles.append(role)
         except Exception as exc:
             logger.warning("Failed to drop orphan PG role %s: %s", role, exc)
+            errors.append(f"PostgreSQL role {role}: removal failed. Check server logs.")
 
     return {
         "dry_run": False,
@@ -5022,6 +5042,7 @@ def cleanup_orphans(
         "orphan_workspaces": removed_workspaces,
         "orphan_ports": removed_ports,
         "orphan_roles": removed_roles,
+        "errors": errors,
     }
 
 

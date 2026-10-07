@@ -54,6 +54,7 @@ from oduflow import (
 )
 from oduflow.docker_ops import (
     env_ops,
+    image_cleanup,
     odoo_ops,
     production_ops,
     service_database_ops,
@@ -87,6 +88,7 @@ from oduflow.licensing import (
 from oduflow.locking import (
     LockManager,
     credentials_lock_key,
+    image_cleanup_lock_key,
     prod_backups_lock_key,
     prod_lock_key,
     service_database_lock_key,
@@ -489,6 +491,11 @@ async def _read_login_credentials(request: Request) -> tuple[str, str]:
 
 
 _EXTERNAL_COMMAND_UI_ERROR = "Operation failed. Check server logs for details."
+
+# Result groups of system_ops.cleanup_orphans that Confirm may name.
+_CLEANUP_ORPHAN_KEYS = frozenset(
+    {"orphan_databases", "orphan_workspaces", "orphan_ports", "orphan_roles"}
+)
 
 
 def _flow_error_status(e: FlowError) -> int:
@@ -2024,6 +2031,83 @@ def _build_routes(
             logger.exception("Unexpected error in api_logs")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_cleanup(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body."}, status_code=400
+            )
+        if not isinstance(body, dict) or type(body.get("force", False)) is not bool:
+            return JSONResponse(
+                {"ok": False, "error": "force must be a boolean."}, status_code=400
+            )
+        force = body.get("force", False)
+        image_ids = body.get("image_ids", [])
+        if not isinstance(image_ids, list) or any(
+            not isinstance(image_id, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+            for image_id in image_ids
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "image_ids must contain full image IDs."},
+                status_code=400,
+            )
+        # Confirm removes only the orphans the user reviewed in the preview.
+        orphans = body.get("orphans", {})
+        if not isinstance(orphans, dict) or any(
+            key not in _CLEANUP_ORPHAN_KEYS
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) for name in names)
+            for key, names in orphans.items()
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "orphans must list reviewed names by group."},
+                status_code=400,
+            )
+
+        def run() -> dict[str, Any]:
+            settings = get_settings()
+            team = _get_ui_team(request)
+            if not force:
+                # Read-only, like the CLI dry run: no lock, so a scan neither
+                # fails on nor blocks the team's environment operations.
+                result = system_ops.cleanup_orphans(settings, team, dry_run=True)
+                result["images"] = image_cleanup.list_unused_images()
+                return result
+            # Hold locks in the worker so disconnects cannot unlock live work,
+            # and take them all before deleting anything.
+            with contextlib.ExitStack() as stack:
+                if image_ids:
+                    # One image cleanup at a time across all dashboard teams.
+                    stack.enter_context(
+                        locks.env_lock(image_cleanup_lock_key(), operation="cleanup")
+                    )
+                with locks.team_lock(team.team_id, operation="cleanup"):
+                    result = system_ops.cleanup_orphans(
+                        settings, team, dry_run=False, only=orphans
+                    )
+                result["images"] = (
+                    image_cleanup.remove_unused_images(image_ids)
+                    if image_ids
+                    else {"removed": [], "skipped": [], "errors": []}
+                )
+            return result
+
+        try:
+            return JSONResponse({"ok": True, "result": await _offload(run)})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_cleanup")
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Cleanup failed. Check server logs and scan again to see remaining resources.",
+                },
+                status_code=500,
             )
 
     def api_stats(request: Request) -> JSONResponse:
@@ -6657,6 +6741,7 @@ def _build_routes(
         *production_routes,
         Route("/healthz", healthz, methods=["GET"]),
         Route("/api/stats", api_stats, methods=["GET"]),
+        Route("/api/cleanup", api_cleanup, methods=["POST"]),
         Route("/api/usage", api_usage, methods=["GET"]),
         Route("/api/usage/refresh", api_usage_refresh, methods=["POST"]),
         Route(

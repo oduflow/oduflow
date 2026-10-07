@@ -60,6 +60,84 @@ def _client(tmp_path) -> TestClient:
     return TestClient(app)
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_cleanup_requires_preview_image_opt_in_and_prevents_duplicate_confirm():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    source = dashboard.split("var cleanupPreview = null;", 1)[1].split(
+        "async function loadStats()", 1
+    )[0]
+    harness = (
+        "var cleanupPreview = null;"
+        + source
+        + r"""
+const assert = require('node:assert/strict');
+const fields = {};
+global.document = {getElementById: id => fields[id] || (fields[id] = {
+  disabled: false, checked: false, textContent: '', setAttribute() {}
+})};
+var refreshes = 0;
+function loadEnvironments() { refreshes++; }
+function loadStats() {}
+function fmtBytes(n) { return n + ' B'; }
+async function readResult(r) { return r; }
+const image = {id: 'sha256:' + 'a'.repeat(64), tags: ['<test-image>'], size_bytes: 100};
+const requests = [];
+let finishCleanup;
+let preview = {dry_run: true, images: [image]};
+global.fetch = async (url, options) => {
+  const body = JSON.parse(options.body);
+  requests.push(body);
+  if (!body.force) return {ok: true, result: preview};
+  return new Promise(resolve => { finishCleanup = resolve; });
+};
+const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: [], orphan_roles: []};
+(async () => {
+  await confirmCleanup();
+  assert.equal(requests.length, 0);
+  await scanCleanup();
+  assert.equal(requests[0].force, false);
+  assert.equal(fields['cleanup-confirm'].disabled, true);
+  assert.equal(fields['cleanup-images'].checked, false);
+  assert.match(fields['cleanup-output'].textContent, /<test-image>/);
+  fields['cleanup-images'].checked = true;
+  updateCleanupConfirm();
+  assert.equal(fields['cleanup-confirm'].disabled, false);
+  const pending = confirmCleanup();
+  await confirmCleanup();
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1], {force: true, orphans: noOrphans, image_ids: [image.id]});
+  assert.equal(fields['cleanup-confirm'].disabled, true);
+  finishCleanup({ok: true, result: {dry_run: false, images: {
+    removed: [], skipped: [{id: image.id, reason: 'Now used by a container.'}], errors: []
+  }}});
+  await pending;
+  assert.match(fields['cleanup-output'].textContent, /Now used by a container/);
+  assert.equal(fields['cleanup-confirm'].disabled, true);
+  assert.equal(refreshes, 1);
+  // A fresh scan is required after completion or a lost response.
+  await confirmCleanup();
+  assert.equal(requests.length, 2);
+  // Confirm names exactly the reviewed orphans, so the server removes no others.
+  preview = {dry_run: true, orphan_databases: ['oduflow_1_old'], images: [image]};
+  await scanCleanup();
+  assert.equal(fields['cleanup-images'].checked, false);
+  assert.equal(fields['cleanup-confirm'].disabled, false);
+  const orphanCleanup = confirmCleanup();
+  assert.deepEqual(requests[3], {
+    force: true, orphans: {...noOrphans, orphan_databases: ['oduflow_1_old']}, image_ids: []
+  });
+  finishCleanup({ok: true, result: {dry_run: false, orphan_databases: ['oduflow_1_old'], images: {
+    removed: [], skipped: [], errors: []
+  }}});
+  await orphanCleanup;
+  assert.match(fields['cleanup-output'].textContent, /oduflow_1_old/);
+  process.stdout.write(JSON.stringify({ok: true}));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    assert _run_node(harness) == {"ok": True}
+
+
 def test_chat_assets_share_one_positive_integer_cache_version(tmp_path):
     client = _client(tmp_path)
     dashboard = client.get("/")
