@@ -42,7 +42,12 @@ import docker
 from docker import DockerClient
 from oduflow import secret_store
 from oduflow.docker_ops import image_cleanup
-from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
+from oduflow.docker_ops.client import (
+    chown_recursive,
+    container_env,
+    get_client,
+    get_odoo_uid_gid,
+)
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
     _copy_file_from_container,
@@ -1652,11 +1657,23 @@ def reconfigure_production(
     # mid-way) or stale routing labels are drift that the run below repairs
     # from the record.
     container = _get_container(client, settings, team, name)
+    # A rotated team secret keeps its reference, so only the values the
+    # container runs with reveal it; recreating applies the new value.
+    rotated_secrets = (
+        secret_store.drifted_secret_keys(
+            team,
+            _production_env_vars(updates.get("env_vars", record.get("env_vars"))),
+            container_env(container),
+        )
+        if container is not None
+        else []
+    )
     drift = (
         force_recreate
         or container is None
         or not os.path.isdir(repo_path)
         or routing_drift(settings, team, name, record, container.labels or {})
+        or bool(rotated_secrets)
     )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
@@ -1831,7 +1848,15 @@ def reconfigure_production(
         )
 
     notes: list[str] = []
-    if not updates:
+    if rotated_secrets:
+        notes.append(
+            "Recreated to apply rotated secret values: "
+            + ", ".join(rotated_secrets)
+            + "."
+        )
+    if force_recreate and not updates:
+        notes.append("The container was recreated on request.")
+    elif not updates and not rotated_secrets:
         notes.append(
             "No settings changed, but drifted state was repaired (the "
             "container, its Traefik routing and/or the repo checkout did not "
@@ -1864,11 +1889,16 @@ def reconfigure_production(
         )
     logger.info(
         "Production reconfigured",
-        extra={"env_name": env_name, "changed": sorted(updates)},
+        extra={
+            "env_name": env_name,
+            "changed": sorted(updates),
+            "rotated_secrets": rotated_secrets,
+        },
     )
     return {
         "name": name,
         "changed": sorted(updates),
+        "rotated_secrets": rotated_secrets,
         "domain": record["domain"],
         "server_mode": server_mode_of(record),
         "url": prod_url(settings, team, record),

@@ -176,3 +176,13 @@ def chown_recursive(
             remove=True,
             volumes={path: {"bind": "/mnt/target", "mode": "rw"}},
         )
+
+
+def container_env(container: Any) -> dict[str, str]:
+    """Config.Env of a container as a dict — the values it actually runs with."""
+    env_vars: dict[str, str] = {}
+    for entry in container.attrs.get("Config", {}).get("Env", []) or []:
+        if "=" in entry:
+            key, value = entry.split("=", 1)
+            env_vars[key] = value
+    return env_vars

@@ -418,3 +418,27 @@ def test_concurrent_creation_reports_created_only_once(team):
         results = list(pool.map(save, ["first", "second"]))
     assert sorted(result["created"] for result in results) == [False, True]
     assert all(result["updated"] is not result["created"] for result in results)
+
+
+def test_drifted_secret_keys_reports_changed_values_by_name(team):
+    secret_store.set_secret(team, "api-key", "new-sensitive-value")
+    secret_store.set_secret(team, "same", "unchanged")
+    env_vars = {
+        "API_KEY": "secret:api-key",
+        "SAME": "secret:same",
+        "PLAIN": "literal",
+        "GONE": "secret:missing",
+        "BAD": "secret:../x",
+    }
+    running = {
+        "API_KEY": "old-sensitive-value",
+        "SAME": "unchanged",
+        "PLAIN": "other",
+        "GONE": "whatever",
+        "BAD": "whatever",
+    }
+    # Literal values are configuration, not secrets; dangling and malformed
+    # references are reported when a recreate resolves them, not here.
+    assert secret_store.drifted_secret_keys(team, env_vars, running) == ["API_KEY"]
+    assert secret_store.drifted_secret_keys(team, None, running) == []
+    assert secret_store.drifted_secret_keys(team, env_vars, {}) == ["API_KEY", "SAME"]

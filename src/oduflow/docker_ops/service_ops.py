@@ -13,6 +13,7 @@ from oduflow import secret_store
 from oduflow.docker_ops import service_presets, volume_ops
 from oduflow.docker_ops.build_ops import STAGING_REPOSITORY_PREFIX, staging_repository
 from oduflow.docker_ops.client import (
+    container_env,
     docker_error_detail,
     docker_operation_error,
     get_client,
@@ -916,12 +917,7 @@ def _secret_env_refs(container: Any) -> dict[str, str]:
 
 def _raw_container_env(container: Any) -> dict[str, str]:
     """Config.Env of a container as a dict — the values it actually runs with."""
-    env_vars: dict[str, str] = {}
-    for entry in container.attrs.get("Config", {}).get("Env", []) or []:
-        if "=" in entry:
-            key, value = entry.split("=", 1)
-            env_vars[key] = value
-    return env_vars
+    return container_env(container)
 
 
 def _image_env_vars(container: Any) -> dict[str, str]:
@@ -1481,12 +1477,10 @@ def update_service(
     # dashboard, then update_service) hinges on this check: compare the values
     # the container actually runs with against the freshly resolved ones for
     # every reference-configured key.
-    if not config_changed:
-        live_env = _raw_container_env(container)
-        for key in secret_store.secret_env_refs(env_vars):
-            if live_env.get(key) != (resolved_env or {}).get(key):
-                config_changed = True
-                break
+    if not config_changed and secret_store.drifted_secret_keys(
+        team, env_vars, _raw_container_env(container)
+    ):
+        config_changed = True
 
     # Capture old image digest
     old_digest = container.image.id  # e.g. sha256:abc...

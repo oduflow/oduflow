@@ -5842,6 +5842,7 @@ def reconfigure_production(
     extra_addons: dict[str, str] | None = None,
     env_vars: dict[str, str] | None = None,
     server_mode: str = "",
+    recreate: bool = False,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -5850,7 +5851,14 @@ def reconfigure_production(
     filestore are preserved; expect a brief downtime while the container is
     replaced. A call with no changes still recreates a container whose state
     drifted from the record (missing container or checkout, outdated Traefik
-    routing).
+    routing, or a team secret whose value changed since the container was
+    created).
+
+    To apply a rotated team secret, call this with just the name: secret
+    values are injected only when the container is created, so
+    restart_production keeps the old value; this call detects the changed
+    value and recreates the container. Pass recreate=true to recreate it
+    even when nothing appears to have changed.
 
     Changeable: the public domain (Traefik Host rule + Let's Encrypt), the
     Odoo Docker image, the deployed git branch or repository URL, the git
@@ -5881,6 +5889,8 @@ def reconfigure_production(
         server_mode: "workers" (sync: pages on 8069, bus on 8072) or "gevent"
                 (async: everything on 8072). Re-tunes odoo.conf workers and
                 re-points Traefik. Omit to leave unchanged.
+        recreate: Recreate the container even when no setting, secret value
+                or runtime state differs from the record.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
@@ -5899,10 +5909,17 @@ def reconfigure_production(
         extra_addons=extra_addons,
         env_vars=env_vars,
         server_mode=production_ops.resolve_server_mode(server_mode, None),
+        force_recreate=recreate,
     )
     if result.get("message"):
         return str(result["message"])
-    changed = ", ".join(result["changed"]) or "none; repaired drifted state"
+    changed = ", ".join(result["changed"]) or (
+        "none; recreated on request"
+        if recreate
+        else "none; applied rotated secrets"
+        if result.get("rotated_secrets")
+        else "none; repaired drifted state"
+    )
     lines = [
         f"Reconfigured production '{name}' (changed: {changed}).",
         f"URL: {result['url']}",

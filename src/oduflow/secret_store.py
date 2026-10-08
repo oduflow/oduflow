@@ -231,6 +231,36 @@ def delete_secret(team: TeamSettings, name: str) -> None:
         _save(team, data)
 
 
+def drifted_secret_keys(
+    team: TeamSettings,
+    env_vars: dict[str, str] | None,
+    container_env: dict[str, str],
+) -> list[str]:
+    """Env keys whose secret value changed since the container was created.
+
+    A rotated secret changes neither the reference-form configuration nor the
+    image, and its value is substituted only at container creation, so a
+    running container keeps the old value until it is recreated. Compares the
+    current value of every ``secret:<name>`` reference with what the container
+    runs with. Returns key names only, never values. A dangling or malformed
+    reference is not drift here; resolving it before a recreate reports it.
+    """
+    refs = secret_env_refs(env_vars)
+    if not refs:
+        return []
+    records = _load(team)["secrets"]
+    drifted: list[str] = []
+    for key, reference in refs.items():
+        try:
+            name = secret_ref_name(reference)
+        except ValueError:
+            continue
+        record = records.get(name)
+        if record is not None and container_env.get(key) != str(record["value"]):
+            drifted.append(key)
+    return sorted(drifted)
+
+
 def resolve_env_secrets(
     team: TeamSettings, env_vars: dict[str, str] | None
 ) -> dict[str, str] | None:
