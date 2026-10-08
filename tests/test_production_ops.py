@@ -975,11 +975,56 @@ class TestReconfigureProduction:
         client.images.pull.assert_not_called()
 
     def _client_running_env(self, settings, team, env):
+        # A container created from the current record: its oduflow.env_vars
+        # label holds the record's reference-form variables, Env the values.
         client = self._client_with_container(settings, team)
-        client.containers.get.return_value.attrs = {
+        container = client.containers.get.return_value
+        record_env = production_registry.get_production(team, "erp").get("env_vars")
+        if record_env:
+            container.labels["oduflow.env_vars"] = json.dumps(
+                record_env, sort_keys=True
+            )
+        container.attrs = {
             "Config": {"Env": [f"{key}={value}" for key, value in env.items()]}
         }
         return client
+
+    def test_new_or_repointed_secret_reference_is_not_a_rotation(self, settings, team):
+        from oduflow import secret_store
+
+        secret_store.set_secret(team, "api-key", "current-value")
+        secret_store.set_secret(team, "other", "other-value")
+        secret_store.set_secret(team, "added", "added-value")
+        _seed_prod_record(team, env_vars={"API_KEY": "secret:api-key"})
+        client = self._client_running_env(settings, team, {"API_KEY": "current-value"})
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings,
+                team,
+                "erp",
+                env_vars={"API_KEY": "secret:other", "NEW": "secret:added"},
+            )
+        client.containers.run.assert_called_once()
+        assert result["changed"] == ["env_vars"]
+        assert result["rotated_secrets"] == []
+        assert not any("rotated" in note for note in result["notes"])
+
+    def test_reference_missing_from_container_is_repaired_not_rotated(
+        self, settings, team
+    ):
+        # Registry intent ahead of the container (an interrupted apply): the
+        # container lacks the variable, so it is recreated as drift.
+        from oduflow import secret_store
+
+        secret_store.set_secret(team, "api-key", "current-value")
+        _seed_prod_record(team, env_vars={"API_KEY": "secret:api-key"})
+        client = self._client_running_env(settings, team, {"MODE": "live"})
+        client.containers.get.return_value.labels.pop("oduflow.env_vars")
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(settings, team, "erp")
+        client.containers.run.assert_called_once()
+        assert result["rotated_secrets"] == []
+        assert any("drifted state was repaired" in note for note in result["notes"])
 
     def test_rotated_secret_recreates_with_the_new_value(self, settings, team):
         from oduflow import secret_store

@@ -262,6 +262,18 @@ def _get_container(
     return container
 
 
+def _container_env_refs(container: Any) -> dict[str, str]:
+    """The ``secret:<name>`` references a container was created with, from its
+    ``oduflow.env_vars`` label (reference form, never values)."""
+    try:
+        declared = json.loads((container.labels or {}).get("oduflow.env_vars", "{}"))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(declared, dict):
+        return {}
+    return secret_store.secret_env_refs(declared)
+
+
 def _require_container(
     client: DockerClient, settings: Settings, team: TeamSettings, name: str
 ) -> Any:
@@ -1659,21 +1671,28 @@ def reconfigure_production(
     container = _get_container(client, settings, team, name)
     # A rotated team secret keeps its reference, so only the values the
     # container runs with reveal it; recreating applies the new value.
-    rotated_secrets = (
-        secret_store.drifted_secret_keys(
-            team,
-            _production_env_vars(updates.get("env_vars", record.get("env_vars"))),
-            container_env(container),
+    secret_drift: list[str] = []
+    rotated_secrets: list[str] = []
+    if container is not None:
+        effective_env = _production_env_vars(
+            updates.get("env_vars", record.get("env_vars"))
         )
-        if container is not None
-        else []
-    )
+        secret_drift = secret_store.drifted_secret_keys(
+            team, effective_env, container_env(container)
+        )
+        # Only a reference the container was created with can have been
+        # rotated; a key added or re-pointed by this call (or by an
+        # interrupted earlier one) is a configuration change, not a rotation.
+        created_refs = _container_env_refs(container)
+        rotated_secrets = [
+            key for key in secret_drift if created_refs.get(key) == effective_env[key]
+        ]
     drift = (
         force_recreate
         or container is None
         or not os.path.isdir(repo_path)
         or routing_drift(settings, team, name, record, container.labels or {})
-        or bool(rotated_secrets)
+        or bool(secret_drift)
     )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
