@@ -33,6 +33,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
 )
 from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
+from oduflow.module_versions import odoo_series
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     get_db_name,
@@ -393,13 +394,6 @@ def _stage_filestore_source(
     raise NotFoundError(f"Filestore source not found: {source}")
 
 
-def _odoo_major_from_module_version(module_version: str) -> str:
-    parts = module_version.split(".")
-    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        return f"{parts[0]}.{parts[1]}"
-    return ""
-
-
 def _read_template_manifest_from_db(
     client: DockerClient, settings: Settings, template_db: str
 ) -> dict[str, object]:
@@ -411,7 +405,7 @@ def _read_template_manifest_from_db(
         "WHERE name='base' AND state='installed' LIMIT 1;",
         db=template_db,
     ).strip()
-    major_version = _odoo_major_from_module_version(version)
+    major_version = odoo_series(version)
     pg_version = _exec_sql(client, settings, "SHOW server_version;", db=template_db)
     modules_raw = _exec_sql(
         client,

@@ -83,6 +83,7 @@ MCP Clients (Cursor, Claude, etc.)
         ├── locking.py ── LockManager with per-branch, per-team, system locks
         ├── git_ops.py ── Clone, credentials, manifest parsing
         ├── git_analysis.py ── Classify changed files → action (install/upgrade/restart/nothing)
+        ├── module_versions.py ── Installed vs checkout manifest versions (template modules to -u at create)
         ├── bundled_upgrade.py ── Three-way merge deployed bundle files with persistent baselines
         ├── naming.py ── Pure functions: slugify, DB names, paths
         ├── extra_addons.py ── Extra addon repo management (bare clones + worktrees)

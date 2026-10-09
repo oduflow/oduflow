@@ -487,21 +487,13 @@ class TestCreateEnvironment:
         )
         assert mock_cleanup.call_count == 2
 
-    def test_create_rolls_back_on_required_setup_failure(
-        self, mock_docker_client, tmp_path
-    ):
-        container = MagicMock()
-        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
-        mock_docker_client.containers.list.return_value = []
-        mock_docker_client.containers.run.return_value = container
+    @staticmethod
+    def _template_create_patches(configure, exec_sql=None):
+        """Patches that carry a template create_environment up to the setup
+        step, which *configure* replaces."""
         instance_conf = MagicMock()
         instance_conf.exists.return_value = False
-        setup_error = PrerequisiteNotMetError("registry not ready")
-
-        # Entered through an ExitStack rather than a parenthesized `with` group:
-        # CPython 3.10 caps a function at 20 statically nested blocks, and the
-        # patches needed to reach the serving container exceed it.
-        provisioning_patches = [
+        return [
             patch("oduflow.docker_ops.env_ops._db_exists", return_value=True),
             patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
             patch("oduflow.docker_ops.env_ops.ensure_team_network"),
@@ -511,7 +503,7 @@ class TestCreateEnvironment:
                 "oduflow.docker_ops.env_ops._template_code_lineage",
                 return_value={},
             ),
-            patch("oduflow.docker_ops.env_ops._exec_sql"),
+            patch("oduflow.docker_ops.env_ops._exec_sql", side_effect=exec_sql),
             patch(
                 "oduflow.docker_ops.env_ops.create_credentials",
                 return_value={"pg_user": "u_1_feature", "pg_password": "pw"},
@@ -532,11 +524,27 @@ class TestCreateEnvironment:
                 "oduflow.docker_ops.env_ops._resolve_instance_conf",
                 return_value=instance_conf,
             ),
+            configure,
+        ]
+
+    def test_create_rolls_back_on_required_setup_failure(
+        self, mock_docker_client, tmp_path
+    ):
+        container = MagicMock()
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.list.return_value = []
+        mock_docker_client.containers.run.return_value = container
+        setup_error = PrerequisiteNotMetError("registry not ready")
+
+        # Entered through an ExitStack rather than a parenthesized `with` group:
+        # CPython 3.10 caps a function at 20 statically nested blocks, and the
+        # patches needed to reach the serving container exceed it.
+        provisioning_patches = self._template_create_patches(
             patch(
                 "oduflow.docker_ops.env_ops._configure_serving_environment",
                 side_effect=setup_error,
-            ),
-        ]
+            )
+        )
 
         with ExitStack() as stack:
             for provisioning_patch in provisioning_patches:
@@ -559,6 +567,65 @@ class TestCreateEnvironment:
         mock_rollback.assert_called_once_with(
             mock_docker_client, TEST_SETTINGS, TEST_TEAM, "feature"
         )
+
+    def test_create_hands_modules_newer_than_template_to_setup(
+        self, mock_docker_client, tmp_path
+    ):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.list.return_value = []
+        mock_docker_client.containers.run.return_value = MagicMock()
+        for name, version in (
+            ("zipfit_delivery_email_rfq", "18.0.1.18.0"),
+            ("unchanged", "18.0.1.0.0"),
+        ):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "__manifest__.py").write_text(
+                f"{{'version': '{version}'}}"
+            )
+        installed = {
+            "base": "18.0.1.3",
+            "zipfit_delivery_email_rfq": "18.0.1.17.0",
+            "unchanged": "18.0.1.0.0",
+        }
+        queried_dbs = []
+
+        def exec_sql(client, settings, sql, db="postgres", **kwargs):
+            if "ir_module_module" in sql:
+                queried_dbs.append(db)
+                return json.dumps(installed)
+            return ""
+
+        with ExitStack() as stack:
+            mocks = [
+                stack.enter_context(provisioning_patch)
+                for provisioning_patch in self._template_create_patches(
+                    patch(
+                        "oduflow.docker_ops.env_ops._configure_serving_environment",
+                        side_effect=PrerequisiteNotMetError("stop here"),
+                    ),
+                    exec_sql=exec_sql,
+                )
+            ]
+            stack.enter_context(
+                patch("oduflow.docker_ops.env_ops._rollback_partial_environment")
+            )
+            with pytest.raises(PrerequisiteNotMetError, match="stop here"):
+                env_ops.create_environment(
+                    TEST_SETTINGS,
+                    TEST_TEAM,
+                    "feature",
+                    "",
+                    "odoo:18.0",
+                    template_name="base",
+                    local_path=str(tmp_path),
+                )
+
+        # The cloned environment database is compared, not the template.
+        assert queried_dbs == ["oduflow_1_feature"]
+        mock_configure = mocks[-1]
+        assert mock_configure.call_args.args[-1] == {
+            "zipfit_delivery_email_rfq": ("18.0.1.17.0", "18.0.1.18.0")
+        }
 
     def test_create_rejects_invalid_auto_install_module_before_provisioning(
         self, mock_docker_client
@@ -2410,6 +2477,180 @@ class TestAutoInstallReadiness:
         container.exec_run.assert_not_called()
 
 
+class TestTemplateModuleUpgrade:
+    UPGRADES = {"zipfit_delivery_email_rfq": ("18.0.1.17.0", "18.0.1.18.0")}
+
+    def test_relaxed_probe_accepts_http_error_statuses(self):
+        strict = env_ops._odoo_registry_probe("oduflow_1_feature")[2]
+        relaxed = env_ops._odoo_registry_probe(
+            "oduflow_1_feature", accept_http_errors=True
+        )[2]
+
+        assert "except urllib.error.HTTPError:" not in strict
+        assert "except urllib.error.HTTPError:\n    sys.exit(0)" in relaxed
+        # Connection errors still mean "not up yet" in both modes.
+        assert relaxed.index("HTTPError") < relaxed.index("except Exception")
+
+    def test_wait_uses_the_relaxed_probe_on_request(self):
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        env_ops._wait_for_container_odoo_ready(
+            container, "oduflow_1_feature", accept_http_errors=True
+        )
+
+        container.exec_run.assert_called_once_with(
+            env_ops._odoo_registry_probe("oduflow_1_feature", accept_http_errors=True)
+        )
+
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 2.0, 1, 120),
+    )
+    def test_upgrade_runs_after_odoo_answers(self, mock_wait):
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"upgraded")
+        calls = MagicMock()
+        calls.attach_mock(mock_wait, "wait")
+        calls.attach_mock(container.exec_run, "upgrade")
+
+        log = env_ops._upgrade_template_modules(
+            container, "oduflow_1_feature", self.UPGRADES, "feature"
+        )
+
+        assert [call[0] for call in calls.mock_calls] == ["wait", "upgrade"]
+        mock_wait.assert_called_once_with(
+            container, "oduflow_1_feature", accept_http_errors=True
+        )
+        cmd = container.exec_run.call_args.args[0]
+        assert "-d oduflow_1_feature -u zipfit_delivery_email_rfq" in cmd
+        assert "--stop-after-init --no-http" in cmd
+        assert "18.0.1.17.0 -> 18.0.1.18.0" in log
+
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(
+            False, 120.0, 60, 120, "URLError: connection refused"
+        ),
+    )
+    def test_upgrade_is_not_attempted_when_odoo_never_answers(self, mock_wait):
+        container = MagicMock()
+        container.logs.return_value = b"traceback"
+
+        with pytest.raises(PrerequisiteNotMetError, match="was not attempted"):
+            env_ops._upgrade_template_modules(
+                container, "oduflow_1_feature", self.UPGRADES, "feature"
+            )
+
+        container.exec_run.assert_not_called()
+
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 2.0, 1, 120),
+    )
+    def test_upgrade_failure_is_fatal(self, mock_wait):
+        container = MagicMock()
+        container.exec_run.return_value = (255, b"ParseError in view")
+
+        with pytest.raises(ExternalCommandError, match="ParseError in view"):
+            env_ops._upgrade_template_modules(
+                container, "oduflow_1_feature", self.UPGRADES, "feature"
+            )
+
+    @patch(
+        "oduflow.docker_ops.env_ops._exec_sql",
+        side_effect=ExternalCommandError("psql", 1, "relation does not exist"),
+    )
+    def test_failed_version_check_upgrades_nothing_but_reports_why(self, mock_sql):
+        upgrades, error = env_ops._template_module_upgrades(
+            MagicMock(),
+            TEST_SETTINGS,
+            "oduflow_1_feature",
+            {"/repo": {"bind": "/mnt/extra-addons", "mode": "rw"}},
+            None,
+            "feature",
+        )
+
+        assert upgrades == {}
+        # The reason has to reach the caller: without it a checkout ahead of
+        # the template only produces an unexplained readiness timeout.
+        assert error is not None
+        assert "relation does not exist" in error
+
+    def test_version_check_survives_a_duplicate_addons_path_key(self, tmp_path):
+        addons = tmp_path / "repo" / "addons"
+        (addons / "shared").mkdir(parents=True)
+        (addons / "shared" / "__manifest__.py").write_text("{'version': '1.2'}")
+        conf = tmp_path / "odoo.conf"
+        # A repository conf spelling the key in another case leaves the
+        # generated conf with two options that configparser lowercases alike.
+        conf.write_text(
+            "[options]\naddons_path = /mnt/extra-addons\n"
+            "Addons_Path = /mnt/extra-addons/addons\n"
+        )
+
+        with patch(
+            "oduflow.docker_ops.env_ops._exec_sql",
+            return_value=json.dumps({"base": "18.0.1.3", "shared": "18.0.1.1"}),
+        ):
+            upgrades, error = env_ops._template_module_upgrades(
+                MagicMock(),
+                TEST_SETTINGS,
+                "oduflow_1_feature",
+                {str(tmp_path / "repo"): {"bind": "/mnt/extra-addons", "mode": "rw"}},
+                str(conf),
+                "feature",
+            )
+
+        assert error is None
+        assert upgrades == {"shared": ("18.0.1.1", "18.0.1.2")}
+
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 2.0, 1, 120),
+    )
+    def test_upgrade_failure_with_undecodable_output_still_raises(self, mock_wait):
+        container = MagicMock()
+        container.exec_run.return_value = (255, b"ParseError \xff in view")
+
+        with pytest.raises(ExternalCommandError, match="ParseError"):
+            env_ops._upgrade_template_modules(
+                container, "oduflow_1_feature", self.UPGRADES, "feature"
+            )
+
+    def test_version_check_follows_the_generated_addons_path(self, tmp_path):
+        repo, oca = tmp_path / "repo", tmp_path / "oca"
+        for addons_dir, version in ((repo / "addons", "1.2"), (oca, "1.9")):
+            (addons_dir / "shared").mkdir(parents=True)
+            (addons_dir / "shared" / "__manifest__.py").write_text(
+                f"{{'version': '{version}'}}"
+            )
+        conf = tmp_path / "odoo.conf"
+        conf.write_text(
+            "[options]\naddons_path = /mnt/extra-addons/addons,/mnt/extra-addons-oca\n"
+        )
+
+        with patch(
+            "oduflow.docker_ops.env_ops._exec_sql",
+            return_value=json.dumps({"base": "18.0.1.3", "shared": "18.0.1.1"}),
+        ):
+            upgrades, error = env_ops._template_module_upgrades(
+                MagicMock(),
+                TEST_SETTINGS,
+                "oduflow_1_feature",
+                {
+                    str(repo): {"bind": "/mnt/extra-addons", "mode": "rw"},
+                    str(oca): {"bind": "/mnt/extra-addons-oca", "mode": "ro"},
+                },
+                str(conf),
+                "feature",
+            )
+
+        # The repository copy comes first on the addons_path and shadows OCA's.
+        assert error is None
+        assert upgrades == {"shared": ("18.0.1.1", "18.0.1.2")}
+
+
 class TestProvisioningSetup:
     @patch("oduflow.sanitizer.sanitize_environment")
     @patch("oduflow.sanitizer.neutralize_environment")
@@ -2517,6 +2758,77 @@ class TestProvisioningSetup:
             "wait",
         ]
         assert result == ["auto-install", "neutralize", "sanitize"]
+
+    @patch("oduflow.sanitizer.sanitize_environment", return_value=["sanitize"])
+    @patch("oduflow.sanitizer.neutralize_environment", return_value=["neutralize"])
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 1.0, 1, 120),
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._upgrade_template_modules",
+        return_value="template-upgrade",
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._auto_install_modules",
+        return_value="auto-install",
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        return_value=(False, ""),
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_template_upgrade_runs_before_the_strict_gate(
+        self,
+        mock_apt,
+        mock_pip,
+        mock_install,
+        mock_upgrade,
+        mock_wait,
+        mock_neutralize,
+        mock_sanitize,
+    ):
+        container = MagicMock()
+        upgrades = {"zipfit_delivery_email_rfq": ("18.0.1.17.0", "18.0.1.18.0")}
+        calls = MagicMock()
+        calls.attach_mock(mock_upgrade, "upgrade")
+        calls.attach_mock(mock_install, "install")
+        calls.attach_mock(mock_neutralize, "neutralize")
+        calls.attach_mock(container.restart, "restart")
+        calls.attach_mock(mock_wait, "wait")
+
+        result = env_ops._configure_serving_environment(
+            MagicMock(),
+            TEST_SETTINGS,
+            TEST_TEAM,
+            container,
+            "/repo",
+            "oduflow_1_feature",
+            "feature",
+            "template",
+            True,
+            ["red_border"],
+            None,
+            None,
+            upgrades,
+        )
+
+        assert [entry[0] for entry in calls.mock_calls] == [
+            # Conf + dependencies are in place before -u imports the modules;
+            # the restart after it drops the serving pre-upgrade registry.
+            "restart",
+            "upgrade",
+            "restart",
+            "wait",
+            "install",
+            "neutralize",
+            "restart",
+            "wait",
+        ]
+        mock_upgrade.assert_called_once_with(
+            container, "oduflow_1_feature", upgrades, "feature"
+        )
+        assert result == ["template-upgrade", "auto-install", "neutralize", "sanitize"]
 
     @patch("oduflow.sanitizer.sanitize_environment", return_value=[])
     @patch("oduflow.sanitizer.neutralize_environment", return_value=[])

@@ -1334,12 +1334,38 @@ def _install_repo_dependencies(
     return exit_code, pip_installed_any, logs
 
 
-def _odoo_registry_probe(env_db: str) -> list[str]:
-    """Build an in-container probe that forces the target registry to load."""
+def _decode_exec_output(output: Any) -> str:
+    """Text of an ``exec_run`` output, never raising on odd bytes.
+
+    Odoo's own output is UTF-8, but a traceback can quote bytes from a module's
+    data files or a third-party library's log, and a strict decode would then
+    raise over the :class:`ExternalCommandError` that carries the real failure.
+    """
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return str(output)
+
+
+def _odoo_registry_probe(env_db: str, *, accept_http_errors: bool = False) -> list[str]:
+    """Build an in-container probe that forces the target registry to load.
+
+    With *accept_http_errors* any HTTP response counts, error statuses
+    included: the request for ``env_db`` was served, so the registry for it
+    was at least set up, even if serving the page then failed.
+    """
+    answered = (
+        [
+            "except urllib.error.HTTPError:",
+            "    sys.exit(0)",
+        ]
+        if accept_http_errors
+        else []
+    )
     script = "\n".join(
         [
             "import http.cookiejar",
             "import sys",
+            "import urllib.error",
             "import urllib.parse",
             "import urllib.request",
             f"db = {env_db!r}",
@@ -1352,6 +1378,7 @@ def _odoo_registry_probe(env_db: str) -> list[str]:
             "    response = opener.open(url, timeout=5)",
             "    if response.status != 200:",
             "        raise RuntimeError(f'HTTP {response.status}')",
+            *answered,
             "except Exception as exc:",
             "    print(f'{type(exc).__name__}: {exc}', file=sys.stderr)",
             "    sys.exit(1)",
@@ -1370,7 +1397,11 @@ class _OdooReadinessResult:
 
 
 def _wait_for_container_odoo_ready(
-    container: Any, env_db: str, timeout: int = 120
+    container: Any,
+    env_db: str,
+    timeout: int = 120,
+    *,
+    accept_http_errors: bool = False,
 ) -> _OdooReadinessResult:
     """Wait until the serving Odoo process has finished registry startup.
 
@@ -1382,8 +1413,13 @@ def _wait_for_container_odoo_ready(
     databases both processes can otherwise race while re-creating the registry
     signaling sequences. ``/web/health`` is not sufficient here because it is
     database-independent and can respond before registry preloading completes.
+
+    *accept_http_errors* relaxes "ready" to "answered": an HTTP 500 for
+    ``env_db`` still means the serving process set up that registry's
+    signaling. Only the pre-readiness template upgrade uses it — the one
+    secondary command that has to run while the page cannot render yet.
     """
-    probe = _odoo_registry_probe(env_db)
+    probe = _odoo_registry_probe(env_db, accept_http_errors=accept_http_errors)
     started = time.monotonic()
     deadline = started + timeout
     attempts = 0
@@ -1461,6 +1497,118 @@ def _readiness_error(
     )
 
 
+def _template_module_upgrades(
+    client: DockerClient,
+    settings: Settings,
+    env_db: str,
+    odoo_volumes: dict[str, Any],
+    odoo_conf_path: str | None,
+    env_name: str,
+) -> tuple[dict[str, tuple[str, str]], str | None]:
+    """Installed modules whose checkout manifest is newer than the cloned DB.
+
+    Compares ``ir_module_module.latest_version`` with the manifests the
+    serving Odoo will load: the generated odoo.conf's addons_path, mapped back
+    to host paths through the container mounts. Returns ``({name: (installed,
+    checkout)}, failure_reason)``.
+
+    Best-effort: a failed check upgrades nothing, so creation continues as it
+    did before this check existed. But skipping it silently would leave only
+    the generic readiness timeout to explain a broken environment, so the
+    reason is returned for the caller to report.
+    """
+    from oduflow import module_versions
+
+    try:
+        raw = _exec_sql(
+            client,
+            settings,
+            "SELECT COALESCE(json_object_agg(name, latest_version), '{}'::json)::text "
+            "FROM ir_module_module WHERE state = 'installed';",
+            db=env_db,
+        )
+        installed = json.loads(raw or "{}")
+        # Without a generated conf the image's own odoo.conf applies, which
+        # points at the repository mount only.
+        addons_path = (
+            module_versions.addons_path_from_conf(odoo_conf_path)
+            if odoo_conf_path
+            else ["/mnt/extra-addons"]
+        )
+        mounts = {spec["bind"]: host for host, spec in odoo_volumes.items()}
+        available = module_versions.checkout_module_versions(
+            module_versions.host_addons_dirs(addons_path, mounts)
+        )
+        return module_versions.modules_newer_than_installed(installed, available), None
+    except Exception as exc:  # noqa: BLE001 - never fail creation over the check
+        logger.warning(
+            "Template module version check failed",
+            exc_info=True,
+            extra={"env_name": env_name},
+        )
+        return {}, f"{type(exc).__name__}: {exc}"
+
+
+def _upgrade_template_modules(
+    container: Any,
+    env_db: str,
+    upgrades: dict[str, tuple[str, str]],
+    env_name: str,
+) -> str:
+    """Upgrade modules whose checkout is newer than the template database.
+
+    A plain start loads these modules' current models against the template's
+    old tables, so ``/web/login`` fails with ``column ... does not exist``
+    until ``-u`` adds the columns. The upgrade runs inside the serving
+    container, where the generated odoo.conf and the repository's pip/apt
+    packages are already in place — the same way ``pull_and_apply`` upgrades.
+    It cannot wait for full readiness (that is what it fixes), so it waits for
+    Odoo to answer at all, which already rules out the signaling race.
+    """
+    from oduflow.docker_ops.odoo_ops import _validate_module_names
+
+    modules = sorted(upgrades)
+    _validate_module_names(modules)
+    modules_str = ",".join(modules)
+    readiness = _wait_for_container_odoo_ready(
+        container, env_db, accept_http_errors=True
+    )
+    if not readiness.ready:
+        raise _readiness_error(
+            container,
+            env_db,
+            readiness,
+            action=f"Upgrade of template modules {modules_str} was not attempted",
+        )
+
+    logger.info(
+        "Upgrading modules newer than the template database: %s",
+        modules_str,
+        extra={"env_name": env_name},
+    )
+    upgrade_cmd = (
+        f"/entrypoint.sh odoo -d {env_db} -u {modules_str} --stop-after-init --no-http"
+    )
+    exit_code, output = container.exec_run(upgrade_cmd)
+    output_str = _decode_exec_output(output)
+    if exit_code != 0:
+        logger.error(
+            "Template module upgrade failed (exit %d): %s",
+            exit_code,
+            output_str,
+            extra={"env_name": env_name},
+        )
+        raise ExternalCommandError(upgrade_cmd, exit_code, output_str[-20_000:])
+    details = ", ".join(
+        f"{name} {installed} -> {checkout}"
+        for name, (installed, checkout) in sorted(upgrades.items())
+    )
+    return (
+        f"[TEMPLATE-UPGRADE] odoo -u {modules_str} completed successfully "
+        f"(newer than the template: {details})"
+    )
+
+
 def _auto_install_modules(
     container: Any,
     settings: Settings,
@@ -1496,7 +1644,7 @@ def _auto_install_modules(
         f"/entrypoint.sh odoo -d {env_db} -i {modules_str} --stop-after-init --no-http"
     )
     exit_code, output = container.exec_run(install_cmd)
-    output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
+    output_str = _decode_exec_output(output)
     if exit_code != 0:
         logger.error(
             "Auto-install modules failed (exit %d): %s",
@@ -1522,8 +1670,13 @@ def _configure_serving_environment(
     auto_install_modules: list[str] | None,
     odoo_conf_to_copy: str | None,
     extra_mount_paths: list[tuple[str, str]] | None = None,
+    template_upgrades: dict[str, tuple[str, str]] | None = None,
 ) -> list[str]:
-    """Run required post-start setup before the environment is declared ready."""
+    """Run required post-start setup before the environment is declared ready.
+
+    *template_upgrades* are installed modules whose checkout is newer than the
+    template database (see :func:`_template_module_upgrades`).
+    """
     setup_logs: list[str] = []
     if odoo_conf_to_copy:
         _copy_file_to_container(container, odoo_conf_to_copy, "/etc/odoo")
@@ -1541,6 +1694,15 @@ def _configure_serving_environment(
     # .oduflow/odoo.conf but no requirements.txt serving on the stock
     # addons_path and worker settings until some later restart.
     container.restart()
+    if template_upgrades:
+        # Before the strict gate: until these upgrades add the new columns, the
+        # serving registry cannot render /web/login and the gate would only
+        # time out on HTTP 500 and roll the environment back.
+        setup_logs.append(
+            _upgrade_template_modules(container, env_db, template_upgrades, env_name)
+        )
+        # The serving process still holds the pre-upgrade registry.
+        container.restart()
     logger.info(
         "Waiting for serving Odoo after the setup restart",
         extra={"env_name": env_name},
@@ -2373,7 +2535,18 @@ def _create_environment_impl(
         )
         odoo_conf_to_copy = generated_conf
 
+    template_upgrades: dict[str, tuple[str, str]] = {}
+    template_check_error: str | None = None
     if template_name is not None:
+        template_upgrades, template_check_error = _template_module_upgrades(
+            client, settings, env_db, odoo_volumes, odoo_conf_to_copy, env_name
+        )
+        if template_upgrades:
+            logger.info(
+                "Checkout is newer than the template database for modules: %s",
+                ", ".join(sorted(template_upgrades)),
+                extra={"env_name": env_name},
+            )
         _mount_filestore(
             client,
             settings,
@@ -2441,6 +2614,14 @@ def _create_environment_impl(
         logger.warning("Could not pull image %s, using local copy: %s", odoo_image, exc)
 
     setup_logs: list[str] = []
+    if template_check_error:
+        # Without the comparison no module gets `-u`, so a checkout that moved
+        # ahead of the template fails the readiness gate below with nothing but
+        # a timeout to go on. Say why the check did not run.
+        setup_logs.append(
+            "[TEMPLATE-UPGRADE] version check skipped, modules newer than the "
+            f"template were not upgraded: {template_check_error}"
+        )
 
     # Greenfield (no template): initialize the empty DB with `-i base` in an
     # isolated, short-lived container BEFORE the serving container exists, so
@@ -2494,6 +2675,7 @@ def _create_environment_impl(
                 auto_install_modules,
                 odoo_conf_to_copy,
                 extra_mount_paths,
+                template_upgrades,
             )
         )
     except Exception:

@@ -264,7 +264,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Environment name. Empty defaults to the branch name. Use it to create several environments from the same branch (e.g. `env_name="client-a"` with `branch="19.0"`).
 
 `template_name`
-:   *str · default empty* — Template profile to use as the database template. Pass `"none"` to skip the template and initialise Odoo from scratch with `-i base`. When a template is given, `repo_url` and `odoo_image` are loaded from its metadata (and can still be overridden).
+:   *str · default empty* — Template profile to use as the database template. Pass `"none"` to skip the template and initialise Odoo from scratch with `-i base`. When a template is given, `repo_url` and `odoo_image` are loaded from its metadata (and can still be overridden), and installed modules whose manifest `version` in the checkout is higher than in the template database are upgraded before the environment is reported ready.
 
 `repo_url`
 :   *str · default empty* — Git repository URL. Optional when `template_name` supplies it.
