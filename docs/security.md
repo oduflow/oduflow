@@ -28,6 +28,16 @@ value is stored in `oduflow.toml` (created with mode `0600`) and never written t
 the log; read it from the file and use it as
 `Authorization: Bearer <auth_token>` when connecting HTTP MCP clients.
 
+## Server settings console
+
+The [Server settings console](admin.md) at `/admin` edits `oduflow.toml`,
+including every team's tokens and passwords, so it is not part of any team's
+dashboard. It has its own `[admin] password` (plus optional TOTP via
+`oduflow ui-2fa setup --admin`), its own 12-hour session cookie, and refuses
+team credentials; a console session does not open a team dashboard either.
+While the password is empty, `/admin` answers 404. Secrets reach the browser
+only through an explicit, logged **Reveal**.
+
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
 
 Oduflow can act as its own OAuth 2.1 Authorization Server, so MCP clients that require an OAuth flow (e.g. Claude.ai Remote MCP, MCP Inspector) can connect without any external identity provider.

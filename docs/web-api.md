@@ -10,6 +10,11 @@ enabled—coding agents and productions. Environment cards also expose logs,
 Odoo/SQL terminals, Connect As, notes, protection, scoped MCP access,
 single-environment share links, and save-as-template actions.
 
+Server configuration is not edited here: the deployment-wide
+[Server settings console](admin.md) at `/admin` has its own password and its
+own JSON API under `/admin/api/`. A browser signed in to the console sees a
+**Server settings** link in the dashboard header.
+
 The header's **Feedback** action opens a prefilled issue form on
 `github.com/oduflow/oduflow`. Oduflow holds no GitHub credentials and files
 nothing itself: it builds the link with the description and a short

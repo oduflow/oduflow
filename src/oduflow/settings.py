@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urlsplit
 
 try:
@@ -293,6 +294,11 @@ class Settings:
     # default so /mcp is never served unauthenticated by accident (#37); set
     # true only when fronting Oduflow with your own auth proxy.
     allow_insecure_http: bool = False
+    # Deployment-wide Server settings console (/admin, [admin] password). It
+    # edits oduflow.toml itself — every team's tokens included — so it has its
+    # own credential, never a team ui_password. Empty = console disabled. See
+    # specs/0077-server-settings-console.md.
+    admin_password: str = field(default="", repr=False)
 
     # Routing
     routing_mode: str = "port"
@@ -793,6 +799,16 @@ class Settings:
         if len(passwords) != len(set(passwords)):
             raise ValueError("Duplicate ui_password values across teams.")
 
+        # The console credential unlocks every team's secrets, so it must never
+        # double as a team credential that a team member already knows.
+        if self.admin_password and self.admin_password in (
+            set(passwords) | set(tokens) | set(production_tokens)
+        ):
+            raise ValueError(
+                "[admin] password must differ from every team ui_password, "
+                "auth_token and production_token."
+            )
+
         if self.prod_workers_cap < 1:
             raise ValueError("[production] workers_cap must be >= 1")
 
@@ -817,10 +833,21 @@ class Settings:
 
     @staticmethod
     def from_toml(path: str) -> Settings:
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
+        settings = Settings.from_raw(load_toml_dict(path), path)
+        global TRACE  # noqa: PLW0603
+        TRACE = settings.trace
+        return settings
 
+    @staticmethod
+    def from_raw(raw: dict[str, Any], path: str) -> Settings:
+        """Build Settings from an already parsed oduflow.toml document.
+
+        Pure: unlike :meth:`from_toml` it does not touch the process-wide
+        TRACE flag, so the Server settings console can dry-run a candidate
+        document through exactly the parser the server boots with.
+        """
         for section in (
+            "admin",
             "server",
             "routing",
             "database",
@@ -837,6 +864,7 @@ class Settings:
 
         server = raw.get("server", {})
         routing = raw.get("routing", {})
+        admin = raw.get("admin", {})
         tls = routing.get("tls", True)
         if not isinstance(tls, bool) and not (isinstance(tls, dict) and not tls):
             raise ValueError("[routing].tls must be true, false, or {}")
@@ -1036,9 +1064,6 @@ class Settings:
 
         trace = bool(server.get("trace", False))
 
-        global TRACE  # noqa: PLW0603
-        TRACE = trace
-
         return Settings(
             bind_host=bind_host,
             port=int(server.get("port", 8000)),
@@ -1047,6 +1072,7 @@ class Settings:
             agent_feedback=bool(server.get("agent_feedback", False)),
             allow_local_path=bool(server.get("allow_local_path", True)),
             allow_insecure_http=bool(server.get("allow_insecure_http", False)),
+            admin_password=str(admin.get("password", "")).strip(),
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
             routing_tls=tls is not False,
@@ -1196,6 +1222,13 @@ def _parse_backup_section(backup_raw: dict[str, object]) -> BackupSettings | Non
         walg_keep_full=int(str(backup_raw.get("walg_keep_full", 7))),
         upload_threads=max(1, int(str(backup_raw.get("upload_threads", 16)))),
     )
+
+
+def load_toml_dict(path: str) -> dict[str, Any]:
+    """Parse oduflow.toml into a plain dict (no Settings construction)."""
+    with open(path, "rb") as f:
+        data: dict[str, Any] = tomllib.load(f)
+    return data
 
 
 def find_toml() -> str:

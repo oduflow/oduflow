@@ -258,8 +258,9 @@ class TestBootstrapConfig:
         secrets_found = re.findall(
             r'^\s*(?:password|auth_token|ui_password) = "([^"]+)"', text, re.M
         )
-        # DB password, MCP auth_token and web-UI password.
-        assert len(secrets_found) == 3
+        # DB password, MCP auth_token, web-UI password and the /admin console
+        # password.
+        assert len(secrets_found) == 4
         for secret in secrets_found:
             assert secret not in caplog.text
         assert os.stat(dest).st_mode & 0o777 == 0o600

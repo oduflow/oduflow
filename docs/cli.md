@@ -69,6 +69,30 @@ Changes take effect without a restart. Shared links and MCP clients are
 unaffected. See [UI 2FA](security.md#enable-authenticator-app-2fa) for enrollment,
 session expiry, and recovery details.
 
+## Server Settings Console
+
+The [Server settings console](admin.md) at `/admin` edits `oduflow.toml` from
+the browser. Its password is the one setting it cannot create for itself:
+
+```bash
+# Generate a console password, store it as [admin] password, print it once
+oduflow admin enable
+
+# Replace the password (signs every console session out)
+oduflow admin enable --reset
+
+# Remove the password; /admin answers 404 again
+oduflow admin disable
+
+# Optional: authenticator-app 2FA for the console
+oduflow ui-2fa setup --admin
+oduflow ui-2fa reset --admin
+```
+
+`enable` and `disable` write through the same validated, history-keeping writer
+as the console. Restart Oduflow afterwards so the running server picks the
+password up.
+
 ## Declarative Stack Commands
 
 ```bash

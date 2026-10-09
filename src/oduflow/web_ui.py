@@ -37,6 +37,7 @@ from starlette.websockets import WebSocket
 
 from oduflow import (
     activity,
+    admin_ui,
     agent_config,
     agent_uploads,
     artifact_tokens,
@@ -52,6 +53,7 @@ from oduflow import (
     ui_totp,
     updates,
 )
+from oduflow.config_store import ConfigRuntime
 from oduflow.docker_ops import (
     env_ops,
     image_cleanup,
@@ -360,7 +362,11 @@ class UIAuthMiddleware:
 
         path = scope.get("path", "")
         if scope["type"] == "http" and (
-            path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES)
+            path in _PUBLIC_PATHS
+            or path.startswith(_PUBLIC_PREFIXES)
+            # The Server settings console is not a team surface: its routes
+            # authenticate the console credential themselves (admin_ui).
+            or admin_ui.is_admin_path(path)
         ):
             await self._app(scope, receive, send)
             return
@@ -930,7 +936,10 @@ def _build_routes(
         )
 
     def _render_dashboard(
-        settings: Settings, scoped_env: str = "", team: TeamSettings | None = None
+        settings: Settings,
+        scoped_env: str = "",
+        team: TeamSettings | None = None,
+        admin: bool = False,
     ) -> str:
         """Render the dashboard page. With ``scoped_env`` set it renders in
         shared single-environment mode (see oduflow.ui_scope): the client-side
@@ -961,12 +970,19 @@ def _build_routes(
                 "__TEAM_BASE_DOMAIN__",
                 html.escape(team.base_domain if team else "", quote=True),
             )
+            # Only a browser already signed in to the Server settings console
+            # gets the link; team members never learn the console exists.
+            .replace(
+                "__ADMIN_LINK_HIDDEN__", "" if admin and not scoped_env else "hidden"
+            )
         )
 
     def dashboard(request: Request) -> HTMLResponse:
         settings = get_settings()
         team = getattr(request.state, "team", None)
-        page = _render_dashboard(settings, team=team)
+        page = _render_dashboard(
+            settings, team=team, admin=admin_ui.has_admin_session(request, settings)
+        )
         return HTMLResponse(page)
 
     def _team_for_share(
@@ -6969,10 +6985,12 @@ def mount_web_ui(
     app: Starlette,
     get_settings: Callable[[], Settings],
     locks: LockManager,
+    config_runtime: ConfigRuntime | None = None,
 ) -> None:
     from starlette.routing import Router
 
-    routes = _build_routes(get_settings, locks)
+    routes = admin_ui.build_admin_routes(get_settings, config_runtime)
+    routes += _build_routes(get_settings, locks)
     sub_app: ASGIApp = Router(routes=routes)
 
     settings = get_settings()
