@@ -151,6 +151,17 @@ def _save_cluster_state(settings: Settings, state: dict[str, Any]) -> None:
         logger.debug("Could not persist scheduler state", exc_info=True)
 
 
+def request_base_backup(settings: Settings) -> None:
+    """Make the next tick take a base backup instead of waiting for its slot.
+
+    For a recreated production cluster: its new WAL-G archive has no base
+    backup to recover from until one is taken.
+    """
+    state = _load_cluster_state(settings)
+    state["basebackup"] = {}
+    _save_cluster_state(settings, state)
+
+
 def _local_now() -> datetime.datetime:
     return datetime.datetime.now().astimezone()
 

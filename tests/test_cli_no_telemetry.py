@@ -64,6 +64,7 @@ def test_no_telemetry_flag_applies_for_whole_run(loaded, argv, expected):
         patch("oduflow.docker_ops.client.wait_for_docker"),
         patch("oduflow.postgres_migration.validate_configuration"),
         patch.object(server.migrations, "run_pending"),
+        patch("oduflow.postgres_migration.upgrade"),
         patch.object(
             server,
             "_ensure_initialized",

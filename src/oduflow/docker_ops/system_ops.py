@@ -1211,6 +1211,40 @@ def pg_clone_strategy_clause(client: DockerClient, settings: Settings) -> str:
     return " STRATEGY FILE_COPY" if version >= 150000 else ""
 
 
+def require_postgres_for_odoo(
+    client: DockerClient,
+    settings: Settings,
+    odoo_image: str,
+    *,
+    container_name: str | None = None,
+) -> None:
+    """Refuse an Odoo 20+ image on a PostgreSQL 15 cluster.
+
+    Odoo 20 needs PostgreSQL 16 or newer. Clusters stay on their major until
+    the operator raises ``[database].image``, so an older cluster is a normal
+    state that must fail before anything is created, not when Odoo starts.
+    Images without a version in their reference are not checked.
+    """
+    from oduflow.odoo_version import major_from_image_reference
+
+    odoo_major = major_from_image_reference(odoo_image)
+    if odoo_major is None or odoo_major < 20:
+        return
+    version = int(
+        _exec_sql(
+            client, settings, "SHOW server_version_num;", container_name=container_name
+        )
+    )
+    if version < 160000:
+        raise PrerequisiteNotMetError(
+            f"Odoo {odoo_major} needs PostgreSQL 16 or newer, but "
+            f"{container_name or settings.shared_db_container} runs PostgreSQL "
+            f"{version // 10000}. Set [database].image to 'postgres:16' or newer "
+            "and restart Oduflow to upgrade the clusters; see Upgrading "
+            "PostgreSQL in the installation guide."
+        )
+
+
 def _create_pg_role(
     client: DockerClient,
     settings: Settings,

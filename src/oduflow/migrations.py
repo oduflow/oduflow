@@ -423,9 +423,12 @@ def _migrate_backfill_service_presets(settings: Settings) -> None:
 
 
 def _migrate_postgres16(settings: Settings) -> None:
-    from oduflow.postgres_migration import migrate
+    """Retired: v1.85.0 replaced PG15 clusters here, once and unconditionally.
 
-    migrate(settings)
+    PostgreSQL upgrades now run on every start when an explicit
+    [database].image is newer than a cluster (postgres_migration.upgrade),
+    which also resumes a replacement this step left unfinished.
+    """
 
 
 # Append-only registry, executed in list order. Ids are recorded in
@@ -498,10 +501,7 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         id="0009-postgresql16",
-        description=(
-            "Replace prepared PG15 clusters with PG16 and restore template databases "
-            "from their on-disk dumps (environments must be deleted beforehand)"
-        ),
+        description="Retired PG15 replacement (now run on demand at startup)",
         apply=_migrate_postgres16,
     ),
 ]

@@ -8219,10 +8219,11 @@ def _run_cli() -> None:
 
         with guard_startup():
             wait_for_docker()
-            from oduflow.postgres_migration import validate_configuration
+            from oduflow import postgres_migration
 
-            validate_configuration(_settings)
+            postgres_migration.validate_configuration(_settings)
             migrations.run_pending(_settings)
+            postgres_migration.upgrade(_settings)
             _ensure_initialized(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
@@ -8373,7 +8374,11 @@ def _run_cli() -> None:
             )
             return
         if args.stack_command == "apply":
+            from oduflow import postgres_migration
+
+            postgres_migration.validate_configuration(_settings)
             migrations.run_pending(_settings)
+            postgres_migration.upgrade(_settings)
             _ensure_initialized(_settings)
             quotas.apply_all(_settings)
             stack_result = apply_stack(

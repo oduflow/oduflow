@@ -512,10 +512,13 @@ fails; inventory commands have a 30-second timeout.
 The production cluster uses the same image as the development cluster,
 `[database].image` (default: the official `postgres:16`). WAL-G trusts the
 persistent mounted CA bundle described above, so no custom PostgreSQL image is
-needed. Existing containers are reused, never automatically upgraded across
-majors; the one-time replacement of PostgreSQL 15 clusters, which also deletes
-the old WAL-G archive, is described in
-[Upgrading to PostgreSQL 16](installation.md#upgrading-to-postgresql-16).
+needed. Existing containers are reused and keep their major version until
+`[database].image` names a newer one. The upgrade then carries every production,
+including its roles and passwords, into a new cluster and deletes the old
+WAL-G archive, as described in
+[Upgrading PostgreSQL](installation.md#upgrading-postgresql). Odoo 20 needs
+PostgreSQL 16 or newer: creating a production with an Odoo 20 image, or
+switching one to it, is refused on an older cluster.
 
 With `[backup]` configured, provisioning and production start/restart/deploy
 require a successful check **inside PostgreSQL as the postgres user**:
