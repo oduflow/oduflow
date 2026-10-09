@@ -8831,6 +8831,12 @@ def main() -> None:
     except StackValidationError as exc:
         print(f"\n❌ {exc}", file=sys.stderr)
         sys.exit(1)
+    except KeyboardInterrupt:
+        # Uvicorn shuts down gracefully on Ctrl+C, then re-raises the captured
+        # SIGINT, which asyncio surfaces here as KeyboardInterrupt. Shutdown is
+        # already complete, so exit with the conventional SIGINT status.
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
 
 
 if __name__ == "__main__":
