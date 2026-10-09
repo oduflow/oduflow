@@ -124,3 +124,21 @@ def test_main_prints_one_line_without_traceback(monkeypatch, capsys):
     assert "Traceback" not in err
     assert "production_token must be distinct" in err
     assert len([line for line in err.splitlines() if line.strip()]) == 1
+
+
+def test_main_exits_130_on_ctrl_c_without_traceback(monkeypatch, capsys):
+    # Uvicorn re-raises the captured SIGINT after a graceful shutdown; main()
+    # must turn the resulting KeyboardInterrupt into a quiet exit.
+    monkeypatch.setattr(
+        server,
+        "_run_cli",
+        lambda: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        server.main()
+
+    assert exc.value.code == 130
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert err.strip() == "Interrupted."
