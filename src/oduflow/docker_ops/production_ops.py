@@ -42,7 +42,12 @@ import docker
 from docker import DockerClient
 from oduflow import secret_store
 from oduflow.docker_ops import image_cleanup
-from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
+from oduflow.docker_ops.client import (
+    chown_recursive,
+    container_env,
+    get_client,
+    get_odoo_uid_gid,
+)
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
     _copy_file_from_container,
@@ -255,6 +260,18 @@ def _get_container(
     if label is not None and label != team.team_id:
         return None
     return container
+
+
+def _container_env_refs(container: Any) -> dict[str, str]:
+    """The ``secret:<name>`` references a container was created with, from its
+    ``oduflow.env_vars`` label (reference form, never values)."""
+    try:
+        declared = json.loads((container.labels or {}).get("oduflow.env_vars", "{}"))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(declared, dict):
+        return {}
+    return secret_store.secret_env_refs(declared)
 
 
 def _require_container(
@@ -1652,11 +1669,30 @@ def reconfigure_production(
     # mid-way) or stale routing labels are drift that the run below repairs
     # from the record.
     container = _get_container(client, settings, team, name)
+    # A rotated team secret keeps its reference, so only the values the
+    # container runs with reveal it; recreating applies the new value.
+    secret_drift: list[str] = []
+    rotated_secrets: list[str] = []
+    if container is not None:
+        effective_env = _production_env_vars(
+            updates.get("env_vars", record.get("env_vars"))
+        )
+        secret_drift = secret_store.drifted_secret_keys(
+            team, effective_env, container_env(container)
+        )
+        # Only a reference the container was created with can have been
+        # rotated; a key added or re-pointed by this call (or by an
+        # interrupted earlier one) is a configuration change, not a rotation.
+        created_refs = _container_env_refs(container)
+        rotated_secrets = [
+            key for key in secret_drift if created_refs.get(key) == effective_env[key]
+        ]
     drift = (
         force_recreate
         or container is None
         or not os.path.isdir(repo_path)
         or routing_drift(settings, team, name, record, container.labels or {})
+        or bool(secret_drift)
     )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
@@ -1831,7 +1867,15 @@ def reconfigure_production(
         )
 
     notes: list[str] = []
-    if not updates:
+    if rotated_secrets:
+        notes.append(
+            "Recreated to apply rotated secret values: "
+            + ", ".join(rotated_secrets)
+            + "."
+        )
+    if force_recreate and not updates:
+        notes.append("The container was recreated on request.")
+    elif not updates and not rotated_secrets:
         notes.append(
             "No settings changed, but drifted state was repaired (the "
             "container, its Traefik routing and/or the repo checkout did not "
@@ -1864,11 +1908,16 @@ def reconfigure_production(
         )
     logger.info(
         "Production reconfigured",
-        extra={"env_name": env_name, "changed": sorted(updates)},
+        extra={
+            "env_name": env_name,
+            "changed": sorted(updates),
+            "rotated_secrets": rotated_secrets,
+        },
     )
     return {
         "name": name,
         "changed": sorted(updates),
+        "rotated_secrets": rotated_secrets,
         "domain": record["domain"],
         "server_mode": server_mode_of(record),
         "url": prod_url(settings, team, record),

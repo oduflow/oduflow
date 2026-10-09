@@ -3031,7 +3031,18 @@ applies to a container whose Traefik routing no longer matches the record
 also recreated, without a separate maintenance window, by the next deploy
 that changes code (`update_production` or an auto-deploy) and by
 `restart_production`; a plain `reconfigure_production(name="erp")` does it
-immediately. Two things reconfigure deliberately does **not** do:
+immediately.
+
+**Applying a rotated secret.** Secret values reach the container only when it
+is created, so `restart_production` keeps running with the old value. After
+replacing a secret's value in the dashboard, call
+`reconfigure_production(name="erp")`: it compares the current value of every
+`secret:<name>` reference with what the container runs with, recreates the
+container when one differs and lists the affected variables by name. A
+reference to a deleted secret is not treated as a change; the next recreate
+reports it. `recreate=true` recreates the container even when nothing differs.
+
+Two things reconfigure deliberately does **not** do:
 
 - Changing `odoo_image` does not migrate the database. A minor image refresh
   is safe; a major Odoo version bump additionally needs an explicit module
@@ -4692,7 +4703,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `POST` | `/api/productions/{name}/auto-update` | Set body `enabled` for webhook deploys |
 | `POST` | `/api/productions/{name}/save-as-template` | Copy the production database and filestore into the dev template named by body `template_name`; optional `overwrite` re-baselines an existing template |
 | `POST` | `/api/productions/{name}/copy-to-dev-mcp` | Set body `enabled` to allow or refuse agent-initiated (MCP) copies of this production into dev; the dashboard itself is never gated |
-| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`, `server_mode` (`workers`/`gevent`), `env_vars` (full replacement of the user-supplied container variables — object or `KEY=VALUE` string, same form as `/api/productions/create`); recreates the container (database and filestore preserved). A present-but-empty `git_user`, `extra_domains` or `env_vars` clears it; an absent key leaves it unchanged |
+| `POST` | `/api/productions/{name}/reconfigure` | Change any of body `domain`, `extra_domains` (list or comma-separated string), `odoo_image`, `branch`, `repo_url`, `git_user`, `extra_addons`, `server_mode` (`workers`/`gevent`), `env_vars` (full replacement of the user-supplied container variables — object or `KEY=VALUE` string, same form as `/api/productions/create`), `recreate` (JSON `true` forces a recreate); recreates the container (database and filestore preserved) and also when a team secret it uses got a new value — the response lists those variables in `rotated_secrets`. A present-but-empty `git_user`, `extra_domains` or `env_vars` clears it; an absent key leaves it unchanged |
 | `POST` | `/api/productions/{name}/odoo-conf` | Set body `options` and remove body `unset` per-production `odoo.conf` overrides; optional `restart` (default true) and `replace` (body `options` become the complete override set) |
 | `GET` | `/api/productions/{name}/logs?lines=200` | Read up to 2,000 log lines |
 | `GET` | `/api/productions/{name}/deploys` | Read recent deploy history |
@@ -7365,7 +7376,8 @@ domains, the Odoo image, the deployed branch or repository URL, the git
 credential user, the extra addon repos, the user environment variables, and
 the server mode. A call that changes nothing still recreates a container whose
 state drifted from the record (missing container or checkout, outdated
-Traefik routing).
+Traefik routing, or a team secret whose value changed since the container was
+created).
 
 Lock: production.
 { .odu-tool-meta }
@@ -7402,8 +7414,16 @@ Lock: production.
 `server_mode`
 :   *str · default empty* — `workers` (sync: pages on 8069, bus on 8072) or `gevent` (async: everything on 8072). Re-tunes the `odoo.conf` workers and re-points Traefik. Omit to leave unchanged.
 
+`recreate`
+:   *bool · default false* — Recreate the container even when no setting, secret value or runtime state differs from the record.
+
 **Use it when**
 
+- A team secret used by the production got a new value: call it with just the
+  name. Secret values reach the container only when it is created, so
+  [`restart_production`](#restart_production) keeps the old value; this call
+  detects the changed value, recreates the container and lists the affected
+  variables (names only).
 - A customer's domain changes, or they bring their own.
 - Moving production onto a release branch.
 - Adding an addons repository production now depends on.
@@ -9384,7 +9404,7 @@ oduflow call create_service '{
 
 The real value is substituted only into the container's environment at creation time. Everything that stores or displays the configuration — the service preset, the environment's Docker label, template metadata, `get_service_info`/`get_environment_info` output — keeps the `secret:<name>` reference. Because only the reference travels, secrets migrate automatically when a service is restored from a preset, an environment is renamed, or an environment is saved as a template and new environments are created from it.
 
-A dangling reference (secret deleted or never created) fails the create/update with a clear error before anything is touched; running containers keep their resolved value until recreated. After replacing a secret's value, recreate the services/environments that use it (`update_service` / `update_environment`): a rotated value counts as a config change, so `update_service` recreates the container even when the image and every other setting are unchanged.
+A dangling reference (secret deleted or never created) fails the create/update with a clear error before anything is touched; running containers keep their resolved value until recreated. After replacing a secret's value, recreate the services, environments and productions that use it (`update_service` / `update_environment` / `reconfigure_production`): a rotated value counts as a config change, so `update_service` and `reconfigure_production` recreate the container even when the image and every other setting are unchanged. `restart_production` and `restart_environment` keep the old value.
 
 The store lives at `{team_data_dir}/secrets.json` with owner-only (0600) file permissions, like the other credential stores. Note the boundary: code running *inside* a container can always read its own environment — secrets protect the MCP/REST/dashboard read surfaces, not the container itself.
 

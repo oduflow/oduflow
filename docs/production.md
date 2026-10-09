@@ -328,7 +328,18 @@ applies to a container whose Traefik routing no longer matches the record
 also recreated, without a separate maintenance window, by the next deploy
 that changes code (`update_production` or an auto-deploy) and by
 `restart_production`; a plain `reconfigure_production(name="erp")` does it
-immediately. Two things reconfigure deliberately does **not** do:
+immediately.
+
+**Applying a rotated secret.** Secret values reach the container only when it
+is created, so `restart_production` keeps running with the old value. After
+replacing a secret's value in the dashboard, call
+`reconfigure_production(name="erp")`: it compares the current value of every
+`secret:<name>` reference with what the container runs with, recreates the
+container when one differs and lists the affected variables by name. A
+reference to a deleted secret is not treated as a change; the next recreate
+reports it. `recreate=true` recreates the container even when nothing differs.
+
+Two things reconfigure deliberately does **not** do:
 
 - Changing `odoo_image` does not migrate the database. A minor image refresh
   is safe; a major Odoo version bump additionally needs an explicit module

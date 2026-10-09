@@ -2645,7 +2645,8 @@ domains, the Odoo image, the deployed branch or repository URL, the git
 credential user, the extra addon repos, the user environment variables, and
 the server mode. A call that changes nothing still recreates a container whose
 state drifted from the record (missing container or checkout, outdated
-Traefik routing).
+Traefik routing, or a team secret whose value changed since the container was
+created).
 
 Lock: production.
 { .odu-tool-meta }
@@ -2682,8 +2683,16 @@ Lock: production.
 `server_mode`
 :   *str · default empty* — `workers` (sync: pages on 8069, bus on 8072) or `gevent` (async: everything on 8072). Re-tunes the `odoo.conf` workers and re-points Traefik. Omit to leave unchanged.
 
+`recreate`
+:   *bool · default false* — Recreate the container even when no setting, secret value or runtime state differs from the record.
+
 **Use it when**
 
+- A team secret used by the production got a new value: call it with just the
+  name. Secret values reach the container only when it is created, so
+  [`restart_production`](#restart_production) keeps the old value; this call
+  detects the changed value, recreates the container and lists the affected
+  variables (names only).
 - A customer's domain changes, or they bring their own.
 - Moving production onto a release branch.
 - Adding an addons repository production now depends on.

@@ -6207,6 +6207,7 @@ def _build_routes(
             server_mode=production_ops.resolve_server_mode(
                 data.get("server_mode"), None
             ),
+            force_recreate=data.get("recreate") is True,
         )
 
     async def api_production_reconfigure(request: Request) -> JSONResponse:

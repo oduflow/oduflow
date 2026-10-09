@@ -78,6 +78,12 @@ def test_reconfigure_passes_server_mode_and_absent_means_unchanged(tmp_path):
         assert reconfigure.call_args.kwargs["server_mode"] == "gevent"
         client.post("/api/productions/erp/reconfigure", json={})
         assert reconfigure.call_args.kwargs["server_mode"] is None
+        assert reconfigure.call_args.kwargs["force_recreate"] is False
+        client.post("/api/productions/erp/reconfigure", json={"recreate": True})
+        assert reconfigure.call_args.kwargs["force_recreate"] is True
+        # Only a JSON true forces it; a truthy string does not.
+        client.post("/api/productions/erp/reconfigure", json={"recreate": "yes"})
+        assert reconfigure.call_args.kwargs["force_recreate"] is False
 
 
 @pytest.fixture
@@ -146,3 +152,24 @@ def test_mcp_reconfigure_empty_mode_means_unchanged(mcp_tool):
         assert reconfigure.call_args.kwargs["server_mode"] is None
         mcp_tool("reconfigure_production", name="erp", server_mode="gevent")
         assert reconfigure.call_args.kwargs["server_mode"] == "gevent"
+
+
+def test_mcp_reconfigure_recreate_and_rotated_secret_summary(mcp_tool):
+    result = {
+        "changed": [],
+        "rotated_secrets": ["API_KEY"],
+        "url": "https://erp.example.com",
+        "server_mode": "workers",
+        "healthy": True,
+        "notes": ["Recreated to apply rotated secret values: API_KEY."],
+    }
+    with patch(
+        "oduflow.server.production_ops.reconfigure_production", return_value=result
+    ) as reconfigure:
+        out = mcp_tool("reconfigure_production", name="erp")
+        assert reconfigure.call_args.kwargs["force_recreate"] is False
+        assert "applied rotated secrets" in out
+        assert "API_KEY" in out
+        out = mcp_tool("reconfigure_production", name="erp", recreate=True)
+        assert reconfigure.call_args.kwargs["force_recreate"] is True
+        assert "recreated on request" in out
