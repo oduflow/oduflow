@@ -57,6 +57,27 @@ When creating an environment, Oduflow:
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
 8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
 
+### Starting a New Branch
+
+The branch must exist on the remote: Oduflow clones only what origin has, so
+push it first (`git push -u origin <branch>`). Over MCP, `create_environment`
+always works this way.
+
+The dashboard's **Create Environment** dialog can start the branch for you.
+Fill in **Base branch**: when the branch name does not exist on origin yet,
+Oduflow clones the base branch, creates the new branch from its tip and pushes
+it to origin before building the environment, so `pull_and_apply`,
+`switch_branch` and the coding agent's checkout all find it there. The push
+uses the team's git credential, which therefore needs write access (an SSH
+deploy key needs *Allow write access*). When the branch already exists, the
+base branch is ignored.
+
+The dialog pre-fills the base branch with the template's source branch (the
+code its database snapshot was taken from) or, when creating from a
+production, with the production's branch. Leave it empty to require an
+existing branch. A pushed branch stays on origin even if a later provisioning
+step fails; a retry then simply clones it.
+
 ### Creating an Environment from Production
 
 `from_production` builds a development environment out of a [production](production.md)'s real data — database, filestore, and the production's code origin (repo, image, extra addons):
@@ -66,6 +87,11 @@ oduflow call create_environment '{"branch":"bugfix-invoice","from_production":"e
 ```
 
 It is mutually exclusive with `template_name` and `local_path`: the production supplies all of them.
+
+In the dashboard, **Create environment** in a production card's menu opens the
+same dialog with the production's repository, Odoo image, git credential and
+extra addons filled in (all editable) and the base branch set to the
+production's branch.
 
 The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
 

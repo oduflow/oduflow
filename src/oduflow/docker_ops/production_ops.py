@@ -2711,6 +2711,10 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
                 "repo_url": record.get("repo_url", ""),
                 "branch": record.get("branch", ""),
                 "odoo_image": record.get("odoo_image", ""),
+                # The dashboard's "create environment from production" dialog
+                # pre-fills the code origin from these.
+                "git_user": record.get("git_user", ""),
+                "extra_addons": record.get("extra_addons") or {},
                 "server_mode": server_mode_of(record),
                 "auto_update": bool(record.get("auto_update")),
                 "allow_copy_to_dev_mcp": bool(

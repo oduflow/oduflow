@@ -123,6 +123,59 @@ def test_api_create_separate_branch_and_env_name(tmp_path):
     assert create.call_args.kwargs["env_name"] == "oldstaging"
 
 
+def test_api_create_passes_base_branch(tmp_path):
+    """A base branch lets the dashboard start a branch origin does not have."""
+    settings = _open_settings(tmp_path)
+    app = Starlette()
+    mount_web_ui(app, lambda: settings, LockManager())
+    client = TestClient(app)
+
+    with patch(
+        "oduflow.web_ui.env_ops.create_environment",
+        return_value={"url": "http://localhost:50000"},
+    ) as create:
+        resp = client.post(
+            "/api/environments/create",
+            json={
+                "branch": "feature/new",
+                "base_branch": "main",
+                "repo_url": "r",
+                "odoo_image": "i",
+            },
+        )
+
+    assert resp.json()["ok"] is True
+    assert create.call_args.args[2] == "feature/new"
+    assert create.call_args.kwargs["base_branch"] == "main"
+
+
+@pytest.mark.parametrize(
+    "branch, base_branch",
+    [("feature/new", "-main"), ("bad..name", "main")],
+)
+def test_api_create_rejects_invalid_branch_with_base(tmp_path, branch, base_branch):
+    """Both names reach checkout -b / push, so git must accept them first."""
+    settings = _open_settings(tmp_path)
+    app = Starlette()
+    mount_web_ui(app, lambda: settings, LockManager())
+    client = TestClient(app)
+
+    with patch("oduflow.web_ui.env_ops.create_environment") as create:
+        resp = client.post(
+            "/api/environments/create",
+            json={
+                "branch": branch,
+                "base_branch": base_branch,
+                "repo_url": "r",
+                "odoo_image": "i",
+            },
+        )
+        create.assert_not_called()
+
+    assert resp.status_code == 400
+    assert "Invalid branch name" in resp.json()["error"]
+
+
 def test_api_create_env_name_defaults_to_branch(tmp_path):
     settings = _open_settings(tmp_path)
     app = Starlette()

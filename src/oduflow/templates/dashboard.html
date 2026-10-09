@@ -1589,11 +1589,16 @@
       <div class="form-group" id="cr-from-prod-group" style="display:none">
         <label>Source production</label>
         <div class="prod-mono" id="cr-from-prod-name"></div>
-        <div class="hint">A copy of this production's database and filestore, through the managed template <code id="cr-from-prod-template"></code> (published on first use, reused afterwards). Repository, image and extra addons come from the production. The database is sanitized on creation. Refresh the copy with the production's <em>Save as template</em> action.</div>
+        <div class="hint">A copy of this production's database and filestore, through the managed template <code id="cr-from-prod-template"></code> (published on first use, reused afterwards). Repository, image and extra addons below are filled in from the production. The database is sanitized on creation. Refresh the copy with the production's <em>Save as template</em> action.</div>
       </div>
       <div class="form-group">
         <label for="cr-branch">Branch name</label>
         <input type="text" id="cr-branch" placeholder="e.g. feature/my-branch">
+      </div>
+      <div class="form-group">
+        <label for="cr-base-branch">Base branch</label>
+        <input type="text" id="cr-base-branch" placeholder="e.g. main">
+        <div class="hint">Used only when the branch above does not exist in the repository yet: it is created from this branch and pushed, so the git credential needs write access. Leave empty to require an existing branch.</div>
       </div>
       <div class="form-group">
         <label for="cr-env-name">Environment name</label>
@@ -5922,6 +5927,7 @@ function populateTemplateSelect() {
       if (tpl.auto_install_modules && !document.getElementById('cr-auto-install').value.trim()) {
         document.getElementById('cr-auto-install').value = tpl.auto_install_modules;
       }
+      setCreateBaseBranch(tpl.source_branch);
       var tplExtras = tpl.extra_addons || {};
       document.querySelectorAll('.cr-extra-cb').forEach(function(cb) {
         cb.checked = cb.value in tplExtras;
@@ -5935,7 +5941,19 @@ function populateTemplateSelect() {
     }
     fillCreateTemplateEnvVars(tpl);
   };
-  fillCreateTemplateEnvVars(cachedTemplates.find(function(t) { return t.template_name === sel.value; }));
+  // A production source hides the picker, so nothing from a template applies:
+  // the first template's env vars or branch would belong to unrelated data.
+  if (_createFromProduction) return;
+  var initial = cachedTemplates.find(function(t) { return t.template_name === sel.value; });
+  fillCreateTemplateEnvVars(initial);
+  if (initial) setCreateBaseBranch(initial.source_branch);
+}
+
+// A new branch starts from the code its database snapshot was taken from (a
+// template's source branch, a production's branch). Only a known branch
+// replaces the field, so a template without one keeps what the user typed.
+function setCreateBaseBranch(branch) {
+  if (branch) document.getElementById('cr-base-branch').value = branch;
 }
 
 function openCreateFromTemplate(templateName) {
@@ -5947,6 +5965,7 @@ function openCreateFromTemplate(templateName) {
   document.getElementById('cr-repo').value = tpl && tpl.repo_url ? tpl.repo_url : '';
   document.getElementById('cr-image').value = tpl && tpl.odoo_image ? tpl.odoo_image : '';
   document.getElementById('cr-auto-install').value = tpl && tpl.auto_install_modules ? tpl.auto_install_modules : '';
+  document.getElementById('cr-base-branch').value = tpl && tpl.source_branch ? tpl.source_branch : '';
   fillCreateTemplateEnvVars(tpl);
   var errEl = document.getElementById('create-error');
   errEl.style.display = 'none';
@@ -5956,7 +5975,10 @@ function openCreateFromTemplate(templateName) {
     populateTemplateSelect();
     var sel = document.getElementById('cr-template');
     sel.value = templateName;
-    fillCreateTemplateEnvVars(cachedTemplates.find(function(t) { return t.template_name === templateName; }) || tpl);
+    var fresh = cachedTemplates.find(function(t) { return t.template_name === templateName; }) || tpl;
+    fillCreateTemplateEnvVars(fresh);
+    // Assigned outright: populateTemplateSelect() filled the first template's.
+    document.getElementById('cr-base-branch').value = fresh && fresh.source_branch ? fresh.source_branch : '';
   });
   loadCredentials().then(function() {
     var sel = document.getElementById('cr-git-user');
@@ -6014,11 +6036,18 @@ function setCreateSourceProduction(name) {
 
 function openCreateModal(fromProduction) {
   setCreateSourceProduction(fromProduction);
+  // A production supplies the code origin: show its repository, image, git
+  // credential, extra addons and branch so they can be checked (or changed)
+  // before the copy is made, the same way a template card pre-fills them.
+  var prod = fromProduction
+    ? cachedProds.find(function(p) { return p.name === fromProduction; })
+    : null;
   document.getElementById('cr-branch').value = '';
   document.getElementById('cr-env-name').value = '';
   document.getElementById('cr-hostname').value = '';
-  document.getElementById('cr-repo').value = '';
-  document.getElementById('cr-image').value = '';
+  document.getElementById('cr-repo').value = prod && prod.repo_url ? prod.repo_url : '';
+  document.getElementById('cr-image').value = prod && prod.odoo_image ? prod.odoo_image : '';
+  document.getElementById('cr-base-branch').value = prod && prod.branch ? prod.branch : '';
   document.getElementById('cr-auto-install').value = '';
   document.getElementById('cr-env-vars').value = '';
   document.getElementById('cr-env-vars-hint').textContent = CREATE_ENV_HINT;
@@ -6034,6 +6063,7 @@ function openCreateModal(fromProduction) {
     (cachedCredentials || []).forEach(function(c) {
       sel.innerHTML += '<option value="' + escAttr(c.username) + '">' + esc(c.username) + ' (' + esc(c.host) + ')</option>';
     });
+    if (prod && prod.git_user) sel.value = prod.git_user;
   });
   // The repo list arrives asynchronously; until it does there is nothing to
   // tick, and a stale state from the previous opening would be misleading.
@@ -6046,12 +6076,15 @@ function openCreateModal(fromProduction) {
       initExtraRepoTools('cr-extra');
       return;
     }
+    var prodExtras = (prod && prod.extra_addons) ? prod.extra_addons : {};
     container.innerHTML = cachedExtraRepos.map(function(r) {
+      var checked = (r.name in prodExtras) ? ' checked' : '';
       return '<label class="check-item">' +
-        '<input type="checkbox" class="cr-extra-cb" value="' + escAttr(r.name) + '">' +
+        '<input type="checkbox" class="cr-extra-cb" value="' + escAttr(r.name) + '"' + checked + '>' +
         esc(r.name) + ' <span class="hint" style="margin-top:0;">(' + esc(r.repo_url) + ')</span>' +
         '<input type="text" class="cr-extra-branch-input branch-input" data-repo="' + escAttr(r.name) + '"' +
-        ' placeholder="branch" value="" list="extra-branches-' + escAttr(r.name) + '">' +
+        ' placeholder="branch" value="' + escAttr(prodExtras[r.name] || '') + '"' +
+        ' list="extra-branches-' + escAttr(r.name) + '">' +
         extraRepoBranchDatalist(r) +
       '</label>';
     }).join('');
@@ -6132,6 +6165,7 @@ async function submitFeedback() {
 
 async function submitCreate() {
   var branch = document.getElementById('cr-branch').value.trim();
+  var baseBranch = document.getElementById('cr-base-branch').value.trim();
   var envName = document.getElementById('cr-env-name').value.trim();
   var hostname = document.getElementById('cr-hostname').value.trim();
   var repo = document.getElementById('cr-repo').value.trim();
@@ -6174,6 +6208,7 @@ async function submitCreate() {
     }
     var payload = {
       branch: branch,
+      base_branch: baseBranch,
       env_name: envName,
       hostname: hostname,
       repo_url: repo,
@@ -6195,9 +6230,13 @@ async function submitCreate() {
     var data = await readResult(r);
     if (r.ok && data.ok) {
       closeCreateModal();
+      var createdFrom = data.result && data.result.branch_created_from;
       showToast('Environment "' + (envName || branch) + '" created' +
         (data.from_production
           ? ' from production "' + data.from_production + '" (template "' + data.template_name + '")'
+          : '') +
+        (createdFrom
+          ? '; new branch "' + branch + '" pushed from "' + createdFrom + '"'
           : ''));
       await Promise.all([
         data.from_production ? loadTemplates() : Promise.resolve(),
