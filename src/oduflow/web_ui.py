@@ -1861,6 +1861,9 @@ def _build_routes(
         auto_install_raw = (body.get("auto_install_modules") or "").strip()
         hostname = (body.get("hostname") or "").strip()
         from_production = (body.get("from_production") or "").strip()
+        # Where the branch starts when origin does not have it yet; it is then
+        # created and pushed. Empty keeps the old rule: the branch must exist.
+        base_branch = (body.get("base_branch") or "").strip()
         env_vars = _env_vars_from_body(body.get("env_vars"))
         if from_production and template_name_raw:
             return JSONResponse(
@@ -1885,6 +1888,13 @@ def _build_routes(
             # and starts no work that has to be unwound.
             if hostname:
                 hostname = validate_env_hostname(hostname)
+            if base_branch:
+                from oduflow.extra_addons import validate_branch_name
+
+                # Both names reach git (checkout -b, push), so both must be
+                # names git accepts as branches.
+                validate_branch_name(base_branch)
+                validate_branch_name(branch)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -1995,6 +2005,7 @@ def _build_routes(
                 env_vars={**template_env_vars, **env_vars} or None,
                 local_path=local_path_from_meta,
                 hostname=hostname,
+                base_branch=base_branch,
             )
             payload: dict[str, Any] = {"ok": True, "result": result}
             if from_production:

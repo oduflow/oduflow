@@ -123,7 +123,7 @@ The agent writes code, installs the module, reads the traceback, fixes the error
 - **Instant environment creation** from large production databases via PostgreSQL templates and overlayfs
 - **Minimal disk footprint** — environments share the template DB and filestore; only per-branch changes consume additional space
 - **Template-free mode** — create environments from scratch (`template_name="none"`) when no production dump is available
-- **Auto branch creation** — if a branch doesn't exist on the remote, Oduflow clones the default branch and creates the new branch automatically
+- **New branches from the dashboard** — give a base branch and a branch that doesn't exist on the remote yet is created from it and pushed (the git credential needs write access)
 - **Extra addons repositories** — mount shared addon repos (e.g. Odoo Enterprise) into environments via git worktrees; `addons_path` is auto-merged into `odoo.conf`
 - **Environment protection** — protect environments from accidental deletion via a toggle in the dashboard or REST API
 

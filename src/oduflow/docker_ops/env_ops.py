@@ -1984,6 +1984,116 @@ def _clone_repo(
         )
 
 
+# git's wording when the remote refuses a push for lack of rights: HTTPS
+# (403 / "Permission to ... denied"), SSH deploy keys ("marked as read only")
+# and a credential store that cannot authenticate at all.
+_PUSH_DENIED_KEYWORDS = (
+    "permission",
+    "denied",
+    "403",
+    "read only",
+    "read-only",
+    "write access",
+    "authentication failed",
+    "could not read username",
+    "terminal prompts disabled",
+    "invalid username or password",
+)
+
+
+def _clone_or_start_branch(
+    repo_url: str,
+    branch: str,
+    repo_path: str,
+    team: TeamSettings,
+    *,
+    git_user: str = "",
+    base_branch: str = "",
+) -> bool:
+    """Clone *branch*, or start it from *base_branch* when origin lacks it.
+
+    A new branch is pushed to origin straight away: every later step fetches
+    the branch from there (pull_and_apply, switch_branch, the agent's own
+    checkout), so a branch that exists only in this checkout would break them.
+    Returns whether the branch was created.
+    """
+    try:
+        _clone_repo(repo_url, branch, repo_path, team, git_user=git_user)
+        return False
+    except NotFoundError:
+        if not base_branch or base_branch == branch:
+            raise
+    try:
+        _clone_repo(repo_url, base_branch, repo_path, team, git_user=git_user)
+    except NotFoundError:
+        raise NotFoundError(
+            f"Branch '{branch}' does not exist on origin, and neither does its "
+            f"base branch '{base_branch}'."
+        ) from None
+    _push_new_branch(repo_url, branch, base_branch, repo_path, team)
+    logger.info(
+        "Created branch '%s' from '%s' on %s",
+        branch,
+        base_branch,
+        sanitize_repo_url(repo_url),
+    )
+    return True
+
+
+def _push_new_branch(
+    repo_url: str,
+    branch: str,
+    base_branch: str,
+    repo_path: str,
+    team: TeamSettings,
+    *,
+    timeout: int = 60,
+) -> None:
+    """Start *branch* at the checked-out base tip and publish it on origin."""
+    git_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+    steps = (
+        ("git checkout", ["git", "-C", repo_path, "checkout", "-b", branch]),
+        # HEAD:refs/heads/<branch> names exactly the new branch and can never
+        # be read as an option. No --force: a branch someone else pushed in
+        # the meantime is never overwritten.
+        (
+            "git push",
+            [
+                "git",
+                "-C",
+                repo_path,
+                "push",
+                "--set-upstream",
+                "origin",
+                f"HEAD:refs/heads/{branch}",
+            ],
+        ),
+    )
+    for label, cmd in steps:
+        try:
+            subprocess.run(
+                cmd, check=True, capture_output=True, timeout=timeout, env=git_env
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = redact_url_credentials(
+                e.stderr.decode("utf-8") if e.stderr else str(e)
+            )
+            lowered = error_msg.lower()
+            if label == "git push" and any(
+                kw in lowered for kw in _PUSH_DENIED_KEYWORDS
+            ):
+                raise RepoAuthError(
+                    f"Branch '{branch}' does not exist on origin and could not "
+                    f"be created from '{base_branch}': the git credential cannot "
+                    f"push to {sanitize_repo_url(repo_url)}. Push the branch "
+                    f"yourself (git push -u origin {branch}) or use a credential "
+                    "with write access, then retry."
+                )
+            raise ExternalCommandError(label, e.returncode, error_msg)
+        except subprocess.TimeoutExpired:
+            raise ExternalCommandError(label, -1, f"{label} timed out ({timeout}s).")
+
+
 def build_env_traefik_labels(
     settings: Settings,
     team: TeamSettings,
@@ -2115,8 +2225,14 @@ def create_environment(
     stack_labels: dict[str, str] | None = None,
     hostname: str = "",
     hostname_source: str = "",
+    base_branch: str = "",
 ) -> dict[str, Any]:
-    """Allocate routing state, then provision the environment itself."""
+    """Allocate routing state, then provision the environment itself.
+
+    *base_branch*, when given, is where a *branch* missing on origin starts
+    from. The new branch is pushed to origin and stays there even when a later
+    provisioning step fails: a retry then simply clones it.
+    """
     resolved_env_name = env_name or branch
     requested_hostname = validate_env_hostname(hostname) if hostname else ""
     if requested_hostname and settings.routing_mode != "traefik":
@@ -2211,6 +2327,7 @@ def create_environment(
             stack_labels=stack_labels,
             hostname=assigned_hostname,
             hostname_source=assigned_hostname_source,
+            base_branch=base_branch,
         )
     except Exception:
         if reservation_active:
@@ -2246,6 +2363,7 @@ def _create_environment_impl(
     stack_labels: dict[str, str] | None = None,
     hostname: str = "",
     hostname_source: str = "",
+    base_branch: str = "",
 ) -> dict[str, Any]:
     env_name = env_name or branch
     from oduflow.naming import PROD_ENV_PREFIX
@@ -2417,6 +2535,7 @@ def _create_environment_impl(
 
     os.makedirs(workspace_path, exist_ok=True)
 
+    branch_created = False
     if local_mount:
         # No clone: the agent's checkout is bind-mounted live. The directory
         # must already exist on the host (validated in the tool layer too).
@@ -2429,12 +2548,13 @@ def _create_environment_impl(
         # against this snapshot. Git is deliberately ignored in live-mount mode.
         _write_local_snapshot(repo_path, env_name, team)
     else:
-        _clone_repo(
+        branch_created = _clone_or_start_branch(
             repo_url,
             branch,
             repo_path,
             team,
             git_user=git_user,
+            base_branch=base_branch,
         )
 
     # The template database is a snapshot of some commit; this checkout may sit
@@ -2725,6 +2845,9 @@ def _create_environment_impl(
     result["extra_addons"] = extra_addons or {}
     result["extra_addons_revisions"] = extra_revisions
     result["local_path"] = repo_path if local_mount else ""
+    # Set when the branch was missing on origin and was started (and pushed)
+    # from this base branch.
+    result["branch_created_from"] = base_branch if branch_created else ""
     result["template_lineage"] = lineage
     result["elapsed_seconds"] = round(time.time() - start_time, 1)
     activity.touch(team, env_name)
