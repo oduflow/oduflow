@@ -53,6 +53,8 @@ def exclusive(settings: Settings, purpose: str) -> Iterator[None]:
     except BlockingIOError:
         if fd != _fd:
             os.close(fd)
+        # A failed conversion may have dropped this process's shared lock;
+        # callers exit on this error rather than run on as a server.
         raise BusyError(
             f"Another Oduflow server is running on {settings.base_data_dir}. "
             f"Stop it to {purpose}, then start this one again."
