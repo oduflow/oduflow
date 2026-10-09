@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from oduflow import postgres_migration
-from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
+from oduflow.errors import BusyError, ExternalCommandError, PrerequisiteNotMetError
 from oduflow.settings import BackupSettings, Settings, TeamSettings
 
 pm = postgres_migration
@@ -1199,12 +1200,31 @@ class TestUpgrade:
         settings = _settings(tmp_path)
         with (
             patch.object(pm, "get_client"),
-            patch.object(pm, "_plan", return_value=None),
-            patch.object(pm, "_run") as run,
+            patch.object(pm, "_outdated", return_value=False),
+            patch.object(pm.instance_lock, "exclusive") as exclusive,
+            patch.object(pm, "_plan") as plan,
         ):
             pm.upgrade(settings)
-        run.assert_not_called()
+        # Other servers may run: nothing needs them stopped.
+        exclusive.assert_not_called()
+        plan.assert_not_called()
         assert not os.path.exists(os.path.join(settings.base_data_dir, pm._JOURNAL))
+
+    def test_requested_upgrade_is_refused_next_to_another_server(self, tmp_path):
+        settings = _settings(tmp_path)
+        other = pm.instance_lock._open(settings)
+        try:
+            fcntl.flock(other, fcntl.LOCK_SH)  # a running server
+            with (
+                patch.object(pm, "get_client"),
+                patch.object(pm, "_outdated", return_value=True),
+                patch.object(pm, "_plan") as plan,
+            ):
+                with pytest.raises(BusyError, match="Stop it to upgrade PostgreSQL"):
+                    pm.upgrade(settings)
+            plan.assert_not_called()
+        finally:
+            os.close(other)
 
     def test_plan_is_journaled_before_it_runs(self, tmp_path):
         settings = _settings(tmp_path)
@@ -1215,6 +1235,7 @@ class TestUpgrade:
 
         with (
             patch.object(pm, "get_client"),
+            patch.object(pm, "_outdated", return_value=True),
             patch.object(pm, "_plan", return_value=state),
             patch.object(pm, "_run", side_effect=run) as runner,
         ):
@@ -1228,6 +1249,7 @@ class TestUpgradeAfterResume:
         resumed, planned = _state([_cluster("dev")]), _state([_cluster("prod")])
         with (
             patch.object(pm, "get_client"),
+            patch.object(pm, "_outdated", return_value=True),
             patch.object(pm, "_resume", return_value=resumed),
             patch.object(pm, "_plan", return_value=planned),
             patch.object(pm, "_run") as run,

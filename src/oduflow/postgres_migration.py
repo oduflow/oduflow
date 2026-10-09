@@ -20,7 +20,6 @@ so setting the image back cancels it.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import io
 import json
 import logging
@@ -37,7 +36,12 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import production_registry, s3_client, service_database_credentials
+from oduflow import (
+    instance_lock,
+    production_registry,
+    s3_client,
+    service_database_credentials,
+)
 from oduflow.docker_ops import system_ops
 from oduflow.docker_ops.client import get_client, run_for_output
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
@@ -636,18 +640,6 @@ def _dump_path(settings: Settings, kind: str = "") -> str:
 
 def _save(settings: Settings, state: dict[str, Any]) -> None:
     atomic_write_private_json(_journal_path(settings), state)
-
-
-@contextlib.contextmanager
-def _lock(settings: Settings) -> Iterator[None]:
-    """Serialize upgrades across server processes."""
-    fd = os.open(_journal_path(settings) + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 def _run_helper(
@@ -1293,15 +1285,27 @@ def preflight(settings: Settings) -> None:
     _plan(get_client(), settings, preflight=True)
 
 
+def _outdated(client: DockerClient, settings: Settings) -> bool:
+    """Some cluster is older than ``[database].image``."""
+    major = _configured_major(client, settings)
+    return any(m < major for *_, m in _initialized(client, settings))
+
+
 def upgrade(settings: Settings) -> None:
     """Upgrade every cluster older than ``[database].image``, or resume doing so.
 
     Runs on every start after :func:`validate_configuration`; returns at once
     when no upgrade is requested or under way.
     """
-    os.makedirs(settings.base_data_dir, exist_ok=True)
-    with _lock(settings):
-        client = get_client()
+    client = get_client()
+    legacy = os.path.join(settings.base_data_dir, _LEGACY_JOURNAL)
+    if not (
+        os.path.isfile(_journal_path(settings))
+        or os.path.isfile(legacy)
+        or _outdated(client, settings)
+    ):
+        return
+    with instance_lock.exclusive(settings, "upgrade PostgreSQL"):
         state = _resume(client, settings)
         if state is not None:
             _run(client, settings, state)
@@ -1324,12 +1328,10 @@ def refuse_pending(settings: Settings) -> None:
     Only the server upgrades: a separate process doing so could remove
     clusters from under a running server.
     """
-    client = get_client()
-    major = _configured_major(client, settings)
     if (
         os.path.isfile(_journal_path(settings))
         or _legacy_pending(settings)
-        or any(m < major for *_, m in _initialized(client, settings))
+        or _outdated(get_client(), settings)
     ):
         raise PrerequisiteNotMetError(
             "A PostgreSQL upgrade is requested or under way. Restart the Oduflow "

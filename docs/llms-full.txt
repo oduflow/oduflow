@@ -867,8 +867,11 @@ image configured. If a template cannot be restored, fix its dump and restart,
 or delete the template with `oduflow delete-template <name> --team <id>` and
 restart; productions and services keep running meanwhile.
 
-Only the server upgrades: `oduflow stack apply` refuses while an upgrade is
-requested or under way, so restart the server first.
+Only the server upgrades, and only when no other Oduflow server runs on the
+same data directory (an stdio MCP client starts its own): stop the others
+first, or startup refuses before changing anything. `oduflow stack apply`
+refuses while an upgrade is requested or under way, so restart the server
+first.
 
 ## Configuration Reference
 
