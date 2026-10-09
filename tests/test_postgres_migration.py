@@ -147,38 +147,14 @@ class TestRemoveOld:
         client.volumes.get.return_value.attrs = {"CreatedAt": "t"}
         return client
 
-    @pytest.mark.parametrize(
-        ("kind", "backup", "expected"),
-        [("prod", True, 1), ("prod", False, 0), ("dev", True, 0)],
-    )
-    def test_archive_deleted_only_for_backed_up_prod(
-        self, tmp_path, kind, backup, expected
-    ):
-        settings = _settings(tmp_path, backup=backup)
-        with (
-            patch.object(pm, "_delete_walg_archive") as delete,
-            patch.object(
-                pm.system_ops,
-                "_pg_tablespaces_host_dir",
-                return_value=str(tmp_path / "missing"),
-            ),
-        ):
-            pm._remove_old(self._client(), settings, _state(), _cluster(kind))
-        assert delete.call_count == expected
-
-    def test_s3_failure_leaves_the_stopped_cluster_intact(self, tmp_path):
+    def test_removal_never_touches_the_archive(self, tmp_path):
         settings = _settings(tmp_path)
         client = self._client()
-        with patch.object(
-            pm,
-            "_delete_walg_archive",
-            side_effect=PrerequisiteNotMetError("AccessDenied"),
-        ):
-            with pytest.raises(PrerequisiteNotMetError):
-                pm._remove_old(client, settings, _state(), _cluster("prod"))
-        client.containers.get.return_value.stop.assert_called_once()
-        client.containers.get.return_value.remove.assert_not_called()
-        client.volumes.get.return_value.remove.assert_not_called()
+        with patch.object(pm, "_delete_walg_archive") as delete:
+            pm._remove_old(client, settings, _state(), _cluster("prod"))
+        delete.assert_not_called()
+        client.containers.get.return_value.remove.assert_called_once()
+        client.volumes.get.return_value.remove.assert_called_once()
 
     def test_only_the_old_majors_tablespace_files_are_removed(self, tmp_path):
         settings = _settings(tmp_path)
@@ -196,6 +172,86 @@ class TestRemoveOld:
                 self._client(), settings, _state(), _cluster("dev", old_major=16)
             )
         assert "-name 'PG_16_*'" in run.call_args.args[2][1]
+
+
+class TestRetireArchive:
+    def _run(self, settings, state, client):
+        with (
+            patch.object(pm, "_stop_applications"),
+            patch.object(pm, "_dump_cluster"),
+            patch.object(pm, "_remove_old") as remove,
+            patch.object(pm, "_retire_archive") as retire,
+            patch.object(pm, "_create_new"),
+            patch.object(pm.system_ops, "_wait_pg_ready"),
+            patch.object(pm, "_restore_cluster"),
+            patch.object(pm, "_start_applications"),
+            patch.object(pm, "_restore_templates"),
+            patch.object(pm, "_finish"),
+        ):
+            retire.side_effect = lambda *a: remove.assert_not_called()
+            client.containers.get.return_value.id = "new"
+            pm._run(client, settings, state)
+        return retire
+
+    @pytest.mark.parametrize(
+        ("kinds", "backup", "expected"),
+        [(("dev", "prod"), True, 1), (("prod",), False, 0), (("dev",), True, 0)],
+    )
+    def test_only_a_backed_up_prod_archive_goes_first(
+        self, tmp_path, kinds, backup, expected
+    ):
+        settings = _settings(tmp_path, backup=backup)
+        state = _state([_cluster(k) for k in kinds])
+        retire = self._run(settings, state, MagicMock())
+        assert retire.call_count == expected
+
+    def test_deleted_archive_is_not_deleted_again(self, tmp_path):
+        settings = _settings(tmp_path)
+        state = _state([_cluster("prod", phase="remove_old")], archive_deleted=True)
+        assert self._run(settings, state, MagicMock()).call_count == 0
+
+    def test_s3_failure_cancels_with_every_old_cluster_intact(self, tmp_path):
+        settings = _settings(tmp_path)
+        state = _state(
+            [_cluster("dev", phase="remove_old"), _cluster("prod", phase="remove_old")],
+            stopped=["shop"],
+        )
+        pm._save(settings, state)
+        os.makedirs(pm._dump_path(settings, "prod"))
+        old_prod = _pg_container("oduflow-prod-db", status="exited")
+        shop = MagicMock()
+        client = _docker(
+            containers={
+                "oduflow-db": _pg_container("oduflow-db"),
+                "oduflow-prod-db": old_prod,
+                "shop": shop,
+            }
+        )
+        client.volumes.get.return_value.attrs = {"CreatedAt": "t"}
+        with (
+            patch.object(
+                pm,
+                "_delete_walg_archive",
+                side_effect=PrerequisiteNotMetError("AccessDenied"),
+            ),
+            patch("oduflow.backup_scheduler.request_base_backup") as base_backup,
+        ):
+            with pytest.raises(PrerequisiteNotMetError, match="AccessDenied"):
+                pm._retire_archive(client, settings, state, state["clusters"][1])
+        old_prod.stop.assert_called_once()
+        old_prod.start.assert_called_once()  # was running before the upgrade
+        shop.start.assert_called_once()
+        base_backup.assert_called_once_with(settings)  # possibly partly deleted
+        assert not os.path.exists(os.path.join(settings.base_data_dir, pm._JOURNAL))
+        assert not os.path.exists(pm._dump_path(settings))
+
+    def test_success_is_journaled(self, tmp_path):
+        settings = _settings(tmp_path)
+        state = _state([_cluster("prod", phase="remove_old")])
+        client = _docker(containers={"oduflow-prod-db": _pg_container("x")})
+        with patch.object(pm, "_delete_walg_archive"):
+            pm._retire_archive(client, settings, state, state["clusters"][0])
+        assert _journal(settings)["archive_deleted"] is True
 
 
 def _write_dump(team, name, filename="dump.pgdump"):
@@ -352,6 +408,16 @@ class TestImageReferences:
     )
     def test_tag_is_trusted_only_for_official_images(self, image, major):
         assert pm._image_major(image) == major
+
+
+class TestBinaryMajor:
+    def test_an_image_id_is_probed_once(self):
+        with patch.object(
+            pm, "run_for_output", return_value=b"postgres (PostgreSQL) 16.4"
+        ) as run:
+            assert pm._binary_major(MagicMock(), "sha256:probe-once") == 16
+            assert pm._binary_major(MagicMock(), "sha256:probe-once") == 16
+        run.assert_called_once()
 
 
 class TestValidateConfiguration:
@@ -526,7 +592,9 @@ class TestInventory:
         settings = _settings(tmp_path)
         # A production deleted with its database kept still has its workspace.
         os.makedirs(os.path.join(settings.teams["1"].workspaces_dir, "prod-old"))
-        databases, extensions, _ = self._run(
+        # A development branch prod/Feature_X is no production.
+        os.makedirs(os.path.join(settings.teams["1"].workspaces_dir, "prod-Feature_X"))
+        databases, extensions, size = self._run(
             settings,
             "prod",
             [
@@ -542,6 +610,7 @@ class TestInventory:
             "oduflow_service_1_pay",
         ]
         assert extensions == {"pg_trgm"}
+        assert size == 10  # one query for all databases
 
     def test_unknown_databases_are_refused(self, tmp_path):
         settings = _settings(tmp_path)
@@ -833,8 +902,7 @@ class TestRun:
             with pytest.raises(ExternalCommandError):
                 pm._run(client, settings, state)
         remove.assert_not_called()
-        client.containers.get.assert_called_once_with("svc")
-        client.containers.get.return_value.start.assert_called_once()
+        assert call("svc") in client.containers.get.call_args_list
         assert not os.path.exists(os.path.join(settings.base_data_dir, pm._JOURNAL))
         assert not os.path.exists(pm._dump_path(settings))
 
@@ -858,6 +926,7 @@ class TestRun:
                 pm, "_create_new", side_effect=lambda *a: calls.append("create")
             ),
             patch.object(pm.system_ops, "_wait_pg_ready"),
+            patch.object(pm, "_start_applications"),
             patch.object(pm, "_restore_templates"),
             patch.object(pm, "_finish"),
         )
@@ -882,6 +951,30 @@ class TestRun:
             for p in patches:
                 p.stop()
 
+    def test_applications_start_once_and_before_the_templates(self, tmp_path):
+        settings = _settings(tmp_path)
+        state = _state([_cluster("dev", phase="done", new_container_id="new")])
+        new = MagicMock(id="new", status="running")
+        client = MagicMock()
+        client.containers.get.return_value = new
+        order = []
+        with (
+            patch.object(pm.system_ops, "_wait_pg_ready"),
+            patch.object(
+                pm, "_start_applications", side_effect=lambda *a: order.append("apps")
+            ),
+            patch.object(
+                pm,
+                "_restore_templates",
+                side_effect=PrerequisiteNotMetError("broken template"),
+            ),
+        ):
+            with pytest.raises(PrerequisiteNotMetError):
+                pm._run(client, settings, state)
+            with pytest.raises(PrerequisiteNotMetError):
+                pm._run(client, settings, _journal(settings))
+        assert order == ["apps"]
+
     def test_replaced_cluster_must_still_be_the_one_created(self, tmp_path):
         settings = _settings(tmp_path)
         cluster = _cluster("dev", phase="restore", new_container_id="new")
@@ -900,6 +993,37 @@ class TestResume:
         assert pm._resume(client, settings) is None
         client.containers.get.return_value.start.assert_called_once()
         assert not os.path.exists(os.path.join(settings.base_data_dir, pm._JOURNAL))
+
+    def test_dumped_but_unremoved_clusters_are_cancelled(self, tmp_path):
+        # Killed right after the dumps: the image can still be set back.
+        settings = replace(_settings(tmp_path), postgres_image="postgres:15")
+        pm._save(
+            settings,
+            _state(
+                [
+                    _cluster("dev", phase="remove_old"),
+                    _cluster("prod", phase="remove_old"),
+                ]
+            ),
+        )
+        old_prod = _pg_container("oduflow-prod-db", status="exited")
+        client = _docker(
+            containers={
+                "oduflow-db": _pg_container("oduflow-db"),
+                "oduflow-prod-db": old_prod,
+            }
+        )
+        client.volumes.get.return_value.attrs = {"CreatedAt": "t"}
+        assert pm._resume(client, settings) is None
+        old_prod.start.assert_called_once()
+        assert not os.path.exists(os.path.join(settings.base_data_dir, pm._JOURNAL))
+
+    def test_removal_under_way_is_resumed(self, tmp_path):
+        settings = _settings(tmp_path)
+        state = _state([_cluster("dev", phase="remove_old")])
+        pm._save(settings, state)
+        client = _docker(containers={})  # the old container is already gone
+        assert pm._resume(client, settings) == state
 
     def test_image_must_stay_after_a_removal(self, tmp_path):
         settings = replace(_settings(tmp_path), postgres_image="postgres:15")
@@ -958,6 +1082,32 @@ class TestLegacyJournal:
         assert pm._resume(client, settings) is None
         assert not os.path.exists(path)
 
+    def test_intact_cluster_is_left_to_a_regular_plan(self, tmp_path):
+        # The dev cluster was replaced, the prod one survived a refused S3
+        # delete and may hold productions created since.
+        settings = _settings(tmp_path, prod_enabled=True)
+        prod = {
+            **self._legacy_cluster("remove_old"),
+            "kind": "prod",
+            "container": "oduflow-prod-db",
+            "volume": "oduflow-prod-db-data",
+        }
+        self._write(
+            settings,
+            {
+                "clusters": [self._legacy_cluster("restore"), prod],
+                "templates": [{"team": "1", "name": "base"}],
+                "restored": [],
+            },
+        )
+        old_prod = _pg_container("oduflow-prod-db", status="exited")
+        client = _docker(containers={"oduflow-prod-db": old_prod})
+        client.volumes.get.return_value.attrs = {"CreatedAt": "t"}
+        state = pm._resume(client, settings)
+        assert [c["kind"] for c in state["clusters"]] == ["dev"]
+        assert state["archive_deleted"] is True
+        old_prod.start.assert_called_once()
+
     def test_started_replacement_is_taken_over(self, tmp_path):
         settings = _settings(tmp_path)
         path = self._write(
@@ -985,9 +1135,6 @@ class TestLegacyJournal:
 
 class TestFinish:
     def _finish(self, settings, cluster, **state):
-        os.makedirs(pm._dump_path(settings, cluster["kind"]))
-        full = _state([cluster], **state)
-        pm._save(settings, full)
         client = MagicMock()
         with (
             patch.object(pm.system_ops, "ensure_team_network"),
@@ -995,10 +1142,17 @@ class TestFinish:
             patch.object(pm.system_ops, "ensure_prod_infra") as infra,
             patch("oduflow.backup_scheduler.request_base_backup") as base_backup,
         ):
-            pm._finish(client, settings, full)
+            pm._start_applications(client, settings, _state([cluster], **state))
+        return client, infra, base_backup
+
+    def test_cleanup_removes_dumps_and_journal(self, tmp_path):
+        settings = _settings(tmp_path)
+        os.makedirs(pm._dump_path(settings, "dev"))
+        state = _state([_cluster("dev", phase="done")])
+        pm._save(settings, state)
+        pm._finish(MagicMock(), settings, state)
         assert not os.path.exists(pm._dump_path(settings))
         assert not os.path.exists(os.path.join(settings.base_data_dir, pm._JOURNAL))
-        return client, infra, base_backup
 
     def test_running_production_is_verified_before_its_odoo_starts(self, tmp_path):
         settings = _settings(tmp_path, prod_enabled=True)
@@ -1068,6 +1222,48 @@ class TestUpgrade:
         runner.assert_called_once()
 
 
+class TestUpgradeAfterResume:
+    def test_cluster_left_by_a_taken_over_replacement_is_planned(self, tmp_path):
+        settings = _settings(tmp_path)
+        resumed, planned = _state([_cluster("dev")]), _state([_cluster("prod")])
+        with (
+            patch.object(pm, "get_client"),
+            patch.object(pm, "_resume", return_value=resumed),
+            patch.object(pm, "_plan", return_value=planned),
+            patch.object(pm, "_run") as run,
+        ):
+            pm.upgrade(settings)
+        assert [c.args[2] for c in run.call_args_list] == [resumed, planned]
+
+
+class TestRefusePending:
+    def _refuse(self, settings, data_major):
+        container = _pg_container("oduflow-db")
+        with (
+            patch.object(pm, "get_client", return_value=_docker()),
+            patch.object(pm, "_configured_major", return_value=16),
+            patch.object(
+                pm,
+                "_initialized",
+                return_value=[("dev", "oduflow-db", "v", container, data_major)],
+            ),
+        ):
+            pm.refuse_pending(settings)
+
+    def test_current_clusters_pass(self, tmp_path):
+        self._refuse(_settings(tmp_path), 16)
+
+    def test_requested_upgrade_is_left_to_the_server(self, tmp_path):
+        with pytest.raises(PrerequisiteNotMetError, match="Restart the Oduflow"):
+            self._refuse(_settings(tmp_path), 15)
+
+    def test_upgrade_under_way_is_left_to_the_server(self, tmp_path):
+        settings = _settings(tmp_path)
+        pm._save(settings, _state([_cluster("dev", phase="restore")]))
+        with pytest.raises(PrerequisiteNotMetError, match="Restart the Oduflow"):
+            self._refuse(settings, 16)
+
+
 class TestOdooRequirement:
     def _check(self, image, version):
         with patch.object(pm.system_ops, "_exec_sql", return_value=version) as sql:
@@ -1086,3 +1282,18 @@ class TestOdooRequirement:
             PrerequisiteNotMetError, match="Odoo 20 needs PostgreSQL 16"
         ):
             self._check("odoo:20.0", "150004")
+
+    def test_template_init_is_refused_before_the_old_one_is_removed(self, tmp_path):
+        settings = _settings(tmp_path)
+        team = settings.teams["1"]
+        _write_dump(team, "base", "dump.sql")
+        so = pm.system_ops
+        with (
+            patch.object(so, "get_client"),
+            patch.object(so, "_ensure_pg_container"),
+            patch.object(so, "_wait_pg_ready"),
+            patch.object(so, "_exec_sql", return_value="150004"),
+        ):
+            with pytest.raises(PrerequisiteNotMetError, match="Odoo 20 needs"):
+                so.init_template(settings, team, "base", "odoo:20.0", force=True)
+        assert os.path.isfile(team.get_template_sql_path("base"))

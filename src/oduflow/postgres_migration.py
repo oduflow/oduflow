@@ -41,7 +41,7 @@ from oduflow import production_registry, s3_client, service_database_credentials
 from oduflow.docker_ops import system_ops
 from oduflow.docker_ops.client import get_client, run_for_output
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
-from oduflow.fsutil import atomic_write_private_json
+from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     get_db_name,
@@ -64,6 +64,8 @@ _DOCKER_HUB_PREFIXES = ("docker.io/", "index.docker.io/", "registry-1.docker.io/
 _SUPPORTED_MAJORS = range(15, 18)
 _HEARTBEAT_SECONDS = 60.0
 _POLL_SECONDS = 2.0
+# Image IDs are content addresses, so one ID always runs one PostgreSQL major.
+_BINARY_MAJORS: dict[str, int] = {}
 
 # Every role except the bootstrap superuser, which a new cluster creates itself.
 # Password hashes are copied, so credentials files stay valid.
@@ -148,6 +150,21 @@ def _clusters(settings: Settings) -> tuple[tuple[str, str, str], ...]:
     )
 
 
+def _initialized(
+    client: DockerClient, settings: Settings
+) -> Iterator[tuple[str, str, str, Any, int]]:
+    """Each cluster that holds data, with its PostgreSQL major."""
+    for kind, name, volume in _clusters(settings):
+        container = _container(client, name)
+        if container is None:
+            continue
+        try:
+            data_major = _data_major(container)
+        except docker.errors.NotFound:
+            continue  # not initialized yet
+        yield kind, name, volume, container, data_major
+
+
 def validate_configuration(settings: Settings) -> None:
     """Reject image selections no start can honour, before anything changes.
 
@@ -165,14 +182,7 @@ def validate_configuration(settings: Settings) -> None:
             f"[database].image '{image}' is PostgreSQL {major}. Update it in "
             f"{toml}. The configuration has not been changed."
         )
-    for _, name, _ in _clusters(settings):
-        container = _container(client, name)
-        if container is None:
-            continue
-        try:
-            data_major = _data_major(container)
-        except docker.errors.NotFound:
-            continue  # not initialized yet
+    for _, name, _, _, data_major in _initialized(client, settings):
         if data_major > major:
             raise PrerequisiteNotMetError(
                 f"{name} holds PostgreSQL {data_major} data, but [database].image "
@@ -203,6 +213,18 @@ def _volume(client: DockerClient, name: str) -> Any:
         return None
 
 
+def _intact(client: DockerClient, cluster: dict[str, Any]) -> bool:
+    """The planned old cluster still exists: same container, same volume."""
+    container = _container(client, cluster["container"])
+    volume = _volume(client, cluster["volume"])
+    return (
+        container is not None
+        and container.id == cluster["old_container_id"]
+        and volume is not None
+        and volume.attrs["CreatedAt"] == cluster["old_volume_created"]
+    )
+
+
 def _data_major(container: Any) -> int:
     # Read the data format even when the server is stopped; image tags may lie.
     stream, _ = container.get_archive(f"{_PGDATA}/PG_VERSION")
@@ -228,6 +250,8 @@ def _download_image(client: DockerClient, image: str) -> None:
 
 
 def _binary_major(client: DockerClient, image: str) -> int:
+    if image in _BINARY_MAJORS:
+        return _BINARY_MAJORS[image]
     output = run_for_output(
         client,
         image,
@@ -238,7 +262,8 @@ def _binary_major(client: DockerClient, image: str) -> int:
     match = re.search(r"PostgreSQL\) (\d+)\.", output)
     if not match:
         raise PrerequisiteNotMetError(f"Cannot determine PostgreSQL version in {image}")
-    return int(match[1])
+    _BINARY_MAJORS[image] = int(match[1])
+    return _BINARY_MAJORS[image]
 
 
 def _pull_target(client: DockerClient, image: str) -> tuple[str, int]:
@@ -342,7 +367,12 @@ def _carried_databases(settings: Settings, kind: str) -> set[str]:
                 for entry in os.listdir(team.workspaces_dir)
                 if entry.startswith(PROD_ENV_PREFIX)
             )
-        names.update(get_db_name(prod_env_name(p), team.team_id) for p in productions)
+        for production in productions:
+            try:
+                env_name = prod_env_name(production)
+            except ValueError:
+                continue  # a development branch such as prod/Feature_X
+            names.add(get_db_name(env_name, team.team_id))
     return names
 
 
@@ -409,12 +439,14 @@ def _inventory(
             ).splitlines()
         )
     size = 0
-    for name in databases:
-        size += int(
+    if databases:
+        listed = ", ".join(f"'{name}'" for name in databases)
+        size = int(
             system_ops._exec_sql(
                 client,
                 settings,
-                f"SELECT pg_database_size('{name}');",
+                "SELECT sum(pg_database_size(datname)) FROM pg_database "
+                f"WHERE datname IN ({listed});",
                 container_name=container,
             )
         )
@@ -494,14 +526,9 @@ def _plan(
     """
     major = _configured_major(client, settings)
     clusters = []
-    for kind, name, volume_name in _clusters(settings):
-        container = _container(client, name)
-        if container is None:
-            continue
-        try:
-            data_major = _data_major(container)
-        except docker.errors.NotFound:
-            continue  # not initialized yet
+    for kind, name, volume_name, container, data_major in _initialized(
+        client, settings
+    ):
         if data_major >= major:
             continue
         volume = _volume(client, volume_name)
@@ -613,7 +640,7 @@ def _save(settings: Settings, state: dict[str, Any]) -> None:
 
 @contextlib.contextmanager
 def _lock(settings: Settings) -> Iterator[None]:
-    """Serialize upgrades across processes (``serve`` and ``stack apply``)."""
+    """Serialize upgrades across server processes."""
     fd = os.open(_journal_path(settings) + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -681,12 +708,6 @@ def _run_helper(
             helper.remove(force=True)
 
 
-def _write_private(path: str, text: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        handle.write(text)
-
-
 def _stop_applications(
     client: DockerClient, settings: Settings, state: dict[str, Any]
 ) -> None:
@@ -727,9 +748,25 @@ def _start(client: DockerClient, name: str) -> None:
 
 
 def _cancel(client: DockerClient, settings: Settings, state: dict[str, Any]) -> None:
-    """Drop an upgrade that has not removed anything yet."""
+    """Drop an upgrade that has not removed an old cluster yet."""
+    for cluster in state["clusters"]:
+        # The removal phase stops an old cluster first.
+        container = _container(client, cluster["container"])
+        if (
+            cluster["was_running"]
+            and container is not None
+            and container.id == cluster["old_container_id"]
+            and container.status != "running"
+        ):
+            _start(client, cluster["container"])
     for name in state["stopped"]:
         _start(client, name)
+    if state.get("archive_deletion_started") and settings.backup is not None:
+        from oduflow import backup_scheduler
+
+        # The kept cluster's archive may be partly deleted: a new base
+        # backup makes it restorable again.
+        backup_scheduler.request_base_backup(settings)
     shutil.rmtree(_dump_path(settings), ignore_errors=True)
     with contextlib.suppress(FileNotFoundError):
         os.remove(_journal_path(settings))
@@ -748,7 +785,9 @@ def _dump_cluster(
             system_ops._exec_sql(client, settings, sql, container_name=container.name)
             for sql in (_ROLES_SQL, _MEMBERSHIPS_SQL)
         ]
-        _write_private(os.path.join(directory, "roles.sql"), "\n".join(roles) + "\n")
+        atomic_write_private_text(
+            os.path.join(directory, "roles.sql"), "\n".join(roles) + "\n"
+        )
         for name in cluster["databases"]:
             dump = f"{name}.pgdump"
             _run_helper(
@@ -787,11 +826,6 @@ def _remove_old(
                 "PostgreSQL container changed during the upgrade; refusing to remove it."
             )
         container.stop()
-    # Before anything irreversible happens locally: if S3 refuses, the stopped
-    # old cluster is still intact for a retry or a rollback.
-    if cluster["kind"] == "prod" and settings.backup is not None:
-        _delete_walg_archive(settings)
-    if container is not None:
         container.remove()
     volume = _volume(client, cluster["volume"])
     if volume is not None:
@@ -818,6 +852,32 @@ def _remove_old(
                 network_disabled=True,
                 volumes={tablespaces: {"bind": "/tablespaces", "mode": "rw"}},
             )
+
+
+def _retire_archive(
+    client: DockerClient,
+    settings: Settings,
+    state: dict[str, Any],
+    cluster: dict[str, Any],
+) -> None:
+    """Delete the old production archive before any old cluster is removed.
+
+    S3 can refuse for reasons unrelated to PostgreSQL; failing here, with every
+    old cluster intact, cancels the upgrade instead of stranding it halfway.
+    """
+    container = _container(client, cluster["container"])
+    if container is not None and container.id == cluster["old_container_id"]:
+        container.stop()  # archives nothing after its archive is gone
+    state["archive_deletion_started"] = True
+    _save(settings, state)
+    try:
+        _delete_walg_archive(settings)
+    except Exception:
+        if all(_intact(client, c) for c in state["clusters"]):
+            _cancel(client, settings, state)
+        raise
+    state["archive_deleted"] = True
+    _save(settings, state)
 
 
 def _delete_walg_archive(settings: Settings) -> None:
@@ -1021,7 +1081,14 @@ def _restore_templates(settings: Settings, state: dict[str, Any]) -> None:
         _save(settings, state)
 
 
-def _finish(client: DockerClient, settings: Settings, state: dict[str, Any]) -> None:
+def _start_applications(
+    client: DockerClient, settings: Settings, state: dict[str, Any]
+) -> None:
+    """Bring production and services back before the templates are restored.
+
+    They do not depend on templates: a broken template dump must not keep
+    them down until it is fixed.
+    """
     clusters = {c["kind"]: c for c in state["clusters"]}
     # init_system attaches the clusters to the team networks and reconciles
     # pg_hba only after this; the applications started below need both now.
@@ -1045,6 +1112,9 @@ def _finish(client: DockerClient, settings: Settings, state: dict[str, Any]) -> 
             backup_scheduler.request_base_backup(settings)
     for name in state["stopped"]:
         _start(client, name)
+
+
+def _finish(client: DockerClient, settings: Settings, state: dict[str, Any]) -> None:
     for image in {c["old_image"] for c in state["clusters"]} - {
         settings.postgres_image
     }:
@@ -1081,6 +1151,14 @@ def _run(client: DockerClient, settings: Settings, state: dict[str, Any]) -> Non
         for cluster in clusters:
             cluster["phase"] = "remove_old"
         _save(settings, state)
+    prod = next((c for c in clusters if c["kind"] == "prod"), None)
+    if (
+        prod is not None
+        and prod["phase"] == "remove_old"
+        and settings.backup is not None
+        and not state.get("archive_deleted")
+    ):
+        _retire_archive(client, settings, state, prod)
     for cluster in clusters:
         if cluster["phase"] == "remove_old":
             logger.info("Removing old PostgreSQL cluster %s", cluster["container"])
@@ -1105,6 +1183,10 @@ def _run(client: DockerClient, settings: Settings, state: dict[str, Any]) -> Non
             _restore_cluster(client, settings, state, cluster)
             cluster["phase"] = "done"
             _save(settings, state)
+    if not state.get("applications_started"):
+        _start_applications(client, settings, state)
+        state["applications_started"] = True
+        _save(settings, state)
     _restore_templates(settings, state)
     _finish(client, settings, state)
 
@@ -1128,25 +1210,23 @@ def _legacy_pending(settings: Settings) -> bool:
 def _adopt_legacy(client: DockerClient, settings: Settings, path: str) -> None:
     """Take over a v1.85.0 replacement that removed an old cluster.
 
-    Its plan only allowed clusters without databases to keep, so templates are
-    all that is left to restore. A finished replacement, or one that removed
-    nothing yet, needs no journal.
+    Its plan only allowed clusters without databases to remove, so templates
+    are all that is left to restore. A cluster it left intact is not taken
+    over: it may hold databases created since, so a regular plan upgrades it.
+    A finished replacement, or one that removed nothing, needs no journal.
     """
     legacy = json.loads(Path(path).read_text())
-    clusters = legacy.get("clusters", [])
-
-    def intact(cluster: dict[str, Any]) -> bool:
-        container = _container(client, cluster["container"])
-        volume = _volume(client, cluster["volume"])
-        return (
-            cluster["phase"] == "remove_old"
-            and container is not None
-            and container.id == cluster["old_container_id"]
-            and volume is not None
-            and volume.attrs["CreatedAt"] == cluster["old_volume_created"]
-        )
-
-    if not _legacy_finished(legacy) and not all(intact(c) for c in clusters):
+    intact = [
+        c
+        for c in legacy.get("clusters", [])
+        if c["phase"] == "remove_old" and _intact(client, c)
+    ]
+    clusters = [c for c in legacy.get("clusters", []) if c not in intact]
+    for cluster in intact:
+        # v1.85.0 stopped it before its failed removal.
+        if cluster["kind"] == "dev" or settings.prod_enabled:
+            _container(client, cluster["container"]).start()
+    if clusters and not _legacy_finished(legacy):
         _save(
             settings,
             {
@@ -1155,6 +1235,8 @@ def _adopt_legacy(client: DockerClient, settings: Settings, path: str) -> None:
                 "image_id": clusters[0]["image_id"],
                 "major": clusters[0].get("major", 16),
                 "stopped": [],
+                # Removing a production cluster began with its archive.
+                "archive_deleted": True,
                 "clusters": [
                     {
                         **c,
@@ -1182,9 +1264,12 @@ def _resume(client: DockerClient, settings: Settings) -> dict[str, Any] | None:
     if not os.path.isfile(path):
         return None
     state: dict[str, Any] = json.loads(Path(path).read_text())
-    if all(c["phase"] == "dump" for c in state["clusters"]):
-        # Nothing has been removed: plan again from the current state, so a
-        # changed configuration, including a reverted image, takes effect.
+    if all(
+        c["phase"] == "dump" or (c["phase"] == "remove_old" and _intact(client, c))
+        for c in state["clusters"]
+    ):
+        # No old cluster has been removed: plan again from the current state,
+        # so a changed configuration, including a reverted image, takes effect.
         _cancel(client, settings, state)
         return None
     if settings.postgres_image != state["image"]:
@@ -1218,14 +1303,35 @@ def upgrade(settings: Settings) -> None:
     with _lock(settings):
         client = get_client()
         state = _resume(client, settings)
+        if state is not None:
+            _run(client, settings, state)
+        # A taken-over v1.85.0 replacement can leave a cluster to upgrade.
+        state = _plan(client, settings)
         if state is None:
-            state = _plan(client, settings)
-            if state is None:
-                return
-            _save(settings, state)
-            logger.info(
-                "Upgrading PostgreSQL clusters %s to %s",
-                ", ".join(c["container"] for c in state["clusters"]),
-                settings.postgres_image,
-            )
+            return
+        _save(settings, state)
+        logger.info(
+            "Upgrading PostgreSQL clusters %s to %s",
+            ", ".join(c["container"] for c in state["clusters"]),
+            settings.postgres_image,
+        )
         _run(client, settings, state)
+
+
+def refuse_pending(settings: Settings) -> None:
+    """Refuse a CLI command while a PostgreSQL upgrade is requested or under way.
+
+    Only the server upgrades: a separate process doing so could remove
+    clusters from under a running server.
+    """
+    client = get_client()
+    major = _configured_major(client, settings)
+    if (
+        os.path.isfile(_journal_path(settings))
+        or _legacy_pending(settings)
+        or any(m < major for *_, m in _initialized(client, settings))
+    ):
+        raise PrerequisiteNotMetError(
+            "A PostgreSQL upgrade is requested or under way. Restart the Oduflow "
+            "server to run it, then run this command again."
+        )

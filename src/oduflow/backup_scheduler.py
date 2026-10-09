@@ -408,18 +408,22 @@ def tick(settings: Settings, locks: LockManager) -> None:
 
     # Cluster jobs only make sense once the production tier exists.
     from oduflow.docker_ops.client import get_client
-    from oduflow.docker_ops.system_ops import prod_infra_exists
+    from oduflow.docker_ops.system_ops import _prod_pg_running, prod_infra_exists
 
     try:
-        if not prod_infra_exists(get_client(), settings):
+        client = get_client()
+        if not prod_infra_exists(client, settings):
             return
+        running = _prod_pg_running(client, settings)
     except Exception:
         return
 
     state = _load_cluster_state(settings)
     base = state.get("basebackup", {})
     fire = last_fire_time(now, backup.basebackup_time)
-    if is_due(
+    # A stopped cluster cannot take one: the slot waits for it to run again
+    # instead of spending its attempts.
+    if running and is_due(
         now,
         fire,
         _parse_ts(str(base.get("last_success_at", ""))),

@@ -8377,8 +8377,8 @@ def _run_cli() -> None:
             from oduflow import postgres_migration
 
             postgres_migration.validate_configuration(_settings)
+            postgres_migration.refuse_pending(_settings)
             migrations.run_pending(_settings)
-            postgres_migration.upgrade(_settings)
             _ensure_initialized(_settings)
             quotas.apply_all(_settings)
             stack_result = apply_stack(

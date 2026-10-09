@@ -191,18 +191,25 @@ image provides every extension those databases use, and that there is room for
 the dumps. It then stops services and production Odoo containers, and dumps
 service databases and production databases (including productions deleted
 with their data kept) together with all PostgreSQL roles and their passwords.
-Only then does it remove the old clusters, create new ones and restore
-everything, so service and production credentials stay valid. Template
-databases are restored from their dumps on disk. Productions start again once
-WAL archiving is verified, a new base backup is taken shortly afterwards, and
-the dumps are deleted. Productions and services are down while their databases
-are dumped and restored.
+With `[backup]` configured, it then deletes the old WAL-G archive. Only then
+does it remove the old clusters, create new ones and restore everything, so
+service and production credentials stay valid. Productions and services start
+again once their databases are restored (productions after WAL archiving is
+verified), and a new base backup is taken shortly afterwards. Template
+databases are restored from their dumps on disk last, and the dumps are
+deleted. Productions and services are down while their databases are dumped
+and restored.
 
-A failure before an old cluster is removed leaves everything as it was, and
-setting the image back cancels the upgrade. After that point a restart resumes
-where it stopped, so keep the new image configured. If a template cannot be
-restored, fix its dump and restart, or delete the template with
-`oduflow delete-template <name> --team <id>` and restart.
+A failure before an old cluster is removed, including a refused S3 delete,
+leaves everything as it was, and setting the image back cancels the upgrade; if
+the archive was already partly deleted, a new base backup is taken. After an
+old cluster is removed, a restart resumes where it stopped, so keep the new
+image configured. If a template cannot be restored, fix its dump and restart,
+or delete the template with `oduflow delete-template <name> --team <id>` and
+restart; productions and services keep running meanwhile.
+
+Only the server upgrades: `oduflow stack apply` refuses while an upgrade is
+requested or under way, so restart the server first.
 
 ## Configuration Reference
 

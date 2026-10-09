@@ -42,16 +42,24 @@ Planning is read-only. It checks environments, classifies every database, and
 verifies that the target image provides the extensions in use and that there
 is room for the dumps. Services and production Odoo containers are then
 stopped, and dumps are taken with the target image's client tools, run in the
-old cluster's network namespace. Every dump is verified before the first old
-cluster is removed. A failure up to that point restores the previous state, and
-a restart re-plans from scratch, so setting the image back cancels the upgrade.
+old cluster's network namespace. Every dump is verified, and the old WAL-G
+archive deleted, before the first old cluster is removed: S3 is the step most
+likely to fail for reasons outside PostgreSQL, so it goes first. A failure up
+to that point restores the previous state, and as long as every old cluster is
+still intact a restart re-plans from scratch, so setting the image back cancels
+the upgrade.
 
 After removal, a journal drives creation of the new clusters and the
-restoration of roles, then databases, then templates. Restarts resume this
-without resetting a new cluster. At the end, production is re-admitted through
+restoration of roles, then databases. Production is then re-admitted through
 the normal provisioning path (networks, pg_hba, verified archiving) before its
-Odoo containers start. The backup scheduler is asked for an immediate base
-backup, and the dumps are deleted. `oduflow upgrade` runs the same checks
+Odoo containers and the services start; templates are restored last, so a
+broken template dump never keeps them down. Restarts resume this without
+resetting a new cluster. The backup scheduler is asked for an immediate base
+backup, which waits while the production cluster is stopped, and the dumps are
+deleted. Only the server upgrades; `stack apply` refuses while an upgrade is
+requested or under way, since a second process could remove clusters from
+under a running server. A v1.85.0 replacement left unfinished is taken over
+for the clusters it removed; one it left intact is upgraded by a regular plan. `oduflow upgrade` runs the same checks
 before `self-update` restarts the service. Creating or switching to an Odoo 20
 environment or production on a PG15 cluster is refused, with a pointer to the
 upgrade.

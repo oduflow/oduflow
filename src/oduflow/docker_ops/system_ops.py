@@ -2893,14 +2893,6 @@ def init_template(
             f"Existing data found: {', '.join(parts)}. Use --force to overwrite."
         )
 
-    if force:
-        if existing_dump:
-            os.remove(template_sql_path)
-            logger.info("Removed existing %s", template_sql_path)
-        if existing_filestore:
-            shutil.rmtree(template_filestore_path)
-            logger.info("Removed existing %s", template_filestore_path)
-
     client = get_client()
     logger.info(
         "Generating template dump from clean Odoo",
@@ -2924,6 +2916,16 @@ def init_template(
     _ensure_pg_container(client, settings, system_labels)
 
     _wait_pg_ready(client, settings)
+    # Before the existing template is removed.
+    require_postgres_for_odoo(client, settings, odoo_image)
+
+    if force:
+        if existing_dump:
+            os.remove(template_sql_path)
+            logger.info("Removed existing %s", template_sql_path)
+        if existing_filestore:
+            shutil.rmtree(template_filestore_path)
+            logger.info("Removed existing %s", template_filestore_path)
 
     build_db = "oduflow_template_build"
     temp_container_name = "flow-template-builder"
