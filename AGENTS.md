@@ -13,7 +13,9 @@ Any change to the web dashboard (`src/oduflow/templates/dashboard.html`, served 
 - `PRODUCT.md` — register (product), users, brand personality, anti-references, design principles.
 - `DESIGN.md` — normative visual system ("The Engineer's Console", shared with oduflow.dev): color tokens, typography, components, do's and don'ts.
 
-Read both before touching dashboard UI. Key hard rules: no external CDNs (all assets ship with the package), every `var(--*)` must be declared in `:root`, status is never conveyed by color alone, no emoji as UI affordances.
+Read both before touching dashboard UI. The same rules apply to the Server
+settings console (`src/oduflow/templates/admin.html`, served by `admin_ui.py`);
+its `:root` tokens must stay identical to the dashboard's. Key hard rules: no external CDNs (all assets ship with the package), every `var(--*)` must be declared in `:root`, status is never conveyed by color alone, no emoji as UI affordances.
 
 The dashboard loads `/static/chat.js` and `/static/acp-client.js` with a
 shared positive integer cache version in the query string, held in the
@@ -78,6 +80,9 @@ MCP Clients (Cursor, Claude, etc.)
         │         └── LockManager (per-branch / per-team / system) → BusyError
         ├── web_ui.py ── Starlette dashboard + REST API + Basic auth
         ├── settings.py ── @dataclass Settings, loads from oduflow.toml (TOML)
+        ├── config_schema.py ── Registry of editable TOML keys + apply class (live/restart/recreate/locked)
+        ├── config_store.py ── Comment-preserving patch, validate, atomic write + history, live overlay
+        ├── admin_ui.py ── Server settings console (/admin): own password/session, JSON API
         ├── migrations.py ── Startup data migrations (Odoo-style, applied automatically on server start)
         ├── quotas.py ── Per-team disk quotas (XFS project quotas)
         ├── locking.py ── LockManager with per-branch, per-team, system locks

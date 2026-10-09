@@ -2612,10 +2612,12 @@ class TestHttpFailClosed:
             patch("fastmcp.server.http.create_streamable_http_app"),
             patch("oduflow.web_ui.mount_web_ui"),
             patch("oduflow.reaper.start_reaper"),
-            patch("uvicorn.run") as mock_uvicorn,
+            patch("uvicorn.Config") as mock_uvicorn,
+            patch("uvicorn.Server") as mock_server,
         ):
             server._start_http()
             mock_uvicorn.assert_called_once()
+            mock_server.return_value.run.assert_called_once()
 
     def test_start_http_refuses_empty_team_map(self):
         from oduflow import server
@@ -2651,7 +2653,8 @@ class TestHttpFailClosed:
             patch("fastmcp.server.http.create_streamable_http_app"),
             patch("oduflow.web_ui.mount_web_ui"),
             patch("oduflow.reaper.start_reaper"),
-            patch("uvicorn.run") as mock_uvicorn,
+            patch("uvicorn.Config") as mock_uvicorn,
+            patch("uvicorn.Server"),
         ):
             server._start_http()
             _, kwargs = mock_uvicorn.call_args
@@ -2682,7 +2685,8 @@ class TestHttpFailClosed:
                 "_traefik_forwarded_allow_ips",
                 return_value=["127.0.0.1", "172.18.0.0/16"],
             ),
-            patch("uvicorn.run") as mock_uvicorn,
+            patch("uvicorn.Config") as mock_uvicorn,
+            patch("uvicorn.Server"),
         ):
             server._start_http()
             _, kwargs = mock_uvicorn.call_args

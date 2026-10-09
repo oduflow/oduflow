@@ -443,3 +443,22 @@ class LockManager:
     def release_system(self) -> None:
         with self._map_lock:
             self._system_holder = None
+
+    def active_operations(self) -> list[str]:
+        """Human-readable list of operations holding a lock right now.
+
+        A restart of the server would kill them half-way, so the Server
+        settings console refuses to restart while this is non-empty.
+        """
+        with self._map_lock:
+            busy = [
+                f"environment '{name}'{holder.describe()}"
+                for name, holder in sorted(self._env_holders.items())
+            ]
+            busy += [
+                f"team '{team_id}'{holder.describe()}"
+                for team_id, holder in sorted(self._team_holders.items())
+            ]
+            if self._system_holder is not None:
+                busy.append(f"system{self._system_holder.describe()}")
+        return busy

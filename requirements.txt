@@ -12,3 +12,4 @@ pyotp>=2.9,<3
 qrcode>=7.4,<9
 boto3
 zstandard
+tomlkit>=0.13,<1

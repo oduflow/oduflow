@@ -6,6 +6,14 @@ allow_local_path = true        # trusted single-user local development; disable 
 # allow_insecure_http = false  # serve HTTP /mcp with NO auth (only behind your own proxy)
 # trace = false                    # verbose tracing for git analysis & env ops
 
+# ── Server settings console ───────────────────────────
+# Browser editor for this whole file at /admin (HTTP mode): every section and
+# every team, validated before saving, with history and a restart button. It
+# has its own password, separate from all team logins. Empty = console off;
+# `oduflow admin enable` generates one. 2FA: `oduflow ui-2fa setup --admin`.
+[admin]
+password = ""
+
 # ── Routing ───────────────────────────────────────────
 [routing]
 mode = "port"                   # "port" | "traefik"

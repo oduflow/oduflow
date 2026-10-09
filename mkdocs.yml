@@ -110,6 +110,7 @@ nav:
       - Traefik Routing: traefik.md
       - Multi-Team Support: multi-instance.md
       - Authentication & Security: security.md
+      - Server Settings Console: admin.md
       - Running in Docker: docker.md
       - Internals: internals.md
       - Troubleshooting: troubleshooting.md

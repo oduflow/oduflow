@@ -31,7 +31,10 @@ def loaded(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_no_telemetry", False)
     monkeypatch.setattr(settings_module, "TRANSPORT", settings_module.TRANSPORT)
     monkeypatch.setattr(server, "find_toml", lambda: str(tmp_path / "oduflow.toml"))
-    monkeypatch.setattr(Settings, "from_toml", classmethod(lambda cls, path: settings))
+    monkeypatch.setattr(server, "load_toml_dict", lambda path: {})
+    monkeypatch.setattr(
+        Settings, "from_raw", classmethod(lambda cls, raw, path: settings)
+    )
     monkeypatch.setattr(Settings, "validate", lambda self: None)
     return settings
 

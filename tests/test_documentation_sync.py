@@ -113,7 +113,7 @@ def test_every_toml_setting_is_in_the_installation_reference():
     from_toml = next(
         node
         for node in settings_class.body
-        if isinstance(node, ast.FunctionDef) and node.name == "from_toml"
+        if isinstance(node, ast.FunctionDef) and node.name == "from_raw"
     )
     parse_backup = next(
         node
@@ -123,6 +123,7 @@ def test_every_toml_setting_is_in_the_installation_reference():
     reference = (DOCS / "installation.md").read_text(encoding="utf-8")
 
     sections = {
+        "admin": {"admin"},
         "server": {"server"},
         "routing": {"routing"},
         "database": {"database"},

@@ -225,14 +225,20 @@ All settings are configured via a TOML file. Oduflow searches for `oduflow.toml`
 If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
 `~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
-values for `[database].password`, `[team.1].auth_token`, and
-`[team.1].ui_password`. The file is created with mode `0600` and the generated
-secrets are never printed to the log — read them from the config file:
+values for `[database].password`, `[team.1].auth_token`,
+`[team.1].ui_password` and `[admin].password`. The file is created with mode
+`0600` and the generated secrets are never printed to the log — read them from
+the config file:
 
 ```bash
 sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
   || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
+
+You do not have to edit this file by hand afterwards: in HTTP mode the
+[Server settings console](admin.md) at `/admin` edits every section and every
+team from the browser, validates each change with the same parser the server
+boots with, keeps a history, and restarts Oduflow when a change needs it.
 
 ### Minimal configuration
 
@@ -252,6 +258,10 @@ allow_local_path = true     # trusted single-user local development; disable on 
 # allow_insecure_http = false  # serve /mcp over HTTP with NO auth (only behind your own proxy)
 # trace = false             # verbose tracing for git analysis & env ops
 # disable_telemetry = false # disable anonymous first_run/env_created events
+
+# ── Server settings console ───────────────────────────
+[admin]
+password = ""               # /admin console password; empty = console disabled
 
 # ── Routing ───────────────────────────────────────────
 [routing]
@@ -360,6 +370,12 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
 | `[server].trace` | `false` | Enable detailed trace logging for git analysis and environment operations |
 | `[server].disable_telemetry` | `false` | Disable anonymous usage telemetry (see [Telemetry](#telemetry)) |
+
+### Server settings console
+
+| Key | Default | Description |
+|---|---|---|
+| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable` |
 
 ### Routing settings
 

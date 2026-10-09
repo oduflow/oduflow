@@ -32,6 +32,7 @@ SOURCES = (
     "traefik.md",
     "multi-instance.md",
     "security.md",
+    "admin.md",
     "docker.md",
     "internals.md",
     "troubleshooting.md",

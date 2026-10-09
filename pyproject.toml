@@ -24,6 +24,8 @@ dependencies = [
     "pyotp>=2.9,<3",
     "qrcode>=7.4,<9",
     "tomli>=2.0; python_version < '3.11'",
+    # Server settings console: comment-preserving oduflow.toml edits.
+    "tomlkit>=0.13,<1",
     # Production backup subsystem: S3 client + per-chunk compression.
     "boto3",
     "zstandard",

@@ -12,6 +12,7 @@ import pathlib
 import re
 import shlex
 import sys
+import threading
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, ParamSpec, TypeVar, cast
@@ -85,7 +86,13 @@ from oduflow.naming import (
 from oduflow.odoo_version import major_from_image_reference
 from oduflow.output_cache import CachedOutput, OutputCache
 from oduflow.po_tools import PoEntry
-from oduflow.settings import ImageRegistrySettings, Settings, TeamSettings, find_toml
+from oduflow.settings import (
+    ImageRegistrySettings,
+    Settings,
+    TeamSettings,
+    find_toml,
+    load_toml_dict,
+)
 from oduflow.stack_loader import StackValidationError
 
 logger = logging.getLogger("oduflow")
@@ -134,6 +141,10 @@ _locks = LockManager()
 # multi-gigabyte filestore — and an instant BusyError would discard all of it.
 ATTACH_SWAP_LOCK_TIMEOUT = 300.0
 _settings: Settings | None = None
+# The parsed document _settings was built from. The Server settings console
+# diffs it against the file to tell live changes from ones waiting for a
+# restart, and overlays only the live ones onto it (see config_store).
+_settings_raw: dict[str, Any] | None = None
 # Set from the global --no-telemetry CLI flag. Applied inside _get_settings so
 # the override survives every reload of the cached Settings.
 _no_telemetry: bool = False
@@ -153,14 +164,16 @@ def _get_settings() -> Settings:
     from validate() reaches the CLI entry point uncaught and systemd records a
     full traceback for what is really one sentence of feedback.
     """
-    global _settings
+    global _settings, _settings_raw
     if _settings is None:
         try:
             toml_path = find_toml()
         except FileNotFoundError as exc:
             raise ConfigError(str(exc)) from exc
         try:
-            settings = Settings.from_toml(toml_path)
+            raw = load_toml_dict(toml_path)
+            settings = Settings.from_raw(raw, toml_path)
+            settings_module.TRACE = settings.trace
             settings.validate()
         # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here
         # too. TypeError/AttributeError/KeyError/OverflowError cover wrong-typed
@@ -174,7 +187,28 @@ def _get_settings() -> Settings:
         if _no_telemetry:
             settings = dataclasses.replace(settings, disable_telemetry=True)
         _settings = settings
+        _settings_raw = raw
     return _settings
+
+
+def _swap_settings(settings: Settings, raw: dict[str, Any]) -> None:
+    """Hot-swap the cached Settings (Server settings console, live keys only).
+
+    Everything that reads configuration per request or per sweep goes through
+    _get_settings(), so the next call sees the new values. Startup-only
+    consumers (auth provider, threads, route table) keep theirs until restart.
+    """
+    global _settings, _settings_raw
+    if _no_telemetry:
+        settings = dataclasses.replace(settings, disable_telemetry=True)
+    settings_module.TRACE = settings.trace
+    _settings = settings
+    _settings_raw = raw
+
+
+def _running_settings() -> tuple[Settings, dict[str, Any] | None]:
+    settings = _get_settings()
+    return settings, _settings_raw
 
 
 def _resolve_team(ctx: Context | None) -> TeamSettings:
@@ -7186,6 +7220,25 @@ def _inject_ui_password(toml_text: str, password: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def _inject_admin_password(toml_text: str, password: str) -> str:
+    """Fill the empty ``[admin] password`` of a freshly bootstrapped config,
+    so a fresh HTTP install has the Server settings console ready. Existing
+    user configs are never rewritten (``oduflow admin enable`` does that)."""
+    out: list[str] = []
+    in_admin = False
+    injected = False
+    for raw in toml_text.splitlines():
+        stripped = raw.split("#", 1)[0].strip()
+        if stripped.startswith("["):
+            in_admin = stripped == "[admin]"
+        if in_admin and not injected and stripped == 'password = ""':
+            out.append(f'password = "{password}"')
+            injected = True
+        else:
+            out.append(raw)
+    return "\n".join(out) + "\n"
+
+
 def _autofill_ui_passwords(toml_text: str) -> tuple[str, list[str]]:
     """Fill EVERY empty ``ui_password = ""`` in an existing oduflow.toml with a
     freshly generated password (one distinct password per team). Used to upgrade
@@ -7230,7 +7283,8 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
     ):
         return settings
     import pathlib
-    import tempfile
+
+    from oduflow.config_store import replace_config_file
 
     try:
         cfg_path = find_toml()
@@ -7239,26 +7293,10 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
         updated, generated = _autofill_ui_passwords(cfg.read_text(encoding="utf-8"))
         if not generated:
             return settings
-        original = cfg.stat()
-        # A chmod of the existing inode cannot revoke an already-open reader.
-        # Stage secrets privately and replace the inode, preserving ownership
-        # and any stricter owner permissions (e.g. 0400). If replacement is not
-        # supported, leave the original untouched and let HTTP fail closed.
-        fd, temporary = tempfile.mkstemp(prefix=f".{cfg.name}.", dir=cfg.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                staged = os.fstat(stream.fileno())
-                if (staged.st_uid, staged.st_gid) != (original.st_uid, original.st_gid):
-                    os.fchown(stream.fileno(), original.st_uid, original.st_gid)
-                mode = original.st_mode & 0o600
-                if staged.st_mode & 0o777 != mode:
-                    os.fchmod(stream.fileno(), mode)
-                stream.write(updated)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, cfg)
-        finally:
-            pathlib.Path(temporary).unlink(missing_ok=True)
+        # Staged privately and swapped in, keeping owner and mode. If
+        # replacement is not supported, the original stays untouched and HTTP
+        # fails closed.
+        replace_config_file(str(cfg), updated)
     except Exception:
         logger.exception("Could not auto-provision a web-UI password")
         return settings
@@ -7756,6 +7794,7 @@ def _bootstrap_config() -> str:
     )
     rendered = _inject_auth_token(rendered, secrets.token_urlsafe(24))
     rendered = _inject_ui_password(rendered, secrets.token_urlsafe(18))
+    rendered = _inject_admin_password(rendered, secrets.token_urlsafe(18))
     # Create the file already private: the default umask would otherwise leave
     # these freshly generated secrets world-readable, and the config is only
     # ever read back by us. O_EXCL because bootstrap must only ever ADD a config:
@@ -7779,11 +7818,70 @@ def _bootstrap_config() -> str:
     # one log line turns them into a permanent leak. The config file is the one
     # place they live.
     logger.info(
-        "Config created: %s (auto-generated DB password, MCP auth_token and "
-        "web-UI password for team 1; read them from that file, mode 0600)",
+        "Config created: %s (auto-generated DB password, MCP auth_token, "
+        "web-UI password for team 1 and the /admin console password; read them "
+        "from that file, mode 0600)",
         dest,
     )
     return dest
+
+
+def _admin_cli(action: str, *, reset: bool = False) -> None:
+    """``oduflow admin enable|disable``: the one config edit the console
+    cannot make for itself. Goes through the same validated, history-keeping
+    writer as the console."""
+    import secrets
+
+    from oduflow import config_store
+
+    settings = _get_settings()
+    path = settings.toml_path
+    snapshot = config_store.read_snapshot(path)
+    current = config_store.parse_text(snapshot.text).get("admin", {})
+    has_password = isinstance(current, dict) and bool(
+        str(current.get("password", "")).strip()
+    )
+    if action == "disable":
+        if not has_password:
+            print("The Server settings console is already disabled.")
+            return
+        change = config_store.Change(path=("admin", "password"), unset=True)
+        note = "Console disabled (CLI)"
+        password = ""
+    else:
+        if has_password and not reset:
+            print(
+                "The Server settings console is already enabled; its password "
+                f"is [admin] password in {snapshot.path}. Use --reset for a new one."
+            )
+            return
+        password = secrets.token_urlsafe(18)
+        change = config_store.Change(path=("admin", "password"), value=password)
+        note = (
+            "Console password reset (CLI)" if has_password else "Console enabled (CLI)"
+        )
+    text = config_store.apply_changes(snapshot.text, [change])
+    config_store.validate_text(text, path, http=False)
+    config_store.write_config(
+        path,
+        text,
+        snapshot.revision,
+        note=note,
+        paths=["admin.password"],
+        actor="cli",
+    )
+    if action == "disable":
+        print(f"Server settings console disabled in {snapshot.path}.")
+    else:
+        team = next(iter(settings.teams.values()))
+        if settings.routing_mode == "traefik":
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}/admin"
+        else:
+            url = f"{settings.public_scheme_for(team)}://{team.hostname}:{settings.port}/admin"
+        print(f"Server settings console password: {password}")
+        print(f"Stored as [admin] password in {snapshot.path}.")
+        print(f"Open {url} (any team hostname works) after the restart.")
+    print("Restart Oduflow to apply it, e.g.: sudo systemctl restart oduflow")
 
 
 def _run_cli() -> None:
@@ -7831,7 +7929,29 @@ def _run_cli() -> None:
     ui_2fa_sub = p_ui_2fa.add_subparsers(dest="ui_2fa_action", required=True)
     for action in ("setup", "reset"):
         command = ui_2fa_sub.add_parser(action)
-        command.add_argument("--team", default="1", help="Team ID (default: 1)")
+        who = command.add_mutually_exclusive_group()
+        who.add_argument("--team", default="1", help="Team ID (default: 1)")
+        who.add_argument(
+            "--admin",
+            action="store_true",
+            help="the Server settings console (/admin) instead of a team",
+        )
+
+    p_admin = sub.add_parser(
+        "admin", help="Enable or disable the Server settings console (/admin)"
+    )
+    admin_sub = p_admin.add_subparsers(dest="admin_action", required=True)
+    for action, action_help in (
+        ("enable", "Generate a console password (printed once) and enable /admin"),
+        ("disable", "Remove the console password; /admin answers 404"),
+    ):
+        command = admin_sub.add_parser(action, help=action_help)
+        if action == "enable":
+            command.add_argument(
+                "--reset",
+                action="store_true",
+                help="replace an existing console password (signs every session out)",
+            )
 
     # --- System commands ---
     sub.add_parser("destroy", help="Destroy all shared infrastructure")
@@ -8167,7 +8287,22 @@ def _run_cli() -> None:
         # Use the existing server configuration; never bootstrap a new install,
         # initialize Docker, or publish this operation through MCP.
         settings = _get_settings()
-        run_cli(settings, settings.get_team(args.team), args.ui_2fa_action)
+        if args.admin:
+            from oduflow.admin_ui import admin_principal
+
+            if not settings.admin_password:
+                raise PrerequisiteNotMetError(
+                    "The Server settings console is disabled; run "
+                    "`oduflow admin enable` first."
+                )
+            principal = admin_principal(settings)
+        else:
+            principal = settings.get_team(args.team)
+        run_cli(settings, principal, args.ui_2fa_action)
+        return
+
+    if args.command == "admin":
+        _admin_cli(args.admin_action, reset=getattr(args, "reset", False))
         return
 
     # --- Load TOML settings ----------------------------------------
@@ -8488,55 +8623,22 @@ def _start_http() -> None:
 
     # Fail closed: never serve the MCP tool surface (run_odoo_command,
     # run_db_query, privileged service creation, …) unauthenticated by accident
-    # (#37). A fresh install bootstraps a random auth_token; reaching here with
-    # no auth means the operator cleared it, which must be explicit.
-    if auth is None and not settings.allow_insecure_http:
-        raise PrerequisiteNotMetError(
-            "Refusing to start the HTTP transport with no MCP authentication: "
-            "set a [team.*] auth_token in oduflow.toml. To "
-            "run unauthenticated on purpose (e.g. behind your own auth proxy), "
-            "set [server] allow_insecure_http = true."
-        )
+    # (#37), nor the web dashboard, which exposes even more (interactive
+    # shells/SQL/agent, credential management). A fresh install bootstraps a
+    # random auth_token and ui_password, and _ensure_web_ui_password just
+    # auto-provisioned passwords for existing teams — so a failure here means
+    # the operator cleared them, which must be explicit. With several teams,
+    # every team needs its own token: auth rejects a tokenless team's requests
+    # before Host-based routing. The Server settings console runs the same
+    # check on every save, so it cannot write a config that fails here.
+    from oduflow.config_store import check_http_auth
+
+    check_http_auth(settings)
     if auth is None:
         logger.warning(
             "HTTP transport starting WITHOUT authentication "
             "(allow_insecure_http=true) — the full MCP tool surface is open."
         )
-
-    # Fail closed for the WEB DASHBOARD too, symmetric to the MCP check above.
-    # The dashboard exposes MORE than MCP (interactive shells/SQL/agent to every
-    # environment, privileged service creation, credential management) and is
-    # only authenticated when a team sets ui_password. Fresh installs bootstrap
-    # one and _ensure_web_ui_password just auto-provisioned one for every existing
-    # team — so reaching here with ANY team still passwordless means the config
-    # write failed and the operator has not opted into an open server. Check
-    # ``all`` (not ``any``): a single passwordless team can never log in (auth is
-    # global; empty passwords are skipped), so refuse rather than silently lock it
-    # out.
-    if not settings.allow_insecure_http and (
-        not settings.teams or not all(t.ui_password for t in settings.teams.values())
-    ):
-        raise PrerequisiteNotMetError(
-            "Refusing to start the HTTP transport with an unauthenticated web "
-            "dashboard: set a [team.*] ui_password in oduflow.toml (the dashboard "
-            "exposes interactive shells, SQL and privileged service creation for "
-            "every environment). To run it open on purpose (e.g. behind your own "
-            "auth proxy), set [server] allow_insecure_http = true."
-        )
-
-    # With several teams, every team needs its own token: auth rejects a
-    # tokenless team's requests before Host-based routing, so its members
-    # would be locked out — and _resolve_team no longer falls back in HTTP
-    # mode, so misconfiguration must fail here, at startup.
-    if not settings.allow_insecure_http and len(settings.teams) > 1:
-        tokenless = sorted(
-            tid for tid, team in settings.teams.items() if not team.auth_token
-        )
-        if tokenless:
-            raise PrerequisiteNotMetError(
-                "HTTP transport with multiple teams requires an auth_token "
-                f"for every team; missing for: {', '.join(tokenless)}."
-            )
     if host not in ("127.0.0.1", "::1", "localhost"):
         logger.warning(
             "Binding %s on all/non-loopback interface — ensure a firewall and "
@@ -8568,9 +8670,25 @@ def _start_http() -> None:
 
     start_monitor(_get_settings)
 
+    from oduflow.config_store import ConfigRuntime
     from oduflow.web_ui import mount_web_ui
 
-    mount_web_ui(app, _get_settings, _locks)
+    mount_web_ui(
+        app,
+        _get_settings,
+        _locks,
+        config_runtime=ConfigRuntime(
+            running=_running_settings,
+            swap=_swap_settings,
+            restart=_request_restart,
+            busy=_locks.active_operations,
+            # The config this process booted with: what the threads, the auth
+            # provider and the route table above were built from. Live swaps
+            # move the cached Settings on, so the console cannot ask those for
+            # the boot state.
+            boot=settings,
+        ),
+    )
     global _web_bind
     _web_bind = (host, port)
 
@@ -8626,7 +8744,10 @@ def _start_http() -> None:
     # so without a cap uvicorn waits indefinitely on SIGTERM and systemd escalates
     # to SIGKILL after TimeoutStopSec (~90s). Force-close lingering connections
     # after 10s so a stop/restart completes cleanly instead of being killed.
-    uvicorn.run(
+    # Server/Config instead of uvicorn.run() so the console's restart can stop
+    # the server gracefully without a signal (uvicorn re-raises captured
+    # signals after shutdown, which would kill the process before re-exec).
+    config = uvicorn.Config(
         served,
         host=host,
         port=port,
@@ -8635,6 +8756,43 @@ def _start_http() -> None:
         proxy_headers=True,
         forwarded_allow_ips=forwarded_allow_ips,
     )
+    server = uvicorn.Server(config)
+    global _uvicorn_server
+    _uvicorn_server = server
+    server.run()
+    if _restart_requested.is_set():
+        _reexec()
+    if not server.started:
+        sys.exit(3)
+
+
+# The running uvicorn server, so a console restart can stop it gracefully.
+_uvicorn_server: Any = None
+_restart_requested = threading.Event()
+
+
+def _request_restart() -> None:
+    """Stop serving gracefully, then re-exec this process with the same argv.
+
+    Re-exec (same PID) restarts identically under systemd, in the container
+    and in a foreground shell, and runs the whole startup path again — Traefik
+    and agent reconciliation, quotas, auth provider, background threads — with
+    the config now on disk. Managed containers are independent of this process
+    and keep running.
+    """
+    if _uvicorn_server is None:
+        raise PrerequisiteNotMetError("Restart is only available in HTTP mode.")
+    _restart_requested.set()
+    _uvicorn_server.should_exit = True
+
+
+def _reexec() -> None:
+    argv = [sys.executable, *sys.orig_argv[1:]]
+    logger.warning("Restarting Oduflow: %s", " ".join(argv))
+    for handler in logging.getLogger().handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()
+    os.execv(sys.executable, argv)
 
 
 def _build_auth(settings: Settings):  # type: ignore[no-untyped-def]
