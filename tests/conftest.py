@@ -21,6 +21,17 @@ _TEST_DB_CONTAINER = "oduflowtest-db"
 _TEST_DB_VOLUME = "oduflowtest-db-data"
 
 
+@pytest.fixture(autouse=True)
+def _server_lock_per_test(monkeypatch):
+    """A test that starts the server must not leave its lock to the next one."""
+    from oduflow import instance_lock
+
+    monkeypatch.setattr(instance_lock, "_fd", None)
+    yield
+    if instance_lock._fd is not None:
+        os.close(instance_lock._fd)
+
+
 def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
     suffix = hashlib.sha1(tmp_dir.encode("utf-8")).hexdigest()[:10]
     team = TeamSettings(

@@ -56,13 +56,15 @@ Odoo containers and the services start; templates are restored last, so a
 broken template dump never keeps them down. Restarts resume this without
 resetting a new cluster. The backup scheduler is asked for an immediate base
 backup, which waits while the production cluster is stopped, and the dumps are
-deleted. Only the server upgrades; `stack apply` refuses while an upgrade is
-requested or under way, since a second process could remove clusters from
-under a running server. A v1.85.0 replacement left unfinished is taken over
-for the clusters it removed; one it left intact is upgraded by a regular plan. `oduflow upgrade` runs the same checks
-before `self-update` restarts the service. Creating or switching to an Odoo 20
-environment or production on a PG15 cluster is refused, with a pointer to the
-upgrade.
+deleted. Only the server upgrades, and only alone: every server holds a shared
+lock on the data directory for its lifetime (stdio clients each start one), and
+the upgrade takes it exclusively, so it refuses next to another server instead
+of removing clusters from under it. `stack apply` refuses while an upgrade is
+requested or under way. A v1.85.0 replacement left unfinished is taken over
+for the clusters it removed; one it left intact is upgraded by a regular plan.
+`oduflow upgrade` runs the same checks before `self-update` restarts the
+service. Creating or switching to an Odoo 20 environment or production on a
+PG15 cluster is refused, with a pointer to the upgrade.
 
 ## Consequences
 

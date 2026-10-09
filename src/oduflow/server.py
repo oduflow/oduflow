@@ -8214,9 +8214,11 @@ def _run_cli() -> None:
         # call that never returns would leave a live process serving nothing
         # and systemd none the wiser. The watchdog turns that into an exit and
         # a restart; see startup_watchdog for why silence is the stall signal.
+        from oduflow import instance_lock
         from oduflow.docker_ops.client import wait_for_docker
         from oduflow.startup_watchdog import guard_startup
 
+        instance_lock.hold_shared(_settings)
         with guard_startup():
             wait_for_docker()
             from oduflow import postgres_migration
