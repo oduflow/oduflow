@@ -329,6 +329,9 @@ class Settings:
     db_user: str = "odoo"
     db_password: str = "odoo"
     postgres_image: str = DEFAULT_POSTGRES_IMAGE
+    # True when oduflow.toml sets [database].image. Only an explicit image may
+    # upgrade an existing cluster; a changed default must never do it.
+    postgres_image_explicit: bool = False
 
     # Storage
     base_data_dir: str = ""
@@ -1053,6 +1056,7 @@ class Settings:
             db_user=str(database.get("user", "odoo")),
             db_password=str(database.get("password", "odoo")),
             postgres_image=str(database.get("image", DEFAULT_POSTGRES_IMAGE)),
+            postgres_image_explicit="image" in database,
             base_data_dir=base_data_dir,
             overlay_threshold_mb=int(storage.get("overlay_threshold_mb", 50)),
             agent_image=_normalize_agent_image(agent.get("image")),

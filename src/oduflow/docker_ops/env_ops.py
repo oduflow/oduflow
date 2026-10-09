@@ -39,6 +39,7 @@ from oduflow.docker_ops.system_ops import (
     estimate_new_db_bytes,
     pg_clone_strategy_clause,
     reassign_db_ownership,
+    require_postgres_for_odoo,
 )
 from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
@@ -434,6 +435,7 @@ def _ensure_system_ready(
     settings: Settings,
     team: TeamSettings,
     template_name: str | None = None,
+    odoo_image: str = "",
 ) -> None:
     try:
         db_container = client.containers.get(settings.shared_db_container)
@@ -445,6 +447,8 @@ def _ensure_system_ready(
         raise PrerequisiteNotMetError(
             f"{settings.shared_db_container} not found. System not initialized. Restart oduflow."
         )
+    if odoo_image:
+        require_postgres_for_odoo(client, settings, odoo_image)
 
     if template_name is not None:
         tpl_db = get_template_db_name(template_name, team.team_id)
@@ -2105,7 +2109,7 @@ def _create_environment_impl(
             f"Failed to connect to Docker daemon: {e}. Ensure Docker is running."
         )
 
-    _ensure_system_ready(client, settings, team, template_name)
+    _ensure_system_ready(client, settings, team, template_name, odoo_image)
 
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -5052,6 +5056,8 @@ def update_environment(
             labels.get(settings.image_label) or container.attrs["Config"]["Image"]
         )
     odoo_image = image_override or current_image
+    if image_override:
+        require_postgres_for_odoo(client, settings, odoo_image)
     try:
         old_digest = container.image.id
     except Exception:

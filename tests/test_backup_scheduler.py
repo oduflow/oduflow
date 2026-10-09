@@ -203,3 +203,37 @@ class TestSlotAttemptsReset:
             )
         backup = production_registry.get_production(team, "erp")["backup"]
         assert backup["slot_attempts"] == 2  # kept and incremented
+
+
+class TestRequestBaseBackup:
+    def test_next_tick_takes_a_base_backup(self, settings):
+        # A recreated production cluster: the last success predates its archive.
+        sched._save_cluster_state(
+            settings,
+            {
+                "basebackup": {
+                    "last_success_at": datetime.datetime.now().astimezone().isoformat()
+                }
+            },
+        )
+        sched.request_base_backup(settings)
+        with (
+            patch.object(sched, "_run_basebackup_job") as job,
+            patch("oduflow.docker_ops.system_ops.prod_infra_exists", return_value=True),
+            patch("oduflow.docker_ops.system_ops._prod_pg_running", return_value=True),
+            patch("oduflow.docker_ops.client.get_client"),
+        ):
+            sched.tick(settings, LockManager())
+        job.assert_called_once()
+
+    def test_stopped_cluster_waits_without_spending_attempts(self, settings):
+        sched.request_base_backup(settings)
+        with (
+            patch.object(sched, "_run_basebackup_job") as job,
+            patch("oduflow.docker_ops.system_ops.prod_infra_exists", return_value=True),
+            patch("oduflow.docker_ops.system_ops._prod_pg_running", return_value=False),
+            patch("oduflow.docker_ops.client.get_client"),
+        ):
+            sched.tick(settings, LockManager())
+        job.assert_not_called()
+        assert sched._load_cluster_state(settings)["basebackup"] == {}

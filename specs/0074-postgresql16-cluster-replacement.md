@@ -1,6 +1,6 @@
 # PostgreSQL 16 cluster replacement
 
-**Status:** Accepted | **Type:** Upgrade policy | **First introduced:** 2026-09-29
+**Status:** Superseded by [[0076-postgresql-upgrade-on-demand]] | **Type:** Upgrade policy | **First introduced:** 2026-09-29
 
 **Key code:** `postgres_migration.py`, `migrations.py`, `settings.py`,
 `docker_ops/system_ops.py`, `docker_ops/env_ops.py`, `walg.py`, `s3_client.py`

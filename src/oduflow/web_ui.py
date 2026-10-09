@@ -1674,7 +1674,9 @@ def _build_routes(
             secret_store.resolve_env_secrets(team, env_vars)
             # Same for a stopped database server or a template without its
             # database: create_environment would refuse only after the delete.
-            env_ops._ensure_system_ready(client, settings, team, template_name)
+            env_ops._ensure_system_ready(
+                client, settings, team, template_name, odoo_image
+            )
 
             env_ops.delete_environment(settings, team, branch, preserve_share=True)
             result = env_ops.create_environment(

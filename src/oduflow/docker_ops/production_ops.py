@@ -62,6 +62,7 @@ from oduflow.docker_ops.system_ops import (
     ensure_prod_infra,
     ensure_team_network,
     reassign_db_ownership,
+    require_postgres_for_odoo,
 )
 from oduflow.domains import (
     NameIndex,
@@ -1147,6 +1148,9 @@ def create_production(
 
     # Bring up (or verify) the production tier before touching anything else.
     ensure_prod_infra(client, settings, force=True)
+    require_postgres_for_odoo(
+        client, settings, odoo_image, container_name=settings.prod_db_container
+    )
 
     # Refuse to clobber leftovers: a previous production's database kept by
     # delete_production(drop_database=False) must be dealt with explicitly.
@@ -1707,6 +1711,13 @@ def reconfigure_production(
     secret_store.resolve_env_secrets(
         team, _production_env_vars(updates.get("env_vars", record.get("env_vars")))
     )
+    if "odoo_image" in updates:
+        require_postgres_for_odoo(
+            client,
+            settings,
+            updates["odoo_image"],
+            container_name=settings.prod_db_container,
+        )
     old_head = ""
     try:
         old_head = rev_parse(repo_path)

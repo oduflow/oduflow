@@ -992,6 +992,22 @@ class TestProductionSettings:
         with pytest.raises(ValueError, match=r"Remove it.*\[database\]\.image"):
             Settings.from_toml(str(toml))
 
+    @pytest.mark.parametrize(
+        ("database", "image", "explicit"),
+        [
+            ("", "postgres:16", False),
+            ('[database]\nimage = "postgres:15"\n', "postgres:15", True),
+        ],
+    )
+    def test_database_image_records_whether_it_is_explicit(
+        self, tmp_path, database, image, explicit
+    ):
+        # Only an explicit image may upgrade an existing cluster.
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(database + '[team.1]\nhostname = "localhost"\n')
+        s = Settings.from_toml(str(toml))
+        assert (s.postgres_image, s.postgres_image_explicit) == (image, explicit)
+
     def test_production_section_without_enabled_stays_disabled(self, tmp_path):
         toml = tmp_path / "oduflow.toml"
         toml.write_text("[production]\nworkers_cap = 12\n[team.1]\n")

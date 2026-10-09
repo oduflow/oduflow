@@ -53,6 +53,8 @@ mode = "port"                   # "port" | "traefik"
 [database]
 user = "odoo"
 # password auto-generated on first launch. Set explicitly to override.
+# PostgreSQL 15-17. A newer major upgrades existing clusters on the next start:
+# https://docs.oduflow.dev/installation/#upgrading-postgresql
 image = "postgres:16"
 
 # ── Storage ───────────────────────────────────────────

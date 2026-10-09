@@ -162,33 +162,54 @@ add `# KEEP` as the **very first line**:
 Files marked with `# KEEP` are skipped and listed as `(kept)` in the upgrade
 output, including under `--force`.
 
-#### Upgrading to PostgreSQL 16
+#### Upgrading PostgreSQL
 
-Oduflow supports PostgreSQL 16 and 17 (Odoo 20 needs 16 or newer; the
-`postgres:18` images use a different data layout). The first start of
-a PostgreSQL 16 release replaces existing PostgreSQL 15 clusters instead of
-upgrading them in place: development data is not transferred. Prepare the
-server before upgrading:
+Oduflow supports PostgreSQL 15, 16 and 17; Odoo 20 needs 16 or newer, and the
+`postgres:18` images use a different data layout. New installations use
+`postgres:16`. An existing cluster keeps its major version until you raise
+`[database].image`: a newer default never upgrades a cluster. If
+`oduflow.toml` has no `image` key while a cluster holds older data, startup
+asks you to set the key explicitly, to keep the cluster or to upgrade it.
 
-1. Push the code of every environment and back up anything you want to keep.
-   The production cluster's WAL-G archive (`<backup.prefix>/walg/` in the
-   bucket) is deleted during the replacement, because its PostgreSQL 15 base
-   backups cannot be restored into PostgreSQL 16.
-2. Delete all environments, productions and service databases, including
-   stopped ones.
-3. In `oduflow.toml`, set `[database].image = "postgres:16"` (or remove the
-   key to use the default) and remove `[production].postgres_image` if present.
-4. Upgrade and restart as usual. `oduflow upgrade`, which `oduflow self-update`
-   runs before restarting, lists anything from step 2 that still exists and
-   exits with an error, so the running server stays up while you delete it.
+Both clusters are upgraded together. Prepare the server first:
 
-On startup Oduflow verifies these conditions again before changing anything. It
-then deletes the old clusters with their data, creates new clusters and
-restores every template database from its dump on disk; template filestores and
-metadata are kept. If a template cannot be restored, startup stops with an
-error naming it. Fix its dump and restart, or delete the template with
-`oduflow delete-template <name> --team <id>` and restart; the replacement
-resumes where it stopped.
+1. Delete all development environments, including stopped ones. Their
+   databases are not carried over, so push their code first. Templates are
+   kept and restored from their dumps on disk.
+2. Back up anything you want to keep. With `[backup]` configured, the
+   production cluster's WAL-G archive (`<backup.prefix>/walg/` in the bucket)
+   is deleted during the upgrade, because its base backups cannot be restored
+   into a newer major. Logical production snapshots stay restorable.
+3. Set `[database].image` to the newer image, for example `postgres:16`, and
+   restart Oduflow. `oduflow upgrade`, which `oduflow self-update` runs before
+   restarting, lists anything that blocks the upgrade and exits with an error,
+   so the running server stays up while you resolve it.
+
+On startup, before changing anything, Oduflow checks that no environment
+remains, that the clusters hold only databases it can restore, that the new
+image provides every extension those databases use, and that there is room for
+the dumps. It then stops services and production Odoo containers, and dumps
+service databases and production databases (including productions deleted
+with their data kept) together with all PostgreSQL roles and their passwords.
+With `[backup]` configured, it then deletes the old WAL-G archive. Only then
+does it remove the old clusters, create new ones and restore everything, so
+service and production credentials stay valid. Productions and services start
+again once their databases are restored (productions after WAL archiving is
+verified), and a new base backup is taken shortly afterwards. Template
+databases are restored from their dumps on disk last, and the dumps are
+deleted. Productions and services are down while their databases are dumped
+and restored.
+
+A failure before an old cluster is removed, including a refused S3 delete,
+leaves everything as it was, and setting the image back cancels the upgrade; if
+the archive was already partly deleted, a new base backup is taken. After an
+old cluster is removed, a restart resumes where it stopped, so keep the new
+image configured. If a template cannot be restored, fix its dump and restart,
+or delete the template with `oduflow delete-template <name> --team <id>` and
+restart; productions and services keep running meanwhile.
+
+Only the server upgrades: `oduflow stack apply` refuses while an upgrade is
+requested or under way, so restart the server first.
 
 ## Configuration Reference
 
@@ -247,7 +268,7 @@ mode = "port"               # "port" (direct host port) | "traefik" (reverse pro
 [database]
 user = "odoo"               # PostgreSQL user for the shared database container
 # password = "..."          # auto-generated on first launch; set explicitly to override
-image = "postgres:16"       # PostgreSQL Docker image (16 or 17)
+image = "postgres:16"       # PostgreSQL Docker image (15-17; a newer major upgrades)
 
 # ── Storage ───────────────────────────────────────────
 [storage]
@@ -352,7 +373,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 |---|---|---|
 | `[database].user` | `odoo` | PostgreSQL user for the shared database container |
 | `[database].password` | *(generated)* | PostgreSQL password. The bundled config omits it and one is auto-generated on first launch; set explicitly to override |
-| `[database].image` | `postgres:16` | PostgreSQL Docker image for both the development and production clusters: PostgreSQL 16 or 17. An existing cluster keeps its major version; startup refuses an image of another major |
+| `[database].image` | `postgres:16` | PostgreSQL Docker image for both the development and production clusters: PostgreSQL 15, 16 or 17. A newer major than a cluster's data upgrades it on the next start (see [Upgrading PostgreSQL](#upgrading-postgresql)); an older one is refused |
 
 ### Storage settings
 
