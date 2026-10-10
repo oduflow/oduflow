@@ -2605,6 +2605,10 @@ def _build_routes(
         returned command so the checkboxes in the import dialog drive what the
         Odoo.sh client downloads. ``addon_error_policy`` is stored with the
         token and controls strict versus best-effort addon wiring at finalize.
+        Optional boolean ``without_filestore`` appends ``--without-filestore``
+        (database and addons only) and is stored with the token, so finalize
+        records ``includes_filestore: false`` and keeps an existing template
+        filestore untouched.
         """
         team = _get_ui_team(request)
         with_flags: list[str] = []
@@ -2626,6 +2630,9 @@ def _build_routes(
                 with_flags.append("--with-themes")
             if data.get("with_extra_addons"):
                 with_flags.append("--with-extra-addons")
+            without_filestore = bool(data.get("without_filestore"))
+            if without_filestore:
+                with_flags.append("--without-filestore")
             addon_error_policy = str(
                 data.get("addon_error_policy")
                 or import_tokens.ADDON_ERROR_POLICY_STRICT
@@ -2634,6 +2641,7 @@ def _build_routes(
                 team,
                 template_name,
                 addon_error_policy=addon_error_policy,
+                without_filestore=without_filestore,
             )
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -3108,6 +3116,7 @@ def _build_routes(
                         record.get("addon_error_policy")
                         or import_tokens.ADDON_ERROR_POLICY_STRICT
                     ),
+                    without_filestore=bool(record.get("without_filestore")),
                 )
                 import_tokens.invalidate(team, str(record["token"]))
             return JSONResponse({"ok": True, "result": result})

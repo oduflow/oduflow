@@ -45,6 +45,33 @@ def test_best_effort_addon_policy_roundtrip(tmp_path):
     assert loaded["addon_error_policy"] == "best_effort"
 
 
+def test_without_filestore_defaults_false_and_roundtrips(tmp_path):
+    team = _team(tmp_path)
+    settings = _settings(team)
+    default = import_tokens.create_token(team, "zipfit")
+    skipped = import_tokens.create_token(team, "zipfit", without_filestore=True)
+
+    assert default["without_filestore"] is False
+    _t, loaded = import_tokens.load_token(settings, skipped["token"])
+    assert loaded["without_filestore"] is True
+
+
+def test_legacy_token_without_filestore_key_reads_as_false(tmp_path):
+    team = _team(tmp_path)
+    settings = _settings(team)
+    rec = import_tokens.create_token(team, "zipfit")
+    path = os.path.join(team.data_dir, "import_tokens", f"{rec['token']}.json")
+    with open(path) as f:
+        legacy = json.load(f)
+    legacy.pop("without_filestore")
+    with open(path, "w") as f:
+        json.dump(legacy, f)
+
+    _t, loaded = import_tokens.load_token(settings, rec["token"])
+
+    assert bool(loaded.get("without_filestore")) is False
+
+
 def test_invalid_addon_policy_rejected(tmp_path):
     with pytest.raises(ValueError, match="addon_error_policy"):
         import_tokens.create_token(

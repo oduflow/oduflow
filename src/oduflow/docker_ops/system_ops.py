@@ -4738,6 +4738,7 @@ def finalize_imported_template(
     staging_dir: str,
     *,
     addon_error_policy: str = "strict",
+    without_filestore: bool = False,
 ) -> dict[str, object]:
     """Promote a fully-staged push import into the live template and load it.
 
@@ -4748,6 +4749,11 @@ def finalize_imported_template(
     filestore/dump/metadata into the template directory, chown the filestore
     for the odoo user, then refresh sizes and restore the dump into the
     template DB. The staging directory is removed on success.
+
+    With ``without_filestore`` (``import-odoo.sh --without-filestore``) no
+    filestore is promoted: an existing template filestore is kept untouched
+    (live overlay environments are not disturbed), a new template gets an empty
+    one, and ``metadata.json`` records ``includes_filestore: false``.
     """
     from oduflow.docker_ops import env_ops
 
@@ -4785,7 +4791,10 @@ def finalize_imported_template(
         os.makedirs(tpl_dir, exist_ok=True)
 
         # Swap filestore (the overlay lower layer) while envs are unmounted.
-        if os.path.isdir(staged_fs):
+        # A database-only import never replaces an existing filestore; any
+        # leftover staged chunks go away with the staging directory.
+        keep_filestore = without_filestore and os.path.isdir(template_filestore_path)
+        if os.path.isdir(staged_fs) and not without_filestore:
             if os.path.exists(template_filestore_path):
                 shutil.rmtree(template_filestore_path)
             os.rename(staged_fs, template_filestore_path)
@@ -4806,9 +4815,14 @@ def finalize_imported_template(
                     os.remove(stale_path)
             os.rename(staged_dump, live_dump)
         if os.path.isfile(staged_meta):
+            if without_filestore:
+                with open(staged_meta) as f:
+                    staged_md = json.load(f)
+                staged_md["includes_filestore"] = False
+                atomic_write_private_json(staged_meta, staged_md, sort_keys=False)
             os.replace(staged_meta, live_meta)
 
-        if major_version:
+        if major_version and not keep_filestore:
             try:
                 uid_gid = get_odoo_uid_gid(client, f"odoo:{major_version}")
                 uid_str, gid_str = uid_gid.split(":")
