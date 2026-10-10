@@ -158,7 +158,31 @@ session-open injection used by Codex. The browser client accepts both the
 legacy ACP `models` response and modern `configOptions`, selecting the matching
 model-change method per session.
 
+Deployments that route models through their own OpenAI-compatible gateway
+(LiteLLM) hit a protocol mismatch: OpenCode's built-in `openai` provider speaks
+the Responses API, while such gateways often accept only Chat Completions. An
+optional `[agent.opencode_provider]` therefore declares one custom provider. It
+is deployment-wide, like `opencode_model`, and is rendered into the same
+session-only OpenCode config for both CLI and ACP. OpenCode's bundled
+`@ai-sdk/openai-compatible` package makes the requests, so the immutable coder
+image did not change. The provider keeps the credential model of the rest of
+the agent: the TOML holds only the *names* of agent-environment variables and
+OpenCode receives `{env:…}` placeholders. Per-team values stay in `agent_env`,
+and the parser rejects anything that looks like an inline URL or key. The
+default variable names are the provider's own rather than `OPENAI_*`, because
+Codex and OpenCode's built-in `openai` provider read those from the same
+container. OpenCode merges a provider whose id is in its models.dev catalog
+with the built-in entry, and that catalog keeps growing; instead of a
+denylist, the generated config pins the provider to the declared models and
+variables, and only the providers Oduflow's agents rely on are reserved.
+Without the section the generated config is unchanged.
+
 ## History
+
+- 2026-10-10 — added an optional custom OpenAI-compatible (Chat Completions)
+  OpenCode provider, `[agent.opencode_provider]`, applied to Agent CLI and
+  Agent Chat, with variable-name-only credentials and startup/console
+  validation.
 
 - 2026-07-24 — added OpenCode as a third hosted agent with CLI and native ACP
   chat, generic provider authentication, Agent Browser, scoped Oduflow MCP,

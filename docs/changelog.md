@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **OpenCode through an OpenAI-compatible gateway** — a new optional
+  `[agent.opencode_provider]` section declares a custom OpenCode provider that
+  uses Chat Completions. It suits gateways such as LiteLLM, which do not accept
+  the Responses API used by OpenCode's built-in `openai` provider. Select its
+  models as `<id>/<model>` (for example `opencode_model = "litellm/glm-5.3"`).
+  The provider applies to both Agent CLI and Agent Chat. The config names only
+  the agent-environment variables that hold the base URL and key (default
+  `OPENCODE_PROVIDER_BASE_URL` and `OPENCODE_PROVIDER_API_KEY`, kept apart from
+  the `OPENAI_*` variables that Codex reads), so no secret is embedded. The
+  section is validated at startup and in the settings console, where it is
+  editable and applies live. When `opencode_model` selects the provider and a
+  team lacks the variables, Agent Chat warns and Agent CLI waits for Enter
+  before starting OpenCode. Without the section, behaviour is unchanged.
+
+### Dashboard
+
+- **Agent Chat sits next to Connect As** — Agent Chat moves out of the
+  **More** menu to sit right of **Connect As** on every environment card.
+
 ## v1.85.0
 
 ### Breaking Changes

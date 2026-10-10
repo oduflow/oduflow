@@ -3,12 +3,14 @@ import os
 import stat
 
 from oduflow import agent_sessions
-from oduflow.settings import Settings, TeamSettings
+from oduflow.settings import OpenCodeProviderSettings, Settings, TeamSettings
 from oduflow.web_ui import (
     _acp_adapter_cmd,
     _codex_cli_cmd,
+    _confirm_before_start,
     _opencode_cli_cmd,
     _opencode_config,
+    _opencode_provider_env_warning,
     _wire_client_acp_mcp,
 )
 
@@ -239,6 +241,110 @@ def test_opencode_acp_config_omits_mcp_servers():
         "permission": "allow",
         "model": "openai/test-model",
     }
+
+
+def _provider() -> OpenCodeProviderSettings:
+    return OpenCodeProviderSettings(
+        id="litellm",
+        name="LiteLLM",
+        models=("glm-5.3", "openai/gpt-4o"),
+    )
+
+
+def test_opencode_config_declares_chat_completions_provider_by_reference():
+    config = json.loads(
+        _opencode_config(
+            include_browser=False,
+            model="litellm/glm-5.3",
+            provider=_provider(),
+        )
+    )
+    assert config["model"] == "litellm/glm-5.3"
+    assert config["provider"] == {
+        "litellm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "LiteLLM",
+            # Pinned so an id from OpenCode's catalog gains no built-in
+            # models or variables.
+            "env": [],
+            "whitelist": ["glm-5.3", "openai/gpt-4o"],
+            "options": {
+                "baseURL": "{env:OPENCODE_PROVIDER_BASE_URL}",
+                "apiKey": "{env:OPENCODE_PROVIDER_API_KEY}",
+            },
+            "models": {
+                "glm-5.3": {"name": "glm-5.3"},
+                "openai/gpt-4o": {"name": "openai/gpt-4o"},
+            },
+        }
+    }
+
+
+def test_opencode_config_without_provider_is_unchanged():
+    assert _opencode_config(
+        "http://scoped/mcp/env", include_oduflow=True, model="anthropic/x"
+    ) == _opencode_config(
+        "http://scoped/mcp/env",
+        include_oduflow=True,
+        model="anthropic/x",
+        provider=None,
+    )
+    assert "provider" not in json.loads(_opencode_config(include_browser=False))
+
+
+def test_opencode_provider_env_warning(tmp_path):
+    team = TeamSettings(
+        team_id="1",
+        data_dir=str(tmp_path),
+        agent_env={
+            "OPENCODE_PROVIDER_BASE_URL": "http://gw/v1",
+            "OPENCODE_PROVIDER_API_KEY": "sk-x",
+        },
+    )
+    assert _opencode_provider_env_warning(Settings(teams={"1": team}), team) == ""
+    configured = Settings(
+        teams={"1": team},
+        agent_opencode_model="litellm/glm-5.3",
+        agent_opencode_provider=_provider(),
+    )
+    assert _opencode_provider_env_warning(configured, team) == ""
+
+    bare = TeamSettings(
+        team_id="1",
+        data_dir=str(tmp_path),
+        agent_env={"OPENCODE_PROVIDER_API_KEY": " "},
+    )
+    warning = _opencode_provider_env_warning(
+        Settings(
+            teams={"1": bare},
+            agent_opencode_model="litellm/glm-5.3",
+            agent_opencode_provider=_provider(),
+        ),
+        bare,
+    )
+    assert "litellm/glm-5.3" in warning
+    assert "OPENCODE_PROVIDER_BASE_URL, OPENCODE_PROVIDER_API_KEY" in warning
+    assert "[team.1.agent_env]" in warning
+    assert "server environment" in warning
+
+
+def test_opencode_provider_env_warning_only_when_the_model_selects_it(tmp_path):
+    bare = TeamSettings(team_id="1", data_dir=str(tmp_path))
+    for model in ("", "anthropic/claude-sonnet-4-6", "litellmx/glm-5.3"):
+        settings = Settings(
+            teams={"1": bare},
+            agent_opencode_model=model,
+            agent_opencode_provider=_provider(),
+        )
+        assert _opencode_provider_env_warning(settings, bare) == "", model
+
+
+def test_confirm_before_start_passes_the_warning_as_an_argument():
+    cmd = _confirm_before_start(["opencode", "--auto"], "it's $(id)")
+    assert cmd[:2] == ["sh", "-c"]
+    assert "$(id)" not in cmd[2]
+    assert cmd[3:] == ["sh", "it's $(id)", "opencode", "--auto"]
+    assert cmd[2].endswith('read -r _; shift; exec "$@"')
 
 
 def test_wire_client_acp_mcp_adds_scoped_server_and_preserves_others():

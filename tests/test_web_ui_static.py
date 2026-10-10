@@ -394,6 +394,24 @@ def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):
     assert "(agentType === 'opencode' ? 'OpenCode' : 'Claude')" in dashboard.text
 
 
+def test_agent_chat_sits_next_to_connect_as(tmp_path):
+    dashboard = _client(tmp_path).get("/").text
+
+    connect = dashboard.index('<button class="btn btn-connect" title="Log in as a user')
+    chat = dashboard.index(
+        '<button class="btn btn-chat" title="Structured chat with the coding agent'
+    )
+    sync = dashboard.index('<button class="btn btn-sync"', connect)
+    # Agent Chat sits right of Connect As, ahead of the routine actions...
+    assert connect < chat < sync
+    assert ">Connect As</button>" in dashboard[connect:chat]
+    # ...and is no longer duplicated inside the More menu.
+    assert 'role="menuitem" title="Structured chat' not in dashboard
+    # Both stay plain outline actions (DESIGN.md: one primary per view).
+    assert ".btn-chat:hover, .btn-chat:focus-visible {" in dashboard
+    assert ".btn-main" not in dashboard
+
+
 def test_minimized_window_dock_has_group_semantics_and_restores_focus(tmp_path):
     dashboard = _client(tmp_path).get("/").text
     assert 'id="min-dock" role="group"' in dashboard

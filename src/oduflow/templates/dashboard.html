@@ -536,6 +536,7 @@
   .btn-sync:hover, .btn-sync:focus-visible { border-color: var(--accent); color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
   .btn-logs:hover, .btn-logs:focus-visible { border-color: var(--accent); color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
   .btn-connect:hover, .btn-connect:focus-visible { border-color: var(--cyan); color: var(--cyan); background: color-mix(in oklab, var(--cyan) 10%, transparent); }
+  .btn-chat:hover, .btn-chat:focus-visible { border-color: var(--accent); color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
   .btn-protect:hover, .btn-protect:focus-visible { border-color: var(--yellow); color: var(--yellow); background: color-mix(in oklab, var(--yellow) 10%, transparent); }
   .btn-create {
     background: var(--surface);
@@ -3533,6 +3534,9 @@ function renderEnvironments(envs, force) {
         '<div class="env-actions">' +
           '<button class="btn btn-connect" title="Log in as a user without a password: mint a session and get the cookie + URL" onclick="openConnect(\'' + escAttr(env.branch) + '\')" ' + dis +
             (allStopped ? 'disabled' : '') + '>Connect As</button>' +
+          (showAgent
+            ? '<button class="btn btn-chat" title="Structured chat with the coding agent for this environment" onclick="openChat(\'' + escAttr(env.branch) + '\')">Agent Chat</button>'
+            : '') +
           '<button class="btn btn-sync" title="Pull code changes and apply: install, upgrade or restart as needed" onclick="doAction(\'' + escAttr(env.branch) + '\',\'sync\')" ' + dis +
             (allStopped ? 'disabled' : '') + '>Sync</button>' +
           '<button class="btn btn-logs" onclick="showLogs(\'' + escAttr(env.branch) + '\')">Logs</button>' +
@@ -3546,9 +3550,6 @@ function renderEnvironments(envs, force) {
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
             '<div class="menu" role="menu">' +
               '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
-              (showAgent
-                ? '<button role="menuitem" title="Structured chat with the coding agent for this environment" onclick="openChat(\'' + escAttr(env.branch) + '\')">Agent Chat</button>'
-                : '') +
               '<button role="menuitem" title="Shell inside the Odoo container" onclick="openConsole(\'' + escAttr(env.branch) + '\')" ' +
                 (allStopped ? 'disabled' : '') + '>Open console</button>' +
               '<button role="menuitem" title="psql session on the environment database" onclick="openSqlConsole(\'' + escAttr(env.branch) + '\')" ' +

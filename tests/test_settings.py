@@ -874,6 +874,112 @@ class TestAgentSettings:
             Settings.from_toml(str(toml))
 
 
+class TestOpenCodeProvider:
+    def _settings(self, tmp_path, provider: str, model: str = "") -> Settings:
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text(
+            "[agent]\n"
+            + (f'opencode_model = "{model}"\n' if model else "")
+            + "[agent.opencode_provider]\n"
+            + provider
+            + '[team.1]\nhostname = "localhost"\n'
+        )
+        return Settings.from_toml(str(toml))
+
+    def test_absent_section_is_none(self, tmp_path):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text('[team.1]\nhostname = "localhost"\n')
+        assert Settings.from_toml(str(toml)).agent_opencode_provider is None
+        assert Settings().agent_opencode_provider is None
+
+    def test_minimal_section_uses_own_variable_defaults(self, tmp_path):
+        s = self._settings(
+            tmp_path, 'id = "litellm"\nmodels = ["glm-5.3"]\n', "litellm/glm-5.3"
+        )
+        assert s.agent_opencode_model == "litellm/glm-5.3"
+        p = s.agent_opencode_provider
+        assert p is not None
+        assert p.id == "litellm"
+        assert (p.name, p.display_name) == ("", "litellm")
+        assert p.models == ("glm-5.3",)
+        # Not OPENAI_*: Codex and OpenCode's built-in openai provider read
+        # those from the same agent container.
+        assert p.base_url_env == "OPENCODE_PROVIDER_BASE_URL"
+        assert p.api_key_env == "OPENCODE_PROVIDER_API_KEY"
+
+    def test_full_section(self, tmp_path):
+        s = self._settings(
+            tmp_path,
+            'id = "gw"\nname = "Gateway"\nbase_url_env = "GW_URL"\n'
+            'api_key_env = "GW_KEY"\nmodels = [" glm-5.3 ", "openai/gpt-4o"]\n',
+            # OpenCode splits at the first slash: the gateway's own
+            # "openai/gpt-4o" stays one model id.
+            "gw/openai/gpt-4o",
+        )
+        p = s.agent_opencode_provider
+        assert p is not None
+        assert (p.display_name, p.base_url_env, p.api_key_env) == (
+            "Gateway",
+            "GW_URL",
+            "GW_KEY",
+        )
+        assert p.models == ("glm-5.3", "openai/gpt-4o")
+
+    def test_model_of_another_provider_is_not_checked(self, tmp_path):
+        s = self._settings(
+            tmp_path,
+            'id = "litellm"\nmodels = ["glm-5.3"]\n',
+            "anthropic/claude-sonnet-4-6",
+        )
+        assert s.agent_opencode_provider is not None
+
+    @pytest.mark.parametrize(
+        ("provider", "message"),
+        [
+            ('models = ["glm-5.3"]\n', "requires id"),
+            ('id = "Lite/LLM"\nmodels = ["glm-5.3"]\n', "must contain only"),
+            ('id = "openai"\nmodels = ["glm-5.3"]\n', "built-in OpenCode provider"),
+            ('id = "litellm"\n', "models must be a list"),
+            ('id = "litellm"\nmodels = "glm-5.3"\n', "models must be a list"),
+            ('id = "litellm"\nmodels = []\n', "models must not be empty"),
+            ('id = "litellm"\nmodels = ["glm 5"]\n', "no whitespace"),
+            ('id = "litellm"\nmodels = ["a", "a"]\n', "duplicates"),
+            (
+                'id = "litellm"\nmodels = ["a"]\nbase_url_env = "https://gw/v1"\n',
+                "base_url_env must be an environment variable name",
+            ),
+            (
+                'id = "litellm"\nmodels = ["a"]\napi_key_env = "sk-live"\n',
+                "api_key_env must be an environment variable name",
+            ),
+            (
+                'id = "litellm"\nmodels = ["a"]\napi_key = "sk-live"\n',
+                "unknown key\\(s\\) api_key",
+            ),
+        ],
+    )
+    def test_invalid_section_is_rejected(self, tmp_path, provider, message):
+        with pytest.raises(ValueError, match=message):
+            self._settings(tmp_path, provider)
+
+    def test_selected_model_must_be_listed(self, tmp_path):
+        with pytest.raises(ValueError, match="'glm-4' is not in"):
+            self._settings(
+                tmp_path, 'id = "litellm"\nmodels = ["glm-5.3"]\n', "litellm/glm-4"
+            )
+
+    @pytest.mark.parametrize("model", ["litellm", "litellm/"])
+    def test_selected_model_needs_provider_and_model(self, tmp_path, model):
+        with pytest.raises(ValueError, match="must be '<provider>/<model>'"):
+            self._settings(tmp_path, 'id = "litellm"\nmodels = ["glm-5.3"]\n', model)
+
+    def test_catalog_provider_id_is_allowed(self, tmp_path):
+        # Only the providers Oduflow's agents rely on are reserved; the
+        # generated config pins any other catalog id to the declared models.
+        s = self._settings(tmp_path, 'id = "deepseek"\nmodels = ["glm-5.3"]\n')
+        assert s.agent_opencode_provider is not None
+
+
 class TestExtraRoutes:
     def _traefik_toml(self, tmp_path, body):
         toml = tmp_path / "oduflow.toml"

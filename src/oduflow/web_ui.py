@@ -108,7 +108,7 @@ from oduflow.naming import (
     validate_env_name,
     validate_template_name,
 )
-from oduflow.settings import Settings, TeamSettings
+from oduflow.settings import OpenCodeProviderSettings, Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
@@ -762,18 +762,40 @@ def _opencode_config(
     include_browser: bool = True,
     include_oduflow: bool = False,
     model: str = "",
+    provider: OpenCodeProviderSettings | None = None,
 ) -> str:
     """Return session-local OpenCode config with no embedded credential.
 
     ``OPENCODE_CONFIG_CONTENT`` has high precedence, so Oduflow's approval-free
     trust model and scoped MCP wiring cannot be silently shadowed by a checkout
     config. The bearer remains an environment placeholder resolved only inside
-    this docker-exec process.
+    this docker-exec process. A configured custom provider is declared the
+    same way: its base URL and key are ``{env:...}`` placeholders resolved
+    from the agent container's environment.
     """
     config: dict[str, Any] = {
         "autoupdate": False,
         "permission": "allow",
     }
+    if provider is not None:
+        # @ai-sdk/openai-compatible is bundled with OpenCode and talks Chat
+        # Completions (POST <baseURL>/chat/completions). OpenCode merges a
+        # provider whose id is in its models.dev catalog with the built-in
+        # entry; the empty env list and the whitelist keep only the declared
+        # models and variables.
+        config["provider"] = {
+            provider.id: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": provider.display_name,
+                "env": [],
+                "whitelist": list(provider.models),
+                "options": {
+                    "baseURL": f"{{env:{provider.base_url_env}}}",
+                    "apiKey": f"{{env:{provider.api_key_env}}}",
+                },
+                "models": {m: {"name": m} for m in provider.models},
+            },
+        }
     if include_browser:
         config["mcp"] = {
             "agent_browser": {
@@ -798,6 +820,53 @@ def _opencode_config(
             },
         }
     return json.dumps(config, separators=(",", ":"))
+
+
+def _opencode_provider_env_warning(settings: Settings, team: TeamSettings) -> str:
+    """Explain a custom OpenCode provider whose variables the team lacks.
+
+    OpenCode substitutes an unset ``{env:...}`` with an empty string, which
+    surfaces only as an opaque connection or 401 error from the gateway.
+    Only a provider that ``opencode_model`` selects is checked: a team that
+    does not use it must not be told its requests will fail. Returns an empty
+    string when there is nothing to warn about.
+    """
+    provider = settings.agent_opencode_provider
+    if provider is None or not settings.agent_opencode_model.startswith(
+        f"{provider.id}/"
+    ):
+        return ""
+    env = env_ops._agent_env_vars(settings, team)
+    missing = [
+        name
+        for name in (provider.base_url_env, provider.api_key_env)
+        if not env.get(name, "").strip()
+    ]
+    if not missing:
+        return ""
+    return (
+        f"the OpenCode model {settings.agent_opencode_model} reads "
+        f"{', '.join(missing)}, which this team's agent environment does not "
+        "set, so its requests will fail. Set the variables in "
+        f"[team.{team.team_id}.agent_env] and restart Oduflow; the server "
+        "environment is forwarded only for the known provider keys of a "
+        "single-team server."
+    )
+
+
+def _confirm_before_start(cmd: list[str], warning: str) -> list[str]:
+    """Wrap a TUI command so a warning stays on screen until Enter is pressed.
+
+    Full-screen TUIs switch to the alternate screen at once and would wipe a
+    warning written just before them. The warning is passed as an argument,
+    never interpolated into the script.
+    """
+    script = (
+        'printf "\\033[33mWarning: %s\\033[0m\\r\\n\\r\\n'
+        'Press Enter to start anyway, or close the console. " "$1"; '
+        'read -r _; shift; exec "$@"'
+    )
+    return ["sh", "-c", script, "sh", warning, *cmd]
 
 
 def _wire_client_acp_mcp(
@@ -5487,8 +5556,12 @@ def _build_routes(
                     mcp_url,
                     include_oduflow=bool(mcp_token),
                     model=settings.agent_opencode_model,
+                    provider=settings.agent_opencode_provider,
                 )
                 cmd = _opencode_cli_cmd(settings.agent_opencode_model)
+                provider_warning = _opencode_provider_env_warning(settings, team)
+                if provider_warning:
+                    cmd = _confirm_before_start(cmd, provider_warning)
             else:
                 # Approval-free like Codex: Docker + the unprivileged `agent`
                 # user are the security boundary, so the console skips per-tool
@@ -5763,7 +5836,11 @@ def _build_routes(
                 exec_env["OPENCODE_CONFIG_CONTENT"] = _opencode_config(
                     include_browser=False,
                     model=settings.agent_opencode_model,
+                    provider=settings.agent_opencode_provider,
                 )
+                provider_warning = _opencode_provider_env_warning(settings, team)
+                if provider_warning:
+                    await _notice(provider_warning)
 
             exec_id = client.api.exec_create(
                 container.id,
