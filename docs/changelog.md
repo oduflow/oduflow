@@ -1,9 +1,52 @@
 # Changelog
 
-## Unreleased
+## v1.86.0
 
 ### Features
 
+- **Server settings console** — operators can now edit the whole
+  `oduflow.toml` in the browser at `/admin`, without SSH. Every key is labelled
+  with how a change takes effect: *live* (applies at once), *restart*,
+  *recreate* (restart and recreate existing containers) or *locked*
+  (read-only). Each edit is checked with the same parser the server boots
+  with, so a typo is caught before a restart instead of after it. Comments and
+  layout are kept, and every write keeps a diff in history with one-click
+  revert. The console has its own password, session and TOTP, separate from
+  team logins, and secrets stay masked unless you reveal them (reveals are
+  logged). Restart is a graceful in-place re-exec and is refused while any
+  lock is held. New CLI: `oduflow admin enable|disable` and
+  `oduflow ui-2fa setup --admin`. See `docs/admin.md` and decision record
+  [0077](https://github.com/oduflow/oduflow/blob/main/specs/0077-server-settings-console.md).
+  (#303)
+- **PostgreSQL major upgrades on operator request** — this replaces the
+  one-time PG15→PG16 replacement from v1.85.0. A cluster stays on its major
+  (15–17) until `[database].image` is raised explicitly. A new default never
+  upgrades anything, and downgrades are refused. Production databases
+  (including soft-deleted ones) and service databases are dumped with every
+  role and password hash, then restored into the new cluster. Templates are
+  restored from their on-disk dumps. Development environments must be deleted
+  first. The upgrade can be cancelled until an old cluster is removed. Odoo 20
+  on a PG15 cluster is refused up front. Every server now holds a shared lock
+  on its data directory, and the upgrade runs only while it can take that lock
+  exclusively. This stops one stdio/HTTP server from upgrading clusters out
+  from under another. See decision record
+  [0076](https://github.com/oduflow/oduflow/blob/main/specs/0076-postgresql-upgrade-on-demand.md).
+  (#301, #302)
+- **Production server mode with a working live bus** — productions sent every
+  request to the prefork workers on 8069, which refuse `/websocket`, so
+  Discuss and notifications never updated live. Each production now has a
+  server mode. `workers` (default) routes `/websocket` and `/longpolling` to
+  the gevent port 8072. `gevent` serves everything from 8072. The mode is
+  available via `create_production`, `reconfigure_production`, the dashboard
+  and Stack manifests (`serverMode`). The health probe checks both ports, so a
+  dead gevent process rolls the deploy back. Existing productions get the new
+  routing at their next deploy, restart or reconfigure rather than all at once
+  at startup. (#290)
+- **Rotated secrets reach productions** — `reconfigure_production` now finds
+  `secret:<name>` values that changed since the container was created and
+  recreates it with the new values. Previously it reported "No settings
+  changed". The result lists only the rotated key names, never values. The new
+  `recreate` flag (MCP and REST) forces a recreate on request. (#300)
 - **OpenCode through an OpenAI-compatible gateway** — a new optional
   `[agent.opencode_provider]` section declares a custom OpenCode provider that
   uses Chat Completions. It suits gateways such as LiteLLM, which do not accept
@@ -17,11 +60,76 @@
   editable and applies live. When `opencode_model` selects the provider and a
   team lacks the variables, Agent Chat warns and Agent CLI waits for Enter
   before starting OpenCode. Without the section, behaviour is unchanged.
+  (#308)
+- **Mail servers are archived during sanitization** — the bundled
+  `01_disable_mail.sql` now sets incoming and outgoing mail servers to
+  inactive instead of deleting them, so you can switch one back on in a dev
+  environment. Unmodified deployed copies pick this up automatically. (#291)
+- **`--no-telemetry` flag** — a new global CLI flag turns telemetry off for
+  the current process only, without editing `oduflow.toml`. (#287)
+- **JSON secret keys by dot path** — partial JSON secret updates now accept
+  dot notation (`environment.OPENROUTER_API_KEY`) as well as JSON Pointer. A
+  missing final object key is created, and the result says whether the key was
+  `created` or `updated`. (#288)
 
 ### Dashboard
 
+- **Cleanup button** — opens a preview of the team's orphaned databases,
+  workspaces, port entries and PostgreSQL roles, plus the server's unused
+  Docker images. Confirming removes only what you reviewed and what is still
+  orphaned. Image removal is opt-in, and images used by any container, any
+  build or a recent operation are kept. (#299)
+- **Production environment variables** — the production Create and Settings
+  forms have an *Environment variables* field. `get_production_info` reports
+  `env_vars`, and `secret:` references stay references. (#298)
+- **Edit one key of a JSON secret** — the secret editor has separate *replace
+  the whole value* and *update a single key* sections, so changing one key no
+  longer means re-sending a write-only document. (#288)
+- **Extra-addons branches dialog** — each remote extra-repo card shows the
+  downloaded branches, who uses each one, and the remote list. Download
+  branches ahead of time, or remove an unused one to free disk.
+  `update_extra_repo(add_branch=...)` also accepts a list. (#285)
+- **Update all** fetches every extra-addons repo one after another and shows a
+  summary of what changed, was up to date or failed. (#294)
+- **Repo filter and bulk branch picker** in the create-environment modal and
+  template settings. Narrow a long repo list by name, then apply a branch to
+  every repo that has it. Rows hidden by the filter stay selected and are
+  counted. (#293)
+- **Extra-repo list on environment cards** folds to two lines. A long list
+  gets a filter (by name or branch) and a **Show all (N)** toggle. (#297)
+- **Create from production is pre-filled** with the production's repository,
+  Odoo image, Git credential and extra addons. A new **Base branch** field
+  creates a branch that doesn't exist on origin yet: it starts from the base
+  branch's tip and is pushed without `--force`. (#305)
 - **Agent Chat sits next to Connect As** — Agent Chat moves out of the
   **More** menu to sit right of **Connect As** on every environment card.
+  (#308)
+
+### Bug Fixes
+
+- **Template modules upgraded at create** — `create_environment` now runs
+  `odoo -u` for installed modules whose checkout manifest is newer than the
+  version recorded in the template. Before, such environments failed with
+  `column ... does not exist` and were rolled back after the readiness
+  timeout. Extra-addons repos are covered. (#304)
+- **Helper containers work on any Docker log driver** — on daemons whose
+  default log driver is not `json-file`/`journald` (for example `local`),
+  `read_file_in_volume`, `search_in_volume`, `delete_file_in_volume`,
+  UID/GID detection and the PostgreSQL version probe read no output. Visible
+  effects included Stack applies rewriting unchanged files and fake search
+  matches. (#289)
+- **Legacy secrets typed by value** — secrets saved before `value_type`
+  existed are now treated as `json` when they hold an object or array, so
+  their keys can be updated. A startup migration records the type. Note:
+  `POST /api/secrets/{name}/set` without `value_type` on such a secret now
+  requires valid JSON. (#307)
+- **`get_environment_info` reports missing environments** with a
+  `NotFoundError` instead of a plausible-looking stub. (#292)
+- **Config errors are reported in one line** for wrong-typed TOML values. A
+  missing `ODUFLOW_TOML` path is reported instead of a new default config
+  being created there silently. (#294)
+- **Ctrl+C exits quietly** with status 130 instead of printing a
+  `KeyboardInterrupt` traceback. (#306)
 
 ## v1.85.0
 
