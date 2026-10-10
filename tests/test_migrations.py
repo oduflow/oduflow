@@ -438,3 +438,48 @@ class TestBackfillServicePresetsMigration:
         backfill.assert_called_once_with(settings, team, "redis", svc)
         filters = client.containers.list.call_args.kwargs["filters"]
         assert "oduflow.service" in filters["label"]
+
+
+class TestSecretValueTypesMigration:
+    def test_types_legacy_secrets_per_team_best_effort(self, tmp_path):
+        from oduflow.migrations import _migrate_secret_value_types
+        from oduflow.settings import TeamSettings
+
+        teams = {}
+        for team_id in ("1", "2", "3", "4"):
+            team_dir = tmp_path / f"team_{team_id}"
+            os.makedirs(team_dir)
+            teams[team_id] = TeamSettings(team_id=team_id, data_dir=str(team_dir))
+        settings = Settings(base_data_dir=str(tmp_path), teams=teams)
+        legacy = {"version": 1, "secrets": {"cfg": {"value": '{"a": 1}'}}}
+        (tmp_path / "team_1" / "secrets.json").write_text(json.dumps(legacy))
+        # Unreadable stores are logged, not fatal; team 3 has no store at all.
+        (tmp_path / "team_2" / "secrets.json").write_text("{broken")
+        (tmp_path / "team_4" / "secrets.json").write_bytes(b"\xff\xfe{}")
+
+        _migrate_secret_value_types(settings)
+
+        data = json.loads((tmp_path / "team_1" / "secrets.json").read_text())
+        assert data["secrets"]["cfg"] == {"value": '{"a": 1}', "value_type": "json"}
+        assert (tmp_path / "team_2" / "secrets.json").read_text() == "{broken"
+        assert not (tmp_path / "team_3" / "secrets.json").exists()
+        assert (tmp_path / "team_4" / "secrets.json").read_bytes() == b"\xff\xfe{}"
+
+    def test_run_pending_applies_it_to_an_upgraded_install(self, tmp_path):
+        from oduflow.settings import TeamSettings
+
+        team_dir = tmp_path / "team_1"
+        os.makedirs(team_dir)
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            teams={"1": TeamSettings(team_id="1", data_dir=str(team_dir))},
+        )
+        legacy = {"version": 1, "secrets": {"cfg": {"value": '{"a": 1}'}}}
+        (team_dir / "secrets.json").write_text(json.dumps(legacy))
+        previous = [mig.id for mig in MIGRATIONS if mig.id != "0010-secret-value-types"]
+        (tmp_path / "migrations.json").write_text(json.dumps({"applied": previous}))
+
+        assert run_pending(settings) == ["0010-secret-value-types"]
+        data = json.loads((team_dir / "secrets.json").read_text())
+        assert data["secrets"]["cfg"]["value_type"] == "json"
+        assert _state(tmp_path) == [mig.id for mig in MIGRATIONS]

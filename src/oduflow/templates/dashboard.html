@@ -8660,7 +8660,9 @@ function validateSecretKey() {
     : !path.includes('/') && path.split('.').every(function(part) { return part.length > 0; });
   var valid = canUpdate && validPath && value.value.length > 0;
   var message = !canUpdate
-    ? 'Save this secret as JSON before updating an individual key.'
+    ? secretTypes[secretEditingName] === 'text'
+      ? 'This secret is stored as text. Paste the full JSON into Replace Data below and choose Replace data to enable key updates.'
+      : 'Save this secret as JSON before updating an individual key.'
     : key.value && !validPath
       ? 'Use non-empty dot-separated keys or a path starting with /.'
       : 'Use environment.OPENROUTER_API_KEY or /environment/OPENROUTER_API_KEY. Missing keys are created; the parent must exist. Use /key.with.dots for a literal dotted name.';
