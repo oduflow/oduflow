@@ -304,6 +304,14 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # codex_model = ""          # optional Codex model override; empty = CLI default
 # opencode_model = ""       # optional provider/model override; empty = OpenCode default
 
+# Optional OpenAI-compatible gateway for OpenCode (Chat Completions); values
+# of the named variables come from [team.X.agent_env].
+# [agent.opencode_provider]
+# id = "litellm"            # select models as "litellm/<model>"
+# models = ["glm-5.3"]
+# base_url_env = "OPENCODE_PROVIDER_BASE_URL"
+# api_key_env = "OPENCODE_PROVIDER_API_KEY"
+
 # ── Production hosting (optional) ─────────────────────
 # [production]
 # enabled = true            # opt in; requires routing.mode = "traefik"
@@ -414,6 +422,12 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 | `[agent].claude_model` | *(empty)* | Optional Claude model override for the agent; empty = CLI default |
 | `[agent].codex_model` | *(empty)* | Optional Codex model override for the agent; empty = CLI default |
 | `[agent].opencode_model` | *(empty)* | Optional OpenCode model override in `provider/model` format; empty = OpenCode default |
+| `[agent].opencode_provider` | *(absent)* | Optional `[agent.opencode_provider]` sub-table: a custom OpenAI-compatible OpenCode provider using Chat Completions (for example a LiteLLM gateway); absent = OpenCode unchanged. See [OpenAI-compatible gateway](agent.md#openai-compatible-gateway-for-opencode) |
+| `[agent.opencode_provider].id` | — | Required provider id (lowercase letters, digits, `-`, `_`; not `anthropic`, `google`, `openai`, `opencode` or `openrouter`). Select its models as `<id>/<model>` |
+| `[agent.opencode_provider].models` | — | Required list of model ids as the gateway names them; an `opencode_model` naming this provider must be one of them |
+| `[agent.opencode_provider].name` | *(id)* | Display name shown in OpenCode |
+| `[agent.opencode_provider].base_url_env` | `OPENCODE_PROVIDER_BASE_URL` | Name of the agent environment variable holding the base URL, including `/v1` |
+| `[agent.opencode_provider].api_key_env` | `OPENCODE_PROVIDER_API_KEY` | Name of the agent environment variable holding the API key |
 
 ### Production settings
 

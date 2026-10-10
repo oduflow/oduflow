@@ -92,6 +92,17 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # claude_model = ""                # optional model override; empty = CLI default
 # codex_model = ""                 # optional model override; empty = CLI default
 # opencode_model = ""              # optional provider/model; empty = OpenCode default
+#                                  # (e.g. "litellm/glm-5.3" with the provider below)
+
+# Optional custom OpenCode provider: an OpenAI-compatible gateway (LiteLLM etc.)
+# reached over Chat Completions. Only variable NAMES go here; set their values
+# in each team's [team.X.agent_env]. Without this section OpenCode is unchanged.
+# [agent.opencode_provider]
+# id = "litellm"                   # provider id; select models as "<id>/<model>"
+# name = "LiteLLM"                 # display name; empty = id
+# base_url_env = "OPENCODE_PROVIDER_BASE_URL"  # variable with the base URL, incl. /v1
+# api_key_env = "OPENCODE_PROVIDER_API_KEY"    # variable with the API key
+# models = ["glm-5.3"]             # model ids as the gateway names them
 
 # ── Production hosting ────────────────────────────────
 # Productions (long-lived customer environments with their own domain and a

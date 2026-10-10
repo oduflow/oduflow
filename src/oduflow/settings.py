@@ -87,6 +87,48 @@ class ImageRegistrySettings:
     keep_images: int = 10
 
 
+ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_OPENCODE_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# Providers that Oduflow's own agents rely on. A custom provider under one of
+# these ids would take the built-in one away from OpenCode. Other ids from
+# OpenCode's models.dev catalog are allowed: the generated config pins the
+# provider to the declared models and variables (see _opencode_config).
+_OPENCODE_BUILTIN_PROVIDERS = frozenset(
+    {"anthropic", "google", "openai", "opencode", "openrouter"}
+)
+# Default variable names of the custom provider. Deliberately not
+# OPENAI_BASE_URL / OPENAI_API_KEY: Codex and OpenCode's built-in openai
+# provider read those from the same agent container.
+DEFAULT_OPENCODE_BASE_URL_ENV = "OPENCODE_PROVIDER_BASE_URL"
+DEFAULT_OPENCODE_API_KEY_ENV = "OPENCODE_PROVIDER_API_KEY"
+_OPENCODE_PROVIDER_KEYS = frozenset(
+    {"id", "name", "base_url_env", "api_key_env", "models"}
+)
+
+
+@dataclass(frozen=True)
+class OpenCodeProviderSettings:
+    """Custom OpenCode provider ([agent.opencode_provider] TOML section).
+
+    OpenCode's built-in ``openai`` provider speaks the Responses API, which
+    OpenAI-compatible gateways such as LiteLLM often do not accept. This
+    provider uses OpenCode's bundled ``@ai-sdk/openai-compatible`` package
+    (Chat Completions). The config holds only the NAMES of the agent
+    environment variables carrying the base URL and the key; their values
+    come from ``[team.X.agent_env]`` and never enter the OpenCode config.
+    """
+
+    id: str  # OpenCode provider id; models are selected as "<id>/<model>"
+    models: tuple[str, ...]
+    name: str = ""  # display name; empty = id
+    base_url_env: str = DEFAULT_OPENCODE_BASE_URL_ENV
+    api_key_env: str = DEFAULT_OPENCODE_API_KEY_ENV
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.id
+
+
 @dataclass(frozen=True)
 class TeamSettings:
     """Per-team settings (isolated workspaces, templates, credentials, ports)."""
@@ -354,6 +396,9 @@ class Settings:
     agent_claude_model: str = ""  # optional; empty = CLI default
     agent_codex_model: str = ""  # optional; empty = CLI default
     agent_opencode_model: str = ""  # optional provider/model; empty = CLI default
+    # Optional custom OpenAI-compatible provider for OpenCode; None = OpenCode
+    # resolves providers on its own (see OpenCodeProviderSettings).
+    agent_opencode_provider: OpenCodeProviderSettings | None = None
 
     # Lifecycle: automatic stop of idle environments and cleanup of stopped
     # ones (see oduflow.reaper). 0 disables either behavior. Protected
@@ -942,6 +987,10 @@ class Settings:
         if not bind_host:
             raise ValueError("[server].bind must not be empty.")
         backup = _parse_backup_section(raw.get("backup", {}))
+        opencode_model = str(agent.get("opencode_model", "")).strip()
+        opencode_provider = _parse_opencode_provider_section(
+            agent.get("opencode_provider", {}), opencode_model
+        )
 
         etc_dir = _resolve_etc_dir()
         base_data_dir = _resolve_data_dir(storage.get("data_dir", ""))
@@ -1088,7 +1137,8 @@ class Settings:
             agent_image=_normalize_agent_image(agent.get("image")),
             agent_claude_model=str(agent.get("claude_model", "")).strip(),
             agent_codex_model=str(agent.get("codex_model", "")).strip(),
-            agent_opencode_model=str(agent.get("opencode_model", "")).strip(),
+            agent_opencode_model=opencode_model,
+            agent_opencode_provider=opencode_provider,
             auto_stop_hours=int(lifecycle.get("auto_stop_hours", 48)),
             auto_delete_hours=int(lifecycle.get("auto_delete_hours", 0)),
             prod_purge_hours=int(lifecycle.get("prod_purge_hours", 0)),
@@ -1186,6 +1236,99 @@ def _parse_image_registry_section(
         max_log_mb=max_log_mb,
         max_concurrent_builds=max_concurrent_builds,
         keep_images=keep_images,
+    )
+
+
+def _parse_opencode_provider_section(
+    raw: object, opencode_model: str
+) -> OpenCodeProviderSettings | None:
+    """Parse the [agent.opencode_provider] TOML section.
+
+    Absent/empty section → None (OpenCode config unchanged). A present section
+    must be complete: a broken provider should fail at startup or on save in
+    the settings console, not as an opaque error in the first agent session.
+    Only variable names are accepted, so a URL or key cannot end up in the
+    config OpenCode receives.
+    """
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("[agent.opencode_provider] must be a table")
+    unknown = sorted(set(raw) - _OPENCODE_PROVIDER_KEYS)
+    if unknown:
+        raise ValueError(
+            f"[agent.opencode_provider]: unknown key(s) {', '.join(unknown)}. "
+            "Allowed: id, name, base_url_env, api_key_env, models. The base URL "
+            "and the key are not stored here: put them in [team.X.agent_env] "
+            "and name those variables in base_url_env / api_key_env."
+        )
+    provider_id = str(raw.get("id", "")).strip()
+    if not provider_id:
+        raise ValueError(
+            "[agent.opencode_provider] requires id (the OpenCode provider id, "
+            "e.g. 'litellm'; models are selected as '<id>/<model>'). Remove the "
+            "section to disable the custom provider."
+        )
+    if not _OPENCODE_PROVIDER_ID_RE.match(provider_id):
+        raise ValueError(
+            f"[agent.opencode_provider] id {provider_id!r} must contain only "
+            "lowercase letters, digits, '-' and '_'."
+        )
+    if provider_id in _OPENCODE_BUILTIN_PROVIDERS:
+        raise ValueError(
+            f"[agent.opencode_provider] id {provider_id!r} is a built-in "
+            "OpenCode provider; choose another id (e.g. 'litellm')."
+        )
+    env_names: dict[str, str] = {}
+    for key, default in (
+        ("base_url_env", DEFAULT_OPENCODE_BASE_URL_ENV),
+        ("api_key_env", DEFAULT_OPENCODE_API_KEY_ENV),
+    ):
+        value = str(raw.get(key, default)).strip()
+        if not ENV_VAR_NAME_RE.match(value):
+            raise ValueError(
+                f"[agent.opencode_provider] {key} must be an environment "
+                f"variable name (e.g. {default}), not a value; got {value!r}."
+            )
+        env_names[key] = value
+    models_raw = raw.get("models")
+    if not isinstance(models_raw, list) or not all(
+        isinstance(m, str) for m in models_raw
+    ):
+        raise ValueError(
+            "[agent.opencode_provider] models must be a list of model ids, "
+            'e.g. models = ["glm-5.3"].'
+        )
+    models = tuple(m.strip() for m in models_raw)
+    if not models:
+        raise ValueError("[agent.opencode_provider] models must not be empty.")
+    if any(not m or any(c.isspace() for c in m) for m in models):
+        raise ValueError(
+            "[agent.opencode_provider] model ids must be non-empty and contain "
+            "no whitespace."
+        )
+    if len(set(models)) != len(models):
+        raise ValueError("[agent.opencode_provider] models contains duplicates.")
+    # OpenCode splits "<provider>/<model>" at the first slash, so gateway model
+    # ids such as "openai/gpt-4o" stay intact.
+    model_provider, _, model_id = opencode_model.partition("/")
+    if model_provider == provider_id and not model_id:
+        raise ValueError(
+            f"[agent] opencode_model {opencode_model!r} must be "
+            f"'<provider>/<model>', e.g. '{provider_id}/{models[0]}'."
+        )
+    if model_provider == provider_id and model_id not in models:
+        raise ValueError(
+            f"[agent] opencode_model {opencode_model!r} names provider "
+            f"{provider_id!r}, but {model_id!r} is not in "
+            "[agent.opencode_provider] models."
+        )
+    return OpenCodeProviderSettings(
+        id=provider_id,
+        models=models,
+        name=str(raw.get("name", "")).strip(),
+        base_url_env=env_names["base_url_env"],
+        api_key_env=env_names["api_key_env"],
     )
 
 

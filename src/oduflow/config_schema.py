@@ -33,7 +33,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from oduflow.settings import DEFAULT_AGENT_IMAGE, DEFAULT_POSTGRES_IMAGE, Settings
+from oduflow.settings import (
+    DEFAULT_AGENT_IMAGE,
+    DEFAULT_OPENCODE_API_KEY_ENV,
+    DEFAULT_OPENCODE_BASE_URL_ENV,
+    DEFAULT_POSTGRES_IMAGE,
+    ENV_VAR_NAME_RE,
+    Settings,
+)
 
 LIVE = "live"
 RESTART = "restart"
@@ -59,7 +66,6 @@ KINDS = frozenset(
     }
 )
 
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Collection member names ([team.<id>], [route.<name>]) end up in data paths,
 # Docker names and Traefik router ids, so keep them to a conservative alphabet.
 COLLECTION_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -449,6 +455,61 @@ GROUPS: tuple[Group, ...] = (
                 "OpenCode model",
                 "provider/model; empty = the OpenCode default.",
                 default="",
+                apply=LIVE,
+            ),
+        ),
+    ),
+    Group(
+        id="agent_opencode_provider",
+        title="OpenCode provider",
+        table=("agent", "opencode_provider"),
+        optional=True,
+        description="A custom OpenAI-compatible provider (Chat Completions) "
+        "for OpenCode, e.g. a LiteLLM gateway. The base URL and the key stay "
+        "in each team's agent environment; only their variable names are "
+        "set here. Select its models as <id>/<model> in OpenCode model.",
+        presence_apply=LIVE,
+        fields=(
+            Field(
+                "id",
+                "str",
+                "Provider id",
+                "Lowercase letters, digits, - and _; not anthropic, google, "
+                "openai, opencode or openrouter.",
+                required=True,
+                apply=LIVE,
+                placeholder="litellm",
+            ),
+            Field(
+                "models",
+                "str_list",
+                "Models",
+                "One model id per line, as the gateway names them.",
+                required=True,
+                apply=LIVE,
+            ),
+            Field(
+                "name",
+                "str",
+                "Display name",
+                "Empty = the provider id.",
+                default="",
+                apply=LIVE,
+            ),
+            Field(
+                "base_url_env",
+                "str",
+                "Base URL variable",
+                "Agent environment variable with the base URL, including /v1.",
+                default=DEFAULT_OPENCODE_BASE_URL_ENV,
+                apply=LIVE,
+            ),
+            Field(
+                "api_key_env",
+                "str",
+                "API key variable",
+                "Agent environment variable with the API key.",
+                default=DEFAULT_OPENCODE_API_KEY_ENV,
                 apply=LIVE,
             ),
         ),
@@ -1015,7 +1076,7 @@ def coerce(f: Field, value: Any) -> Any:
         out: dict[str, str] = {}
         for name, item in value.items():
             name = str(name).strip()
-            if not _ENV_NAME_RE.match(name):
+            if not ENV_VAR_NAME_RE.match(name):
                 raise CoercionError(f"{label}: invalid variable name {name!r}")
             if not isinstance(item, str):
                 raise CoercionError(f"{label}: {name} must be text")

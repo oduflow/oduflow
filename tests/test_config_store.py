@@ -503,3 +503,41 @@ def test_every_parsed_section_has_a_schema_group():
         "route",
     ):
         assert section in tables, section
+
+
+def test_opencode_provider_is_a_console_table_that_applies_live():
+    fake = _Runtime(BASE)
+    runtime = cs.ConfigRuntime(running=fake.running, swap=fake.swap)
+    text = _apply(
+        BASE,
+        {"path": ["agent", "opencode_model"], "value": "litellm/glm-5.3"},
+        {"path": ["agent", "opencode_provider", "id"], "value": "litellm"},
+        {"path": ["agent", "opencode_provider", "models"], "value": ["glm-5.3"]},
+        {"path": ["agent", "opencode_provider", "api_key_env"], "value": "GW_KEY"},
+    )
+    new = cs.parse_text(text)
+    assert cs.unknown_keys(new) == []
+    # Variable names are not credentials: the console shows them as typed.
+    assert cs.mask_raw(new)["agent"]["opencode_provider"]["api_key_env"] == "GW_KEY"
+    changes = {c.path: c for c in cs.diff_raw(fake.raw, new, fake.settings)}
+    assert changes[("agent", "opencode_provider")].presence
+    assert cs.worst_apply(list(changes.values())) == schema.LIVE
+
+    applied, problem = cs.apply_live(runtime, new)
+    assert not problem and applied
+    provider = fake.settings.agent_opencode_provider
+    assert provider is not None
+    assert (provider.id, provider.models, provider.api_key_env) == (
+        "litellm",
+        ("glm-5.3",),
+        "GW_KEY",
+    )
+    assert cs.pending_changes(runtime, new) == []
+
+    with pytest.raises(ConfigError, match="'glm-4' is not in"):
+        cs.validate_text(
+            _apply(
+                text, {"path": ["agent", "opencode_model"], "value": "litellm/glm-4"}
+            ),
+            "x",
+        )
