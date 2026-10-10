@@ -71,7 +71,7 @@ def _load(team: TeamSettings) -> dict[str, Any]:
             data = json.load(handle)
     except FileNotFoundError:
         return {"version": _VERSION, "secrets": {}}
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise PrerequisiteNotMetError(
             "The team secrets store cannot be read safely."
         ) from exc
@@ -92,22 +92,58 @@ def _save(team: TeamSettings, data: dict[str, Any]) -> None:
     atomic_write_private_json(path, data)
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("Invalid JSON value.")
+
+
+def _parse_json(value: Any) -> Any:
+    """Strictly parse a JSON secret value; raise ValueError without its content.
+
+    The single definition of an acceptable JSON secret: NaN and Infinity are
+    rejected, and parser errors are reduced to a position so no fragment of
+    the value reaches an error message.
+    """
+    try:
+        return json.loads(value, parse_constant=_reject_json_constant)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON value at line {exc.lineno}, column {exc.colno}."
+        ) from None
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError("Invalid JSON value.") from None
+
+
+def _value_type(record: dict[str, Any]) -> str:
+    """A record's stored type, or the type of an untyped legacy record.
+
+    Records written before value_type existed carry none. Reading them as
+    ``text`` would leave a JSON document stored then without element updates,
+    and being write-only its value cannot be read back to re-save it as JSON.
+    So a value that strictly parses as a JSON object or array is ``json``;
+    anything else, including scalars such as ``12345`` or ``true`` that happen
+    to be valid JSON, is a plain token and ``text``.
+    """
+    if "value_type" in record:
+        return str(record["value_type"])
+    try:
+        document = _parse_json(record.get("value"))
+    except ValueError:
+        return "text"
+    return "json" if isinstance(document, (dict, list)) else "text"
+
+
 def list_secrets(team: TeamSettings) -> list[dict[str, str]]:
     """Names, types and timestamps only — never secret values."""
     records = _load(team)["secrets"]
     return [
         {
             "name": name,
-            "value_type": record.get("value_type", "text"),
+            "value_type": _value_type(record),
             "created_at": record.get("created_at", ""),
             "updated_at": record.get("updated_at", ""),
         }
         for name, record in sorted(records.items())
     ]
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError("Invalid JSON value.")
 
 
 def set_secret(
@@ -123,16 +159,9 @@ def set_secret(
         data = _load(team)
         existing = data["secrets"].get(name)
         if value_type is None:
-            value_type = existing.get("value_type", "text") if existing else "text"
+            value_type = _value_type(existing) if existing else "text"
         if value_type == "json":
-            try:
-                json.loads(value, parse_constant=_reject_json_constant)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Invalid JSON value at line {exc.lineno}, column {exc.colno}."
-                ) from None
-            except (ValueError, RecursionError):
-                raise ValueError("Invalid JSON value.") from None
+            _parse_json(value)
         data["secrets"][name] = {
             "value": value,
             "value_type": value_type,
@@ -141,6 +170,31 @@ def set_secret(
         }
         _save(team, data)
     return {"name": name, "created": existing is None}
+
+
+def backfill_value_types(team: TeamSettings) -> list[str]:
+    """Persist the type of every untyped legacy record; return JSON names.
+
+    Reads already type such records on the fly (see _value_type); this only
+    records that type, so the store no longer depends on the inference.
+    Values are never rewritten, and records that already carry a type are an
+    operator's explicit choice and are left alone, so a rerun changes nothing.
+    Returns names only.
+    """
+    promoted: list[str] = []
+    with keyed_mutex(team_secrets_lock_key(team.team_id)):
+        data = _load(team)
+        changed = False
+        for name, record in sorted(data["secrets"].items()):
+            if not isinstance(record, dict) or "value_type" in record:
+                continue
+            record["value_type"] = _value_type(record)
+            if record["value_type"] == "json":
+                promoted.append(name)
+            changed = True
+        if changed:
+            _save(team, data)
+    return promoted
 
 
 def _json_element_key(container: Any, token: str) -> str | int:
@@ -189,11 +243,11 @@ def update_secret_json(
         record = data["secrets"].get(name)
         if record is None:
             raise NotFoundError(f"Secret '{name}' not found.")
-        if record.get("value_type", "text") != "json":
+        if _value_type(record) != "json":
             raise ValueError("Element updates are only supported for JSON secrets.")
         try:
-            document = json.loads(record["value"], parse_constant=_reject_json_constant)
-        except (ValueError, TypeError, KeyError, RecursionError):
+            document = _parse_json(record.get("value"))
+        except ValueError:
             raise PrerequisiteNotMetError(
                 "The stored secret is not valid JSON."
             ) from None

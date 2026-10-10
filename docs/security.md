@@ -408,7 +408,7 @@ Environment variables on services and environments are visible to coding agents 
 
 **Secrets** are team-scoped named values that avoid this. A human operator creates them in the dashboard (**Credentials** tab → **Secrets**); values are *write-only* — they can be replaced or deleted, but no MCP tool or REST endpoint ever returns a stored value. Agents can list the names with `list_secrets`.
 
-The secret form starts with **Name**, followed by the independent **Hide value** and **JSON value** switches. **Hide value** masks the ordinary text value and the individual key's **Value** by default. In JSON mode, **Replace Data** is always visible, even with masking enabled, and validates JSON while you type. Its warning makes clear that saving replaces all data in the secret. Text and JSON replacement drafts stay separate when switching modes. JSON secrets also undergo server-side validation before saving; invalid input leaves the previous value intact. The stored type (`text` or `json`) persists across replacements. Existing secrets default to `text`. JSON values retain their original formatting and may contain any valid JSON value, including arrays and scalars; `NaN` and `Infinity` are rejected.
+The secret form starts with **Name**, followed by the independent **Hide value** and **JSON value** switches. **Hide value** masks the ordinary text value and the individual key's **Value** by default. In JSON mode, **Replace Data** is always visible, even with masking enabled, and validates JSON while you type. Its warning makes clear that saving replaces all data in the secret. Text and JSON replacement drafts stay separate when switching modes. JSON secrets also undergo server-side validation before saving; invalid input leaves the previous value intact. The stored type (`text` or `json`) persists across replacements. Secrets saved before types existed are typed by their stored value: a JSON object or array is `json`, anything else (including scalars such as `123`) is `text`; an upgrade records that type once. JSON values retain their original formatting and may contain any valid JSON value, including arrays and scalars; `NaN` and `Infinity` are rejected.
 
 To use one, set the env-var value to a reference:
 
@@ -436,6 +436,11 @@ click **Save key**. The value is saved as a string exactly as entered, without
 JSON quotes or automatic conversion of text such as `true` or `123`.
 **Hide value** controls masking for this field independently of the visible
 replacement JSON.
+
+**Update Key** and **Value** stay disabled for a secret stored as text, even
+with **JSON value** checked. Paste the full JSON into **Replace Data** and click
+**Replace data** once; the form closes and the secret is stored as JSON. Open
+**Edit secret** again to update individual keys.
 
 After saving, the form stays open and displays **Key created** or **Key updated**
 with the submitted path. The value field is cleared, and the path remains for

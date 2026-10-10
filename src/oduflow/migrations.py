@@ -422,6 +422,33 @@ def _migrate_backfill_service_presets(settings: Settings) -> None:
                 backfill_service_preset(settings, team, name, container)
 
 
+def _migrate_secret_value_types(settings: Settings) -> None:
+    """Persist the type of team secrets stored before value_type existed.
+
+    secret_store already reads an untyped record holding a JSON object or
+    array as JSON (so its keys can be updated) and anything else as text;
+    secret_store.backfill_value_types records that type on disk. Best effort
+    per team, like migration 0006: an unreadable store is logged for the
+    operator and fails at its point of use anyway, and a team skipped here —
+    or a legacy store restored later — is still typed correctly on read.
+    """
+    from oduflow import secret_store
+
+    for team in settings.teams.values():
+        try:
+            promoted = secret_store.backfill_value_types(team)
+        except (OSError, PrerequisiteNotMetError) as exc:
+            logger.warning("Could not type secrets for team %s: %s", team.team_id, exc)
+            continue
+        if promoted:
+            logger.info(
+                "Typed team %s secret(s) as JSON: %s. Replacing their value "
+                "now requires valid JSON unless value_type 'text' is passed.",
+                team.team_id,
+                ", ".join(promoted),
+            )
+
+
 def _migrate_postgres16(settings: Settings) -> None:
     """Retired: v1.85.0 replaced PG15 clusters here, once and unconditionally.
 
@@ -503,6 +530,14 @@ MIGRATIONS: list[Migration] = [
         id="0009-postgresql16",
         description="Retired PG15 replacement (now run on demand at startup)",
         apply=_migrate_postgres16,
+    ),
+    Migration(
+        id="0010-secret-value-types",
+        description=(
+            "Type team secrets saved before value_type existed: JSON objects "
+            "and arrays as json (enables key updates), everything else as text"
+        ),
+        apply=_migrate_secret_value_types,
     ),
 ]
 

@@ -83,9 +83,9 @@ class TestStore:
         with pytest.raises(ValueError):
             secret_store.set_secret(team, "k", "")
 
-    def test_corrupt_store_is_a_prerequisite_error(self, team):
-        with open(secret_store.secrets_path(team), "w") as fh:
-            fh.write("not json")
+    @pytest.mark.parametrize("content", [b"not json", b"\xff\xfe{}"])
+    def test_corrupt_store_is_a_prerequisite_error(self, team, content):
+        Path(secret_store.secrets_path(team)).write_bytes(content)
         with pytest.raises(PrerequisiteNotMetError):
             secret_store.list_secrets(team)
 
@@ -161,6 +161,92 @@ def test_legacy_secret_defaults_to_text_and_can_change_type(team):
     assert secret_store.list_secrets(team)[0]["value_type"] == "json"
     secret_store.set_secret(team, "key", "plain", "text")
     assert secret_store.list_secrets(team)[0]["value_type"] == "text"
+
+
+def test_backfill_types_legacy_records_by_stored_value(team):
+    legacy = {
+        "config": '{\n  "environment": {"KEY": "private"}\n}',
+        "list": "[1, 2]",
+        "token": "s3cret",
+        "number": "12345",
+        "flag": "true",
+        "quoted": '"token"',
+        "nan": "NaN",
+        "broken": '{"private":}',
+    }
+    path = Path(secret_store.secrets_path(team))
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "secrets": {
+                    name: {"value": value, "created_at": "c", "updated_at": "u"}
+                    for name, value in legacy.items()
+                },
+            }
+        )
+    )
+
+    # Only objects and arrays become JSON; valid JSON scalars stay plain tokens.
+    assert secret_store.backfill_value_types(team) == ["config", "list"]
+    records = json.loads(path.read_text())["secrets"]
+    assert {name: r["value_type"] for name, r in records.items()} == {
+        name: "json" if name in ("config", "list") else "text" for name in legacy
+    }
+    # Values and timestamps are untouched.
+    assert {name: r["value"] for name, r in records.items()} == legacy
+    assert {r["updated_at"] for r in records.values()} == {"u"}
+
+    before = path.read_bytes()
+    assert secret_store.backfill_value_types(team) == []
+    assert path.read_bytes() == before
+    assert secret_store.update_secret_json(
+        team, "config", "environment.KEY", "new"
+    ) == {"name": "config", "created": False, "updated": True}
+    stored = json.loads(path.read_text())["secrets"]["config"]["value"]
+    assert json.loads(stored) == {"environment": {"KEY": "new"}}
+
+
+def test_untyped_legacy_records_are_typed_on_read(team):
+    # A store the backfill never saw (team re-added, restored backup) behaves
+    # exactly as if it had been typed.
+    path = Path(secret_store.secrets_path(team))
+    legacy = {"config": '{"environment": {}}', "number": "12345"}
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "secrets": {name: {"value": value} for name, value in legacy.items()},
+            }
+        )
+    )
+
+    assert {r["name"]: r["value_type"] for r in secret_store.list_secrets(team)} == {
+        "config": "json",
+        "number": "text",
+    }
+    assert secret_store.update_secret_json(
+        team, "config", "environment.KEY", "new"
+    ) == {"name": "config", "created": True, "updated": False}
+    stored = json.loads(path.read_text())["secrets"]["config"]["value"]
+    assert json.loads(stored) == {"environment": {"KEY": "new"}}
+    # An omitted type is inherited from the inferred one.
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        secret_store.set_secret(team, "config", "plain")
+    secret_store.set_secret(team, "number", "67890")
+    assert json.loads(path.read_text())["secrets"]["number"]["value_type"] == "text"
+
+
+def test_backfill_keeps_explicit_types_and_skips_missing_store(team):
+    path = Path(secret_store.secrets_path(team))
+    assert secret_store.backfill_value_types(team) == []
+    assert not path.exists()
+
+    # JSON deliberately saved as text after typing existed stays text.
+    secret_store.set_secret(team, "chosen", '{"key": "value"}', "text")
+    before = path.read_bytes()
+    assert secret_store.backfill_value_types(team) == []
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("value_type", ["xml", "", False, [], {}])
@@ -283,7 +369,9 @@ def test_update_json_requires_existing_element(team, original):
 
 @pytest.mark.parametrize("legacy", [False, True])
 def test_update_json_rejects_text_without_converting(team, legacy):
-    secret_store.set_secret(team, "config", '{"key": "private"}')
+    # An untyped legacy record is text unless it holds a JSON object or array.
+    value = '"private"' if legacy else '{"key": "private"}'
+    secret_store.set_secret(team, "config", value)
     path = Path(secret_store.secrets_path(team))
     if legacy:
         data = json.loads(path.read_text())
