@@ -4,8 +4,8 @@ Creation must be refused while the disk still has room to recover — once
 PostgreSQL hits 0 bytes free even deleting environments fails. The check
 estimates the bytes each target filesystem will receive (template DB size via
 pg_database_size, filestore copy vs overlay, git clone budget), groups targets
-sharing a device, and keeps a max(5 GiB, min(5%, 10 GiB)) reserve free on
-every device.
+sharing a device, and keeps max(1 GiB, 10% of current free) up to the
+max(5 GiB, min(5%, 10 GiB)) comfort reserve.
 """
 
 from __future__ import annotations
@@ -172,33 +172,52 @@ class TestCheckDiskSpace:
     def test_insufficient_space_raises(self, tmp_path):
         settings, team = _make_env(tmp_path)
         with pytest.raises(PrerequisiteNotMetError, match="Not enough free disk"):
-            self._check(settings, team, None, 2 * GB, _usage(100 * GB, 96 * GB, 4 * GB))
+            self._check(
+                settings, team, None, 2 * GB, _usage(100 * GB, 97 * GB, int(3.2 * GB))
+            )
 
     def test_reserve_cannot_be_consumed(self, tmp_path):
-        # free (6 GB) covers the estimate (2 GB * 1.2 + clone budget) but the
-        # remainder dips under the 5 GiB floor: refuse.
+        # The write fits in the raw free bytes, but less than 1 GiB would
+        # remain. Refuse so a full disk can still be cleaned up.
         settings, team = _make_env(tmp_path)
         with pytest.raises(PrerequisiteNotMetError, match="must stay free"):
-            self._check(settings, team, None, 2 * GB, _usage(100 * GB, 94 * GB, 6 * GB))
+            self._check(
+                settings, team, None, 2 * GB, _usage(100 * GB, 97 * GB, int(3.2 * GB))
+            )
+
+    def test_template_volume_allows_first_environment(self, tmp_path):
+        # Comfort reserve is 5 GiB, but 8.6 GiB free and a ~5.2 GiB write
+        # still leave more than 1 GiB. A volume that only holds the template
+        # must be allowed to create that first environment.
+        settings, team = _make_env(tmp_path)
+        self._check(
+            settings,
+            team,
+            None,
+            int(3.833 * GB),
+            _usage(40 * GB, int(31.4 * GB), int(8.6 * GB)),
+        )
 
     def test_same_device_requirements_are_summed(self, tmp_path):
-        # DB (4 GB) or filestore copy (4 GB) alone fits in 11 GB free with the
-        # 5 GiB reserve; together (8 GB * 1.2 margin) they do not.
+        # DB (4 GB) or a filestore copy (4 GB) alone fits in 11 GB free.
+        # Together, with the clone budget and the 1.2 margin, less than the
+        # recovery floor would remain.
         settings, team = _make_env(tmp_path)
         _write_template(team, "t", {"use_overlay": False, "filestore_size_mb": 4096})
         with pytest.raises(PrerequisiteNotMetError, match="Not enough free disk"):
             self._check(settings, team, "t", 4 * GB, _usage(100 * GB, 89 * GB, 11 * GB))
 
     def test_local_mount_skips_clone_budget(self, tmp_path):
-        # 2 GB * 1.2 = 2.4 GB; free 7.5 GB leaves 5.1 GB > 5 GiB reserve only
-        # because no clone budget is added for a live-mount.
+        # 2 GB * 1.2 = 2.4 GB without a clone. 3.5 GB free leaves that write
+        # above the 1 GiB recovery floor, and drops under it once the clone
+        # budget is added.
         settings, team = _make_env(tmp_path)
         self._check(
             settings,
             team,
             None,
             2 * GB,
-            _usage(100 * GB, int(92.5 * GB), int(7.5 * GB)),
+            _usage(100 * GB, int(96.5 * GB), int(3.5 * GB)),
             local_mount=True,
         )
         clone_extra = _CLONE_BUDGET_BYTES * 1.2 / GB
@@ -209,7 +228,7 @@ class TestCheckDiskSpace:
                 team,
                 None,
                 2 * GB,
-                _usage(100 * GB, int(92.5 * GB), int(7.5 * GB)),
+                _usage(100 * GB, int(96.5 * GB), int(3.5 * GB)),
             )
 
     def test_separate_devices_checked_independently(self, tmp_path):
@@ -228,7 +247,7 @@ class TestCheckDiskSpace:
 
         def fake_usage(path):
             if str(path).startswith(tablespace_root):
-                return _usage(100 * GB, 97 * GB, 3 * GB)
+                return _usage(100 * GB, 98 * GB, 2 * GB)
             return _usage(100 * GB, 10 * GB, 90 * GB)
 
         with (
@@ -263,7 +282,7 @@ class TestCheckDiskSpace:
         client.volumes.get.side_effect = RuntimeError("no mountpoint")
         df_output = (
             "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
-            f"overlay {100 * GB // 1024} {98 * GB // 1024} {2 * GB // 1024} 98% "
+            f"overlay {100 * GB // 1024} {99 * GB // 1024} {int(0.5 * GB) // 1024} 99% "
             "/var/lib/postgresql/data\n"
         )
         client.containers.get.return_value.exec_run.return_value = (
