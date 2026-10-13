@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **Branch switches restore dependencies after container recreation** —
+  `switch_branch` reinstalls declared APT/PIP dependencies from the target code
+  and all mounted extra-addons repositories, even with unchanged requirements
+  or an empty diff. Same-branch renames restore dependencies too. Strict
+  guardrail refusals still restore the currently mounted code's dependencies;
+  installation failures are reported and stop subsequent module actions.
+
 ## v1.87.0
 
 ### Features

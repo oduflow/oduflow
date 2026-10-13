@@ -1312,6 +1312,20 @@ def _install_pip_requirements(
         return True, f"[PIP] Requirements installed successfully:\n{output_str}"
 
 
+def _environment_dependency_paths(
+    container: Any, repo_path: str, extra_addons: dict[str, str]
+) -> list[tuple[str, str]]:
+    """List the main repo and extra checkouts actually mounted in a container."""
+    paths = [(repo_path, "/mnt/extra-addons")]
+    sources = _extra_checkout_sources(container, iter(extra_addons))
+    paths.extend(
+        (sources[name], f"/mnt/extra-addons-{name}")
+        for name in extra_addons
+        if sources.get(name)
+    )
+    return paths
+
+
 def _install_repo_dependencies(
     container: Any, dep_paths: list[tuple[str, str]]
 ) -> tuple[int, bool, list[str]]:
@@ -4412,6 +4426,18 @@ def _apply_actions(
     if dep_units:
         dep_container = client.containers.get(odoo_container_name)
         dep_exit, _, dep_logs = _install_repo_dependencies(dep_container, dep_units)
+        if dep_exit:
+            return {
+                "action": "error",
+                "exit_code": dep_exit,
+                "changed_files": changed_files,
+                "message": (
+                    "Dependency installation failed; Odoo module actions were not "
+                    "run. Fix the dependency error and run update_environment "
+                    "to restore dependencies, then retry the requested module actions."
+                ),
+                "output": "\n".join(dep_logs),
+            }
 
     if to_install or to_upgrade:
         messages: list[str] = []
@@ -4511,6 +4537,7 @@ def pull_environment(
     strict: bool = False,
     presynced: tuple[str, list[str]] | None = None,
     before_apply: Callable[[], None] | None = None,
+    reinstall_all_deps: bool = False,
 ) -> dict[str, Any]:
     """Sync code into an environment and apply the right Odoo action.
 
@@ -4528,6 +4555,11 @@ def pull_environment(
     :func:`switch_environment_branch`. Pulling again would find the clone
     already at origin's tip and report "up to date", losing the very diff that
     has to be applied, so the sync step is skipped and those values are used.
+
+    ``reinstall_all_deps`` restores dependencies after a caller recreated the
+    container. All mounted repos are installed, even with an empty diff. A
+    strict refusal still restores the currently mounted code's dependencies,
+    but does not switch pending extra mounts or apply Odoo module actions.
 
     Action selection:
 
@@ -4710,6 +4742,10 @@ def pull_environment(
     for dep_host, dep_base, dep_files in extra_dep_candidates:
         if any(_is_active_dep_file(f, dep_host) for f in dep_files):
             dep_units.append((dep_host, dep_base))
+    if reinstall_all_deps:
+        dep_units = _environment_dependency_paths(
+            container_obj, repo_path, extra_addons
+        )
 
     warnings: list[str] = []
     do_refresh = False
@@ -4722,18 +4758,41 @@ def pull_environment(
                 recommended, to_install, to_upgrade, do_restart
             )
         if strict and warnings:
+            recovery: dict[str, Any] = {}
+            if reinstall_all_deps:
+                recovery = _apply_actions(
+                    client,
+                    settings,
+                    team,
+                    env_name,
+                    odoo_container_name,
+                    to_install=[],
+                    to_upgrade=[],
+                    do_restart=False,
+                    changed_files=all_changed,
+                    dep_units=dep_units,
+                )
+                if recovery.get("exit_code"):
+                    recovery["warnings"] = warnings
+                    return recovery
             return {
                 "action": "blocked",
                 "warnings": warnings,
                 "changed_files": all_changed,
+                "output": recovery.get("output", ""),
                 "message": (
-                    "Guardrail (strict) blocked apply: the requested action looks "
+                    (
+                        "Restored dependencies for the currently mounted code. "
+                        if recovery
+                        else ""
+                    )
+                    + "Guardrail (strict) blocked apply: the requested action looks "
                     "incomplete for the detected changes. Re-call with the suggested "
                     "install/upgrade, or pass strict=False to apply anyway."
                 ),
             }
     else:
-        if not all_changed:
+        if not all_changed and not reinstall_all_deps:
             if extra_mount_switch_needed:
                 # install_dependencies is on because this recreates the
                 # container, and pip --user packages live in the container
@@ -4741,7 +4800,7 @@ def pull_environment(
                 # recreate destroys them. update_environment reinstalls apt +
                 # pip for the main repo and every extra checkout from the new
                 # mount sources, which is exactly the recovery needed here.
-                update_environment(
+                updated = update_environment(
                     settings,
                     team,
                     env_name,
@@ -4756,6 +4815,7 @@ def pull_environment(
                 return {
                     "action": "none",
                     "extra_addons_cache_migrated": True,
+                    "output": "\n".join(updated.get("setup_logs", [])),
                     "message": (
                         "Already up to date. Extra-addons mounts now use the "
                         "shared immutable checkout cache."
@@ -4787,12 +4847,13 @@ def pull_environment(
     # Do this only after strict guardrails have accepted the requested action.
     # The checkout itself was prepared off to the side and is safe to cache even
     # when strict mode blocks without touching the running container.
+    setup_logs: list[str] = []
     if extra_mount_switch_needed:
         # See the note on the early-return recreate above: the container is
         # replaced, so its pip --user packages go with it and have to be
         # reinstalled unconditionally, not just for the repos whose dependency
         # descriptor happens to be in this diff.
-        update_environment(
+        updated = update_environment(
             settings,
             team,
             env_name,
@@ -4801,6 +4862,10 @@ def pull_environment(
             pull_image=False,
             install_dependencies=True,
         )
+        setup_logs = updated.get("setup_logs", [])
+        # The new container already has every repo's dependencies, including
+        # those whose descriptors changed. Do not install them a second time.
+        dep_units = []
         _cleanup_legacy_extra_worktrees(team, env_name, iter(pending_extra_checkouts))
 
     result = _apply_actions(
@@ -4817,6 +4882,9 @@ def pull_environment(
         config_changed=config_changed,
         dep_units=dep_units,
     )
+    if setup_logs:
+        result["output"] = "\n".join(setup_logs + [result.get("output", "")]).rstrip()
+        result["message"] = "Reinstalled dependencies. " + result["message"]
     if warnings:
         result["warnings"] = warnings
     if is_local and int(result.get("exit_code", 0)) == 0:
@@ -4946,14 +5014,15 @@ def switch_environment_branch(
         )
         # The pull runs first so that a strict refusal keeps its meaning:
         # "blocked" has to mean nothing changed, the name included.
-        if rename_to and result.get("action") != "blocked":
-            update_environment(
+        blocked = result.get("action") == "blocked" or bool(result.get("exit_code"))
+        if rename_to and not blocked:
+            updated = update_environment(
                 settings,
                 team,
                 env_name,
                 rename_to=rename_to,
                 pull_image=False,
-                install_dependencies=False,
+                install_dependencies=True,
                 # The agent checkout is moved and refreshed right below, with
                 # the branch in hand; clone-env.sh must not run twice.
                 sync_agent_checkout=False,
@@ -4970,11 +5039,13 @@ def switch_environment_branch(
                 labels.get("oduflow.git_user", ""),
             )
             result["renamed_from"] = previous_env_name
+            result["output"] = "\n".join(
+                [result.get("output", "")] + updated.get("setup_logs", [])
+            ).strip()
         result["branch"] = branch
         result["previous_branch"] = current_branch
         result["branch_switched"] = False
         result["env_name"] = env_name
-        blocked = result.get("action") == "blocked"
         renamed = (
             f"Renamed '{previous_env_name}' to '{env_name}'. "
             if rename_to and not blocked
@@ -5005,9 +5076,9 @@ def switch_environment_branch(
             "to_branch": branch,
         },
     )
-    # Dependencies are deliberately not reinstalled here: the checkout is still
-    # on the old branch at this point. A changed requirements.txt / apt list is
-    # part of the diff below, which pull_environment installs before restarting.
+    # The checkout is still on the old branch. Defer dependency installation
+    # until after checkout, then restore ALL repos: this recreate loses even
+    # dependencies whose descriptors are unchanged between the two branches.
     # A requested rename rides on this same recreate.
     previous_env_name = env_name
     update_environment(
@@ -5060,6 +5131,7 @@ def switch_environment_branch(
         restart=restart,
         strict=strict,
         presynced=(old_head, changed_files),
+        reinstall_all_deps=True,
     )
 
     if rename_to:
@@ -5074,7 +5146,7 @@ def switch_environment_branch(
     # the running Odoo with nothing to catch up on.
     tail = (
         "No code difference to apply."
-        if result.get("action") == "none"
+        if result.get("action") == "none" and not result.get("output")
         else str(result.get("message", ""))
     )
     result["branch"] = branch
@@ -5325,8 +5397,8 @@ def update_environment(
     different ``image_override`` and/or fully replaces the user-supplied
     environment variables with ``env_override`` (an explicit dict; an empty dict
     clears them). Internal extra-checkout overrides atomically switch immutable
-    SHA mounts during pull_and_apply; that path disables image pulls and the
-    redundant dependency reinstall. The PostgreSQL connection variables
+    SHA mounts during pull_and_apply; that path disables image pulls and
+    restores dependencies from the new mounts. The PostgreSQL connection variables
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
     and image-baked env comes from the image itself.
 
@@ -5730,22 +5802,16 @@ def update_environment(
     # ------------------------------------------------------------------
     setup_logs: list[str] = []
     deps_installed = False
+    dep_exit = 0
     if install_dependencies:
-        dep_paths = [(repo_path, "/mnt/extra-addons")]
         try:
             extra_dict = _normalize_extra_addons(
                 json.loads(labels.get("oduflow.extra_addons", "{}"))
             )
         except (json.JSONDecodeError, TypeError):
             extra_dict = {}
-        if extra_dict:
-            sources = _extra_checkout_sources(new_container, iter(extra_dict))
-            dep_paths.extend(
-                (sources[rn], f"/mnt/extra-addons-{rn}")
-                for rn in extra_dict
-                if sources.get(rn)
-            )
-        _, pip_installed, dep_logs = _install_repo_dependencies(
+        dep_paths = _environment_dependency_paths(new_container, repo_path, extra_dict)
+        dep_exit, pip_installed, dep_logs = _install_repo_dependencies(
             new_container, dep_paths
         )
         setup_logs.extend(dep_logs)
@@ -5791,6 +5857,15 @@ def update_environment(
 
     env_db = get_db_name(env_name, team.team_id)
     workspace = get_workspace_path(env_name, team.workspaces_dir)
+    if dep_exit:
+        raise ExternalCommandError(
+            "install environment dependencies",
+            dep_exit,
+            f"Environment '{env_name}' was recreated, but dependency installation "
+            "failed. Fix the error and retry update_environment.\n"
+            + "\n".join(setup_logs),
+        )
+
     logger.info(
         "Environment updated",
         extra={"env_name": env_name, "url": url, "container": odoo_container_name},

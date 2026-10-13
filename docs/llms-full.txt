@@ -5375,6 +5375,19 @@ The branch must already exist on origin, so push it first. Oduflow diffs the old
 and new tips and applies exactly the logic of [`pull_and_apply`](#pull_and_apply).
 Errors and tracebacks come back in the response — do not chase them in the logs.
 
+Switching recreates the container and restores declared APT/PIP dependencies
+from the target branch and every mounted extra-addons repository, even when
+the dependency files are unchanged or the branches have identical code.
+Renaming on the same branch also restores dependencies. Packages installed
+manually without a corresponding requirements/APT entry are not preserved.
+
+`strict=True` blocks incomplete module actions; it does not roll back a branch
+switch that has already happened. Dependencies for the currently mounted code
+are still restored before returning the refusal. If dependency installation
+fails, module actions are skipped and the error is returned. Fix the dependency
+error, run [`update_environment`](#update_environment) to restore packages, then
+retry the required module actions explicitly.
+
 Lock: environment.
 { .odu-tool-meta }
 

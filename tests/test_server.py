@@ -3437,3 +3437,24 @@ class TestOdooGuideReminder:
         from oduflow.server import _odoo_guide_reminder
 
         assert _odoo_guide_reminder(image) == ""
+
+
+@patch("oduflow.server._wake_for_work", return_value="")
+@patch("oduflow.docker_ops.env_ops.switch_environment_branch")
+def test_switch_strict_response_preserves_restore_log_and_new_endpoint(
+    mock_switch, mock_wake
+):
+    mock_switch.return_value = {
+        "action": "blocked",
+        "warnings": ["upgrade required"],
+        "message": "Switched branch. Restored dependencies. Module apply blocked.",
+        "output": "[PIP] Requirements installed successfully",
+        "renamed_from": "main",
+        "env_name": "dev2",
+    }
+    result = _call_tool(
+        "switch_branch", env_name="main", branch="feature/new", strict=True
+    )
+    assert "BLOCKED" in result
+    assert "[PIP] Requirements installed successfully" in result
+    assert "/mcp/dev2" in result

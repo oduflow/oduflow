@@ -4237,10 +4237,10 @@ class TestApplyActionsDeps:
             changed_files=["requirements.txt"],
             dep_units=[("/repo", "/mnt/extra-addons")],
         )
-        assert result["action"] == "restart"
+        assert result["action"] == "error"
         assert "FAILED" in result["output"]
         assert result["exit_code"] == 1
-        container.restart.assert_called_once()
+        container.restart.assert_not_called()
 
     @patch("oduflow.docker_ops.env_ops._install_pip_requirements")
     @patch("oduflow.docker_ops.env_ops._install_apt_packages")
