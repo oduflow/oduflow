@@ -516,4 +516,7 @@ The bundled `odoo.conf` template includes these security settings:
 - `max_cron_threads = 0` (disables cron in dev environments)
 
 A repository that ships its own `.oduflow/odoo.conf` replaces the template
-entirely and is responsible for these settings itself.
+entirely and is responsible for these settings itself. Either way, the
+generated conf always sets `http_interface = 0.0.0.0`: Odoo 20 otherwise
+listens only on `127.0.0.1`, which neither Traefik nor a published port can
+reach.

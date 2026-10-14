@@ -458,6 +458,52 @@ def _migrate_postgres16(settings: Settings) -> None:
     """
 
 
+def _migrate_regenerate_odoo_confs(settings: Settings) -> None:
+    """Rewrite ``/etc/odoo/odoo.conf`` in existing Odoo containers.
+
+    The conf is a copy made at create/update time, so a container created
+    before http_interface was pinned keeps a conf without it — on Odoo 20 that
+    binds 127.0.0.1, which neither Traefik nor a published port can reach.
+    Productions also stop applying a repo ``.oduflow/odoo.prod.conf``. Writes
+    the current conf without restarting anything: the next restart, start or
+    pull_and_apply picks it up. Best-effort per container: a failure is
+    logged and skipped (the next Update/Recreate regenerates the conf anyway).
+    """
+    from oduflow.docker_ops.client import get_client
+    from oduflow.docker_ops.env_ops import _reapply_odoo_conf
+    from oduflow.naming import get_resource_name
+
+    client = get_client()
+    for team_id, team in settings.teams.items():
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{settings.managed_label}=true",
+                    f"{settings.team_label}={team_id}",
+                ]
+            },
+        )
+        for container in containers:
+            # Odoo containers only: a dev environment's (branch label, -odoo
+            # name) or a production's; services and infra have no odoo.conf.
+            env_name = container.labels.get(settings.branch_label, "")
+            is_env_odoo = bool(env_name) and container.name == get_resource_name(
+                env_name, "odoo", settings.prefix, team_id
+            )
+            if not is_env_odoo and container.labels.get("oduflow.prod") != "true":
+                continue
+            try:
+                _reapply_odoo_conf(settings, team, env_name, container)
+                logger.info("Regenerated odoo.conf in %s", container.name)
+            except Exception as exc:
+                logger.warning(
+                    "Could not regenerate odoo.conf in %s: %s",
+                    container.name,
+                    exc,
+                )
+
+
 # Append-only registry, executed in list order. Ids are recorded in
 # migrations.json once applied; reordering or renaming entries would re-run
 # or skip steps on existing installs.
@@ -538,6 +584,15 @@ MIGRATIONS: list[Migration] = [
             "and arrays as json (enables key updates), everything else as text"
         ),
         apply=_migrate_secret_value_types,
+    ),
+    Migration(
+        id="0011-regenerate-odoo-confs",
+        description=(
+            "Rewrite odoo.conf in existing Odoo containers: pin "
+            "http_interface = 0.0.0.0 (Odoo 20 binds loopback otherwise) and "
+            "drop repo odoo.prod.conf from productions; applied on next restart"
+        ),
+        apply=_migrate_regenerate_odoo_confs,
     ),
 ]
 

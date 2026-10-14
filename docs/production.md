@@ -252,9 +252,11 @@ worker's 2 GB, so it does not recycle itself — dropping every connection — u
 normal load.
 
 The listen settings are pinned in the generated `odoo.conf` whatever the base
-conf (team or repo `.oduflow/odoo.prod.conf`) says: `http_port = 8069`,
-`gevent_port`/`longpolling_port = 8072`, `http_enable = True`, and
-`http_interface`/`xmlrpc_*` are dropped; a base conf that set them is logged.
+conf (team `odoo.prod.conf`) says: `http_interface = 0.0.0.0` (Odoo 20
+otherwise listens only on `127.0.0.1`, which Traefik cannot reach),
+`http_port = 8069`, `gevent_port`/`longpolling_port = 8072`,
+`http_enable = True`, and the legacy `xmlrpc`, `xmlrpc_port` and
+`xmlrpc_interface` keys are dropped; a base conf that set them is logged.
 The deploy health check requires **both** ports to answer `/web/health` in
 either mode, so a dead gevent process (a broken bus in `workers` mode, a
 dead site in `gevent` mode) fails the deploy and triggers the code rollback.
@@ -354,21 +356,28 @@ The dashboard offers the same settings on each production card under
 
 ### odoo.conf overrides
 
-The generated production `odoo.conf` merges a base conf chain
-(`.oduflow/odoo.prod.conf` in the repo > team `odoo.prod.conf` > bundled)
-with [auto-tuned](#configuration) worker/limit settings. Per-production
-overrides sit on top of both and survive deploys, retunes and reconfigures:
+The generated production `odoo.conf` merges a base conf chain (team
+`odoo.prod.conf` > bundled) with [auto-tuned](#configuration) worker/limit
+settings. Per-production overrides sit on top of both and survive deploys,
+retunes and reconfigures:
 
 ```text
 set_production_odoo_conf(name="erp", options={"limit_time_real": "300"})
 set_production_odoo_conf(name="erp", unset="limit_time_real")
 ```
 
+The repository is never part of the chain: a `.oduflow/odoo.prod.conf`
+(honoured by earlier versions) is ignored and logged, so pushing to the
+deployed branch cannot change how the production server runs. Move such
+settings into overrides or the team `odoo.prod.conf`.
+
 An explicit override beats the auto-tuned value (e.g. pin `workers`; it must
 be at least 1, see [Server mode](#server-mode)). Keys managed by Oduflow are
 refused: `addons_path` and `data_dir` are generated, the `db_*` connection
-keys come from container env vars, and the listen ports (`http_port`,
-`xmlrpc_port`, `gevent_port`, `longpolling_port`) are what Traefik routes to.
+keys come from container env vars, and the listen settings (`http_interface`,
+`http_port`, `gevent_port`, `longpolling_port`, `http_enable` and the legacy
+`xmlrpc`, `xmlrpc_port`, `xmlrpc_interface`) are pinned to what Traefik
+routes to.
 Such keys saved before they became managed are ignored (and logged) and are
 removed from the record by the next override save or reconfigure (option names
 are compared case-insensitively and stored lowercased, matching how Odoo

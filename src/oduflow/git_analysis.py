@@ -19,7 +19,7 @@ def _trace(msg: str, *args: object) -> None:
 
 
 MANIFEST_KEYS_WITH_FILES = ("data", "demo", "assets", "qweb")
-RESTART_REQUIRED_PATHS = {".oduflow/odoo.conf", ".oduflow/odoo.prod.conf"}
+RESTART_REQUIRED_PATHS = {".oduflow/odoo.conf"}
 
 # Dependency descriptors Oduflow can read into the container. A change to the
 # active one means Python/apt deps changed → reinstall + restart. The

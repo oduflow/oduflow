@@ -491,8 +491,6 @@ class TestCreateEnvironment:
     def _template_create_patches(configure, exec_sql=None):
         """Patches that carry a template create_environment up to the setup
         step, which *configure* replaces."""
-        instance_conf = MagicMock()
-        instance_conf.exists.return_value = False
         return [
             patch("oduflow.docker_ops.env_ops._db_exists", return_value=True),
             patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
@@ -520,9 +518,11 @@ class TestCreateEnvironment:
                 "oduflow.docker_ops.env_ops.get_odoo_uid_gid",
                 return_value="100:101",
             ),
+            patch("oduflow.extra_addons.generate_odoo_conf"),
+            # What the bundled conf generates for a repo without addons/.
             patch(
-                "oduflow.docker_ops.env_ops._resolve_instance_conf",
-                return_value=instance_conf,
+                "oduflow.module_versions.addons_path_from_conf",
+                return_value=["/mnt/extra-addons"],
             ),
             configure,
         ]
@@ -1742,7 +1742,7 @@ class TestUpdateEnvironment:
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
     )
     @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
     @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
     @patch("oduflow.docker_ops.env_ops._create_pg_role")
@@ -1756,14 +1756,13 @@ class TestUpdateEnvironment:
         mock_role,
         mock_isdir,
         mock_isfile,
-        mock_resolve_conf,
+        mock_reapply_conf,
         mock_apt,
         mock_pip,
         mock_docker_client,
     ):
         import json
 
-        mock_resolve_conf.return_value.exists.return_value = False
         container = self._make_container()
         mock_docker_client.containers.get.return_value = container
         new_image = MagicMock()
@@ -1799,7 +1798,7 @@ class TestUpdateEnvironment:
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
     )
     @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
     @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
     @patch("oduflow.docker_ops.env_ops._create_pg_role")
@@ -1817,12 +1816,11 @@ class TestUpdateEnvironment:
         mock_role,
         mock_isdir,
         mock_isfile,
-        mock_resolve_conf,
+        mock_reapply_conf,
         mock_apt,
         mock_pip,
         mock_docker_client,
     ):
-        mock_resolve_conf.return_value.exists.return_value = False
         container = self._make_container()
         container.attrs["HostConfig"]["Binds"] = [
             "/tmp/flow-test/workspaces/main/repo:/mnt/extra-addons:rw",
@@ -1895,9 +1893,8 @@ class TestUpdateEnvironment:
                 "oduflow.docker_ops.env_ops._install_pip_requirements",
                 return_value=(False, ""),
             ),
-            patch("oduflow.docker_ops.env_ops._resolve_instance_conf") as conf,
+            patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True),
         ):
-            conf.return_value.exists.return_value = False
             env_ops.update_environment(
                 TEST_SETTINGS, TEST_TEAM, "main", pull_image=False, rename_to="main"
             )
@@ -1924,9 +1921,8 @@ class TestUpdateEnvironment:
                 "oduflow.docker_ops.env_ops._install_pip_requirements",
                 return_value=(False, ""),
             ),
-            patch("oduflow.docker_ops.env_ops._resolve_instance_conf") as conf,
+            patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True),
         ):
-            conf.return_value.exists.return_value = False
             return env_ops.update_environment(
                 TEST_SETTINGS, TEST_TEAM, "main", pull_image=False, **kwargs
             )
@@ -2165,9 +2161,8 @@ class TestUpdateEnvironment:
                 "oduflow.docker_ops.env_ops._install_pip_requirements",
                 return_value=(False, ""),
             ),
-            patch("oduflow.docker_ops.env_ops._resolve_instance_conf") as conf,
+            patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True),
         ):
-            conf.return_value.exists.return_value = False
             result = env_ops.update_environment(
                 TEST_SETTINGS, team, "main", pull_image=False
             )
@@ -2198,7 +2193,7 @@ class TestUpdateEnvironment:
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
     )
     @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
     @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
     @patch("oduflow.docker_ops.env_ops._create_pg_role")
@@ -2212,12 +2207,11 @@ class TestUpdateEnvironment:
         mock_role,
         mock_isdir,
         mock_isfile,
-        mock_resolve_conf,
+        mock_reapply_conf,
         mock_apt,
         mock_pip,
         mock_docker_client,
     ):
-        mock_resolve_conf.return_value.exists.return_value = False
         container = self._make_container()
         # A previous digest-pinned recreation can leave the container without
         # image tags and with Config.Image set to the digest. The persisted
@@ -4301,21 +4295,55 @@ class TestReapplyOdooConf:
         assert extra_arg == ["/mnt/extra-addons-enterprise"]
 
     @patch("oduflow.docker_ops.env_ops._copy_file_to_container")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
-    @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
-    def test_returns_false_when_no_base_conf(
-        self, mock_isfile, mock_resolve, mock_copy
-    ):
-        inst = MagicMock()
-        inst.exists.return_value = False
-        mock_resolve.return_value = inst
-        container = MagicMock()
-        container.labels = {}
-        applied = env_ops._reapply_odoo_conf(
-            TEST_SETTINGS, TEST_TEAM, "feature/x", container
+    def test_pins_listen_interface_over_repo_conf(self, mock_copy, tmp_path):
+        # Odoo 20 binds 127.0.0.1 when http_interface is unset; a loopback
+        # value from the repo conf is just as unreachable for Traefik.
+        repo = tmp_path / "repo"
+        (repo / ".oduflow").mkdir(parents=True)
+        (repo / ".oduflow" / "odoo.conf").write_text(
+            "[options]\naddons_path = /mnt/extra-addons\nhttp_interface = 127.0.0.1\n"
         )
-        assert applied is False
-        mock_copy.assert_not_called()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        container = MagicMock()
+        container.labels = {"oduflow.local_path": str(repo)}
+        with patch(
+            "oduflow.docker_ops.env_ops.get_workspace_path",
+            return_value=str(workspace),
+        ):
+            assert env_ops._reapply_odoo_conf(
+                TEST_SETTINGS, TEST_TEAM, "feature/x", container
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.read(workspace / "odoo.conf")
+        assert cp.get("options", "http_interface") == "0.0.0.0"
+        mock_copy.assert_called_once()
+
+    @patch("oduflow.docker_ops.env_ops._copy_file_to_container")
+    def test_falls_back_to_the_bundled_conf(self, mock_copy, tmp_path):
+        # Neither a repo nor a team conf: the bundled odoo.conf is the base,
+        # so a conf (with the pinned interface) is always applied.
+        team = dataclasses.replace(TEST_TEAM, data_dir=str(tmp_path / "team"))
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        container = MagicMock()
+        container.labels = {"oduflow.local_path": str(tmp_path / "repo")}
+        with patch(
+            "oduflow.docker_ops.env_ops.get_workspace_path",
+            return_value=str(workspace),
+        ):
+            assert env_ops._reapply_odoo_conf(
+                TEST_SETTINGS, team, "feature/x", container
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.read(workspace / "odoo.conf")
+        assert cp.get("options", "max_cron_threads") == "0"
+        assert cp.get("options", "http_interface") == "0.0.0.0"
+        mock_copy.assert_called_once()
 
 
 class TestAgentContainer:

@@ -571,12 +571,17 @@ class TestProdConfChain:
         path = production_ops._prod_base_conf_path(team, str(repo))
         assert path.endswith("odoo-prod.conf")
 
-    def test_repo_conf_wins(self, team, tmp_path):
+    def test_repo_conf_is_ignored(self, team, tmp_path, caplog):
+        # Whoever can push to the branch must not tune the production server.
         repo = tmp_path / "repo"
         (repo / ".oduflow").mkdir(parents=True)
-        conf = repo / ".oduflow" / "odoo.prod.conf"
-        conf.write_text("[options]\n")
-        assert production_ops._prod_base_conf_path(team, str(repo)) == str(conf)
+        (repo / ".oduflow" / "odoo.prod.conf").write_text("[options]\n")
+        path = production_ops._prod_base_conf_path(team, str(repo))
+        assert path.endswith("odoo-prod.conf")
+        assert "Ignoring" in caplog.text
+        team_conf = tmp_path / "team_1" / "odoo.prod.conf"
+        team_conf.write_text("[options]\n")
+        assert production_ops._prod_base_conf_path(team, str(repo)) == str(team_conf)
 
     def test_team_conf_beats_bundled(self, team, tmp_path):
         repo = tmp_path / "repo"
@@ -1499,18 +1504,20 @@ class TestServerMode:
         assert cp.get("options", "gevent_port") == "8072"
 
     def test_base_conf_cannot_move_the_listeners(self, settings, team, tmp_path):
-        # A repo .oduflow/odoo.prod.conf is merged into the managed conf; its
-        # listen settings must not move Odoo off the ports Traefik targets.
+        # The team odoo.prod.conf is merged into the managed conf; its listen
+        # settings must not move Odoo off the ports Traefik targets.
         production_registry.create_production(team, "erp", {})
         repo = tmp_path / "repo"
-        (repo / ".oduflow").mkdir(parents=True)
-        (repo / ".oduflow" / "odoo.prod.conf").write_text(
+        repo.mkdir()
+        (tmp_path / "team_1" / "odoo.prod.conf").write_text(
             "[options]\n"
             "gevent_port = 8073\n"
             "Longpolling_Port = 8090\n"
             "http_port = 8069\n"
-            "http_interface = 127.0.0.1\n"
+            "http_interface = 0.0.0.0\n"
+            "xmlrpc_interface = 127.0.0.1\n"
             "xmlrpc_port = 9069\n"
+            "xmlrpc = False\n"
             "http_enable = False\n"
             "limit_time_real = 300\n"
         )
@@ -1539,8 +1546,10 @@ class TestServerMode:
         assert "Longpolling_Port" not in options
         assert options["http_port"] == "8069"
         assert options["http_enable"] == "True"
-        assert "http_interface" not in options
+        assert options["http_interface"] == "0.0.0.0"
+        assert "xmlrpc_interface" not in options
         assert "xmlrpc_port" not in options
+        assert "xmlrpc" not in options
         assert options["limit_time_real"] == "300"
 
     def test_set_odoo_conf_purges_legacy_reserved_overrides(self, settings, team):
@@ -1659,6 +1668,12 @@ class TestServerMode:
             ({"workers": "many"}, "positive integer"),
             ({"gevent_port": "9000"}, "gevent_port"),
             ({"http_port": "8080"}, "http_port"),
+            ({"http_interface": "127.0.0.1"}, r"http_interface\..*listen settings"),
+            # Legacy aliases and http_enable are pinned or dropped too: refused,
+            # not stored and then silently replaced.
+            ({"xmlrpc_interface": "127.0.0.1"}, "xmlrpc_interface"),
+            ({"xmlrpc": "False"}, "xmlrpc"),
+            ({"http_enable": "False"}, "http_enable"),
         ],
     )
     def test_set_odoo_conf_refuses_values_that_break_routing(

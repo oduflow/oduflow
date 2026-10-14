@@ -37,6 +37,15 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 # in one place so the two sites cannot drift.
 DB_CONN_CONF_KEYS = ("db_host", "db_port", "db_user", "db_password")
 
+# Pinned by generate_odoo_conf into every conf it writes (dev and production):
+# Odoo 20 listens on 127.0.0.1 when http_interface is unset or empty, which
+# Traefik and published ports cannot reach from outside the container. Odoo
+# <= 19 defaulted to 0.0.0.0, so the explicit value changes nothing there.
+LISTEN_INTERFACE_CONF = {"http_interface": "0.0.0.0"}
+# Legacy alias Odoo remaps onto http_interface when it reads the file, so a
+# later line would override the pin; dropped from every generated conf.
+LISTEN_INTERFACE_ALIASES = ("xmlrpc_interface",)
+
 _WILDCARD_REFSPEC = "+refs/heads/*:refs/heads/*"
 # Marks a repo whose fetch refspecs list exactly the branches it tracks (every
 # repo registered on demand, and older subset repos once they untrack a branch),
@@ -1625,6 +1634,8 @@ def generate_odoo_conf(
     ``overrides`` win over the base conf. ``pinned`` win over both and
     ``remove_keys`` are dropped (both case-insensitive); a base conf that set
     either to something else is logged, since its value is not what runs.
+    The listen interface is always pinned (:data:`LISTEN_INTERFACE_CONF`,
+    under any caller pins) and its alias always dropped.
     """
     parser = configparser.RawConfigParser()
     # Preserve option case (Odoo config keys are case-sensitive); the default
@@ -1649,8 +1660,10 @@ def generate_odoo_conf(
     for key, value in (overrides or {}).items():
         parser.set("options", key, value)
 
-    pinned = {k.lower(): v for k, v in (pinned or {}).items()}
-    dropped = {k.lower() for k in remove_keys}
+    pinned = {
+        k.lower(): v for k, v in {**LISTEN_INTERFACE_CONF, **(pinned or {})}.items()
+    }
+    dropped = {k.lower() for k in (*LISTEN_INTERFACE_ALIASES, *remove_keys)}
     ignored = []
     for key in list(parser.options("options")):
         lowered = key.lower()

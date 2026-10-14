@@ -5987,8 +5987,9 @@ def set_production_odoo_conf(
     Set or remove odoo.conf [options] overrides for a production and re-apply
     the config. Overrides are stored per production, win over the auto-tuned
     worker settings, and survive deploys and retunes. Keys managed by Oduflow
-    (addons_path, data_dir, db_*) cannot be overridden. Current overrides are
-    shown by get_production_info.
+    (addons_path, data_dir, db_*, the listen interface/ports and their
+    xmlrpc* aliases) cannot be overridden. Current overrides are shown by
+    get_production_info.
 
     Args:
         name: The production name.

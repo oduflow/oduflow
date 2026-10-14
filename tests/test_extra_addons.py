@@ -89,3 +89,33 @@ class TestGenerateOdooConf:
         parts = _read_addons_path(out).split(",")
         assert "/opt/custom" in parts
         assert "/mnt/extra-addons/addons" in parts
+
+    def test_pins_listen_interface_and_drops_its_alias(self, tmp_path):
+        # Odoo 20 binds 127.0.0.1 without http_interface; the legacy alias
+        # would override the pin when Odoo reads the file (case-insensitive).
+        base = tmp_path / "base.conf"
+        base.write_text(
+            "[options]\n"
+            "addons_path = /mnt/extra-addons\n"
+            "http_interface = 0.0.0.0\n"
+            "XMLRPC_Interface = 127.0.0.1\n"
+        )
+        out = tmp_path / "odoo.conf"
+        generate_odoo_conf(str(base), str(out), [])
+
+        parser = configparser.RawConfigParser()
+        parser.optionxform = str
+        parser.read(out)
+        options = dict(parser.items("options"))
+        assert options["http_interface"] == "0.0.0.0"
+        assert not any(k.lower() == "xmlrpc_interface" for k in options)
+
+    def test_pins_interface_when_base_conf_omits_it(self, tmp_path):
+        base = _write_base_conf(tmp_path / "base.conf")
+        out = tmp_path / "odoo.conf"
+        generate_odoo_conf(base, str(out), [], pinned={"http_port": "8069"})
+
+        parser = configparser.RawConfigParser()
+        parser.read(out)
+        assert parser.get("options", "http_interface") == "0.0.0.0"
+        assert parser.get("options", "http_port") == "8069"

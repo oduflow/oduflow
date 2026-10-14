@@ -16,9 +16,9 @@ Key differences from dev environments:
   the ``{slug}.{team.hostname}`` scheme — traefik routing mode required;
 - full git clone (commit history is the point: rollback targets, deploy
   history) instead of ``--depth 1``;
-- a production odoo.conf chain (``.oduflow/odoo.prod.conf`` > team
-  ``odoo.prod.conf`` > bundled ``odoo-prod.conf``) with auto-tuned
-  workers/limits injected on top (see :mod:`oduflow.prod_tune`);
+- a production odoo.conf chain (team ``odoo.prod.conf`` > bundled
+  ``odoo-prod.conf``; never the repo) with auto-tuned workers/limits
+  injected on top (see :mod:`oduflow.prod_tune`);
 - no ``--dev=xml``, no sanitize/neutralize, plain filestore directory
   (no overlay), no reaper.
 """
@@ -78,7 +78,12 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.extra_addons import DB_CONN_CONF_KEYS, validate_extra_repo_name
+from oduflow.extra_addons import (
+    DB_CONN_CONF_KEYS,
+    LISTEN_INTERFACE_ALIASES,
+    LISTEN_INTERFACE_CONF,
+    validate_extra_repo_name,
+)
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     PRODUCTION_TEMPLATE_PREFIX,
@@ -117,23 +122,6 @@ TOMBSTONE_FILENAME = "deleted.json"
 # Signature: hook(settings, team, name) -> None.
 pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 
-# odoo.conf [options] keys a per-production override may not touch:
-# addons_path is generated from the repo + extra addon worktrees, data_dir
-# anchors the filestore bind mount, the db_* connection keys are managed
-# via container env vars (a conf value would override them inside Odoo), and
-# the listen ports are what the Traefik routes target (see SERVER_MODES).
-# Compared lowercased: Odoo lowercases option names on read.
-RESERVED_ODOO_CONF_KEYS = frozenset(
-    {
-        "addons_path",
-        "data_dir",
-        "http_port",
-        "xmlrpc_port",
-        "gevent_port",
-        "longpolling_port",
-    }
-) | frozenset(DB_CONN_CONF_KEYS)
-
 # How a production serves HTTP (record["server_mode"]; a missing key reads
 # as "workers"). Both run Odoo's prefork server, which always spawns the
 # gevent process on 8072 next to the HTTP workers on 8069:
@@ -151,10 +139,11 @@ _GEVENT_PORT = "8072"
 # regardless of version: the one a version lacks 404s on either port.
 _BUS_PATH_RULE = "PathPrefix(`/websocket`) || PathPrefix(`/longpolling`)"
 # Listen settings forced into every production conf, over the base conf chain
-# (repo .oduflow/odoo.prod.conf, team odoo.prod.conf) and the overrides:
-# Traefik and the health probe target these ports whatever the conf says.
+# (team odoo.prod.conf, bundled odoo-prod.conf) and the overrides: Traefik
+# and the health probe target these ports whatever the conf says.
 # gevent_port (16+) and longpolling_port (<=15) are both pinned; a version
-# ignores the key it does not know.
+# ignores the key it does not know. The listen interface is pinned by
+# generate_odoo_conf for every conf, dev and production alike.
 _PINNED_LISTEN_CONF = {
     "http_enable": "True",
     "http_port": _HTTP_PORT,
@@ -162,13 +151,28 @@ _PINNED_LISTEN_CONF = {
     "longpolling_port": _GEVENT_PORT,
 }
 # Base-conf keys that could move a listener away from what Traefik targets
-# (legacy xmlrpc_* aliases, a loopback-only interface); dropped, so Odoo
-# listens on every interface.
+# (legacy xmlrpc_* aliases of the pinned http_* keys); dropped.
 _DROPPED_LISTEN_CONF_KEYS = (
-    "http_interface",
     "xmlrpc",
     "xmlrpc_port",
-    "xmlrpc_interface",
+)
+# odoo.conf [options] keys a per-production override may not touch:
+# addons_path is generated from the repo + extra addon worktrees, data_dir
+# anchors the filestore bind mount, the db_* connection keys are managed
+# via container env vars (a conf value would override them inside Odoo), and
+# every listen key the generated conf pins or drops is what the Traefik
+# routes target (see SERVER_MODES) — refused rather than silently replaced.
+# Compared lowercased: Odoo lowercases option names on read.
+RESERVED_ODOO_CONF_KEYS = frozenset(
+    {
+        "addons_path",
+        "data_dir",
+        *DB_CONN_CONF_KEYS,
+        *LISTEN_INTERFACE_CONF,
+        *LISTEN_INTERFACE_ALIASES,
+        *_PINNED_LISTEN_CONF,
+        *_DROPPED_LISTEN_CONF_KEYS,
+    }
 )
 # Both Odoo processes must answer for a production to be healthy: the
 # workers on 8069 and the gevent process on 8072, which carries the bus in
@@ -295,15 +299,23 @@ def _require_container(
 
 
 def _prod_base_conf_path(team: TeamSettings, repo_path: str) -> str:
-    """Resolve the production base conf: repo > team > bundled.
+    """Resolve the production base conf: team > bundled.
 
     A separate chain from the dev one on purpose: a repo's dev conf
     (workers=0) must never leak into production, so the file names are
-    explicit (``odoo.prod.conf`` / bundled ``odoo-prod.conf``).
+    explicit (``odoo.prod.conf`` / bundled ``odoo-prod.conf``). The repo is
+    never consulted: whoever can push to the branch must not get to tune the
+    production server. Per-production settings go through the operator-only
+    overrides (set_production_odoo_conf). A repo ``.oduflow/odoo.prod.conf``
+    (honoured by earlier versions) is logged as ignored.
     """
     repo_conf = os.path.join(repo_path, ".oduflow", "odoo.prod.conf")
     if os.path.isfile(repo_conf):
-        return repo_conf
+        logger.warning(
+            "Ignoring %s: production odoo.conf comes from the team "
+            "odoo.prod.conf and per-production overrides only",
+            repo_conf,
+        )
     team_conf = _resolve_instance_conf("odoo.prod.conf", team.data_dir)
     if team_conf.exists():
         return str(team_conf)
@@ -1503,7 +1515,9 @@ def set_production_odoo_conf(
             f"odoo.conf keys managed by Oduflow cannot be overridden: "
             f"{', '.join(reserved)}. addons_path and data_dir are generated; "
             "db_* connection keys come from container env vars; the listen "
-            "ports are what Traefik routes to (choose server_mode instead)."
+            "settings (interface, ports, http_enable and their legacy xmlrpc* "
+            "aliases) are pinned to what Traefik routes to (use server_mode to "
+            "pick the serving port)."
         )
     invalid = sorted(k for k in cleaned if not _ODOO_CONF_KEY_RE.match(k))
     if invalid:

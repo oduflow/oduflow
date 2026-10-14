@@ -2644,26 +2644,15 @@ def _create_environment_impl(
     for host_path, container_path in extra_mount_paths:
         odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
 
-    repo_odoo_conf = os.path.join(repo_path, ".oduflow", "odoo.conf")
-    if os.path.isfile(repo_odoo_conf):
-        base_conf_path = repo_odoo_conf
-        logger.info("Using odoo.conf from repository")
-    elif _resolve_instance_conf("odoo.conf", team.data_dir).exists():
-        base_conf_path = str(_resolve_instance_conf("odoo.conf", team.data_dir))
-    else:
-        base_conf_path = None
+    from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
 
-    odoo_conf_to_copy: str | None = None
-    if base_conf_path:
-        from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
-
-        generated_conf = os.path.join(workspace_path, "odoo.conf")
-        extra_container_paths = extra_conf_paths
-        main_addons_path = resolve_main_addons_path(repo_path)
-        generate_odoo_conf(
-            base_conf_path, generated_conf, extra_container_paths, main_addons_path
-        )
-        odoo_conf_to_copy = generated_conf
+    odoo_conf_to_copy = os.path.join(workspace_path, "odoo.conf")
+    generate_odoo_conf(
+        _dev_base_conf_path(team, repo_path),
+        odoo_conf_to_copy,
+        extra_conf_paths,
+        resolve_main_addons_path(repo_path),
+    )
 
     template_upgrades: dict[str, tuple[str, str]] = {}
     template_check_error: str | None = None
@@ -4317,6 +4306,19 @@ def _detect_local_changes(
     return None, changed
 
 
+def _dev_base_conf_path(team: TeamSettings, repo_path: str) -> str:
+    """Resolve the dev base conf: repo ``.oduflow/odoo.conf`` > team > bundled.
+
+    Always a path: :func:`_resolve_instance_conf` falls back to the bundled
+    ``odoo.conf``.
+    """
+    repo_conf = os.path.join(repo_path, ".oduflow", "odoo.conf")
+    if os.path.isfile(repo_conf):
+        logger.info("Using odoo.conf from repository")
+        return repo_conf
+    return str(_resolve_instance_conf("odoo.conf", team.data_dir))
+
+
 def _reapply_odoo_conf(
     settings: Settings,
     team: TeamSettings,
@@ -4325,10 +4327,11 @@ def _reapply_odoo_conf(
 ) -> bool:
     """Reconstruct ``/etc/odoo/odoo.conf`` inside *container*.
 
-    Resolves the base config (repo ``.oduflow/odoo.conf`` takes priority over the
-    instance-level conf), regenerates the merged conf with *container*'s current
-    extra-addons paths, and copies it into the container. Returns ``True`` if a
-    conf was applied, ``False`` if no base config exists.
+    Resolves the base config (:func:`_dev_base_conf_path`), regenerates the
+    merged conf with *container*'s current extra-addons paths, and copies it
+    into the container. Always returns ``True``, like
+    :func:`~oduflow.docker_ops.production_ops.reapply_prod_odoo_conf`: a base
+    conf always exists.
 
     The container reads ``/etc/odoo/odoo.conf`` as a *copy* made at create/update
     time — a plain restart reuses the stale copy, so this must run before a
@@ -4336,8 +4339,8 @@ def _reapply_odoo_conf(
     """
     labels = container.labels if isinstance(container.labels, dict) else {}
     if labels.get("oduflow.prod") == "true":
-        # Production uses its own conf chain (odoo.prod.conf + tuned worker
-        # overrides). Local import: production_ops composes env_ops helpers.
+        # Production uses its own conf chain (team odoo.prod.conf + tuned
+        # worker overrides). Local import: production_ops composes env_ops helpers.
         from oduflow.docker_ops.production_ops import reapply_prod_odoo_conf
 
         return reapply_prod_odoo_conf(
@@ -4347,13 +4350,6 @@ def _reapply_odoo_conf(
         env_name, team.workspaces_dir
     )
     workspace_path = get_workspace_path(env_name, team.workspaces_dir)
-    repo_odoo_conf = os.path.join(repo_path, ".oduflow", "odoo.conf")
-    if os.path.isfile(repo_odoo_conf):
-        base_conf_path = repo_odoo_conf
-    elif _resolve_instance_conf("odoo.conf", team.data_dir).exists():
-        base_conf_path = str(_resolve_instance_conf("odoo.conf", team.data_dir))
-    else:
-        return False
 
     from oduflow.extra_addons import (
         generate_odoo_conf,
@@ -4372,7 +4368,10 @@ def _reapply_odoo_conf(
     generated_conf = os.path.join(workspace_path, "odoo.conf")
     main_addons_path = resolve_main_addons_path(repo_path)
     generate_odoo_conf(
-        base_conf_path, generated_conf, extra_container_paths, main_addons_path
+        _dev_base_conf_path(team, repo_path),
+        generated_conf,
+        extra_container_paths,
+        main_addons_path,
     )
     _copy_file_to_container(container, generated_conf, "/etc/odoo")
     return True
