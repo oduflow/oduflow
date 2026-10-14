@@ -426,6 +426,11 @@ With no arguments it simply rebuilds from the current image and configuration â€
 the fix for a broken container (packages accidentally removed, system files
 corrupted) reconnected to the existing data.
 
+If APT/PIP setup fails after recreation, the response reports the failure and
+setup logs together with the resulting environment identity. A completed rename
+is retained, including the agent checkout and its MCP configuration; use the
+reported new name and endpoint even when dependency setup failed.
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -483,8 +488,17 @@ manually without a corresponding requirements/APT entry are not preserved.
 switch that has already happened. Dependencies for the currently mounted code
 are still restored before returning the refusal. If dependency installation
 fails, module actions are skipped and the error is returned. Fix the dependency
-error, run [`update_environment`](#update_environment) to restore packages, then
-retry the required module actions explicitly.
+error in the environment checkout or package source, run
+[`update_environment`](#update_environment) to restore packages, then retry the
+module actions using the explicit `pull_and_apply` arguments included in the
+failure message. The structured result also retains `pending_actions` and
+`retry`: a plain automatic retry cannot recover the consumed Git diff.
+
+On a same-branch rename, any extra-addons mount changes share one container
+recreation and dependency installation. A strict refusal prevents the rename;
+an installation or module error after the rename reports the new identity.
+Repositories without dependency files do not trigger an extra restart merely
+because their dependencies were checked.
 
 Lock: environment.
 { .odu-tool-meta }

@@ -1211,7 +1211,9 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
                     "changed_files": [],
                 },
             ),
-            patch("oduflow.docker_ops.env_ops.update_environment") as update,
+            patch(
+                "oduflow.docker_ops.env_ops.update_environment", return_value={}
+            ) as update,
             patch("oduflow.docker_ops.env_ops._cleanup_legacy_extra_worktrees"),
         ):
             result = env_ops.pull_environment(settings, team, "env")
@@ -1273,7 +1275,9 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
                     "changed_files": ["sale/models/sale.py"],
                 },
             ),
-            patch("oduflow.docker_ops.env_ops.update_environment") as update,
+            patch(
+                "oduflow.docker_ops.env_ops.update_environment", return_value={}
+            ) as update,
             patch("oduflow.docker_ops.env_ops._cleanup_legacy_extra_worktrees"),
             patch("oduflow.docker_ops.env_ops._apply_actions") as apply_actions,
         ):
@@ -1330,7 +1334,9 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
                 "oduflow.git_analysis.guardrail_warnings",
                 return_value=["upgrade sale is required"],
             ),
-            patch("oduflow.docker_ops.env_ops.update_environment") as update,
+            patch(
+                "oduflow.docker_ops.env_ops.update_environment", return_value={}
+            ) as update,
             patch("oduflow.docker_ops.env_ops._apply_actions") as apply,
         ):
             result = env_ops.pull_environment(

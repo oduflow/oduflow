@@ -4392,6 +4392,48 @@ def _reapply_odoo_conf(
     return True
 
 
+def _dependency_failure_result(
+    env_name: str,
+    changed_files: list[str],
+    to_install: list[str],
+    to_upgrade: list[str],
+    do_restart: bool,
+    do_refresh: bool,
+    config_changed: bool,
+    exit_code: int,
+    output: str,
+) -> dict[str, Any]:
+    """Keep the unexecuted plan after checkout has consumed its source diff."""
+    arguments = {
+        "env_name": env_name,
+        "install": ",".join(to_install),
+        "upgrade": ",".join(to_upgrade),
+        "restart": do_restart or do_refresh or config_changed,
+    }
+    return {
+        "action": "error",
+        "exit_code": exit_code,
+        "env_name": env_name,
+        "changed_files": changed_files,
+        "pending_actions": {
+            "install": to_install,
+            "upgrade": to_upgrade,
+            "restart": do_restart,
+            "refresh": do_refresh,
+            "config_changed": config_changed,
+        },
+        "retry": {"tool": "pull_and_apply", "arguments": arguments},
+        "message": (
+            "Dependency installation failed; module actions were not run. "
+            f"Fix the dependency error, run update_environment for '{env_name}', "
+            "then call pull_and_apply explicitly with "
+            + json.dumps(arguments)
+            + ". The automatic diff has already been consumed."
+        ),
+        "output": output,
+    }
+
+
 def _apply_actions(
     client: DockerClient,
     settings: Settings,
@@ -4406,18 +4448,25 @@ def _apply_actions(
     do_refresh: bool = False,
     config_changed: bool = False,
     dep_units: list[tuple[str, str]] | None = None,
+    deps_changed: bool | None = None,
 ) -> dict[str, Any]:
     """Run install/upgrade/restart and build the result dict (shared by the
     explicit and auto paths of :func:`pull_environment`).
 
     ``dep_units`` lists the ``(host_path, container_base)`` repos whose
-    dependency descriptors changed and need an apt/pip reinstall."""
+    dependencies must be checked. ``deps_changed=False`` distinguishes a full
+    restore from changed descriptors: repos without dependencies do not restart
+    a fresh container merely because they were checked."""
     from oduflow.docker_ops.odoo_ops import (
         install_odoo_modules,
         upgrade_odoo_modules,
     )
 
-    deps_changed = bool(dep_units)
+    # Restoring a fresh container checks every repo, even ones without any
+    # dependency files. That is different from a changed descriptor (including
+    # a deleted one), which still requires a restart on an ordinary pull.
+    if deps_changed is None:
+        deps_changed = bool(dep_units)
     # Reinstall apt/pip deps up front so a subsequent module install/upgrade can
     # import newly-added libs (same apt-then-pip order as create/update). Never
     # restart here — a single restart happens in the branches below.
@@ -4427,17 +4476,17 @@ def _apply_actions(
         dep_container = client.containers.get(odoo_container_name)
         dep_exit, _, dep_logs = _install_repo_dependencies(dep_container, dep_units)
         if dep_exit:
-            return {
-                "action": "error",
-                "exit_code": dep_exit,
-                "changed_files": changed_files,
-                "message": (
-                    "Dependency installation failed; Odoo module actions were not "
-                    "run. Fix the dependency error and run update_environment "
-                    "to restore dependencies, then retry the requested module actions."
-                ),
-                "output": "\n".join(dep_logs),
-            }
+            return _dependency_failure_result(
+                env_name,
+                changed_files,
+                to_install,
+                to_upgrade,
+                do_restart,
+                do_refresh,
+                config_changed,
+                dep_exit,
+                "\n".join(dep_logs),
+            )
 
     if to_install or to_upgrade:
         messages: list[str] = []
@@ -4480,7 +4529,7 @@ def _apply_actions(
             "output": "\n".join(dep_logs + odoo_output_parts),
         }
 
-    if do_restart or deps_changed:
+    if do_restart or deps_changed or dep_logs:
         container = client.containers.get(odoo_container_name)
         reapplied = config_changed and _reapply_odoo_conf(
             settings, team, env_name, container
@@ -4538,6 +4587,7 @@ def pull_environment(
     presynced: tuple[str, list[str]] | None = None,
     before_apply: Callable[[], None] | None = None,
     reinstall_all_deps: bool = False,
+    rename_to: str | None = None,
 ) -> dict[str, Any]:
     """Sync code into an environment and apply the right Odoo action.
 
@@ -4560,6 +4610,9 @@ def pull_environment(
     container. All mounted repos are installed, even with an empty diff. A
     strict refusal still restores the currently mounted code's dependencies,
     but does not switch pending extra mounts or apply Odoo module actions.
+
+    ``rename_to`` combines a same-branch rename with any extra-mount recreate,
+    after strict guardrails accept the action and before module actions run.
 
     Action selection:
 
@@ -4737,15 +4790,16 @@ def pull_environment(
     # (.oduflow/ shadows the repo root) applies within each repo separately;
     # applies to both explicit and auto modes (a prerequisite, not an agent action).
     dep_units: list[tuple[str, str]] = []
-    if any(_is_active_dep_file(f, repo_path) for f in main_changed_files):
-        dep_units.append((repo_path, "/mnt/extra-addons"))
-    for dep_host, dep_base, dep_files in extra_dep_candidates:
-        if any(_is_active_dep_file(f, dep_host) for f in dep_files):
-            dep_units.append((dep_host, dep_base))
     if reinstall_all_deps:
         dep_units = _environment_dependency_paths(
             container_obj, repo_path, extra_addons
         )
+    else:
+        if any(_is_active_dep_file(f, repo_path) for f in main_changed_files):
+            dep_units.append((repo_path, "/mnt/extra-addons"))
+        for dep_host, dep_base, dep_files in extra_dep_candidates:
+            if any(_is_active_dep_file(f, dep_host) for f in dep_files):
+                dep_units.append((dep_host, dep_base))
 
     warnings: list[str] = []
     do_refresh = False
@@ -4771,8 +4825,22 @@ def pull_environment(
                     do_restart=False,
                     changed_files=all_changed,
                     dep_units=dep_units,
+                    deps_changed=False,
                 )
                 if recovery.get("exit_code"):
+                    # Recovery itself applied no modules. Retain the original
+                    # plan and guardrail warnings, rather than its empty lists.
+                    recovery = _dependency_failure_result(
+                        env_name,
+                        all_changed,
+                        to_install,
+                        to_upgrade,
+                        do_restart,
+                        do_refresh,
+                        config_changed,
+                        recovery["exit_code"],
+                        recovery["output"],
+                    )
                     recovery["warnings"] = warnings
                     return recovery
             return {
@@ -4783,7 +4851,7 @@ def pull_environment(
                 "message": (
                     (
                         "Restored dependencies for the currently mounted code. "
-                        if recovery
+                        if recovery.get("output")
                         else ""
                     )
                     + "Guardrail (strict) blocked apply: the requested action looks "
@@ -4792,7 +4860,7 @@ def pull_environment(
                 ),
             }
     else:
-        if not all_changed and not reinstall_all_deps:
+        if not all_changed and not reinstall_all_deps and not rename_to:
             if extra_mount_switch_needed:
                 # install_dependencies is on because this recreates the
                 # container, and pip --user packages live in the container
@@ -4812,6 +4880,18 @@ def pull_environment(
                 _cleanup_legacy_extra_worktrees(
                     team, env_name, iter(pending_extra_checkouts)
                 )
+                if updated.get("exit_code"):
+                    return _dependency_failure_result(
+                        env_name,
+                        all_changed,
+                        [],
+                        [],
+                        False,
+                        False,
+                        False,
+                        updated["exit_code"],
+                        "\n".join(updated["setup_logs"]),
+                    )
                 return {
                     "action": "none",
                     "extra_addons_cache_migrated": True,
@@ -4840,6 +4920,7 @@ def pull_environment(
         or do_refresh
         or dep_units
         or extra_mount_switch_needed
+        or rename_to
     ):
         before_apply()
 
@@ -4848,25 +4929,54 @@ def pull_environment(
     # The checkout itself was prepared off to the side and is safe to cache even
     # when strict mode blocks without touching the running container.
     setup_logs: list[str] = []
-    if extra_mount_switch_needed:
+    identity: dict[str, Any] = {}
+    if extra_mount_switch_needed or rename_to:
         # See the note on the early-return recreate above: the container is
         # replaced, so its pip --user packages go with it and have to be
         # reinstalled unconditionally, not just for the repos whose dependency
         # descriptor happens to be in this diff.
+        recreate_kwargs: dict[str, Any] = {}
+        if extra_mount_switch_needed:
+            recreate_kwargs.update(
+                extra_checkout_overrides=pending_extra_checkouts,
+                extra_revision_overrides=pending_extra_revisions,
+            )
+        if rename_to:
+            recreate_kwargs["rename_to"] = rename_to
         updated = update_environment(
             settings,
             team,
             env_name,
-            extra_checkout_overrides=pending_extra_checkouts,
-            extra_revision_overrides=pending_extra_revisions,
             pull_image=False,
             install_dependencies=True,
+            **recreate_kwargs,
         )
         setup_logs = updated.get("setup_logs", [])
+        if rename_to:
+            identity = {"env_name": rename_to, "renamed_from": env_name}
+            env_name = rename_to
+            odoo_container_name = get_resource_name(
+                env_name, "odoo", settings.prefix, team.team_id
+            )
         # The new container already has every repo's dependencies, including
         # those whose descriptors changed. Do not install them a second time.
         dep_units = []
         _cleanup_legacy_extra_worktrees(team, env_name, iter(pending_extra_checkouts))
+        if updated.get("exit_code"):
+            result = _dependency_failure_result(
+                env_name,
+                all_changed,
+                to_install,
+                to_upgrade,
+                do_restart,
+                do_refresh,
+                config_changed,
+                updated["exit_code"],
+                "\n".join(setup_logs),
+            )
+            result.update(identity)
+            result["warnings"] = warnings
+            return result
 
     result = _apply_actions(
         client,
@@ -4881,8 +4991,11 @@ def pull_environment(
         changed_files=all_changed,
         config_changed=config_changed,
         dep_units=dep_units,
+        deps_changed=bool(dep_units) and not reinstall_all_deps,
     )
+    result.update(identity)
     if setup_logs:
+        result["dependencies_restored"] = True
         result["output"] = "\n".join(setup_logs + [result.get("output", "")]).rstrip()
         result["message"] = "Reinstalled dependencies. " + result["message"]
     if warnings:
@@ -5002,7 +5115,6 @@ def switch_environment_branch(
     if branch == current_branch and extra_override is None:
         # Not an error: the caller wanted this environment on this branch, and it
         # is. Pull instead, so "switch" is safe to call at the start of any task.
-        previous_env_name = env_name
         result = pull_environment(
             settings,
             team,
@@ -5011,53 +5123,25 @@ def switch_environment_branch(
             upgrade=upgrade,
             restart=restart,
             strict=strict,
+            rename_to=rename_to or None,
         )
-        # The pull runs first so that a strict refusal keeps its meaning:
-        # "blocked" has to mean nothing changed, the name included.
-        blocked = result.get("action") == "blocked" or bool(result.get("exit_code"))
-        if rename_to and not blocked:
-            updated = update_environment(
-                settings,
-                team,
-                env_name,
-                rename_to=rename_to,
-                pull_image=False,
-                install_dependencies=True,
-                # The agent checkout is moved and refreshed right below, with
-                # the branch in hand; clone-env.sh must not run twice.
-                sync_agent_checkout=False,
-            )
-            _agent_rename_env(client, settings, team, env_name, rename_to)
-            env_name = rename_to
-            _agent_add_env(
-                client,
-                settings,
-                team,
-                env_name,
-                labels.get(settings.repo_label, ""),
-                branch,
-                labels.get("oduflow.git_user", ""),
-            )
-            result["renamed_from"] = previous_env_name
-            result["output"] = "\n".join(
-                [result.get("output", "")] + updated.get("setup_logs", [])
-            ).strip()
+        final_env_name = str(result.get("env_name") or env_name)
         result["branch"] = branch
         result["previous_branch"] = current_branch
         result["branch_switched"] = False
-        result["env_name"] = env_name
+        result["env_name"] = final_env_name
         renamed = (
-            f"Renamed '{previous_env_name}' to '{env_name}'. "
-            if rename_to and not blocked
+            f"Renamed '{env_name}' to '{final_env_name}'. "
+            if result.get("renamed_from")
             else ""
         )
         not_renamed = (
             f" The rename to '{rename_to}' was not applied."
-            if rename_to and blocked
+            if rename_to and not result.get("renamed_from")
             else ""
         )
         result["message"] = (
-            f"{renamed}Environment '{env_name}' is already on branch '{branch}'; "
+            f"{renamed}Environment '{final_env_name}' is already on branch '{branch}'; "
             f"pulled it instead. {result.get('message', '')}".strip()
             + not_renamed
         )
@@ -5146,7 +5230,7 @@ def switch_environment_branch(
     # the running Odoo with nothing to catch up on.
     tail = (
         "No code difference to apply."
-        if result.get("action") == "none" and not result.get("output")
+        if result.get("action") == "none" and not result.get("dependencies_restored")
         else str(result.get("message", ""))
     )
     result["branch"] = branch
@@ -5401,6 +5485,11 @@ def update_environment(
     restores dependencies from the new mounts. The PostgreSQL connection variables
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
     and image-baked env comes from the image itself.
+
+    Dependency installer failures are returned as a nonzero ``exit_code`` with
+    setup logs and the resulting identity, after rename bookkeeping finishes.
+    Callers must inspect that status before applying further work. A failed
+    setup does not undo the recreated container or the rename.
 
     ``hostname_override`` changes the short public hostname in Traefik mode.
     Empty or omitted values keep the current hostname policy. Conflicts are
@@ -5857,21 +5946,23 @@ def update_environment(
 
     env_db = get_db_name(env_name, team.team_id)
     workspace = get_workspace_path(env_name, team.workspaces_dir)
-    if dep_exit:
-        raise ExternalCommandError(
-            "install environment dependencies",
-            dep_exit,
-            f"Environment '{env_name}' was recreated, but dependency installation "
-            "failed. Fix the error and retry update_environment.\n"
-            + "\n".join(setup_logs),
-        )
-
-    logger.info(
-        "Environment updated",
+    message = (
+        f"Environment '{env_name}' was recreated, but dependency installation failed. "
+        "Fix the error and retry update_environment."
+        if dep_exit
+        else f"Environment '{env_name}' updated successfully."
+    )
+    logger.log(
+        logging.WARNING if dep_exit else logging.INFO,
+        message,
         extra={"env_name": env_name, "url": url, "container": odoo_container_name},
     )
 
     return {
+        "exit_code": dep_exit,
+        "message": message,
+        "action": "error" if dep_exit else "restart",
+        "output": "\n".join(setup_logs),
         "url": url,
         "env_name": env_name,
         "renamed_from": renamed_from,

@@ -2376,13 +2376,17 @@ def update_environment(
             _locks.release_env(rename_to)
     renamed_from = result.get("renamed_from") or ""
     final_env_name = str(result.get("env_name") or env_name)
-    lines = [
-        (
+    if result.get("exit_code"):
+        headline = result["message"]
+    elif renamed_from:
+        headline = (
             f"Environment renamed from '{renamed_from}' to '{final_env_name}' "
             "and updated successfully!"
-            if renamed_from
-            else "Environment updated successfully!"
-        ),
+        )
+    else:
+        headline = "Environment updated successfully!"
+    lines = [
+        headline,
         f"URL: {result['url']}",
         f"Hostname: {result.get('hostname', '')}",
         f"Odoo Container: {result['odoo_container']}",
