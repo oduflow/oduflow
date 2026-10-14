@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **Branch switches restore dependencies after container recreation** —
+  `switch_branch` reinstalls declared APT/PIP dependencies from the target code
+  and all mounted extra-addons repositories, even with unchanged requirements
+  or an empty diff. Same-branch renames restore dependencies too. Strict
+  guardrail refusals still restore the currently mounted code's dependencies;
+  installation failures are reported and stop subsequent module actions.
+  Failures retain the pending module plan and explicit retry arguments after
+  the Git diff has been consumed. Completed renames keep the agent checkout
+  and MCP configuration synchronized and report the resulting identity even
+  when dependency setup fails. The dashboard shows full failure output.
+  Same-branch renames combine extra-addons mount changes in one recreation;
+  checking repositories without dependency files adds no restart.
+
 ## v1.87.0
 
 ### Features

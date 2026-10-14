@@ -3437,3 +3437,49 @@ class TestOdooGuideReminder:
         from oduflow.server import _odoo_guide_reminder
 
         assert _odoo_guide_reminder(image) == ""
+
+
+@patch("oduflow.server._wake_for_work", return_value="")
+@patch("oduflow.docker_ops.env_ops.switch_environment_branch")
+def test_switch_strict_response_preserves_restore_log_and_new_endpoint(
+    mock_switch, mock_wake
+):
+    mock_switch.return_value = {
+        "action": "blocked",
+        "warnings": ["upgrade required"],
+        "message": "Switched branch. Restored dependencies. Module apply blocked.",
+        "output": "[PIP] Requirements installed successfully",
+        "renamed_from": "main",
+        "env_name": "dev2",
+    }
+    result = _call_tool(
+        "switch_branch", env_name="main", branch="feature/new", strict=True
+    )
+    assert "BLOCKED" in result
+    assert "[PIP] Requirements installed successfully" in result
+    assert "/mcp/dev2" in result
+
+
+@pytest.mark.parametrize("renamed", [False, True])
+@patch("oduflow.docker_ops.env_ops.update_environment")
+def test_update_dependency_failure_reports_partial_result(mock_update, renamed):
+    mock_update.return_value = {
+        "env_name": "dev2" if renamed else "main",
+        "renamed_from": "main" if renamed else "",
+        "exit_code": 1,
+        "message": "Container recreated; dependency installation failed.",
+        "url": "http://odoo",
+        "odoo_container": "odoo",
+        "database": "db",
+        "workspace": "/workspace",
+        "setup_logs": ["[PIP] failed: missing package"],
+    }
+    result = _call_tool(
+        "update_environment", env_name="main", new_name="dev2" if renamed else ""
+    )
+    assert "dependency installation failed" in result
+    assert "updated successfully" not in result
+    assert "missing package" in result
+    if renamed:
+        assert "env_name='dev2'" in result
+        assert "/mcp/dev2" in result

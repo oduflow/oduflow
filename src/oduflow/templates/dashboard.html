@@ -3137,8 +3137,8 @@ function closeSyncResult(event) {
 
 function showSyncResult(branch, result, title) {
   var actionLabels = {none: 'No changes', refresh: 'Refresh', restart: 'Restart', install: 'Install', upgrade: 'Upgrade', blocked: 'Blocked'};
-  var action = result.action || 'none';
-  var label = actionLabels[action] || action;
+  var action = result.exit_code ? 'blocked' : (result.action || 'none');
+  var label = result.exit_code ? 'Failed' : (actionLabels[action] || action);
 
   var html = '<span class="sync-result-action sync-action-' + action + '">' + label + '</span>';
   html += '<div class="sync-message">' + esc(result.message || '') + '</div>';
@@ -4428,8 +4428,8 @@ async function confirmSwitchBranch() {
       body: JSON.stringify({branch: target})
     });
     const data = await readResult(r);
-    if (data.ok) {
-      showSyncResult(branch, data.result, 'Switch branch');
+    if (data.result) {
+      showSyncResult(data.result.env_name || branch, data.result, 'Switch branch');
     } else {
       showToast(data.error || 'Switch failed', true);
     }
@@ -4746,6 +4746,8 @@ async function confirmUpdateEnv() {
       showToast(payload.new_name
         ? branch + ': renamed to ' + payload.new_name
         : branch + ': updated');
+    } else if (data.result) {
+      showSyncResult(data.result.env_name || branch, data.result, 'Update environment');
     } else {
       showToast(data.error || (payload.new_name ? 'Rename failed' : 'Update failed'), true);
     }

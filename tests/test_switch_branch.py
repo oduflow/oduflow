@@ -9,6 +9,7 @@ guardrail.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -204,6 +205,7 @@ class TestSwitchEnvironmentBranch:
         # The checkout is still on the old branch at that point, so a changed
         # requirements.txt belongs to the diff, not to this recreate.
         assert kwargs["install_dependencies"] is False
+        assert switch_env["pull"].call_args.kwargs["reinstall_all_deps"] is True
 
     def test_strict_only_applies_to_the_normal_apply_path(self, tmp_path, switch_env):
         with patch("oduflow.docker_ops.odoo_ops._get_module_states") as module_states:
@@ -280,6 +282,7 @@ class TestSwitchEnvironmentBranch:
         switch_env["update"].assert_not_called()
         switch_env["checkout"].assert_not_called()
         switch_env["pull"].assert_called_once()
+        assert not switch_env["pull"].call_args.kwargs.get("reinstall_all_deps")
         assert "already on branch 'feature/new'" in result["message"]
 
     def test_a_live_mounted_environment_is_refused(self, tmp_path, switch_env):
@@ -417,18 +420,13 @@ class TestSwitchWithRename:
             _labels(**{"oduflow.git_branch": "feature/new"})
         )
 
+        switch_env["pull"].return_value.update(env_name="dev2", renamed_from="dev1")
         result = _switch(tmp_path, new_name="dev2")
-
-        assert switch_env["update"].call_args.kwargs["rename_to"] == "dev2"
-        # Same as for a real switch: one clone-env.sh run, owned by the caller.
-        assert switch_env["update"].call_args.kwargs["sync_agent_checkout"] is False
+        assert switch_env["pull"].call_args.kwargs["rename_to"] == "dev2"
+        switch_env["update"].assert_not_called()
         assert result["branch_switched"] is False
         assert result["env_name"] == "dev2"
         assert result["renamed_from"] == "dev1"
-        # The pull that stands in for the switch runs first, under the old name,
-        # so a strict refusal can still leave the name untouched.
-        assert switch_env["pull"].call_args[0][2] == "dev1"
-        assert switch_env["agent"].call_args[0][3] == "dev2"
 
     def test_a_guardrail_refusal_blocks_the_rename_too(self, tmp_path, switch_env):
         switch_env["client"].containers.get.return_value = _container(
@@ -719,3 +717,489 @@ class TestRebaseVolumes:
         )
         # Shared checkouts live outside the workspace and are not name-keyed.
         assert "/data/shared_extra_checkouts/enterprise/abc" in rebased
+
+
+@pytest.fixture
+def dependency_switch(tmp_path, monkeypatch):
+    """Run switch, recreate, pull and installation; fake only Docker/Git I/O."""
+    from types import SimpleNamespace
+
+    team = _team(tmp_path)
+    settings = Settings(routing_mode="port", teams={"1": team})
+    repo = tmp_path / "workspaces" / "dev1" / "repo"
+    repo.mkdir(parents=True)
+    extra = tmp_path / "extra-old"
+    extra.mkdir()
+    target_extra = tmp_path / "extra-new"
+    target_extra.mkdir()
+    for path, package in (
+        (repo, "main-shared"),
+        (extra, "extra-old"),
+        (target_extra, "extra-new"),
+    ):
+        (path / "requirements.txt").write_text(package)
+        (path / ".oduflow").mkdir()
+        (path / ".oduflow" / "apt_packages.txt").write_text("curl\n")
+
+    state = SimpleNamespace(
+        files=[],
+        target_extra=extra,
+        extra_files=[],
+        containers=[],
+        pip_failure=False,
+        apt_failure=False,
+    )
+
+    def make_container(labels, volumes):
+        container = MagicMock()
+        container.labels = labels
+        container.image.tags = ["odoo:18.0"]
+        container.image.id = "sha256:odoo"
+        container.attrs = {
+            "Config": {"Cmd": ["odoo"], "Image": "odoo:18.0"},
+            "HostConfig": {
+                "Binds": [
+                    f"{host}:{spec['bind']}:{spec['mode']}"
+                    for host, spec in volumes.items()
+                ],
+                "PortBindings": {"8069/tcp": [{"HostPort": "50000"}]},
+            },
+        }
+        container.packages = []
+        container.apt_installs = []
+
+        def execute(command, **kwargs):
+            if command.startswith("pip3 install"):
+                if state.pip_failure:
+                    return 1, b"package unavailable"
+                from pathlib import Path
+
+                required = command.split()[-1]
+                host = next(
+                    host
+                    for host, spec in volumes.items()
+                    if required.startswith(spec["bind"] + "/")
+                )
+                relative = required.removeprefix(volumes[host]["bind"] + "/")
+                container.packages.append((Path(host) / relative).read_text())
+            if command.startswith("apt-get install"):
+                if state.apt_failure:
+                    return 1, b"apt unavailable"
+                container.apt_installs.append(command)
+            return 0, b"ok"
+
+        container.exec_run.side_effect = execute
+        state.containers.append(container)
+        return container
+
+    volumes = {
+        str(repo): {"bind": "/mnt/extra-addons", "mode": "rw"},
+        str(extra): {"bind": "/mnt/extra-addons-custom", "mode": "ro"},
+    }
+    state.current = make_container(
+        _labels(
+            **{
+                "oduflow.extra_addons": json.dumps({"custom": "main"}),
+                "oduflow.extra_addons_revisions": json.dumps({"custom": "old"}),
+            }
+        ),
+        volumes,
+    )
+    client = MagicMock()
+    client.containers.get.side_effect = lambda *a, **kw: state.current
+
+    def run(**kwargs):
+        state.current = make_container(kwargs["labels"], kwargs["volumes"])
+        return state.current
+
+    client.containers.run.side_effect = run
+    monkeypatch.setattr(env_ops, "get_client", lambda: client)
+    monkeypatch.setattr(
+        env_ops,
+        "load_credentials",
+        lambda *a: {
+            "pg_user": settings.db_user,
+            "pg_password": settings.db_password,
+        },
+    )
+    monkeypatch.setattr(env_ops, "_reapply_odoo_conf", lambda *a: False)
+    monkeypatch.setattr(
+        env_ops, "_reconcile_environment_hostname_for_update", lambda *a: False
+    )
+    monkeypatch.setattr(env_ops, "_agent_add_env", lambda *a: None)
+    monkeypatch.setattr(git_ops, "is_git_repository", lambda *a: True)
+    monkeypatch.setattr(git_ops, "fetch_branch", lambda *a, **kw: "target")
+    monkeypatch.setattr(git_ops, "pull_repo", lambda *a, **kw: ("old", state.files))
+
+    def checkout(*args):
+        if "requirements.txt" in state.files:
+            (repo / "requirements.txt").write_text("main-target")
+        return "old", "target", state.files
+
+    monkeypatch.setattr(git_ops, "checkout_branch", checkout)
+    monkeypatch.setattr(
+        "oduflow.extra_addons.ensure_shared_checkout",
+        lambda *a, **kw: {
+            "path": str(state.target_extra),
+            "revision": "old" if state.target_extra == extra else "new",
+            "changed_files": state.extra_files,
+        },
+    )
+    state.switch = lambda **kwargs: env_ops.switch_environment_branch(
+        settings, team, "dev1", "feature/new", **kwargs
+    )
+    state.new_extra = target_extra
+    state.client = client
+    state.repo = repo
+    state.settings = settings
+    state.team = team
+    return state
+
+
+@pytest.mark.parametrize("files", [[], ["README.md"], ["requirements.txt"]])
+def test_switch_restores_all_repos_from_target_code(dependency_switch, files):
+    state = dependency_switch
+    state.files = files
+    result = state.switch()
+
+    main_package = "main-target" if "requirements.txt" in files else "main-shared"
+    assert state.current.packages == [main_package, "extra-old"]
+    assert len(state.current.apt_installs) == 2
+    state.current.restart.assert_called_once()
+    assert result["exit_code"] == 0
+    assert result["branch_switched"] is True
+    assert "Reinstalled dependencies" in result["message"]
+    assert len(state.containers) == 2
+
+
+@pytest.mark.parametrize("files", [[], ["requirements.txt"]])
+def test_extra_mount_recreate_installs_once_in_final_container(
+    dependency_switch, files
+):
+    state = dependency_switch
+    state.target_extra = state.new_extra
+    state.extra_files = files
+    result = state.switch()
+
+    assert len(state.containers) == 3
+    assert state.containers[1].packages == []
+    assert state.current.packages == ["main-shared", "extra-new"]
+    assert len(state.current.apt_installs) == 2
+    assert "[PIP]" in result["output"]
+    assert "Reinstalled dependencies" in result["message"]
+
+
+def test_strict_restores_current_mounts_before_refusing_modules(
+    dependency_switch, monkeypatch
+):
+    state = dependency_switch
+    state.target_extra = state.new_extra
+    state.extra_files = ["sale/security/rules.xml"]
+    monkeypatch.setattr(
+        "oduflow.git_analysis.guardrail_warnings", lambda *a: ["upgrade required"]
+    )
+    with patch("oduflow.docker_ops.odoo_ops.upgrade_odoo_modules") as upgrade:
+        result = state.switch(restart=True, strict=True)
+
+    assert result["action"] == "blocked"
+    assert result["branch_switched"] is True
+    assert state.current.packages == ["main-shared", "extra-old"]
+    state.current.restart.assert_called_once()
+    assert len(state.containers) == 2
+    assert "Restored dependencies" in result["message"]
+    assert "[PIP]" in result["output"]
+    upgrade.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["pip_failure", "apt_failure"])
+@pytest.mark.parametrize("strict", [False, True])
+def test_failed_restore_stops_module_actions(
+    dependency_switch, monkeypatch, failure, strict
+):
+    state = dependency_switch
+    setattr(state, failure, True)
+    state.files = ["README.md"]
+    monkeypatch.setattr(
+        "oduflow.git_analysis.guardrail_warnings", lambda *a: ["incomplete action"]
+    )
+    with (
+        patch("oduflow.docker_ops.odoo_ops.install_odoo_modules") as install,
+        patch("oduflow.docker_ops.odoo_ops.upgrade_odoo_modules") as upgrade,
+    ):
+        result = state.switch(install=["sale"], upgrade=["stock"], strict=strict)
+
+    assert result["action"] == "error"
+    assert result["exit_code"] == 1
+    assert "FAILED" in result["output"]
+    install.assert_not_called()
+    upgrade.assert_not_called()
+    state.current.restart.assert_not_called()
+
+
+def test_extra_mount_recreate_dependency_failure_is_not_swallowed(dependency_switch):
+    state = dependency_switch
+    state.target_extra = state.new_extra
+    state.pip_failure = True
+    with patch.object(env_ops, "_cleanup_legacy_extra_worktrees") as cleanup:
+        result = state.switch()
+    assert result["action"] == "error"
+    assert result["exit_code"] == 1
+    assert "package unavailable" in result["output"]
+    cleanup.assert_called_once()
+
+
+def test_same_branch_without_rename_does_not_reinstall(dependency_switch):
+    state = dependency_switch
+    state.current.labels["oduflow.git_branch"] = "feature/new"
+    result = state.switch()
+    assert result["branch_switched"] is False
+    assert len(state.containers) == 1
+    state.current.exec_run.assert_not_called()
+    state.current.restart.assert_not_called()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_same_branch_rename_restores_dependencies(
+    dependency_switch, monkeypatch, failed
+):
+    state = dependency_switch
+    state.current.labels["oduflow.git_branch"] = "feature/new"
+    state.pip_failure = failed
+    monkeypatch.setattr(env_ops, "_db_exists", lambda *a: False)
+
+    def relocate(client, settings, team, old, new):
+        state.repo.parent.rename(state.repo.parent.with_name(new))
+
+    monkeypatch.setattr(env_ops, "_relocate_environment_state", relocate)
+    with (
+        patch.object(env_ops, "_agent_rename_env") as move_agent,
+        patch.object(env_ops, "_agent_add_env") as sync_agent,
+    ):
+        result = state.switch(new_name="dev2")
+    assert result["renamed_from"] == "dev1"
+    assert result["env_name"] == "dev2"
+    assert bool(result.get("exit_code")) == failed
+    assert "[PIP]" in result["output"]
+    if not failed:
+        assert state.current.packages == ["main-shared", "extra-old"]
+    move_agent.assert_called_once()
+    assert move_agent.call_args.args[-2:] == ("dev1", "dev2")
+    sync_agent.assert_called_once()
+    assert sync_agent.call_args.args[3] == "dev2"
+    assert len(state.containers) == 2
+
+
+@pytest.mark.parametrize("operation", ["switch-branch", "update"])
+def test_environment_http_reports_failed_dependency_result(tmp_path, operation):
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from oduflow.locking import LockManager
+    from oduflow.web_ui import mount_web_ui
+
+    app = Starlette()
+    settings = _settings(tmp_path)
+    mount_web_ui(app, lambda: settings, LockManager())
+    result = {
+        "action": "error",
+        "exit_code": 1,
+        "message": "Switched branch. Dependency installation failed.",
+        "output": "[PIP] install FAILED: unavailable",
+    }
+    function = (
+        "switch_environment_branch"
+        if operation == "switch-branch"
+        else "update_environment"
+    )
+    with patch.object(env_ops, function, return_value=result):
+        response = TestClient(app).post(
+            f"/api/environments/dev1/{operation}", json={"branch": "feature/new"}
+        )
+    assert response.status_code == 500
+    assert response.json()["ok"] is False
+    assert response.json()["result"]["output"] == result["output"]
+
+
+def test_switch_restores_dependencies_before_module_actions(dependency_switch):
+    state = dependency_switch
+    state.files = ["requirements.txt"]
+    applied = []
+
+    def apply_module(*args):
+        assert state.current.packages == ["main-target", "extra-old"]
+        assert len(state.current.apt_installs) == 2
+        applied.append(args[-1])
+        return {"exit_code": 0, "output": "module applied"}
+
+    with (
+        patch(
+            "oduflow.docker_ops.odoo_ops.install_odoo_modules", side_effect=apply_module
+        ),
+        patch(
+            "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules", side_effect=apply_module
+        ),
+    ):
+        result = state.switch(install=["sale"], upgrade=["stock"])
+
+    assert applied == ["sale", "stock"]
+    assert result["exit_code"] == 0
+    state.current.restart.assert_called_once()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("conf_applied", [False, True])
+def test_switch_without_dependency_files_does_not_restart(
+    dependency_switch, monkeypatch, strict, conf_applied
+):
+    state = dependency_switch
+    monkeypatch.setattr(env_ops, "_reapply_odoo_conf", lambda *a: conf_applied)
+    for root in (state.repo, state.target_extra):
+        (root / "requirements.txt").unlink()
+        (root / ".oduflow" / "apt_packages.txt").unlink()
+    if strict:
+        state.files = ["README.md"]
+        monkeypatch.setattr(
+            "oduflow.git_analysis.guardrail_warnings", lambda *a: ["upgrade required"]
+        )
+    result = state.switch(upgrade=["sale"] if strict else None, strict=strict)
+    assert state.current.restart.call_count == int(conf_applied)
+    assert "Dependencies changed" not in result["message"]
+    assert "Restored dependencies" not in result["message"]
+    assert result["action"] == ("blocked" if strict else "none")
+    if not strict:
+        assert "No code difference to apply." in result["message"]
+
+
+def test_auto_dependency_failure_reports_exact_pending_modules(
+    dependency_switch, monkeypatch
+):
+    state = dependency_switch
+    state.pip_failure = True
+    state.files = ["sale/models/order.py"]
+    monkeypatch.setattr(
+        "oduflow.git_analysis.recommend",
+        lambda *a: {
+            "action": "upgrade",
+            "modules_to_install": ["new_module"],
+            "modules_to_upgrade": ["sale"],
+        },
+    )
+    result = state.switch()
+    assert result["pending_actions"]["install"] == ["new_module"]
+    assert result["pending_actions"]["upgrade"] == ["sale"]
+    assert result["retry"]["arguments"]["install"] == "new_module"
+    assert result["retry"]["arguments"]["upgrade"] == "sale"
+    assert "new_module" in result["message"]
+    assert "sale" in result["message"]
+
+
+@pytest.fixture
+def rename_switch(dependency_switch, monkeypatch):
+    state = dependency_switch
+    state.current.labels["oduflow.git_branch"] = "feature/new"
+    monkeypatch.setattr(env_ops, "_db_exists", lambda *a: False)
+    monkeypatch.setattr(env_ops, "_agent_rename_env", lambda *a: None)
+    monkeypatch.setattr(
+        env_ops,
+        "_relocate_environment_state",
+        lambda *a: state.repo.parent.rename(state.repo.parent.with_name(a[-1])),
+    )
+    return state
+
+
+@pytest.mark.parametrize("extra_changed", [[], ["requirements.txt"]])
+def test_same_branch_rename_and_extra_mounts_recreate_once(
+    rename_switch, extra_changed
+):
+    state = rename_switch
+    state.target_extra = state.new_extra
+    state.extra_files = extra_changed
+    result = state.switch(new_name="dev2")
+    assert result["env_name"] == "dev2"
+    assert len(state.containers) == 2
+    assert state.current.packages == ["main-shared", "extra-new"]
+    assert len(state.current.apt_installs) == 2
+
+
+def test_module_failure_does_not_cancel_same_branch_rename(rename_switch):
+    state = rename_switch
+    with patch(
+        "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
+        return_value={"exit_code": 1, "output": "upgrade traceback"},
+    ) as upgrade:
+        result = state.switch(new_name="dev2", upgrade=["sale"])
+    assert result["env_name"] == "dev2"
+    assert result["renamed_from"] == "dev1"
+    assert result["exit_code"] == 1
+    assert "upgrade traceback" in result["output"]
+    assert upgrade.call_args.args[2:] == ("dev2", "sale")
+
+
+@pytest.mark.parametrize("replace_mounts", [False, True])
+def test_auto_plan_can_be_replayed_after_dependency_repair(
+    dependency_switch, monkeypatch, replace_mounts
+):
+    state = dependency_switch
+    if replace_mounts:
+        state.target_extra = state.new_extra
+    state.files = ["sale/models/order.py"]
+    state.pip_failure = True
+    monkeypatch.setattr(
+        "oduflow.git_analysis.recommend",
+        lambda *a: {
+            "action": "upgrade",
+            "modules_to_install": ["new_module"],
+            "modules_to_upgrade": ["sale"],
+        },
+    )
+    failed = state.switch()
+    assert failed["pending_actions"]["upgrade"] == ["sale"]
+    assert failed["retry"]["arguments"]["install"] == "new_module"
+
+    state.files = []
+    state.pip_failure = False
+    updated = env_ops.update_environment(
+        state.settings, state.team, "dev1", pull_image=False
+    )
+    assert updated["exit_code"] == 0
+    retry = failed["retry"]["arguments"]
+    with (
+        patch(
+            "oduflow.docker_ops.odoo_ops.install_odoo_modules",
+            return_value={"exit_code": 0},
+        ) as install,
+        patch(
+            "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
+            return_value={"exit_code": 0},
+        ) as upgrade,
+    ):
+        result = env_ops.pull_environment(
+            state.settings,
+            state.team,
+            retry["env_name"],
+            install=retry["install"].split(","),
+            upgrade=retry["upgrade"].split(","),
+            restart=retry["restart"],
+        )
+    assert result["exit_code"] == 0
+    assert result["changed_files"] == []
+    assert install.call_args.args[-1] == "new_module"
+    assert upgrade.call_args.args[-1] == "sale"
+
+
+def test_strict_same_branch_rename_does_not_change_identity_or_mounts(
+    rename_switch, monkeypatch
+):
+    state = rename_switch
+    state.target_extra = state.new_extra
+    state.extra_files = ["sale/security/rules.xml"]
+    monkeypatch.setattr(
+        "oduflow.git_analysis.guardrail_warnings", lambda *a: ["upgrade required"]
+    )
+    with patch.object(env_ops, "_relocate_environment_state") as relocate:
+        result = state.switch(new_name="dev2", restart=True, strict=True)
+    assert result["action"] == "blocked"
+    assert result["env_name"] == "dev1"
+    assert not result.get("renamed_from")
+    assert len(state.containers) == 1
+    relocate.assert_not_called()

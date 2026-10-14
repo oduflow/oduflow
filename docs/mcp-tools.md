@@ -426,6 +426,11 @@ With no arguments it simply rebuilds from the current image and configuration â€
 the fix for a broken container (packages accidentally removed, system files
 corrupted) reconnected to the existing data.
 
+If APT/PIP setup fails after recreation, the response reports the failure and
+setup logs together with the resulting environment identity. A completed rename
+is retained, including the agent checkout and its MCP configuration; use the
+reported new name and endpoint even when dependency setup failed.
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -472,6 +477,28 @@ the repository and re-copies the template database. With slots still free,
 The branch must already exist on origin, so push it first. Oduflow diffs the old
 and new tips and applies exactly the logic of [`pull_and_apply`](#pull_and_apply).
 Errors and tracebacks come back in the response â€” do not chase them in the logs.
+
+Switching recreates the container and restores declared APT/PIP dependencies
+from the target branch and every mounted extra-addons repository, even when
+the dependency files are unchanged or the branches have identical code.
+Renaming on the same branch also restores dependencies. Packages installed
+manually without a corresponding requirements/APT entry are not preserved.
+
+`strict=True` blocks incomplete module actions; it does not roll back a branch
+switch that has already happened. Dependencies for the currently mounted code
+are still restored before returning the refusal. If dependency installation
+fails, module actions are skipped and the error is returned. Fix the dependency
+error in the environment checkout or package source, run
+[`update_environment`](#update_environment) to restore packages, then retry the
+module actions using the explicit `pull_and_apply` arguments included in the
+failure message. The structured result also retains `pending_actions` and
+`retry`: a plain automatic retry cannot recover the consumed Git diff.
+
+On a same-branch rename, any extra-addons mount changes share one container
+recreation and dependency installation. A strict refusal prevents the rename;
+an installation or module error after the rename reports the new identity.
+Repositories without dependency files do not trigger an extra restart merely
+because their dependencies were checked.
 
 Lock: environment.
 { .odu-tool-meta }

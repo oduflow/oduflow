@@ -778,7 +778,7 @@ def apply_stack(
                     hostname=desired_env.hostname or "",
                 )
             elif ("update", "environment") in operations:
-                env_ops.update_environment(
+                updated = env_ops.update_environment(
                     settings,
                     team,
                     desired_env.name,
@@ -786,6 +786,14 @@ def apply_stack(
                     image_override=desired_env.odoo_image,
                     label_overrides=env_labels,
                 )
+                if updated.get("exit_code"):
+                    raise ConflictError(
+                        f"Stack environment '{desired_env.name}' was recreated, "
+                        "but its dependencies failed to install. Remaining stack "
+                        "operations were not applied. Fix the dependency error, "
+                        "run update_environment for this environment, then rerun "
+                        "stack apply.\n" + "\n".join(updated.get("setup_logs", []))
+                    )
 
         else:
             for operation in ("create", "adopt", "update"):
