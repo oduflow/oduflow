@@ -6,8 +6,8 @@ ingest call. Because the token expires quickly, a copy left in the terminal
 scrollback is useless afterwards.
 
 Each token is one JSON file under ``<team.data_dir>/import_tokens/<token>.json``.
-The token carries auth, the target template, and the selected addon error policy;
-it deliberately does NOT store upload progress. Resume is instead derived from
+The token carries auth, the target template, the selected addon error policy and
+whether the filestore is skipped (``without_filestore``); it deliberately does NOT store upload progress. Resume is instead derived from
 what is actually staged on disk in the template directory (see ``web_ui``), so a
 re-run — even with a freshly minted token after the previous one expired
 mid-upload — continues where it left off instead of restarting.
@@ -89,6 +89,7 @@ def create_token(
     template_name: str,
     *,
     addon_error_policy: str = ADDON_ERROR_POLICY_STRICT,
+    without_filestore: bool = False,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     now: float | None = None,
 ) -> dict[str, object]:
@@ -106,6 +107,7 @@ def create_token(
         "team_id": team.team_id,
         "template_name": template_name,
         "addon_error_policy": addon_error_policy,
+        "without_filestore": bool(without_filestore),
         "created_at": now,
         "expires_at": now + ttl_seconds,
     }

@@ -493,6 +493,87 @@ def test_import_token_flags_in_command(tmp_path):
     assert record["addon_error_policy"] == "best_effort"
 
 
+def test_import_token_without_filestore_flag(tmp_path):
+    from oduflow import import_tokens
+
+    client, settings, _team = _client(tmp_path)
+    _token, plain = _mint(client)
+    assert "--without-filestore" not in plain["command"]
+    _t, plain_record = import_tokens.load_token(settings, plain["token"])
+    assert plain_record["without_filestore"] is False
+
+    r = client.post(
+        "/api/templates/import-token",
+        json={"template_name": "zipfit", "without_filestore": True},
+    )
+    data = r.json()
+    assert data["command"].endswith(" --without-filestore")
+    _t, record = import_tokens.load_token(settings, data["token"])
+    assert record["without_filestore"] is True
+
+
+def test_finalize_passes_without_filestore_from_token(tmp_path):
+    client, _settings, team = _client(tmp_path)
+    r = client.post(
+        "/api/templates/import-token",
+        json={"template_name": "zipfit", "without_filestore": True},
+    )
+    token = r.json()["token"]
+    staging = team.get_import_staging_dir("zipfit")
+    os.makedirs(staging)
+    with open(os.path.join(staging, "metadata.json"), "w") as f:
+        f.write("{}")
+    with open(os.path.join(staging, "dump.sql.gz"), "wb") as f:
+        f.write(b"gz")
+
+    with patch.object(
+        system_ops,
+        "finalize_imported_template",
+        return_value={"template_name": "zipfit", "addon_warnings": []},
+    ) as finalize:
+        response = client.post(
+            "/api/templates/import/finalize",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert finalize.call_args.kwargs["without_filestore"] is True
+
+
+def test_import_script_accepts_without_filestore(tmp_path):
+    import subprocess
+
+    script = os.path.join(
+        os.path.dirname(system_ops.__file__), "..", "templates", "import-odoo.sh"
+    )
+    subprocess.run(["bash", "-n", script], check=True)
+    help_out = subprocess.run(
+        ["bash", script, "--help"], capture_output=True, text=True, check=True
+    )
+    assert "--without-filestore" in help_out.stdout
+    # The flag parses; the run then stops at the missing Odoo.sh environment
+    # (PGDATABASE) instead of rejecting the argument. Port 9 refuses fast.
+    env = {k: v for k, v in os.environ.items() if k != "PGDATABASE"}
+    run = subprocess.run(
+        [
+            "bash",
+            script,
+            "--server",
+            "http://127.0.0.1:9",
+            "--token",
+            "t",
+            "--without-filestore",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert "unknown argument" not in run.stderr
+    assert "PGDATABASE is not set" in run.stderr
+    assert run.returncode == 2
+
+
 def test_import_token_rejects_unknown_addon_policy(tmp_path):
     client, _settings, _team = _client(tmp_path)
 
@@ -876,3 +957,82 @@ def test_finalize_can_retry_after_reload_failure_without_reupload(tmp_path):
     assert result["template_db"] == "tdb"
     assert reload.call_count == 2
     assert not os.path.exists(staging)
+
+
+def _finalize_with_mocks(settings, team, staging, **kwargs):
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from oduflow.docker_ops import env_ops
+
+    remount = MagicMock(affected=[], failures=[])
+
+    @contextmanager
+    def fake_remount(*a, **kw):
+        yield remount
+
+    with (
+        patch.object(system_ops, "get_client"),
+        patch.object(env_ops, "remount_template_overlays", fake_remount),
+        patch.object(system_ops, "get_odoo_uid_gid", return_value="101:101"),
+        patch.object(system_ops, "chown_recursive") as chown,
+        patch.object(system_ops, "_update_template_sizes"),
+        patch.object(
+            system_ops,
+            "reload_template",
+            return_value={"template_db": "tdb", "restore_seconds": 1.0},
+        ),
+    ):
+        result = system_ops.finalize_imported_template(
+            settings, team, "zipfit", staging_dir=staging, **kwargs
+        )
+    return result, chown
+
+
+def test_finalize_without_filestore_keeps_existing_filestore(tmp_path):
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    staging = team.get_import_staging_dir("zipfit")
+    # A leftover staged chunk (e.g. an earlier run with the filestore) must not
+    # replace the live filestore of a database-only import.
+    os.makedirs(os.path.join(staging, "filestore", "ab"))
+    with open(os.path.join(staging, "metadata.json"), "w") as f:
+        json.dump({"odoo_version": "18.0", "includes_filestore": True}, f)
+    with open(os.path.join(staging, "dump.sql.gz"), "wb") as f:
+        f.write(b"gz")
+    fs = team.get_template_filestore_path("zipfit")
+    os.makedirs(os.path.join(fs, "ff"))
+    with open(os.path.join(fs, "ff", "blob"), "wb") as f:
+        f.write(b"keep")
+
+    result, chown = _finalize_with_mocks(
+        settings, team, staging, without_filestore=True
+    )
+
+    assert result["template_db"] == "tdb"
+    assert open(os.path.join(fs, "ff", "blob"), "rb").read() == b"keep"
+    assert not os.path.exists(os.path.join(fs, "ab"))
+    chown.assert_not_called()
+    md = json.load(open(team.get_template_metadata_path("zipfit")))
+    assert md["includes_filestore"] is False
+    assert md["odoo_version"] == "18.0"
+    assert not os.path.exists(staging)
+
+
+def test_finalize_without_filestore_creates_empty_filestore(tmp_path):
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    staging = team.get_import_staging_dir("zipfit")
+    os.makedirs(staging)
+    with open(os.path.join(staging, "metadata.json"), "w") as f:
+        json.dump({"odoo_version": "18.0"}, f)
+    with open(os.path.join(staging, "dump.sql.gz"), "wb") as f:
+        f.write(b"gz")
+
+    _finalize_with_mocks(settings, team, staging, without_filestore=True)
+
+    fs = team.get_template_filestore_path("zipfit")
+    assert os.path.isdir(fs)
+    assert os.listdir(fs) == []
+    md = json.load(open(team.get_template_metadata_path("zipfit")))
+    assert md["includes_filestore"] is False
