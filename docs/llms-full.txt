@@ -1951,10 +1951,29 @@ How it behaves, in the order it matters at scale:
   if the dump's S3 ETag is unchanged since the last sync — skips the dump
   download *and* the template DB reload. This makes a periodic
   "pull the latest production backup into dev" job cheap.
-- **Credentials.** `--s3-access-key`/`--s3-secret-key` (with `--s3-endpoint`
-  for MinIO or other S3-compatible stores, and `--s3-region` when required)
-  win; otherwise the `[backup]` settings are reused when the bucket matches;
+- **Credentials, remembered.** `--s3-access-key`/`--s3-secret-key` (with
+  `--s3-endpoint` for MinIO or other S3-compatible stores, and `--s3-region`
+  when required) win; otherwise the secret remembered for this template is
+  reused; otherwise the `[backup]` settings when the bucket matches;
   otherwise the bucket is read anonymously (public bucket).
+
+    **The secret key is never written into template metadata.** A raw value is
+    stored as the team secret `s3-template-<template>` (visible under
+    **Credentials → Secrets** in the dashboard, where it can be rotated) and
+    the metadata records only a `secret:<name>` reference, so no template
+    listing, metadata editor or MCP tool can echo it back. Pass
+    `secret:<name>` yourself to sign with an existing team secret instead —
+    Oduflow then leaves that secret alone.
+
+    So a re-sync of a private bucket needs **no key at all**: omit
+    `--s3-secret-key` and the stored one signs the request. It is required
+    again when the endpoint or the access key changes, so a stored secret is
+    never sent to a different endpoint or key pair. To keep the key out of
+    `~/.bash_history`, `--s3-secret-key` defaults to `$ODUFLOW_S3_SECRET_KEY`.
+
+    A secret Oduflow created is deleted together with the template, and
+    released when the template is re-published from an environment or a
+    production (its data no longer comes from the bucket).
 - **Metadata.** The Odoo version, image, and installed modules are read from
   the restored database; `snapshot_at` records the dump's upload time, so
   template freshness reflects the data, not the import.
@@ -6477,7 +6496,7 @@ filestore overlays. Fresh imports can run alongside environment operations.
 :   *bool · default `False`* — With no source, restore from the template's own files and refresh metadata and overlays. Requires explicit permission.
 
 `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_region`
-:   *str · default empty* — S3 source connection settings. Credentials fall back to matching `[backup]` settings, then anonymous access. Supply access and secret keys together.
+:   *str · default empty* — S3 source connection settings. Supply access and secret keys together. `s3_secret_key` also accepts `secret:<name>` to sign with an existing team secret; a raw value is stored as the team secret `s3-template-<template>` and the template records only the reference, so a re-sync needs no key. Credentials resolve most-explicit-first: these parameters, then the secret remembered for this template, then matching `[backup]` settings, then anonymous access. The key is required again when the endpoint or access key changes.
 
 **Use it when**
 
@@ -8540,6 +8559,15 @@ oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [
 oduflow import-template --template-name myproject --refresh [--team 1]
 ```
 
+For a private bucket, pass `--s3-access-key` with `--s3-secret-key` (plus
+`--s3-endpoint`/`--s3-region` where needed). The secret key is stored as the
+team secret `s3-template-<template>` and the template records only a
+`secret:<name>` reference, so a later `--overwrite` re-sync needs no key —
+omit `--s3-secret-key` and the stored one is reused. It is required again when
+the endpoint or access key changes. `--s3-secret-key` defaults to
+`$ODUFLOW_S3_SECRET_KEY`, which keeps the key out of your shell history; pass
+`secret:<name>` to sign with an existing team secret instead.
+
 `template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
 
 ## Service Commands
@@ -9455,8 +9483,12 @@ https://your-server.com/env/<env>?key=<share-secret>
 ```
 
 Opening it trades the key for a signed, HTTP-only, SameSite=Strict cookie and
-redirects to the clean `/env/<env>`, so the key does not linger in the address
-bar or browser history. The same modal regenerates or revokes the link; both
+moves on to the clean `/env/<env>`, so the key does not linger in the address
+bar or browser history. The move is a navigation started by a small landing
+page rather than an HTTP redirect: when the link is opened from another site,
+such as a webmail button, the browser treats a redirect chain as cross-site and
+withholds the Strict cookie, while a navigation started by the landing page is
+same-site. The same modal regenerates or revokes the link; both
 take effect immediately, including for sessions already opened with it, because
 the cookie carries a fingerprint of the secret it was minted from. Links have no
 expiry of their own; a session cookie lasts seven days and re-opening the link

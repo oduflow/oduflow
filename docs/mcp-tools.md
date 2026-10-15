@@ -1527,7 +1527,7 @@ filestore overlays. Fresh imports can run alongside environment operations.
 :   *bool · default `False`* — With no source, restore from the template's own files and refresh metadata and overlays. Requires explicit permission.
 
 `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_region`
-:   *str · default empty* — S3 source connection settings. Credentials fall back to matching `[backup]` settings, then anonymous access. Supply access and secret keys together.
+:   *str · default empty* — S3 source connection settings. Supply access and secret keys together. `s3_secret_key` also accepts `secret:<name>` to sign with an existing team secret; a raw value is stored as the team secret `s3-template-<template>` and the template records only the reference, so a re-sync needs no key. Credentials resolve most-explicit-first: these parameters, then the secret remembered for this template, then matching `[backup]` settings, then anonymous access. The key is required again when the endpoint or access key changes.
 
 **Use it when**
 

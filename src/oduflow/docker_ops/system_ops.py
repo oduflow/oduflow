@@ -3407,7 +3407,17 @@ def _finalize_template_metadata(
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     """Decide the overlay mode from the new baseline's size and persist metadata."""
+    from oduflow import template_import
     from oduflow.docker_ops import env_ops
+
+    # Publishing from an environment or a production rebuilds metadata from that
+    # source, so an S3 lineage does not survive it — the data no longer comes
+    # from the bucket. Release the secret Oduflow stored for it rather than
+    # leaving it in the team's secret store with nothing referencing it.
+    if "source_secret_key" not in metadata:
+        template_import.delete_managed_secret(
+            team, template_import._load_carried_metadata(team, template_name)
+        )
 
     template_filestore_path = team.get_template_filestore_path(template_name)
     fs_size = (
@@ -5141,8 +5151,14 @@ def delete_template(
         logger.info("Dropped template DB %s", tpl_db)
 
     if dir_exists:
+        # Read before the directory goes: the S3 secret Oduflow stored for this
+        # template is referenced from its metadata and goes with it.
+        from oduflow import template_import
+
+        carried = template_import._load_carried_metadata(team, template_name)
         shutil.rmtree(template_dir_path)
         logger.info("Removed template directory %s", template_dir_path)
+        template_import.delete_managed_secret(team, carried)
 
     return {"status": "dropped", "template_name": template_name, "template_db": tpl_db}
 

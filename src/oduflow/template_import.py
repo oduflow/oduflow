@@ -34,16 +34,20 @@ environments keep their upper-layer deltas.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import gzip
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
+from oduflow import secret_store
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -96,6 +100,160 @@ def parse_s3_url(url: str) -> tuple[str, str]:
             f"Invalid S3 URL '{url}': expected s3://bucket/prefix."
         )
     return bucket, prefix.strip("/")
+
+
+# --- Remembered source credentials -------------------------------------------
+#
+# A private bucket has to be re-read on every ``overwrite`` re-sync, so asking
+# for the secret key again each time would make the cron-able path impossible
+# to automate without putting the key in a crontab. The key is therefore kept
+# in the team secret store and the template metadata records only a
+# ``secret:<name>`` reference, so no listing, metadata editor or MCP tool can
+# echo it back. A secret Oduflow created on the operator's behalf is marked
+# managed and its lifetime follows the template's.
+
+_MANAGED_SECRET_PREFIX = "s3-template-"
+
+
+def managed_secret_name(template_name: str) -> str:
+    """The team-secret name Oduflow uses for a template's S3 secret key."""
+    base = re.sub(r"[^a-z0-9_.-]", "-", template_name.lower().replace("/", "."))
+    room = 64 - len(_MANAGED_SECRET_PREFIX)
+    if base == template_name and len(base) <= room:
+        return _MANAGED_SECRET_PREFIX + base
+    # Lowercasing and truncation both collide; a digest keeps names apart.
+    digest = hashlib.sha256(template_name.encode()).hexdigest()[:8]
+    return f"{_MANAGED_SECRET_PREFIX}{base[: room - 9]}-{digest}"
+
+
+def _resolve_secret_value(team: TeamSettings, ref: str) -> str:
+    """The stored value behind a ``secret:<name>`` reference."""
+    resolved = secret_store.resolve_env_secrets(team, {"S3_SECRET_KEY": ref}) or {}
+    return resolved["S3_SECRET_KEY"]
+
+
+@dataclass
+class SourceCredentials:
+    """Keys ready to sign with, plus what metadata should record about them."""
+
+    access_key: str = ""
+    # Resolved in memory for this operation only; never persisted as-is.
+    secret_key: str = ""
+    # What metadata records: a ``secret:<name>`` reference, or "" (none).
+    secret_ref: str = ""
+    # Whether Oduflow created that secret and therefore owns its lifetime.
+    secret_managed: bool = False
+    # A newly entered raw secret to write into the store; "" = nothing new.
+    store_value: str = ""
+
+
+def resolve_source_credentials(
+    team: TeamSettings,
+    template_name: str,
+    *,
+    endpoint: str = "",
+    access_key: str = "",
+    secret_key: str = "",
+    carried: dict[str, Any] | None = None,
+) -> SourceCredentials:
+    """Work out which keys sign this import, and what to remember about them.
+
+    Most explicit wins, as everywhere else in this module: keys passed now; a
+    ``secret:<name>`` reference the operator chose; the secret remembered for
+    this template. An empty secret key reuses the remembered one **only while
+    the endpoint and access key are unchanged**, so a stored secret is never
+    sent to sign requests for a different endpoint or key pair. With no key
+    material at all the caller falls through to the ``[backup]`` credentials or
+    anonymous access, exactly as before this was remembered.
+    """
+    carried = carried or {}
+    access_key = (access_key or "").strip()
+    secret_key = (secret_key or "").strip()
+    stored_ref = str(carried.get("source_secret_key") or "")
+    stored_access_key = str(carried.get("source_access_key") or "")
+
+    if secret_store.is_secret_ref(secret_key):
+        return SourceCredentials(
+            access_key=access_key or stored_access_key,
+            secret_key=_resolve_secret_value(team, secret_key),
+            secret_ref=secret_key,
+        )
+    if secret_key:
+        # Keep writing into the secret this template already owns, so rotating
+        # the key does not leave the previous managed secret behind.
+        if carried.get("source_secret_managed") and secret_store.is_secret_ref(
+            stored_ref
+        ):
+            ref = stored_ref
+        else:
+            ref = secret_store.SECRET_REF_PREFIX + managed_secret_name(template_name)
+        return SourceCredentials(
+            access_key=access_key,
+            secret_key=secret_key,
+            secret_ref=ref,
+            secret_managed=True,
+            store_value=secret_key,
+        )
+    if not stored_ref:
+        return SourceCredentials(access_key=access_key)
+    if (access_key or stored_access_key) == stored_access_key and str(
+        carried.get("source_endpoint") or ""
+    ) == endpoint:
+        return SourceCredentials(
+            access_key=stored_access_key,
+            secret_key=_resolve_secret_value(team, stored_ref),
+            secret_ref=stored_ref,
+            secret_managed=bool(carried.get("source_secret_managed")),
+        )
+    raise PrerequisiteNotMetError(
+        "Re-enter s3_secret_key when changing the endpoint or access key: the "
+        f"secret stored for template '{template_name}' signs only "
+        f"{stored_access_key or 'anonymous'} access to its recorded endpoint."
+    )
+
+
+def credential_metadata(creds: SourceCredentials) -> dict[str, Any]:
+    """The credential fields an import records in template metadata."""
+    return {
+        "source_access_key": creds.access_key,
+        "source_secret_key": creds.secret_ref,
+        "source_secret_managed": creds.secret_managed,
+    }
+
+
+def store_source_secret(team: TeamSettings, creds: SourceCredentials) -> None:
+    """Persist a newly entered secret key under its managed name."""
+    if creds.store_value:
+        secret_store.set_secret(
+            team,
+            secret_store.secret_ref_name(creds.secret_ref),
+            creds.store_value,
+        )
+
+
+def delete_managed_secret(team: TeamSettings, metadata: object) -> None:
+    """Best-effort removal of the secret Oduflow created for a template."""
+    if not isinstance(metadata, dict) or not metadata.get("source_secret_managed"):
+        return
+    ref = str(metadata.get("source_secret_key") or "")
+    if not secret_store.is_secret_ref(ref):
+        return
+    with contextlib.suppress(Exception):
+        secret_store.delete_secret(team, secret_store.secret_ref_name(ref))
+        logger.info("Deleted managed S3 secret %s", ref)
+
+
+def release_replaced_secret(
+    team: TeamSettings, creds: SourceCredentials, previous: dict[str, Any] | None
+) -> None:
+    """Drop the managed secret a completed import no longer references.
+
+    Called only after the new metadata is on disk: until then the template
+    still points at the old reference, and removing it early would leave a
+    dangling one behind if the import failed.
+    """
+    if previous and str(previous.get("source_secret_key") or "") != creds.secret_ref:
+        delete_managed_secret(team, previous)
 
 
 def _make_source_client(
@@ -719,19 +877,27 @@ def import_from_s3_prefix(
     else:
         _check_overwrite_quota(settings, team, template_name, client)
 
+    carried = _load_carried_metadata(team, template_name) if overwrite else {}
+    creds = resolve_source_credentials(
+        team,
+        template_name,
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        carried=carried,
+    )
     s3 = _make_source_client(
         settings,
         bucket,
         endpoint=endpoint,
-        access_key=access_key,
-        secret_key=secret_key,
+        access_key=creds.access_key,
+        secret_key=creds.secret_key,
         region=region,
     )
     listing = _list_s3_source(s3, bucket, prefix)
     dump = listing.dump
     remote_fs = {} if without_filestore else listing.filestore
 
-    carried = _load_carried_metadata(team, template_name) if overwrite else {}
     staging = team.get_import_staging_dir(template_name)
     staging_fs = os.path.normpath(os.path.join(staging, "filestore"))
     os.makedirs(staging, exist_ok=True)
@@ -784,19 +950,29 @@ def import_from_s3_prefix(
         _record_staged_dump(staging, dump, source_url + "|" + endpoint)
     metadata = _source_metadata(carried, source_url=source_url, dump=dump)
     metadata["source_endpoint"] = endpoint
-    final = _promote_and_reload(
-        settings,
-        team,
-        template_name,
-        client=client,
-        staging=staging,
-        staging_fs=staging_fs,
-        syncing_filestore=not without_filestore,
-        reload_db=reload_db,
-        dump_name=_canonical_dump_name(dump.name),
-        metadata=metadata,
-        overwrite=overwrite,
-    )
+    metadata.update(credential_metadata(creds))
+    store_source_secret(team, creds)
+    try:
+        final = _promote_and_reload(
+            settings,
+            team,
+            template_name,
+            client=client,
+            staging=staging,
+            staging_fs=staging_fs,
+            syncing_filestore=not without_filestore,
+            reload_db=reload_db,
+            dump_name=_canonical_dump_name(dump.name),
+            metadata=metadata,
+            overwrite=overwrite,
+        )
+    except BaseException:
+        # A failed fresh import leaves no template behind to own the secret it
+        # just stored. A re-sync keeps its own: the template still needs it.
+        if creds.store_value and not overwrite:
+            delete_managed_secret(team, credential_metadata(creds))
+        raise
+    release_replaced_secret(team, creds, carried)
     return _import_result(
         final,
         template_name=template_name,

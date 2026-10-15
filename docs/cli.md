@@ -273,6 +273,15 @@ oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [
 oduflow import-template --template-name myproject --refresh [--team 1]
 ```
 
+For a private bucket, pass `--s3-access-key` with `--s3-secret-key` (plus
+`--s3-endpoint`/`--s3-region` where needed). The secret key is stored as the
+team secret `s3-template-<template>` and the template records only a
+`secret:<name>` reference, so a later `--overwrite` re-sync needs no key —
+omit `--s3-secret-key` and the stored one is reused. It is required again when
+the endpoint or access key changes. `--s3-secret-key` defaults to
+`$ODUFLOW_S3_SECRET_KEY`, which keeps the key out of your shell history; pass
+`secret:<name>` to sign with an existing team secret instead.
+
 `template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
 
 ## Service Commands

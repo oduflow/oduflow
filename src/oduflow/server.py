@@ -1621,7 +1621,8 @@ def import_template(
     - "s3://bucket/prefix": syncs a raw backup layout file-by-file —
       efficient for very large databases and filestores (parallel downloads,
       resume, no archiving on the source). Credentials: s3_* args if given,
-      else the [backup] settings when the bucket matches, else anonymous.
+      else the secret remembered for this template, else the [backup]
+      settings when the bucket matches, else anonymous.
     - Local path on the Oduflow host: a directory with the same raw layout
       (files are hardlinked, near-instant on the same filesystem), or a
       single dump file for a database-only import.
@@ -1644,8 +1645,8 @@ def import_template(
         overwrite: s3/local only: incrementally re-sync an EXISTING template — only changed files are fetched, an unchanged dump skips the DB reload. Requires explicit user permission: it replaces the template's current data.
         refresh: Reload the template DB from files already in the template directory (no source). Requires explicit user permission: it rebuilds the template database.
         s3_endpoint: s3 only: custom S3 endpoint URL (MinIO etc.); empty = AWS S3 or the configured [backup] endpoint.
-        s3_access_key: s3 only: access key for the source bucket (with s3_secret_key); empty = [backup] credentials or anonymous.
-        s3_secret_key: s3 only: secret key paired with s3_access_key.
+        s3_access_key: s3 only: access key for the source bucket (with s3_secret_key); empty = the key remembered for this template, else [backup] credentials or anonymous.
+        s3_secret_key: s3 only: secret key paired with s3_access_key, or "secret:<name>" to sign with an existing team secret. A raw value is stored as the team secret "s3-template-<template>" and the template records only the reference, so re-syncing needs no key. Leave empty to reuse it; required again when the endpoint or access key changes.
         s3_region: s3 only: region of the source bucket.
     """
     settings = _get_settings()
@@ -8179,7 +8180,15 @@ def _run_cli() -> None:
         "--s3-access-key", default="", help="s3 only: source bucket access key"
     )
     p_import.add_argument(
-        "--s3-secret-key", default="", help="s3 only: source bucket secret key"
+        "--s3-secret-key",
+        # A key typed on the command line lands in ~/.bash_history; the env var
+        # keeps it out while staying scriptable. An explicit flag still wins.
+        default=os.environ.get("ODUFLOW_S3_SECRET_KEY", ""),
+        help=(
+            "s3 only: source bucket secret key, or secret:<name> for a team "
+            "secret (default: $ODUFLOW_S3_SECRET_KEY). Omit when re-syncing: "
+            "the secret stored for the template is reused"
+        ),
     )
     p_import.add_argument(
         "--s3-region", default="", help="s3 only: source bucket region"
