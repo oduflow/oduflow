@@ -268,6 +268,9 @@ oduflow import-template <odoo_url> <master_pwd> --template-name myproject [--db-
 oduflow import-template s3://bucket/backups/mydb/ --template-name myproject [--overwrite] [--team 1]
 oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [--team 1]
 
+# A single Odoo backup .zip already sitting in a bucket
+oduflow import-template s3://bucket/backups/mydb-2026-10-13.zip --template-name myproject [--team 1]
+
 # Reload the template DB from files already placed in the template directory
 # (an external rsync/scp drop) and refresh its metadata
 oduflow import-template --template-name myproject --refresh [--team 1]

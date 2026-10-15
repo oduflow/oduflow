@@ -1614,7 +1614,7 @@ def import_template(
     ctx: Context | None = None,
 ) -> str:
     """
-    Import a template. One tool, four source shapes:
+    Import a template. One tool, five source shapes:
 
     - http(s) URL of a running Odoo: downloads a full ZIP backup or
       database-only dump via the database manager API (master_pwd required).
@@ -1623,6 +1623,10 @@ def import_template(
       resume, no archiving on the source). Credentials: s3_* args if given,
       else the secret remembered for this template, else the [backup]
       settings when the bucket matches, else anonymous.
+    - "s3://bucket/path/backup.zip": a single Odoo backup archive already in
+      the bucket. Fetched whole whenever it changes and its filestore
+      replaces the template's wholesale, so prefer the prefix layout for a
+      large database; this shape is for the archive you already have.
     - Local path on the Oduflow host: a directory with the same raw layout
       (files are hardlinked, near-instant on the same filesystem), or a
       single dump file for a database-only import.
@@ -1637,7 +1641,7 @@ def import_template(
     `aws s3 sync`).
 
     Args:
-        source: http(s) Odoo URL, "s3://bucket/prefix", or a local path. Empty only with refresh=true.
+        source: http(s) Odoo URL, "s3://bucket/prefix", "s3://bucket/path/backup.zip", or a local path. Empty only with refresh=true.
         master_pwd: Odoo master password (database manager password). Required for http(s) sources only.
         db_name: Name of the database to back up (http mode only). If empty, auto-detected (fails if multiple DBs exist).
         template_name: Name of the template profile to create or update.
@@ -8138,9 +8142,9 @@ def _run_cli() -> None:
         nargs="?",
         default="",
         help=(
-            "http(s) Odoo URL, s3://bucket/prefix, or a local path with "
-            "dump.* + filestore/ (a single dump file for DB-only). "
-            "Omit together with --refresh"
+            "http(s) Odoo URL, s3://bucket/prefix, s3://bucket/backup.zip, "
+            "or a local path with dump.* + filestore/ (a single dump file "
+            "for DB-only). Omit together with --refresh"
         ),
     )
     p_import.add_argument(

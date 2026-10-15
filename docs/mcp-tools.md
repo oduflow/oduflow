@@ -1506,7 +1506,7 @@ filestore overlays. Fresh imports can run alongside environment operations.
 **Parameters**
 
 `source`
-:   *str · default empty* — An http(s) Odoo URL, `s3://bucket/prefix`, or an absolute local path. Omit with `refresh=True`.
+:   *str · default empty* — An http(s) Odoo URL, `s3://bucket/prefix` (raw dump + `filestore/` layout), `s3://bucket/path/backup.zip` (a single Odoo backup archive), or an absolute local path. Omit with `refresh=True`.
 
 `master_pwd`
 :   *str · default empty* — Required only for the Odoo database-manager source.

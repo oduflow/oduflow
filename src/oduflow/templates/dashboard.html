@@ -2190,9 +2190,9 @@
         </div>
       </div>
       <div class="form-group">
-        <label for="s3-tpl-prefix">Source folder</label>
+        <label for="s3-tpl-prefix">Source</label>
         <input class="mono-input" type="text" id="s3-tpl-prefix" placeholder="backups/mydb/" autocomplete="off" spellcheck="false">
-        <div class="hint">A folder holding one <code>dump.pgdump</code>, <code>dump.sql</code> or <code>dump.sql.gz</code> (hand-made <code>db.dump</code> also works) plus an optional <code>filestore/</code> tree. Browse to it above, or type the prefix.</div>
+        <div class="hint">A folder holding one <code>dump.pgdump</code>, <code>dump.sql</code> or <code>dump.sql.gz</code> (hand-made <code>db.dump</code> also works) plus an optional <code>filestore/</code> tree — the efficient shape for a large database. A single Odoo backup <code>.zip</code> also works if that is what you already have. Browse to it above, or type the key.</div>
       </div>
       <div class="form-group" id="s3-tpl-name-group">
         <label for="s3-tpl-name">Template name</label>
@@ -5455,11 +5455,17 @@ function _renderS3Browser() {
   (_s3Browse.files || []).forEach(function(file) {
     var name = file.key.slice((_s3Browse.prefix || '').length);
     var isDump = S3_DUMP_NAMES.indexOf(name) !== -1;
-    rows.push('<div class="s3-row">' +
+    // An Odoo backup .zip is a source on its own, so it is pickable. A dump
+    // inside a raw layout is not: the folder around it is what gets imported.
+    var isArchive = /\.zip$/i.test(name);
+    var cells =
       '<span class="s3-row-name">' + esc(name) + '</span>' +
       '<span class="s3-row-meta">' + esc(fmtBytes(file.size)) + '</span>' +
       '<span class="s3-row-meta s3-row-date">' + esc((file.last_modified || '').slice(0, 10)) + '</span>' +
-      '<span class="s3-row-flag">' + (isDump ? 'dump' : '') + '</span></div>');
+      '<span class="s3-row-flag">' + (isArchive ? 'archive' : (isDump ? 'dump' : '')) + '</span>';
+    rows.push(isArchive
+      ? '<button type="button" class="s3-row s3-row-nav" onclick="s3UseObject(\'' + escAttr(file.key) + '\')">' + cells + '</button>'
+      : '<div class="s3-row">' + cells + '</div>');
   });
   if (_s3Browse.truncated && _s3Browse.next_token) {
     rows.push('<button type="button" class="btn btn-sm s3-more" onclick="s3Browse(\'' + escAttr(_s3Browse.prefix || '') + '\', true)">Load more</button>');
@@ -5475,22 +5481,30 @@ function _renderS3Browser() {
   _s3El('use-btn').disabled = !dump;
   _s3El('use-hint').textContent = listingBuckets
     ? ''
-    : (dump ? 'Contains ' + dump + '.' : 'No database dump at this level — open a subfolder.');
+    : (dump ? 'Contains ' + dump + '.' : 'No database dump here — open a subfolder, or pick a .zip archive.');
   _s3El('browse-status').textContent = _s3Browse.truncated
     ? 'Showing the first page of this folder.'
     : '';
 }
 
-function s3UseCurrentFolder() {
+function _s3Pick(source, suggestedName) {
   _s3El('bucket').value = _s3Browse.bucket;
-  _s3El('prefix').value = _s3Browse.prefix || '';
+  _s3El('prefix').value = source;
   _s3El('browser').hidden = true;
   if (!_s3El('name').value.trim() && _s3Mode === 'import') {
-    // A sensible default: the folder the dump sits in.
-    var parts = (_s3Browse.prefix || '').split('/').filter(function(p) { return p; });
-    _s3El('name').value = parts.length ? parts[parts.length - 1] : _s3Browse.bucket;
+    _s3El('name').value = suggestedName;
   }
   (_s3Mode === 'sync' ? _s3El('submit') : _s3El('name')).focus();
+}
+
+function s3UseCurrentFolder() {
+  // A sensible default name: the folder the dump sits in.
+  var parts = (_s3Browse.prefix || '').split('/').filter(function(p) { return p; });
+  _s3Pick(_s3Browse.prefix || '', parts.length ? parts[parts.length - 1] : _s3Browse.bucket);
+}
+
+function s3UseObject(key) {
+  _s3Pick(key, key.split('/').pop().replace(/\.zip$/i, ''));
 }
 
 async function submitS3Template() {

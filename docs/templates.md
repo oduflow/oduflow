@@ -258,6 +258,27 @@ How it behaves, in the order it matters at scale:
 
 `--without-filestore` skips the `filestore/` tree for a database-only import.
 
+### An Odoo backup `.zip` already in the bucket
+
+If what you have is a backup `.zip` — written by Odoo's own database manager,
+or downloaded from Odoo.sh — point the import straight at that object instead
+of a folder:
+
+```bash
+oduflow import-template s3://mybucket/backups/acme-2026-10-13.zip --template-name prod
+```
+
+A key ending in `.zip` is unpacked as an Odoo backup (`dump.sql` plus
+`filestore/`); anything else is read as a prefix holding the raw layout. A
+re-sync with `--overwrite` still costs nothing while the object's ETag is
+unchanged.
+
+Prefer the raw layout for a large database when you can choose. A zip has to
+be fetched whole every time it changes, its filestore replaces the template's
+wholesale instead of syncing file by file, and an interrupted download starts
+over — all of which the raw layout avoids. The `.zip` shape exists for the
+archive you already have, not as the recommended way to make one.
+
 ## Importing from a Local Path
 
 The same engine and layout work for a directory on the Oduflow host — useful

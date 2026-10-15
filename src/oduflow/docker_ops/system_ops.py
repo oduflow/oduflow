@@ -4180,7 +4180,6 @@ def import_template(
     ``overwrite`` (s3/local) incrementally re-syncs an existing template.
     """
     import urllib.request
-    import zipfile
 
     from oduflow import template_import
     from oduflow.url_safety import assert_allowed_url
@@ -4205,7 +4204,14 @@ def import_template(
             "or a local path) unless refresh=true."
         )
     if source.startswith("s3://"):
-        return template_import.import_from_s3_prefix(
+        # A key naming an archive is one object to unpack; anything else is a
+        # prefix holding the raw layout.
+        s3_import = (
+            template_import.import_from_s3_archive
+            if template_import.is_archive_key(source)
+            else template_import.import_from_s3_prefix
+        )
+        return s3_import(
             settings,
             team,
             url=source,
@@ -4371,60 +4377,11 @@ def import_template(
                 shutil.copy2(tmp_backup, template_sql_path)
                 logger.info("Saved DB-only dump to %s", template_sql_path)
             else:
-                with zipfile.ZipFile(tmp_backup, "r") as zf:
-                    # Extract manifest.json
-                    if "manifest.json" in zf.namelist():
-                        with zf.open("manifest.json") as mf:
-                            manifest = json.load(mf)
-
-                    # Extract dump.sql
-                    with (
-                        zf.open("dump.sql") as src,
-                        open(template_sql_path, "wb") as dst,
-                    ):
-                        shutil.copyfileobj(src, dst)
-                    logger.info("Extracted dump.sql to %s", template_sql_path)
-
-                    # Extract filestore
-                    if os.path.exists(template_filestore_path):
-                        shutil.rmtree(template_filestore_path)
-                    os.makedirs(template_filestore_path, exist_ok=True)
-
-                    fs_prefix = "filestore/"
-                    for member in zf.namelist():
-                        if not member.startswith(fs_prefix):
-                            continue
-                        rel = member[len(fs_prefix) :]
-                        if not rel:
-                            continue
-                        # Skip checklist/ symlink-like entries
-                        if rel.startswith("checklist/"):
-                            continue
-                        target = os.path.join(template_filestore_path, rel)
-                        # Reject any member that escapes the filestore dir (zip-slip).
-                        if not _is_within_directory(template_filestore_path, target):
-                            logger.warning(
-                                "Skipping unsafe archive member outside filestore: %s",
-                                member,
-                            )
-                            continue
-                        if member.endswith("/"):
-                            os.makedirs(target, exist_ok=True)
-                        else:
-                            os.makedirs(os.path.dirname(target), exist_ok=True)
-                            with zf.open(member) as src, open(target, "wb") as dst:
-                                shutil.copyfileobj(src, dst)
-
-                    fs_count = sum(
-                        1
-                        for f in pathlib.Path(template_filestore_path).rglob("*")
-                        if f.is_file()
-                    )
-                    logger.info(
-                        "Extracted filestore to %s (%d files)",
-                        template_filestore_path,
-                        fs_count,
-                    )
+                # Same unpacking (and the same zip-slip guard) as an archive
+                # imported from a bucket — one definition for both doors.
+                manifest = template_import.extract_odoo_backup_zip(
+                    tmp_backup, template_sql_path, template_filestore_path
+                )
 
             # chown the new lower layer so the odoo user can read it through the
             # overlay once it is remounted.

@@ -995,6 +995,99 @@ def _check_free_disk(staging: str, needed_bytes: int) -> None:
         )
 
 
+# --- Odoo backup archives ----------------------------------------------------
+#
+# The raw layout above is the efficient way to move a large database, and
+# remains the recommended one. But an operator who already holds an Odoo
+# backup .zip — written by Odoo's own database manager, or pulled off Odoo.sh —
+# paid its packaging cost long before Oduflow was asked to read it, and asking
+# them to unpack and re-upload it as a raw layout buys nothing. So a single
+# .zip object is accepted as a source shape too, with its costs stated: the
+# whole archive is re-fetched whenever it changes, and its filestore replaces
+# the template's wholesale rather than syncing file by file.
+
+_ZIP_DUMP_NAME = "dump.sql"
+_ZIP_CHECKLIST_PREFIX = "checklist/"
+
+
+def is_archive_key(key: str) -> bool:
+    """Whether an S3 key names a backup archive rather than a source prefix."""
+    return key.lower().endswith(".zip")
+
+
+def zip_uncompressed_bytes(path: str) -> int:
+    import zipfile
+
+    with zipfile.ZipFile(path, "r") as zf:
+        return sum(info.file_size for info in zf.infolist())
+
+
+def extract_odoo_backup_zip(
+    zip_path: str, dump_dest: str, filestore_dest: str, *, with_filestore: bool = True
+) -> dict[str, Any]:
+    """Unpack an Odoo database-manager backup ``.zip``; return its manifest.
+
+    Writes ``dump.sql`` to ``dump_dest`` and replaces ``filestore_dest`` with
+    the archive's ``filestore/`` tree. Members that would escape that
+    directory (zip-slip) and the ``checklist/`` symlink-like entries are
+    skipped. Shared by the pull-from-Odoo and the S3 archive imports, so the
+    guard has one definition.
+
+    ``with_filestore=False`` reads only the dump: a database-only import
+    should not spend the disk and the minutes unpacking attachments it is
+    about to throw away.
+    """
+    import zipfile
+
+    manifest: dict[str, Any] = {}
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = zf.namelist()
+        if _ZIP_DUMP_NAME not in names:
+            raise PrerequisiteNotMetError(
+                "The archive is not an Odoo backup: no dump.sql at its top level."
+            )
+        if "manifest.json" in names:
+            with zf.open("manifest.json") as mf:
+                loaded = json.load(mf)
+            if isinstance(loaded, dict):
+                manifest = loaded
+
+        os.makedirs(os.path.dirname(dump_dest) or ".", exist_ok=True)
+        with zf.open(_ZIP_DUMP_NAME) as src, open(dump_dest, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        logger.info("Extracted dump.sql to %s", dump_dest)
+
+        if not with_filestore:
+            return manifest
+
+        if os.path.exists(filestore_dest):
+            shutil.rmtree(filestore_dest)
+        os.makedirs(filestore_dest, exist_ok=True)
+
+        files = 0
+        for member in names:
+            if not member.startswith(_FILESTORE_PREFIX):
+                continue
+            rel = member[len(_FILESTORE_PREFIX) :]
+            if not rel or rel.startswith(_ZIP_CHECKLIST_PREFIX):
+                continue
+            target = _safe_join(filestore_dest, rel.rstrip("/"))
+            if target is None:
+                logger.warning(
+                    "Skipping unsafe archive member outside filestore: %s", member
+                )
+                continue
+            if member.endswith("/"):
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            files += 1
+    logger.info("Extracted filestore to %s (%d files)", filestore_dest, files)
+    return manifest
+
+
 def _source_metadata(
     carried: dict[str, Any],
     *,
@@ -1157,6 +1250,156 @@ def import_from_s3_prefix(
         fetch_bytes=fetch_bytes,
         reload_db=reload_db,
     )
+
+
+def import_from_s3_archive(
+    settings: Settings,
+    team: TeamSettings,
+    *,
+    url: str,
+    template_name: str,
+    overwrite: bool = False,
+    without_filestore: bool = False,
+    endpoint: str = "",
+    access_key: str = "",
+    secret_key: str = "",
+    region: str = "",
+) -> dict[str, object]:
+    """Import (or re-sync) a template from a single Odoo backup ``.zip``.
+
+    A zip is opaque until it is on disk, so none of the prefix layout's
+    incremental machinery applies: the object is fetched whole, unpacked into
+    staging and promoted by the same swap. What does carry over is the ETag
+    skip — an archive unchanged since the last sync costs one HEAD.
+    """
+    from oduflow.docker_ops.client import get_client
+
+    validate_template_name(template_name)
+    bucket, key = parse_s3_url(url)
+    source_url = f"s3://{bucket}/{key}"
+
+    client = get_client()
+    if not overwrite:
+        _check_fresh_conflicts(settings, team, template_name, client)
+    else:
+        _check_overwrite_quota(settings, team, template_name, client)
+
+    carried = _load_carried_metadata(team, template_name) if overwrite else {}
+    creds = resolve_source_credentials(
+        team,
+        template_name,
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        carried=carried,
+    )
+    region = region or str(carried.get("source_region") or "")
+    s3 = _make_source_client(
+        settings,
+        bucket,
+        endpoint=endpoint,
+        access_key=creds.access_key,
+        secret_key=creds.secret_key,
+        region=region,
+    )
+    with _s3_errors(f"Reading {source_url}"):
+        head = s3.head_object(Bucket=bucket, Key=key)
+    dump = _SourceDump(
+        name=_ZIP_DUMP_NAME,
+        key=key,
+        size=int(head.get("ContentLength") or 0),
+        token=str(head.get("ETag") or "").strip('"'),
+        last_modified=_iso(head.get("LastModified")),
+    )
+
+    if overwrite and _dump_unchanged(
+        settings, team, template_name, dump, carried, client, source_url, endpoint
+    ):
+        logger.info("%s unchanged since the last sync; nothing to do", source_url)
+        return {
+            "status": "unchanged",
+            "template_name": template_name,
+            "source_url": source_url,
+            "source_db": dump.name,
+            "odoo_image": carried.get("odoo_image", ""),
+            "odoo_version": carried.get("odoo_version", ""),
+            "template_db": get_template_db_name(template_name, team.team_id),
+            "restore_seconds": 0,
+            "dump_reloaded": False,
+            "includes_filestore": carried.get("includes_filestore", False),
+            "downloaded_files": 0,
+            "downloaded_mb": 0.0,
+            "reused_files": 0,
+            "removed_files": 0,
+            "affected_envs": [],
+            "remount_failures": [],
+        }
+
+    staging = team.get_import_staging_dir(template_name)
+    staging_fs = os.path.normpath(os.path.join(staging, "filestore"))
+    os.makedirs(staging, exist_ok=True)
+    # The archive and everything it unpacks to live side by side until the
+    # promote, so both have to fit.
+    _check_free_disk(staging, dump.size * 2)
+
+    archive = os.path.join(staging, "archive.zip")
+    logger.info("Downloading %s (%d bytes)...", source_url, dump.size)
+    try:
+        _download_one(s3, bucket, key, archive)
+        unpacked = zip_uncompressed_bytes(archive)
+        _check_free_disk(staging, unpacked)
+        staged_dump = os.path.join(staging, _ZIP_DUMP_NAME)
+        extract_odoo_backup_zip(
+            archive, staged_dump, staging_fs, with_filestore=not without_filestore
+        )
+        os.remove(archive)
+
+        metadata = _source_metadata(carried, source_url=source_url, dump=dump)
+        metadata["source_endpoint"] = endpoint
+        metadata["source_region"] = region
+        metadata.update(credential_metadata(creds))
+        store_source_secret(team, creds)
+        final = _promote_and_reload(
+            settings,
+            team,
+            template_name,
+            client=client,
+            staging=staging,
+            staging_fs=staging_fs,
+            syncing_filestore=not without_filestore,
+            reload_db=True,
+            dump_name=_ZIP_DUMP_NAME,
+            metadata=metadata,
+            overwrite=overwrite,
+        )
+    except BaseException:
+        if creds.store_value and not overwrite:
+            delete_managed_secret(team, credential_metadata(creds))
+        # Nothing here is resumable, so a failed attempt leaves no staging
+        # behind to be mistaken for progress on the next run.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    release_replaced_secret(team, creds, carried)
+
+    result_metadata = final["metadata"]
+    return {
+        "status": final["status"],
+        "template_name": template_name,
+        "source_url": source_url,
+        "source_db": dump.name,
+        "odoo_image": result_metadata.get("odoo_image", ""),
+        "odoo_version": result_metadata.get("odoo_version", ""),
+        "template_db": final["template_db"],
+        "restore_seconds": final["restore_seconds"],
+        "dump_reloaded": True,
+        "includes_filestore": result_metadata["includes_filestore"],
+        "downloaded_files": 1,
+        "downloaded_mb": round(dump.size / 1024**2, 1),
+        "reused_files": 0,
+        "removed_files": 0,
+        "affected_envs": final["affected_envs"],
+        "remount_failures": final["remount_failures"],
+    }
 
 
 def import_from_local_path(

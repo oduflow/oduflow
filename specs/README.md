@@ -88,7 +88,7 @@ precursors).
 | [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
 | [0068](0068-production-mcp-credentials.md) | 2026-09-19 | Separate production MCP credentials, direct OduMCP access and automatic addon provisioning |
 
-| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite |
+| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite; remembered S3 credentials, bucket browser and `.zip` source (v3) |
 
 | [0070](0070-annual-commercial-licenses.md) | 2026-09-23 | Annual commercial license terms, informational expiry, and manual Paddle renewal |
 | [0071](0071-manual-license-periods.md) | 2026-09-23 | Agreed legacy migration, manual periods and optional Paddle subscriptions |
