@@ -135,12 +135,13 @@ would let work in the environment.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/templates` | List template profiles |
+| `GET` | `/api/templates` | List template profiles. A template imported from a bucket carries an `s3_source` object (`url`, `endpoint`, `region`, `access_key`, `has_secret`, `dump`, `synced_at`) — the connection needed to re-sync it, never the secret key; `null` for every other template |
 | `GET` | `/api/templates/{name:path}/metadata` | Read the complete `metadata.json` content and its optimistic revision |
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
 | `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
+| `POST` | `/api/s3/browse` | UI-authenticated: list one level of an S3 bucket for the import dialog's object browser, or the buckets when `bucket` is empty. Body: `bucket`, `prefix`, `continuation_token`, `endpoint`, `region`, `access_key`, `secret_key`, and `template` to sign with that template's stored secret. Returns `buckets`, `folders`, `files` (newest first), `truncated`, `next_token`. Read-only, so not team-locked |
 | `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |

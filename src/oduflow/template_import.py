@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import shutil
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
@@ -243,6 +244,29 @@ def delete_managed_secret(team: TeamSettings, metadata: object) -> None:
         logger.info("Deleted managed S3 secret %s", ref)
 
 
+def public_source_view(metadata: object) -> dict[str, Any] | None:
+    """What a listing may show of a remembered S3 source — never the secret.
+
+    ``None`` for anything that did not come from a bucket, so a caller can use
+    it directly as "is this template re-syncable from S3".
+    """
+    if not isinstance(metadata, dict):
+        return None
+    url = str(metadata.get("source_url") or "")
+    if not url.startswith("s3://"):
+        return None
+    return {
+        "url": url,
+        "endpoint": str(metadata.get("source_endpoint") or ""),
+        "region": str(metadata.get("source_region") or ""),
+        "access_key": str(metadata.get("source_access_key") or ""),
+        # Enough for the UI to say "no key needed"; the value stays put.
+        "has_secret": bool(metadata.get("source_secret_key")),
+        "dump": str(metadata.get("source_db") or ""),
+        "synced_at": str(metadata.get("snapshot_at") or ""),
+    }
+
+
 def release_replaced_secret(
     team: TeamSettings, creds: SourceCredentials, previous: dict[str, Any] | None
 ) -> None:
@@ -314,6 +338,152 @@ def _make_source_client(
     if endpoint:
         kwargs["endpoint_url"] = endpoint
     return boto3.client("s3", config=Config(**config_kwargs), **kwargs)
+
+
+# --- Bucket browser ----------------------------------------------------------
+#
+# Typing an object key blind is the one step of an S3 import that cannot be
+# verified before it runs, and a mistyped prefix fails only after the listing
+# comes back empty. The dashboard therefore walks the bucket one level at a
+# time, which needs a listing that is cheap, bounded and says nothing about
+# credentials.
+
+# Loose on purpose: S3-compatible stores accept more than AWS's 3-63 lowercase
+# rule, but nothing that could turn into a path or a URL component.
+_BUCKET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+_MAX_BROWSE_KEYS = 1000
+
+
+def validate_bucket(bucket: str) -> str:
+    bucket = (bucket or "").strip()
+    if not _BUCKET_RE.fullmatch(bucket):
+        raise ValueError(f"Invalid S3 bucket name '{bucket}'.")
+    return bucket
+
+
+@contextlib.contextmanager
+def _s3_errors(action: str) -> Iterator[None]:
+    """Translate boto errors into FlowErrors with a message fit for the UI.
+
+    S3 error messages name the failing condition (bad key id, missing bucket,
+    signature mismatch) and never echo credentials, so they are passed
+    through: without them the operator cannot tell a typo from a permissions
+    problem.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        yield
+    except ClientError as exc:
+        error = exc.response.get("Error", {}) or {}
+        code = str(error.get("Code") or "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        message = str(error.get("Message") or "")
+        if code in ("NoSuchBucket", "NoSuchKey", "NotFound", "404") or status == 404:
+            raise NotFoundError(f"{action}: not found ({code or status}).") from exc
+        raise PrerequisiteNotMetError(
+            f"{action} failed: {message or code or status}."
+        ) from exc
+    except BotoCoreError as exc:
+        raise PrerequisiteNotMetError(f"{action} failed: {exc}") from exc
+
+
+def _iso(value: Any) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+
+
+def browse_source(
+    settings: Settings,
+    team: TeamSettings,
+    *,
+    bucket: str = "",
+    prefix: str = "",
+    continuation_token: str = "",
+    endpoint: str = "",
+    region: str = "",
+    access_key: str = "",
+    secret_key: str = "",
+    template_name: str = "",
+) -> dict[str, Any]:
+    """List one level of a bucket, or the buckets when *bucket* is empty.
+
+    With ``template_name`` the secret remembered for that template signs the
+    request when no new one is given — under the same endpoint/access-key rule
+    as an import — so pointing an existing S3 template at a different object
+    never sends its secret back to the browser.
+    """
+    carried: dict[str, Any] = {}
+    if template_name:
+        validate_template_name(template_name)
+        carried = _load_carried_metadata(team, template_name)
+    creds = resolve_source_credentials(
+        team,
+        template_name or "browse",
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        carried=carried,
+    )
+    client = _make_source_client(
+        settings,
+        bucket,
+        endpoint=endpoint,
+        access_key=creds.access_key,
+        secret_key=creds.secret_key,
+        region=region,
+    )
+    if not bucket:
+        with _s3_errors("Listing buckets"):
+            resp = client.list_buckets()
+        return {
+            "bucket": "",
+            "prefix": "",
+            "buckets": [
+                str(b["Name"]) for b in resp.get("Buckets", []) if b.get("Name")
+            ],
+            "folders": [],
+            "files": [],
+            "truncated": False,
+            "next_token": "",
+        }
+
+    bucket = validate_bucket(bucket)
+    prefix = (prefix or "").strip().lstrip("/")
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    kwargs: dict[str, Any] = {
+        "Bucket": bucket,
+        "Prefix": prefix,
+        "Delimiter": "/",
+        "MaxKeys": _MAX_BROWSE_KEYS,
+    }
+    if continuation_token:
+        kwargs["ContinuationToken"] = continuation_token
+    with _s3_errors(f"Listing s3://{bucket}/{prefix}"):
+        resp = client.list_objects_v2(**kwargs)
+    files = [
+        {
+            "key": str(obj["Key"]),
+            "size": int(obj.get("Size") or 0),
+            "last_modified": _iso(obj.get("LastModified")),
+            "etag": str(obj.get("ETag") or "").strip('"'),
+        }
+        for obj in resp.get("Contents", [])
+        # A zero-byte "folder marker" object named after the prefix itself.
+        if obj.get("Key") and obj["Key"] != prefix
+    ]
+    files.sort(key=lambda f: str(f["last_modified"]), reverse=True)
+    return {
+        "bucket": bucket,
+        "prefix": prefix,
+        "buckets": [],
+        "folders": [
+            str(p["Prefix"]) for p in resp.get("CommonPrefixes", []) if p.get("Prefix")
+        ],
+        "files": files,
+        "truncated": bool(resp.get("IsTruncated")),
+        "next_token": str(resp.get("NextContinuationToken") or ""),
+    }
 
 
 def _list_s3_source(client: Any, bucket: str, prefix: str) -> _SourceListing:
@@ -886,6 +1056,9 @@ def import_from_s3_prefix(
         secret_key=secret_key,
         carried=carried,
     )
+    # Remembered like the keys: a re-sync of a region-pinned bucket must not
+    # need the region typed again (a dashboard Sync has nowhere to ask).
+    region = region or str(carried.get("source_region") or "")
     s3 = _make_source_client(
         settings,
         bucket,
@@ -950,6 +1123,7 @@ def import_from_s3_prefix(
         _record_staged_dump(staging, dump, source_url + "|" + endpoint)
     metadata = _source_metadata(carried, source_url=source_url, dump=dump)
     metadata["source_endpoint"] = endpoint
+    metadata["source_region"] = region
     metadata.update(credential_metadata(creds))
     store_source_secret(team, creds)
     try:

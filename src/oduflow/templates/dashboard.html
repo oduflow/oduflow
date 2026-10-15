@@ -653,6 +653,41 @@
   .oca-footer .form-actions { margin-top: 10px; flex-wrap: wrap; }
   .modal-routes { max-width: 680px; max-height: 90vh; }
   #template-settings-modal .modal { width: min(760px, calc(100vw - 32px)); max-height: 90vh; }
+  /* Import / sync a template from S3: connection fold-out + object browser. */
+  #s3-template-modal .modal { width: min(760px, calc(100vw - 32px)); max-height: 90vh; }
+  .s3-conn { margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
+  .s3-conn summary { cursor: pointer; font-size: var(--text-xs); font-weight: 600; color: var(--text-dim); border-radius: var(--radius-sm); }
+  .s3-conn summary:hover { color: var(--text); }
+  .s3-conn summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+  .s3-conn[open] summary { margin-bottom: 10px; }
+  .s3-conn-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; }
+  .s3-inline { display: flex; gap: 8px; align-items: center; }
+  .s3-inline input { flex: 1; min-width: 0; }
+  .s3-browser { margin: -4px 0 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+  .s3-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-dim); }
+  .s3-crumbs button { background: none; border: none; padding: 2px 4px; border-radius: var(--radius-sm); font: inherit; color: var(--accent); cursor: pointer; }
+  .s3-crumbs button:hover { text-decoration: underline; }
+  .s3-crumbs button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+  .s3-crumbs [aria-current] { color: var(--text); padding: 2px 4px; }
+  .s3-list { max-height: 280px; overflow-y: auto; }
+  .s3-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 14px; align-items: center; width: 100%; padding: 5px 10px; background: none; border: none; border-bottom: 1px solid var(--border); text-align: left; color: var(--text); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .s3-row:last-child { border-bottom: none; }
+  .s3-row-nav { cursor: pointer; }
+  .s3-row-nav:hover { background: var(--subtle); }
+  .s3-row-nav:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+  .s3-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s3-row-meta { color: var(--text-dim); white-space: nowrap; }
+  .s3-row-flag { font-family: var(--font-sans); font-weight: 600; color: var(--accent); min-width: 5em; text-align: right; }
+  .s3-more { display: block; margin: 6px auto; }
+  .s3-browser > .hint { margin: 0; padding: 4px 10px 6px; }
+  .s3-browser > .hint:empty { display: none; }
+  .s3-use { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-top: 1px solid var(--border); }
+  .s3-use .hint { margin: 0; flex: 1; }
+  @media (max-width: 640px) {
+    .s3-conn-grid { grid-template-columns: 1fr; }
+    .s3-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .s3-row .s3-row-date { display: none; }
+  }
   #template-metadata-editor {
     min-height: 48vh;
     resize: vertical;
@@ -1511,6 +1546,7 @@
 <div id="tab-templates" class="tab-content">
   <div class="tab-toolbar">
     <button class="btn" onclick="openImportFromOdooModal()">Import from Odoo</button>
+    <button class="btn" onclick="openImportFromS3Modal()">Import from S3</button>
     <button class="btn-create" onclick="openImportOdooModal()">Import from Odoo.sh</button>
   </div>
   <div id="tpl-list"></div>
@@ -2102,6 +2138,79 @@
       <div class="form-actions">
         <button class="btn" onclick="closeCreateVolumeModal()">Cancel</button>
         <button class="btn-create" id="vol-submit" onclick="submitCreateVolume()">Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="s3-template-modal" onclick="closeS3TemplateModal(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="s3-tpl-title">
+    <div class="modal-header">
+      <h2 id="s3-tpl-title">Import from S3</h2>
+      <button class="modal-close" aria-label="Close S3 template dialog" onclick="closeS3TemplateModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="s3-tpl-error" role="alert"></div>
+      <p class="modal-note" id="s3-tpl-note"></p>
+      <details class="s3-conn" id="s3-tpl-conn">
+        <summary>Connection</summary>
+        <div class="s3-conn-grid">
+          <div class="form-group">
+            <label for="s3-tpl-endpoint">Endpoint <span class="label-hint">— empty for AWS S3</span></label>
+            <input class="mono-input" type="url" id="s3-tpl-endpoint" placeholder="https://minio.example.com" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="s3-tpl-region">Region <span class="label-hint">— optional</span></label>
+            <input class="mono-input" type="text" id="s3-tpl-region" placeholder="eu-central-1" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="s3-tpl-access-key">Access key ID <span class="label-hint">— empty for a public bucket</span></label>
+            <input class="mono-input" type="text" id="s3-tpl-access-key" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label for="s3-tpl-secret-key">Secret key</label>
+            <input class="mono-input" type="password" id="s3-tpl-secret-key" autocomplete="off">
+            <div class="hint" id="s3-tpl-secret-hint"></div>
+          </div>
+        </div>
+      </details>
+      <div class="form-group">
+        <label for="s3-tpl-bucket">Bucket</label>
+        <div class="s3-inline">
+          <input class="mono-input" type="text" id="s3-tpl-bucket" placeholder="Leave empty and browse to list buckets" autocomplete="off" spellcheck="false" onkeydown="if (event.key === 'Enter') { event.preventDefault(); s3BrowseFromBucket(); }">
+          <button class="btn" id="s3-tpl-browse-btn" onclick="s3BrowseFromBucket()">Browse</button>
+        </div>
+      </div>
+      <div class="s3-browser" id="s3-tpl-browser" hidden>
+        <nav class="s3-crumbs" id="s3-tpl-crumbs" aria-label="S3 location"></nav>
+        <div class="s3-list" id="s3-tpl-list"></div>
+        <div class="hint" id="s3-tpl-browse-status" role="status" aria-live="polite"></div>
+        <div class="s3-use" id="s3-tpl-use">
+          <div class="hint" id="s3-tpl-use-hint"></div>
+          <button class="btn btn-sm" id="s3-tpl-use-btn" onclick="s3UseCurrentFolder()">Use this folder</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="s3-tpl-prefix">Source folder</label>
+        <input class="mono-input" type="text" id="s3-tpl-prefix" placeholder="backups/mydb/" autocomplete="off" spellcheck="false">
+        <div class="hint">A folder holding one <code>dump.pgdump</code>, <code>dump.sql</code> or <code>dump.sql.gz</code> (hand-made <code>db.dump</code> also works) plus an optional <code>filestore/</code> tree. Browse to it above, or type the prefix.</div>
+      </div>
+      <div class="form-group" id="s3-tpl-name-group">
+        <label for="s3-tpl-name">Template name</label>
+        <input class="mono-input" type="text" id="s3-tpl-name" placeholder="e.g. production-copy" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <div class="check-row">
+          <input type="checkbox" id="s3-tpl-without-filestore">
+          <label for="s3-tpl-without-filestore">Database only <span class="label-hint">— skip the filestore/ tree</span></label>
+        </div>
+      </div>
+      <div class="hint" id="s3-tpl-progress" role="status" aria-live="polite" style="display:none">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="s3-tpl-progress-text">Downloading and restoring the template…</span> <span id="s3-tpl-elapsed" aria-hidden="true"></span>
+      </div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeS3TemplateModal()">Cancel</button>
+        <button class="btn-create" id="s3-tpl-submit" onclick="submitS3Template()">Import</button>
       </div>
     </div>
   </div>
@@ -5193,6 +5302,268 @@ async function submitImportFromOdoo() {
   }
 }
 
+// --- Import / sync a template from S3 ----------------------------------------
+// Typing an object prefix blind is the one import step nothing can verify
+// before it runs, so the dialog walks the bucket a level at a time via
+// POST /api/s3/browse. Listings are paged: "Load more" appends to what is on
+// screen rather than replacing it.
+var _s3Mode = 'import';   // 'import' | 'sync'
+var _s3Template = '';     // the template being re-synced, in sync mode
+var _s3Browse = null;     // last listing from /api/s3/browse
+
+// The dump names the import engine accepts at a source root, newest-first
+// precedence mirrored from template_import._SOURCE_DUMP_NAMES.
+var S3_DUMP_NAMES = ['dump.pgdump', 'dump.sql', 'dump.pgdump.gz', 'dump.sql.gz', 'db.dump', 'db.dump.gz'];
+
+function _s3El(id) { return document.getElementById('s3-tpl-' + id); }
+
+function _s3SetError(message) {
+  var el = _s3El('error');
+  el.textContent = message || '';
+  el.style.display = message ? 'block' : 'none';
+}
+
+function _openS3TemplateModal(mode, tpl) {
+  var isSync = mode === 'sync';
+  var s3 = (tpl && tpl.s3_source) || {};
+  _s3Mode = mode;
+  _s3Template = isSync ? tpl.template_name : '';
+  _s3Browse = null;
+  _s3El('title').textContent = isSync ? 'Sync template from S3' : 'Import from S3';
+  _s3El('note').textContent = isSync
+    ? 'Re-fetch the source of template "' + _s3Template + '". Only changed filestore files are downloaded, and an unchanged database dump skips the restore entirely.'
+    : 'Sync a raw backup out of an S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, …) into a new template. The source is remembered, so it can be re-synced later.';
+  _s3El('endpoint').value = s3.endpoint || '';
+  _s3El('region').value = s3.region || '';
+  _s3El('access-key').value = s3.access_key || '';
+  _s3El('secret-key').value = '';
+  _s3El('secret-hint').textContent = s3.has_secret
+    ? 'Stored for this template — leave empty to reuse it. Required again if you change the endpoint or access key.'
+    : 'Stored as the team secret "s3-template-<template>"; the template keeps only a reference. Leave both keys empty for a public bucket.';
+  // A sync starts from the remembered source; everything else starts blank.
+  var url = String(s3.url || '');
+  var rest = url.indexOf('s3://') === 0 ? url.slice(5) : '';
+  var slash = rest.indexOf('/');
+  _s3El('bucket').value = slash === -1 ? rest : rest.slice(0, slash);
+  _s3El('prefix').value = slash === -1 ? '' : rest.slice(slash + 1);
+  _s3El('name').value = _s3Template;
+  _s3El('name-group').hidden = isSync;
+  _s3El('without-filestore').checked = false;
+  _s3El('conn').open = !isSync && !s3.url;
+  _s3El('browser').hidden = true;
+  _s3El('progress').style.display = 'none';
+  _s3El('elapsed').textContent = '';
+  _s3El('submit').disabled = false;
+  _s3El('submit').textContent = isSync ? 'Sync' : 'Import';
+  _s3SetError('');
+  showModal('s3-template-modal');
+  (isSync ? _s3El('bucket') : _s3El('endpoint')).focus();
+}
+
+function openImportFromS3Modal() { _openS3TemplateModal('import', null); }
+
+function openS3SyncModal(name) {
+  var tpl = cachedTemplates.find(function(t) { return t.template_name === name; });
+  if (!tpl || !tpl.s3_source) {
+    showToast('Template "' + name + '" has no S3 source.', true);
+    return;
+  }
+  _openS3TemplateModal('sync', tpl);
+}
+
+function closeS3TemplateModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  _s3El('secret-key').value = '';
+  hideModal('s3-template-modal');
+}
+
+function s3BrowseFromBucket() { return s3Browse(_s3El('prefix').value.trim()); }
+
+async function s3Browse(prefix, append) {
+  var btn = _s3El('browse-btn');
+  var status = _s3El('browse-status');
+  btn.disabled = true;
+  status.textContent = 'Loading…';
+  _s3El('browser').hidden = false;
+  try {
+    var r = await fetch('/api/s3/browse', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        bucket: _s3El('bucket').value.trim(),
+        prefix: prefix || '',
+        continuation_token: append && _s3Browse ? _s3Browse.next_token : '',
+        endpoint: _s3El('endpoint').value.trim(),
+        region: _s3El('region').value.trim(),
+        access_key: _s3El('access-key').value.trim(),
+        secret_key: _s3El('secret-key').value,
+        template: _s3Template
+      })
+    });
+    var data = await readResult(r);
+    if (!r.ok || !data.ok) {
+      status.textContent = '';
+      _s3SetError(data.error || 'Could not list the bucket.');
+      return;
+    }
+    _s3SetError('');
+    if (append && _s3Browse) {
+      data.folders = (_s3Browse.folders || []).concat(data.folders || []);
+      data.files = (_s3Browse.files || []).concat(data.files || []);
+    }
+    _s3Browse = data;
+    _renderS3Browser();
+  } catch (e) {
+    status.textContent = '';
+    _s3SetError('Connection error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _s3Crumbs() {
+  var bucket = _s3Browse.bucket;
+  if (!bucket) return '<span aria-current="page">Buckets</span>';
+  var parts = (_s3Browse.prefix || '').split('/').filter(function(p) { return p; });
+  var crumbs = ['<button type="button" onclick="s3Browse(\'\')">' + esc(bucket) + '</button>'];
+  var acc = '';
+  parts.forEach(function(part, i) {
+    acc += part + '/';
+    crumbs.push('<span aria-hidden="true">/</span>');
+    crumbs.push(i === parts.length - 1
+      ? '<span aria-current="page">' + esc(part) + '</span>'
+      : '<button type="button" onclick="s3Browse(\'' + escAttr(acc) + '\')">' + esc(part) + '</button>');
+  });
+  return crumbs.join('');
+}
+
+function _renderS3Browser() {
+  var rows = [];
+  var listingBuckets = !_s3Browse.bucket;
+  _s3El('crumbs').innerHTML = _s3Crumbs();
+  (_s3Browse.buckets || []).forEach(function(b) {
+    rows.push('<button type="button" class="s3-row s3-row-nav" onclick="_s3El(\'bucket\').value = \'' + escAttr(b) + '\'; s3Browse(\'\')">' +
+      '<span class="s3-row-name">' + esc(b) + '</span>' +
+      '<span class="s3-row-flag">bucket</span></button>');
+  });
+  (_s3Browse.folders || []).forEach(function(f) {
+    var name = f.slice((_s3Browse.prefix || '').length).replace(/\/$/, '');
+    rows.push('<button type="button" class="s3-row s3-row-nav" onclick="s3Browse(\'' + escAttr(f) + '\')">' +
+      '<span class="s3-row-name">' + esc(name) + '/</span>' +
+      '<span class="s3-row-flag">folder</span></button>');
+  });
+  (_s3Browse.files || []).forEach(function(file) {
+    var name = file.key.slice((_s3Browse.prefix || '').length);
+    var isDump = S3_DUMP_NAMES.indexOf(name) !== -1;
+    rows.push('<div class="s3-row">' +
+      '<span class="s3-row-name">' + esc(name) + '</span>' +
+      '<span class="s3-row-meta">' + esc(fmtBytes(file.size)) + '</span>' +
+      '<span class="s3-row-meta s3-row-date">' + esc((file.last_modified || '').slice(0, 10)) + '</span>' +
+      '<span class="s3-row-flag">' + (isDump ? 'dump' : '') + '</span></div>');
+  });
+  if (_s3Browse.truncated && _s3Browse.next_token) {
+    rows.push('<button type="button" class="btn btn-sm s3-more" onclick="s3Browse(\'' + escAttr(_s3Browse.prefix || '') + '\', true)">Load more</button>');
+  }
+  _s3El('list').innerHTML = rows.join('') ||
+    '<div class="s3-row"><span class="s3-row-meta">Empty.</span></div>';
+  // "Use this folder" is only meaningful once the listing shows a dump the
+  // import engine would actually pick up at this level.
+  var dump = (_s3Browse.files || []).map(function(f) {
+    return f.key.slice((_s3Browse.prefix || '').length);
+  }).find(function(name) { return S3_DUMP_NAMES.indexOf(name) !== -1; });
+  _s3El('use').hidden = listingBuckets;
+  _s3El('use-btn').disabled = !dump;
+  _s3El('use-hint').textContent = listingBuckets
+    ? ''
+    : (dump ? 'Contains ' + dump + '.' : 'No database dump at this level — open a subfolder.');
+  _s3El('browse-status').textContent = _s3Browse.truncated
+    ? 'Showing the first page of this folder.'
+    : '';
+}
+
+function s3UseCurrentFolder() {
+  _s3El('bucket').value = _s3Browse.bucket;
+  _s3El('prefix').value = _s3Browse.prefix || '';
+  _s3El('browser').hidden = true;
+  if (!_s3El('name').value.trim() && _s3Mode === 'import') {
+    // A sensible default: the folder the dump sits in.
+    var parts = (_s3Browse.prefix || '').split('/').filter(function(p) { return p; });
+    _s3El('name').value = parts.length ? parts[parts.length - 1] : _s3Browse.bucket;
+  }
+  (_s3Mode === 'sync' ? _s3El('submit') : _s3El('name')).focus();
+}
+
+async function submitS3Template() {
+  var isSync = _s3Mode === 'sync';
+  var bucket = _s3El('bucket').value.trim();
+  // The field reads as a folder ("odoo/acme/"); the URL the server records is
+  // normalized, so send the same form it will store.
+  var prefix = _s3El('prefix').value.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  var templateName = isSync ? _s3Template : _s3El('name').value.trim();
+  if (!bucket) return _s3SetError('Bucket is required.');
+  if (!templateName) return _s3SetError('Template name is required.');
+  _s3SetError('');
+
+  var btn = _s3El('submit');
+  var progress = _s3El('progress');
+  var elapsed = _s3El('elapsed');
+  var started = Date.now();
+  btn.disabled = true;
+  btn.textContent = isSync ? 'Syncing…' : 'Importing…';
+  _s3El('progress-text').textContent = isSync
+    ? 'Syncing the template from S3…'
+    : 'Downloading and restoring the template…';
+  progress.style.display = 'block';
+  var updateProgress = function() { elapsed.textContent = _fmtElapsed(Date.now() - started); };
+  updateProgress();
+  var progressTimer = setInterval(updateProgress, 1000);
+  var source = 's3://' + bucket + (prefix ? '/' + prefix : '');
+  try {
+    var r = await fetch(API_TEMPLATES + '/import-from-odoo', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        source: source,
+        template_name: templateName,
+        overwrite: isSync,
+        without_filestore: _s3El('without-filestore').checked,
+        s3_endpoint: _s3El('endpoint').value.trim(),
+        s3_region: _s3El('region').value.trim(),
+        s3_access_key: _s3El('access-key').value.trim(),
+        s3_secret_key: _s3El('secret-key').value
+      })
+    });
+    var data = await readResult(r);
+    if (r.ok && data.ok) {
+      var result = data.result || {};
+      closeS3TemplateModal();
+      showToast((isSync ? 'Synced template "' : 'Imported template "') + templateName +
+        '" from ' + (result.source_url || source) +
+        (result.dump_reloaded === false ? ' (dump unchanged, database kept)' : ''));
+      await loadTemplates();
+      var failures = result.remount_failures || [];
+      if (failures.length) {
+        showToast('Template updated, but ' + failures.length + ' environment filestore remount' +
+          (failures.length === 1 ? ' failed.' : 's failed.'), true);
+      }
+    } else if (isAmbiguousGatewayStatus(r.status)) {
+      closeS3TemplateModal();
+      showToast('The proxy stopped waiting, but the S3 sync of "' + templateName +
+        '" may still be running. Refresh in a moment.');
+      await loadTemplates();
+    } else {
+      _s3SetError(data.error || 'Import failed');
+    }
+  } catch (e) {
+    _s3SetError('Connection error: ' + e.message);
+  } finally {
+    clearInterval(progressTimer);
+    progress.style.display = 'none';
+    btn.disabled = false;
+    btn.textContent = isSync ? 'Sync' : 'Import';
+  }
+}
+
 function openImportOdooModal() {
   document.getElementById('import-tpl-name').value = '';
   var errEl = document.getElementById('import-odoo-error');
@@ -5938,6 +6309,9 @@ function renderTemplates(templates) {
     var metadataTag = t.metadata_valid === false
       ? '<span class="tag tag-missing" title="metadata.json is invalid; open Settings to repair it">Invalid metadata</span>'
       : '';
+    var s3Tag = t.s3_source
+      ? '<span class="tag tag-neutral" title="Imported from ' + escHtmlAttr(t.s3_source.url) + ' and can be re-synced from it">S3</span>'
+      : '';
     var sizeHtml = '';
     if (t.filestore_size_mb != null || t.dump_size_mb != null) {
       var fmtSize = function(mb) {
@@ -5958,18 +6332,26 @@ function renderTemplates(templates) {
       if (envCount) parts.push('<span>Env vars: <strong>' + envCount + '</strong></span>');
       metaHtml = '<div class="tpl-meta" style="margin-top:8px;flex-wrap:wrap;">' + parts.join('') + '</div>';
     }
+    var s3Meta = t.s3_source
+      ? '<div class="tpl-meta" style="margin-top:8px;flex-wrap:wrap;"><span>S3: <strong>' +
+        esc(t.s3_source.url) + '</strong></span></div>'
+      : '';
     return '<div class="tpl-card tpl-card-stacked">' +
       '<div class="tpl-head">' +
         '<span class="tpl-name">' + esc(t.template_name) + '</span>' +
         '<div class="tpl-head-right">' +
-          '<div class="tpl-meta">' + dbTag + sqlTag + fsTag + modeTag + metadataTag + sizeHtml + '</div>' +
+          '<div class="tpl-meta">' + dbTag + sqlTag + fsTag + modeTag + metadataTag + s3Tag + sizeHtml + '</div>' +
           '<button class="btn-create btn-sm" onclick="openCreateFromTemplate(\'' + escAttr(t.template_name) + '\')">+ New Env</button>' +
+          (t.s3_source
+            ? '<button class="btn btn-sm" onclick="openS3SyncModal(\'' + escAttr(t.template_name) + '\')">Sync</button>'
+            : '') +
           '<button class="btn btn-sm" onclick="openTemplateSettingsModal(\'' + escAttr(t.template_name) + '\')">Settings</button>' +
           '<button class="btn btn-sm" onclick="openRenameTemplateModal(\'' + escAttr(t.template_name) + '\')">Rename</button>' +
           '<button class="btn btn-delete btn-sm" onclick="doDeleteTemplate(\'' + escAttr(t.template_name) + '\')">Remove</button>' +
         '</div>' +
       '</div>' +
       metaHtml +
+      s3Meta +
     '</div>';
   }).join('');
 }
@@ -9631,6 +10013,7 @@ var MODAL_CLOSERS = {
   'add-credential-modal': closeAddCredentialModal,
   'secret-modal': closeSecretModal,
   'import-from-odoo-modal': closeImportFromOdooModal,
+  's3-template-modal': closeS3TemplateModal,
   'import-odoo-modal': closeImportOdooModal,
   'template-settings-modal': closeTemplateSettingsModal,
   'confirm-modal': cancelConfirm,

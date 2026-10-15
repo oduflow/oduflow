@@ -5381,6 +5381,8 @@ def _template_env_vars(metadata: dict[str, Any], template_name: str) -> dict[str
 
 
 def list_templates(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
+    from oduflow import template_import
+
     client = get_client()
     templates = team.list_templates()
     result = []
@@ -5434,6 +5436,9 @@ def list_templates(settings: Settings, team: TeamSettings) -> list[dict[str, Any
                 "source_branch": metadata.get("source_branch", ""),
                 "source_commit": metadata.get("source_commit", ""),
                 "snapshot_at": metadata.get("snapshot_at", ""),
+                # Set only for a template imported from a bucket: the
+                # connection to re-sync it, without the secret key.
+                "s3_source": template_import.public_source_view(metadata),
             }
         )
     return result

@@ -203,6 +203,19 @@ aws s3 sync ~/.local/share/Odoo/filestore/mydb/ s3://mybucket/backups/mydb/files
 oduflow import-template s3://mybucket/backups/mydb/ --template-name prod
 ```
 
+### In the dashboard
+
+**Templates → Import from S3** fills the same request in a form. Enter the
+connection (endpoint — empty for AWS — region, access key ID, secret key),
+type a bucket or leave it empty, and **Browse**: the dialog walks the bucket
+one folder at a time, newest files first, and marks the folder that holds a
+recognized dump. **Use this folder** fills in the source and suggests a
+template name. You can also type the prefix directly.
+
+A template imported this way is tagged **S3** in the list and gains a **Sync**
+button — the same incremental re-sync as `--overwrite`, with the connection
+and the stored secret already filled in.
+
 How it behaves, in the order it matters at scale:
 
 - **Parallel + resumable.** Filestore files download on several connections;

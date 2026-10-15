@@ -51,6 +51,7 @@ from oduflow import (
     import_tokens,
     production_registry,
     secret_store,
+    template_import,
     ui_scope,
     ui_totp,
     updates,
@@ -2564,6 +2565,50 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("Unexpected error in api_template_rename")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_s3_browse(request: Request) -> JSONResponse:
+        """One level of an S3 bucket for the import dialog's object browser.
+
+        Read-only and not template-locked: it creates nothing and an operator
+        typically browses while an unrelated import runs. ``template`` signs
+        with that template's stored secret, so re-pointing an existing S3
+        template never sends its secret back to the browser.
+        """
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body"}, status_code=400
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "JSON body must be an object"}, status_code=400
+            )
+        try:
+            result = await _offload(
+                template_import.browse_source,
+                get_settings(),
+                team,
+                bucket=str(body.get("bucket") or "").strip(),
+                prefix=str(body.get("prefix") or ""),
+                continuation_token=str(body.get("continuation_token") or ""),
+                endpoint=str(body.get("endpoint") or "").strip(),
+                region=str(body.get("region") or "").strip(),
+                access_key=str(body.get("access_key") or ""),
+                secret_key=str(body.get("secret_key") or ""),
+                template_name=str(body.get("template") or "").strip(),
+            )
+            return JSONResponse({"ok": True, **result})
+        except ValueError as e:  # invalid bucket, endpoint or template name
+            return _error_text_response(e)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_s3_browse")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -7070,6 +7115,7 @@ def _build_routes(
         ),
         Route("/api/templates/{name}/delete", api_template_delete, methods=["POST"]),
         Route("/api/templates/{name}/rename", api_template_rename, methods=["POST"]),
+        Route("/api/s3/browse", api_s3_browse, methods=["POST"]),
         Route("/api/environments", api_list, methods=["GET"]),
         Route("/api/environments/create", api_create, methods=["POST"]),
         *production_routes,
