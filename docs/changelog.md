@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Security
+
+- **Environments are isolated inside the team's coding-agent container** —
+  every environment's Agent CLI/Chat sessions, checkout, attachments and HOME
+  now belong to that environment's own Linux user (`oduflow-coder:0.4.0`).
+  Previously all sessions shared one user, so an agent in one environment could
+  read another environment's scoped MCP token from its process environment and
+  see or change other environments' checkouts and conversations. Existing
+  checkouts, attachments and Claude/Codex conversations are handed over to
+  their environment on the first start; OpenCode conversations from before the
+  upgrade are not carried over. Interactive logins (Claude `/login`,
+  `codex login`, `opencode auth login`) are now per environment; credentials in
+  `[team.X.agent_env]` keep working for every environment. Agents read other
+  branches through git instead of neighbouring checkouts. An `[agent].image`
+  explicitly pinned to an older coder image is refused; use 0.4.0 or later.
+  See decision record
+  [0079](https://github.com/oduflow/oduflow/blob/main/specs/0079-per-environment-agent-identities.md).
+
 ### Fixes
 
 - **Share links open from email** — a share link opened from another site, such

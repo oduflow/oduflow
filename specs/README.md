@@ -99,6 +99,7 @@ precursors).
 | [0076](0076-postgresql-upgrade-on-demand.md) | 2026-10-09 | PostgreSQL major upgrade on operator request, carrying service and production databases |
 | [0077](0077-server-settings-console.md) | 2026-10-08 | Server settings console: oduflow.toml edited, validated and applied from the browser at /admin |
 | [0078](0078-custom-white-label-license.md) | 2026-10-07 | Custom license: operator brand instead of Oduflow in the dashboard and MCP, domain-bound key, 30-day grace |
+| [0079](0079-per-environment-agent-identities.md) | 2026-10-17 | Per-environment uids inside the team agent container: private sessions, checkouts, attachments and HOMEs |
 
 ## Design docs
 

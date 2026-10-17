@@ -63,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.5"
+# image = "oduist/oduflow-coder:0.4.0"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -214,7 +214,7 @@ feature is enabled; public `/healthz` reports dev/prod infrastructure health.
 
 ## Coding Agent (hosting)
 
-An opt-in, per-team hosting feature: Oduflow runs one coding-agent container per team (`oduist/oduflow-coder`, Claude Code + OpenAI Codex + OpenCode) and exposes two dashboard surfaces — **Agent CLI** (the agent's TUI in the browser) and **Agent Chat** (a browser ACP chat with per-environment conversation history). The agent edits its own git checkout, `git push`es, and drives the environment through the Oduflow MCP server with a scoped per-environment token. A built-in Agent Browser MCP and Chromium provide browser automation to all three agents, with one persistent profile per environment. Hosted agents run installed MCP methods without interactive approval prompts. OpenCode supports arbitrary provider environment variables or persistent `opencode auth login`. It is off by default; enable it per team with `agent_enabled` and set provider credentials under `[team.X.agent_env]`. The agent UI is hidden for live-mount (`local_path`) environments.
+An opt-in, per-team hosting feature: Oduflow runs one coding-agent container per team (`oduist/oduflow-coder`, Claude Code + OpenAI Codex + OpenCode) and exposes two dashboard surfaces — **Agent CLI** (the agent's TUI in the browser) and **Agent Chat** (a browser ACP chat with per-environment conversation history). The agent edits its own git checkout, `git push`es, and drives the environment through the Oduflow MCP server with a scoped per-environment token. Every environment runs as its own Linux user inside the container, so environments cannot see each other's checkouts, conversations or tokens; interactive logins are per environment. A built-in Agent Browser MCP and Chromium provide browser automation to all three agents, with one persistent profile per environment. Hosted agents run installed MCP methods without interactive approval prompts. OpenCode supports arbitrary provider environment variables or persistent `opencode auth login`. It is off by default; enable it per team with `agent_enabled` and set provider credentials under `[team.X.agent_env]`. The agent UI is hidden for live-mount (`local_path`) environments.
 
 ## Database Sanitization
 

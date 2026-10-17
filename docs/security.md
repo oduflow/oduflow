@@ -219,12 +219,14 @@ actions on the environment itself (create, delete, update, recreate, switch
 branch, protect, save as template), the share routes themselves, and **Agent
 CLI**.
 
-Agent CLI is deliberately excluded: it is a terminal in the *per-team* agent
-container, whose workspace holds a checkout of every environment of the team.
-Agent Chat runs in that same container — driven over ACP at this environment's
-checkout, with this environment's scoped MCP token — so the boundary a share
-link enforces is the dashboard surface, not the confinement that the
-per-environment Bearer token gives on `/mcp/<env>`. Share with people you would
+Agent Chat runs in the *per-team* agent container, but as this environment's
+own Linux user: it reaches only this environment's checkout, attachments and
+HOME, and only this environment's scoped MCP token. Other environments'
+checkouts, conversations and tokens are closed to it (see
+[Coding Agent → Security model](agent.md#security-model)). What it still shares
+with the rest of the team is the git credential store and deploy key (below),
+the team-wide provider credentials in `[team.X.agent_env]`, and the container
+network. Agent CLI stays excluded from share links. Share with people you would
 let work in the environment, and revoke when they are done.
 
 Share secrets live in the team's data directory (`shares.json`, mode 0600), not
@@ -393,7 +395,8 @@ deploy key or machine-user key) and SSH repository URLs
 productions.
 
 Like the team's git credential store, the private key is also provisioned
-into the team's coding-agent container so agent-side clones work over SSH.
+into the team's coding-agent container (a copy in every environment's HOME) so
+agent-side clones work over SSH.
 Anyone who can drive that agent — including a visitor holding a scoped
 environment share link, via Agent Chat — can therefore read it. Treat the
 deploy key as a team-level credential: prefer registering it read-only and

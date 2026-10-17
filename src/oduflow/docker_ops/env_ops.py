@@ -20,7 +20,7 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import activity, branding, env_share, secret_store, settings
+from oduflow import activity, agent_uids, branding, env_share, secret_store, settings
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import (
     chown_recursive,
@@ -71,6 +71,8 @@ from oduflow.locking import env_wake_key, keyed_mutex
 from oduflow.naming import (
     get_agent_checkout_dir,
     get_agent_container_name,
+    get_agent_env_home_dir,
+    get_agent_env_tmp_dir,
     get_agent_home_volume_name,
     get_agent_upload_dir,
     get_agent_workspace_volume_name,
@@ -101,6 +103,8 @@ AGENT_HOME = "/home/agent"
 # written by earlier releases named it "oduflow"; that entry is dropped.
 AGENT_MCP_SERVER = "development"
 LEGACY_AGENT_MCP_SERVER = "oduflow"
+# Root-run identity management inside the coder image (docker/agent/).
+AGENT_ENV_USER_SCRIPT = "/usr/local/bin/env-user.sh"
 ENV_HOSTNAME_LABEL = "oduflow.hostname"
 ENV_HOSTNAME_SOURCE_LABEL = "oduflow.hostname_source"
 HOSTNAME_SOURCE_CUSTOM = "custom"
@@ -2950,21 +2954,89 @@ def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> 
     return f"{base}/mcp/{quote(env_name, safe='/')}"
 
 
+def agent_exec_identity(uid: int) -> tuple[str, dict[str, str]]:
+    """``docker exec`` user and environment for an environment's own uid.
+
+    Every console/chat session, checkout hook and attachment operation of an
+    environment runs as that environment's uid with its private HOME and
+    TMPDIR, so the kernel keeps environments of one team apart inside their
+    shared agent container (specs/0079-per-environment-agent-identities.md).
+    The image sets CLAUDE_CONFIG_DIR/CODEX_HOME to the shared ``agent`` HOME;
+    they are overridden here. Claude Code's self-updater is off: the shared
+    install is read-only to environments and refreshed by the container
+    entrypoint.
+    """
+    home = get_agent_env_home_dir(uid)
+    return f"{uid}:{uid}", {
+        "HOME": home,
+        "CLAUDE_CONFIG_DIR": f"{home}/.claude",
+        "CODEX_HOME": f"{home}/.codex",
+        "TMPDIR": get_agent_env_tmp_dir(uid),
+        "DISABLE_AUTOUPDATER": "1",
+    }
+
+
+def agent_session_command(cmd: list[str]) -> list[str]:
+    """Wrap a console/chat command so everything it creates is private.
+
+    ``docker exec`` has no umask option and starts with 022. Files a session
+    writes outside its own 0700 directories (``/dev/shm``, a tool that
+    hard-codes ``/tmp``) would then be readable by every other environment's
+    uid in the container.
+    """
+    return ["sh", "-c", 'umask 077; exec "$@"', "sh", *cmd]
+
+
+def agent_env_uid(
+    container: docker.models.containers.Container,
+    team: TeamSettings,
+    env_name: str,
+) -> int | None:
+    """The environment's uid if its identity and checkout are usable, else None.
+
+    A uid is returned only when that uid has an account, a HOME and a TMPDIR
+    in the (possibly recreated) container and the checkout belongs to it, so
+    an environment from before per-environment uids, a lost account or a
+    missing clone all route through :func:`ensure_agent_env_checkout`.
+    """
+    uid = agent_uids.get_uid(team, env_name)
+    if uid is None:
+        return None
+    user, env = agent_exec_identity(uid)
+    code, _ = container.exec_run(
+        [
+            "sh",
+            "-c",
+            'getent passwd "$(id -u)" >/dev/null && [ -d "$HOME" ] '
+            '&& [ -w "$TMPDIR" ] && [ -w "$1/.git" ]',
+            "sh",
+            get_agent_checkout_dir(env_name),
+        ],
+        user=user,
+        environment=env,
+    )
+    return uid if code == 0 else None
+
+
 def refresh_agent_mcp_config(
     container: docker.models.containers.Container,
     settings: Settings,
     team: TeamSettings,
     env_name: str,
+    uid: int,
 ) -> None:
-    """Refresh an existing Claude checkout's generated MCP entry and identity.
+    """Refresh an existing Claude checkout's generated MCP entries and identity.
 
     Agent workspaces persist across Oduflow/coder upgrades, so a checkout may
-    still contain the old host-gateway URL or the old ``oduflow`` server name.
-    Rewrite only the generated ``development`` entry and drop the legacy one,
-    preserving Agent Browser and any user-added servers. The token remains an
-    environment placeholder and is never written to disk. A generated
-    per-checkout commit email (``<user>@<slug>.local``) follows the brand.
+    still contain an old host-gateway URL, the old ``oduflow`` server name or
+    predate the built-in Agent Browser. Rewrite only the generated
+    ``development`` and ``agent_browser`` entries and drop the legacy one,
+    preserving any user-added servers. The token remains an environment
+    placeholder and is never written to disk. A generated per-checkout commit
+    email (``<user>@<slug>.local``) follows the brand. Runs as the
+    environment's own ``uid`` (the only one that can write its checkout).
     """
+    user, env = agent_exec_identity(uid)
     config_path = os.path.join(get_agent_checkout_dir(env_name), ".mcp.json")
     script = """\
 set -eu
@@ -2975,7 +3047,10 @@ brand_slug=$3
 tmp_path="${config_path}.tmp.$$"
 trap 'rm -f "$tmp_path"' EXIT
 jq --arg url "$mcp_url" --arg name "$4" --arg legacy "$5" \
-  '.mcpServers |= (del(.[$legacy]) | .[$name] = {type: "http", url: $url, headers: {Authorization: "Bearer ${ODUFLOW_MCP_TOKEN}"}})' \
+  '.mcpServers = ((if (.mcpServers | type) == "object" then .mcpServers else {} end)
+    | del(.[$legacy])
+    | .agent_browser = {type: "stdio", command: "agent-browser", args: ["mcp", "--tools", "all"]}
+    | .[$name] = {type: "http", url: $url, headers: {Authorization: "Bearer ${ODUFLOW_MCP_TOKEN}"}})' \
   "$config_path" > "$tmp_path"
 mv "$tmp_path" "$config_path"
 checkout=$(dirname "$config_path")
@@ -2984,7 +3059,8 @@ case "$email" in
   *@*.local) git -C "$checkout" config user.email "${email%@*}@${brand_slug}.local" ;;
 esac
 """
-    exit_code, output = container.exec_run(
+    _agent_exec(
+        container,
         [
             "sh",
             "-c",
@@ -2996,20 +3072,10 @@ esac
             AGENT_MCP_SERVER,
             LEGACY_AGENT_MCP_SERVER,
         ],
-        user=AGENT_USER,
+        f"Agent MCP config refresh for '{env_name}'",
+        user=user,
+        environment=env,
     )
-    if exit_code not in (0, None):
-        detail = (
-            output.decode("utf-8", "replace")
-            if isinstance(output, (bytes, bytearray))
-            else output
-        )
-        logger.warning(
-            "Agent MCP config refresh for '%s' exited %s: %s",
-            env_name,
-            exit_code,
-            detail,
-        )
 
 
 def _agent_container_config(
@@ -3039,6 +3105,9 @@ def _agent_container_config(
         },
         "extra_hosts": {"host.docker.internal": "host-gateway"},
         "shm_size": "1g",
+        # A real PID 1 reaps the orphans of ended sessions and of the
+        # processes env-user.sh kills when an environment is deleted.
+        "init": True,
         "restart_policy": {"Name": "unless-stopped"},
     }
 
@@ -3086,9 +3155,10 @@ def _prepare_agent_volumes(
     Older coder images mounted HOME at ``/root`` and consequently left both
     named volumes root-owned. A short-lived, networkless init container runs
     as root only to migrate that existing data and copy the host credential
-    store and team SSH deploy key; the long-lived container and every agent
-    exec run as ``agent``. Marker files avoid recursively walking large
-    checkouts after migration.
+    store and team SSH deploy key (the sources env-user.sh copies into every
+    environment's HOME); the long-lived container runs as ``agent`` and every
+    session as its environment's own uid. Marker files avoid recursively
+    walking large checkouts after migration.
     """
     volumes: dict[str, dict[str, str]] = {
         home_volume: {"bind": AGENT_HOME, "mode": "rw"},
@@ -3111,6 +3181,11 @@ if ! id agent >/dev/null 2>&1; then
     echo "build the current docker/agent image and configure [agent].image to that tag" >&2
     exit 64
 fi
+if [ ! -x /usr/local/bin/env-user.sh ]; then
+    echo "incompatible coder image: missing per-environment identities (env-user.sh)" >&2
+    echo "build the current docker/agent image and configure [agent].image to that tag" >&2
+    exit 64
+fi
 if [ ! -f /home/agent/.oduflow-owner-v2 ]; then
     chown -R agent:agent /home/agent
     touch /home/agent/.oduflow-owner-v2
@@ -3129,23 +3204,6 @@ if [ -f /run/oduflow/ssh-key ]; then
     install -d -m 700 -o agent -g agent /home/agent/.ssh
     install -m 600 -o agent -g agent \
         /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
-    # Oduflow's SSH policy lives in its own file, rewritten on every
-    # container creation so policy changes reach existing (persistent) homes;
-    # the user-editable config only carries the Include. Mirrors the
-    # server-side team_ssh_command options.
-    printf '%s\\n' 'Host *' '  IdentitiesOnly yes' '  BatchMode yes' \
-        '  StrictHostKeyChecking accept-new' > /home/agent/.ssh/oduflow_config
-    chown agent:agent /home/agent/.ssh/oduflow_config
-    chmod 600 /home/agent/.ssh/oduflow_config
-    if [ ! -f /home/agent/.ssh/config ]; then
-        printf 'Include oduflow_config\\n' > /home/agent/.ssh/config
-    elif ! grep -q 'Include oduflow_config' /home/agent/.ssh/config; then
-        { printf 'Include oduflow_config\\n'; \
-          cat /home/agent/.ssh/config; } > /home/agent/.ssh/config.tmp
-        mv /home/agent/.ssh/config.tmp /home/agent/.ssh/config
-    fi
-    chown agent:agent /home/agent/.ssh/config
-    chmod 600 /home/agent/.ssh/config
 fi
 """
     client.containers.run(
@@ -3164,16 +3222,17 @@ def _ensure_agent_container(
 ) -> None:
     """Ensure the team's coding-agent container (best-effort, opt-in).
 
-    One container serves every environment of the team. Its HOME (auth +
-    sessions) and /workspace (one checkout per environment, at
-    /workspace/<slug>) live on persistent named volumes, so a login done once
-    survives recreation and is shared by the team's environments. Per-env
-    checkouts are created by ``_agent_add_env``; the agent reaches each
-    environment only through the Oduflow MCP server (git push ->
+    One container serves every environment of the team, each environment as
+    its own uid with a private HOME (logins + sessions) and checkout
+    (/workspace/<slug>), all on persistent named volumes, so they survive
+    recreation. Identities and checkouts are created by ``_agent_add_env`` and
+    restored for every environment after a (re)creation; the agent reaches
+    each environment only through the Oduflow MCP server (git push ->
     pull_and_apply). Config (oduflow.toml) is the source of truth: an existing
     container created with a different agent config (credentials, image, port)
     is recreated automatically. Never fatal to the caller.
-    See specs/0029-agent-console-and-chat.md.
+    See specs/0029-agent-console-and-chat.md and
+    specs/0079-per-environment-agent-identities.md.
     """
     if not team.agent_enabled:
         return
@@ -3307,12 +3366,16 @@ def _ensure_agent_container(
             # feeds the config hash and may be "" while the key is usable.
             ssh_key_file if os.path.isfile(ssh_key_file) else None,
         )
-        client.containers.run(
+        container = client.containers.run(
             name=container_name,
             labels=labels,
             **container_config,
         )
         logger.info("Agent container ensured", extra={"container": container_name})
+        # Accounts live in the container layer, so a fresh container needs
+        # every environment's identity back (and re-seeds every HOME with the
+        # possibly changed config) before any session starts.
+        _agent_sync_identities(client, settings, team, container)
         # Report which Claude credential the (re)created container will use, so
         # authentication failures can be diagnosed from the logs. The secret
         # value is never logged, only the selected mode.
@@ -3326,6 +3389,101 @@ def _ensure_agent_container(
         logger.warning("Agent container ensure failed", exc_info=True)
 
 
+def _agent_exec(
+    container: docker.models.containers.Container,
+    cmd: list[str],
+    what: str,
+    **kwargs: Any,
+) -> bool:
+    """Run one agent-container exec; log a non-zero exit and report success."""
+    exit_code, output = container.exec_run(cmd, **kwargs)
+    if exit_code in (0, None):
+        return True
+    detail = (
+        output.decode("utf-8", "replace")
+        if isinstance(output, (bytes, bytearray))
+        else output
+    )
+    logger.warning("%s exited %s: %s", what, exit_code, detail)
+    return False
+
+
+def _team_env_names(
+    client: DockerClient, settings: Settings, team: TeamSettings
+) -> list[str]:
+    """Names of the team's environments, from their container labels."""
+    containers = client.containers.list(
+        all=True,
+        filters={
+            "label": [
+                f"{settings.managed_label}=true",
+                f"{settings.team_label}={team.team_id}",
+            ]
+        },
+        ignore_removed=True,
+    )
+    names = {
+        container.labels.get(settings.branch_label)
+        for container in containers
+        if container.name.startswith(settings.prefix)
+    }
+    return sorted(name for name in names if name)
+
+
+def _agent_purge_removed(
+    container: docker.models.containers.Container, team: TeamSettings
+) -> None:
+    """Finish the cleanup of deleted environments (best-effort).
+
+    A deletion while the agent container was stopped or gone, or a failed
+    ``env-user.sh remove``, leaves the retired uid's checkout, attachments and
+    HOME behind. They are removed before any environment is provisioned, so a
+    new environment that reuses the slug never inherits them. A uid stays
+    pending until its removal succeeds.
+    """
+    try:
+        for uid, slug in agent_uids.pending_removals(team).items():
+            if _agent_exec(
+                container,
+                [AGENT_ENV_USER_SCRIPT, "remove", slug, str(uid)],
+                f"Agent cleanup of deleted environment '{slug}' (uid {uid})",
+                user="root",
+            ):
+                agent_uids.forget_removed(team, uid)
+    except Exception:
+        logger.warning("Agent cleanup of deleted environments failed", exc_info=True)
+
+
+def _agent_sync_identities(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    container: docker.models.containers.Container,
+) -> None:
+    """Give every environment of the team its identity in a fresh container.
+
+    First finishes pending cleanups of deleted environments, then assigns
+    uids to environments that predate per-environment identities (the
+    one-time migration then hands their checkouts, attachments and transcripts
+    over to them) and restores the accounts of the others. Best-effort.
+    """
+    _agent_purge_removed(container, team)
+    try:
+        pairs = []
+        for env_name in _team_env_names(client, settings, team):
+            slug = slugify_branch(env_name)
+            if slug:
+                pairs.append(f"{slug}:{agent_uids.allocate_uid(team, env_name)}")
+        _agent_exec(
+            container,
+            [AGENT_ENV_USER_SCRIPT, "sync", *pairs],
+            "Agent identity sync",
+            user="root",
+        )
+    except Exception:
+        logger.warning("Agent identity sync failed", exc_info=True)
+
+
 def _agent_add_env(
     client: DockerClient,
     settings: Settings,
@@ -3335,11 +3493,12 @@ def _agent_add_env(
     branch: str,
     git_user: str,
 ) -> None:
-    """Create/refresh one environment's checkout in the team's agent container.
+    """Create/refresh one environment's identity and checkout.
 
-    Ensures the container exists, then execs clone-env.sh to clone/fetch the
-    branch into /workspace/<slug> and write that checkout's Claude .mcp.json.
-    Best-effort: never fatal to environment creation.
+    Ensures the container exists, gives the environment its own uid and
+    private HOME (env-user.sh, as root), then execs clone-env.sh AS THAT UID to
+    clone/fetch the branch into /workspace/<slug> and write that checkout's
+    Claude .mcp.json. Best-effort: never fatal to environment creation.
     """
     if not team.agent_enabled:
         return
@@ -3348,6 +3507,17 @@ def _agent_add_env(
         container = client.containers.get(
             get_agent_container_name(team.team_id, settings.prefix)
         )
+        _agent_purge_removed(container, team)
+        slug = slugify_branch(env_name)
+        uid = agent_uids.allocate_uid(team, env_name)
+        if not _agent_exec(
+            container,
+            [AGENT_ENV_USER_SCRIPT, "provision", slug, str(uid)],
+            f"Agent identity setup for '{env_name}'",
+            user="root",
+        ):
+            return
+        user, env = agent_exec_identity(uid)
         # The scoped per-env URL only; no token argument — the checkout's
         # .mcp.json holds a ${ODUFLOW_MCP_TOKEN} placeholder that each session
         # resolves from its own exec env.
@@ -3355,23 +3525,17 @@ def _agent_add_env(
             "/usr/local/bin/clone-env.sh",
             repo_url,
             branch,
-            slugify_branch(env_name),
+            slug,
             get_agent_mcp_url(settings, team, env_name),
             git_user,
         ]
-        exit_code, output = container.exec_run(cmd, user=AGENT_USER)
-        if exit_code not in (0, None):
-            detail = (
-                output.decode("utf-8", "replace")
-                if isinstance(output, (bytes, bytearray))
-                else output
-            )
-            logger.warning(
-                "Agent checkout setup for '%s' exited %s: %s",
-                env_name,
-                exit_code,
-                detail,
-            )
+        _agent_exec(
+            container,
+            cmd,
+            f"Agent checkout setup for '{env_name}'",
+            user=user,
+            environment=env,
+        )
     except Exception:
         logger.warning("Agent checkout setup failed for '%s'", env_name, exc_info=True)
 
@@ -3379,12 +3543,13 @@ def _agent_add_env(
 def ensure_agent_env_checkout(
     settings: Settings, team: TeamSettings, env_name: str
 ) -> None:
-    """Ensure an environment's checkout exists in the team's agent container.
+    """Ensure an environment's identity and checkout in the agent container.
 
-    Clones it on demand (idempotent) by reading repo/branch/git_user from the
-    environment's Odoo container labels. Used when opening a console/chat so
-    that environments created before the agent feature — or a fresh workspace
-    volume — get their ``/workspace/<slug>`` checkout without a full recreate.
+    Provisions and clones on demand (idempotent) by reading repo/branch/git_user
+    from the environment's Odoo container labels. Used when opening a
+    console/chat so that environments created before the agent feature (or
+    before per-environment identities), or a fresh workspace volume, get their
+    uid and ``/workspace/<slug>`` checkout without a full recreate.
     Best-effort.
     """
     if not team.agent_enabled:
@@ -3421,10 +3586,17 @@ def _agent_rename_env(
 
     Deliberately a move, not remove + re-clone: the checkout can hold the coding
     agent's uncommitted work, which ``_agent_remove_env`` would delete. The
-    caller follows with :func:`_agent_add_env`, which rewrites that checkout's
-    ``.mcp.json`` with the renamed environment's scoped MCP URL. Best-effort,
-    like every other agent-container side effect.
+    environment keeps its uid (and with it its HOME, logins and the ownership
+    of what is moved). The caller follows with :func:`_agent_add_env`, which
+    rewrites that checkout's ``.mcp.json`` with the renamed environment's
+    scoped MCP URL. Best-effort, like every other agent-container side effect.
     """
+    # The uid follows the environment even while the agent is disabled, so a
+    # later re-enable finds the renamed environment's data under its owner.
+    try:
+        agent_uids.rename_env(team, old_name, new_name)
+    except Exception:
+        logger.warning("Agent identity rename failed for '%s'", old_name, exc_info=True)
     if not team.agent_enabled:
         return
     # Same guard as _agent_remove_env: an empty slug would make the paths below
@@ -3446,6 +3618,8 @@ def _agent_rename_env(
     ):
         if old_dir == new_dir:
             continue
+        # Root: the parents belong to the shared agent user, the directories
+        # to the environment.
         with contextlib.suppress(Exception):
             container.exec_run(
                 [
@@ -3454,15 +3628,19 @@ def _agent_rename_env(
                     f'[ -d "{old_dir}" ] || exit 0; rm -rf -- "{new_dir}"; '
                     f'mv -- "{old_dir}" "{new_dir}"',
                 ],
-                user=AGENT_USER,
+                user="root",
             )
 
 
 def _agent_remove_env(
     client: DockerClient, settings: Settings, team: TeamSettings, env_name: str
 ) -> None:
-    """Remove one environment's checkout and Agent Chat attachments.
+    """Remove one environment's identity, checkout, attachments and HOME.
 
+    Its uid is retired first (never handed out again), then its running
+    sessions are killed and its files removed. If the agent container cannot
+    do that now (stopped, gone, or the removal fails), the uid stays pending
+    and the cleanup is retried before any environment is provisioned again.
     Best-effort; the container itself keeps running (it serves other envs).
     """
     # A name that slugifies to nothing would make the checkout dir /workspace/
@@ -3471,6 +3649,11 @@ def _agent_remove_env(
     if not slugify_branch(env_name):
         logger.warning("Agent checkout removal skipped: empty slug for '%s'", env_name)
         return
+    try:
+        uid = agent_uids.retire_uid(team, env_name)
+    except Exception:
+        logger.warning("Agent identity lookup failed for '%s'", env_name, exc_info=True)
+        uid = None
     try:
         container = client.containers.get(
             get_agent_container_name(team.team_id, settings.prefix)
@@ -3482,6 +3665,11 @@ def _agent_remove_env(
             "Agent checkout removal failed for '%s'", env_name, exc_info=True
         )
         return
+    if uid is not None:
+        _agent_purge_removed(container, team)
+        return
+    # An environment from before per-environment identities: its checkout
+    # and attachments still belong to the shared agent user.
     with contextlib.suppress(Exception):
         container.exec_run(
             [
@@ -3491,7 +3679,7 @@ def _agent_remove_env(
                 get_agent_checkout_dir(env_name),
                 get_agent_upload_dir(env_name),
             ],
-            user=AGENT_USER,
+            user="root",
         )
 
 

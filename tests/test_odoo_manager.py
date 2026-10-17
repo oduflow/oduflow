@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 import docker
-from oduflow import po_tools
+from oduflow import agent_uids, po_tools
 from oduflow.docker_ops import env_ops, odoo_ops, system_ops
 from oduflow.errors import (
     ConflictError,
@@ -4351,12 +4351,19 @@ class TestAgentContainer:
     """The agent is a SINGLE per-team container with persistent HOME/workspace
     volumes; per-env checkouts are added/removed via `docker exec`. It is
     opt-in per team (a hosting feature) and configured statically in
-    oduflow.toml. See specs/0029-agent-console-and-chat.md."""
+    oduflow.toml. Every environment runs as its own uid inside it. See
+    specs/0029-agent-console-and-chat.md and
+    specs/0079-per-environment-agent-identities.md."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_data_dir(self, tmp_path):
+        # The per-environment uid registry lives in the team data dir.
+        self._data_dir = str(tmp_path)
 
     def _team(self, **kw):
         base = dict(
             team_id="1",
-            data_dir="/tmp/flow-test",
+            data_dir=self._data_dir,
             auth_token="tok",
             agent_enabled=True,
         )
@@ -4396,17 +4403,69 @@ class TestAgentContainer:
     def test_refresh_agent_mcp_config_uses_current_public_url(self):
         team = self._team(hostname="mirageflow.ca")
         settings = self._settings(team=team, routing_mode="traefik")
+        uid = agent_uids.allocate_uid(team, "feature/x")
         container = MagicMock()
         container.exec_run.return_value = (0, b"")
 
-        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x")
+        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x", uid)
 
         cmd = container.exec_run.call_args.args[0]
         assert cmd[:2] == ["sh", "-c"]
         assert cmd[4] == "/workspace/feature-x/.mcp.json"
         assert cmd[5] == "https://mirageflow.ca/mcp/feature/x"
         assert "ODUFLOW_MCP_TOKEN" in cmd[2]
-        assert container.exec_run.call_args.kwargs["user"] == "agent"
+        assert "agent_browser" in cmd[2]
+        # Only the environment's own uid can write its checkout.
+        kwargs = container.exec_run.call_args.kwargs
+        assert kwargs["user"] == f"{uid}:{uid}"
+        assert kwargs["environment"]["HOME"] == f"/home/agent/envs/{uid}"
+
+    def test_exec_identity_is_the_environments_own_uid_home_and_tmpdir(self):
+        user, env = env_ops.agent_exec_identity(20001)
+
+        assert user == "20001:20001"
+        assert env == {
+            "HOME": "/home/agent/envs/20001",
+            "CLAUDE_CONFIG_DIR": "/home/agent/envs/20001/.claude",
+            "CODEX_HOME": "/home/agent/envs/20001/.codex",
+            "TMPDIR": "/tmp/user/20001",
+            "DISABLE_AUTOUPDATER": "1",
+        }
+
+    def test_session_command_runs_with_a_private_umask(self):
+        assert env_ops.agent_session_command(["claude", "--model", "x y"]) == [
+            "sh",
+            "-c",
+            'umask 077; exec "$@"',
+            "sh",
+            "claude",
+            "--model",
+            "x y",
+        ]
+
+    def test_env_uid_checks_account_home_tmpdir_and_checkout_as_the_env(self):
+        team = self._team()
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        # No uid yet (an environment from before per-environment identities).
+        assert env_ops.agent_env_uid(container, team, "feature/x") is None
+        container.exec_run.assert_not_called()
+
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        assert env_ops.agent_env_uid(container, team, "feature/x") == uid
+        cmd = container.exec_run.call_args.args[0]
+        assert cmd[-1] == "/workspace/feature-x"
+        assert "getent passwd" in cmd[2]
+        assert '[ -w "$TMPDIR" ]' in cmd[2]
+        assert container.exec_run.call_args.kwargs["user"] == f"{uid}:{uid}"
+        assert (
+            container.exec_run.call_args.kwargs["environment"]["TMPDIR"]
+            == f"/tmp/user/{uid}"
+        )
+
+        container.exec_run.return_value = (1, b"")
+        assert env_ops.agent_env_uid(container, team, "feature/x") is None
 
     def test_refresh_agent_mcp_config_renames_server_and_follows_brand(self, tmp_path):
         import json
@@ -4419,7 +4478,7 @@ class TestAgentContainer:
         settings = self._settings(team=team, routing_mode="traefik")
         container = MagicMock()
         container.exec_run.return_value = (0, b"")
-        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x")
+        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x", 20000)
         cmd = container.exec_run.call_args.args[0]
         assert cmd[6:] == ["oduflow", "development", "oduflow"]
 
@@ -4444,7 +4503,8 @@ class TestAgentContainer:
         subprocess.run(script_args, check=True)
 
         servers = json.loads(config.read_text())["mcpServers"]
-        assert set(servers) == {"custom", "development"}
+        # The legacy entry is dropped; Agent Browser is (re)added alongside.
+        assert set(servers) == {"agent_browser", "custom", "development"}
         assert servers["development"]["url"] == "https://mirageflow.ca/mcp/feature/x"
         email = subprocess.run(
             ["git", "-C", str(checkout), "config", "user.email"],
@@ -4565,6 +4625,8 @@ class TestAgentContainer:
 
         team = self._team()
         s = self._settings(team=team)
+        created_container = mock_docker_client.containers.run.return_value
+        created_container.exec_run.return_value = (0, b"")
         env_ops._ensure_agent_container(mock_docker_client, s, team)
 
         # Both persistent volumes created.
@@ -4600,6 +4662,18 @@ class TestAgentContainer:
         assert s.branch_label not in kwargs["labels"]
         assert kwargs["extra_hosts"] == {"host.docker.internal": "host-gateway"}
         assert kwargs["shm_size"] == "1g"
+        # A real PID 1 reaps ended sessions and killed environments' processes.
+        assert kwargs["init"] is True
+        # Accounts live in the container layer: a fresh container gets every
+        # environment's identity back before any session starts (as root).
+        created_container.exec_run.assert_called_once()
+        assert created_container.exec_run.call_args.args[0][:2] == [
+            "/usr/local/bin/env-user.sh",
+            "sync",
+        ]
+        assert created_container.exec_run.call_args.kwargs["user"] == "root"
+        # An image without per-environment identities is refused up front.
+        assert "env-user.sh" in init_kwargs["command"][2]
         vols = kwargs["volumes"]
         assert vols["oduflow-1-agent-home"]["bind"] == "/home/agent"
         assert vols["oduflow-1-agent-workspace"]["bind"] == "/workspace"
@@ -4849,10 +4923,65 @@ class TestAgentContainer:
         assert env["OPENAI_API_KEY"] == "from-config"  # config wins
         assert env["MY_FLAG"] == "1"
 
-    def test_add_env_execs_clone_script(self, monkeypatch, mock_docker_client):
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    def _no_provider_keys(self, monkeypatch):
+        for key in env_ops._AGENT_PROVIDER_CREDENTIALS:
+            monkeypatch.delenv(key, raising=False)
+
+    def test_sync_gives_every_existing_environment_an_identity(
+        self, mock_docker_client
+    ):
+        # Environments that predate per-environment identities get a uid on
+        # the next container (re)creation; known ones keep theirs. Deletions
+        # the container could not carry out are finished first.
+        team = self._team()
+        s = self._settings(team=team)
+        known = agent_uids.allocate_uid(team, "main")
+        deleted = agent_uids.allocate_uid(team, "gone")
+        agent_uids.retire_uid(team, "gone")
+
+        def _labelled(name, env_name):
+            c = MagicMock()
+            c.name = name
+            c.labels = {s.branch_label: env_name} if env_name else {}
+            return c
+
+        mock_docker_client.containers.list.return_value = [
+            _labelled("oduflow-1-main-odoo", "main"),
+            _labelled("oduflow-1-main-db", "main"),
+            _labelled("oduflow-1-feature-x-odoo", "feature/x"),
+            _labelled("oduflow-1-agent", None),
+            _labelled("unrelated", "other"),
+        ]
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        env_ops._agent_sync_identities(mock_docker_client, s, team, container)
+
+        new = agent_uids.get_uid(team, "feature/x")
+        assert new is not None and new not in (known, deleted)
+        assert agent_uids.get_uid(team, "other") is None
+        remove, sync = container.exec_run.call_args_list
+        assert remove.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "remove",
+            "gone",
+            str(deleted),
+        ]
+        assert sync.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "sync",
+            f"feature-x:{new}",
+            f"main:{known}",
+        ]
+        assert all(
+            c.kwargs["user"] == "root" for c in container.exec_run.call_args_list
+        )
+        assert agent_uids.pending_removals(team) == {}
+
+    def test_add_env_provisions_identity_then_clones_as_the_env(
+        self, monkeypatch, mock_docker_client
+    ):
+        self._no_provider_keys(monkeypatch)
         team = self._team()
         s = self._settings(team=team)
         container = self._existing_container(s, team, monkeypatch)
@@ -4870,8 +4999,17 @@ class TestAgentContainer:
             "alice",
         )
 
-        container.exec_run.assert_called_once()
-        cmd = container.exec_run.call_args.args[0]
+        uid = agent_uids.get_uid(team, "feature/x")
+        assert uid is not None
+        provision, clone = container.exec_run.call_args_list
+        assert provision.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "provision",
+            "feature-x",
+            str(uid),
+        ]
+        assert provision.kwargs["user"] == "root"
+        cmd = clone.args[0]
         assert cmd[0] == "/usr/local/bin/clone-env.sh"
         assert cmd[1] == "https://x/r.git"
         assert cmd[2] == "feature/x"
@@ -4880,7 +5018,64 @@ class TestAgentContainer:
         assert cmd[4] == "http://host.docker.internal:8000/mcp/feature/x"
         assert cmd[5] == "alice"
         assert "tok" not in cmd
-        assert container.exec_run.call_args.kwargs["user"] == "agent"
+        # The checkout belongs to the environment's own uid, cloned with the
+        # git credentials seeded into its own HOME.
+        assert clone.kwargs["user"] == f"{uid}:{uid}"
+        assert clone.kwargs["environment"]["HOME"] == f"/home/agent/envs/{uid}"
+
+    def test_add_env_finishes_pending_removals_before_provisioning(
+        self, monkeypatch, mock_docker_client
+    ):
+        # A new environment that reuses a deleted one's slug must never meet
+        # the old checkout: the deferred cleanup runs before provisioning.
+        self._no_provider_keys(monkeypatch)
+        team = self._team()
+        s = self._settings(team=team)
+        old = agent_uids.allocate_uid(team, "feature/x")
+        agent_uids.retire_uid(team, "feature/x")
+        container = self._existing_container(s, team, monkeypatch)
+        container.exec_run.return_value = (0, b"")
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = container
+
+        env_ops._agent_add_env(
+            mock_docker_client, s, team, "feature/x", "https://x/r.git", "x", ""
+        )
+
+        new = agent_uids.get_uid(team, "feature/x")
+        cmds = [c.args[0] for c in container.exec_run.call_args_list]
+        assert cmds[0] == [
+            "/usr/local/bin/env-user.sh",
+            "remove",
+            "feature-x",
+            str(old),
+        ]
+        assert cmds[1] == [
+            "/usr/local/bin/env-user.sh",
+            "provision",
+            "feature-x",
+            str(new),
+        ]
+        assert new != old
+        assert agent_uids.pending_removals(team) == {}
+
+    def test_add_env_does_not_clone_when_provisioning_fails(
+        self, monkeypatch, mock_docker_client
+    ):
+        self._no_provider_keys(monkeypatch)
+        team = self._team()
+        s = self._settings(team=team)
+        container = self._existing_container(s, team, monkeypatch)
+        container.exec_run.return_value = (1, b"useradd failed")
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = container
+
+        env_ops._agent_add_env(
+            mock_docker_client, s, team, "main", "https://x/r.git", "main", ""
+        )
+
+        container.exec_run.assert_called_once()
+        assert container.exec_run.call_args.args[0][1] == "provision"
 
     def test_add_env_skipped_when_disabled(self, mock_docker_client):
         team = self._team(agent_enabled=False)
@@ -4894,15 +5089,14 @@ class TestAgentContainer:
             "alice",
         )
         mock_docker_client.containers.get.assert_not_called()
+        assert agent_uids.get_uid(team, "feature/x") is None
 
     def test_ensure_env_checkout_clones_from_labels(
         self, monkeypatch, mock_docker_client
     ):
         # Opening a console for a pre-existing env reads repo/branch/user from the
         # Odoo container labels and clones on demand.
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        self._no_provider_keys(monkeypatch)
         team = self._team()
         s = self._settings(team=team)
         odoo = MagicMock()
@@ -4922,7 +5116,7 @@ class TestAgentContainer:
 
         env_ops.ensure_agent_env_checkout(s, team, "prod")
 
-        agent.exec_run.assert_called_once()
+        uid = agent_uids.get_uid(team, "prod")
         cmd = agent.exec_run.call_args.args[0]
         assert cmd[0] == "/usr/local/bin/clone-env.sh"
         assert cmd[1] == "https://x/r.git"
@@ -4930,16 +5124,14 @@ class TestAgentContainer:
         assert cmd[3] == "prod"  # slug from env name -> checkout dir
         assert cmd[4] == "http://host.docker.internal:8000/mcp/prod"
         assert cmd[5] == "alice"
-        assert agent.exec_run.call_args.kwargs["user"] == "agent"
+        assert agent.exec_run.call_args.kwargs["user"] == f"{uid}:{uid}"
 
     def test_ensure_env_checkout_skips_repo_for_live_mount(
         self, monkeypatch, mock_docker_client
     ):
         # A live-mount env has no repo to clone; the hook passes an empty URL
         # (clone-env.sh then skips) instead of cloning a stale repo label.
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        self._no_provider_keys(monkeypatch)
         team = self._team()
         s = self._settings(team=team)
         odoo = MagicMock()
@@ -4973,7 +5165,67 @@ class TestAgentContainer:
 
         agent.exec_run.assert_not_called()
 
-    def test_remove_env_removes_checkout_and_chat_attachments(self, mock_docker_client):
+    def test_remove_env_drops_identity_and_retires_uid(self, mock_docker_client):
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        agent = MagicMock()
+        agent.exec_run.return_value = (0, b"")
+        mock_docker_client.containers.get.return_value = agent
+
+        env_ops._agent_remove_env(
+            mock_docker_client, self._settings(team=team), team, "feature/x"
+        )
+
+        # Kills its sessions and deletes checkout, attachments and HOME.
+        assert agent.exec_run.call_args.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "remove",
+            "feature-x",
+            str(uid),
+        ]
+        assert agent.exec_run.call_args.kwargs["user"] == "root"
+        assert agent_uids.get_uid(team, "feature/x") is None
+        assert agent_uids.pending_removals(team) == {}
+        # Never handed out again, not even to an environment of the same name.
+        assert agent_uids.allocate_uid(team, "feature/x") > uid
+
+    def test_remove_env_keeps_cleanup_pending_when_it_cannot_run(
+        self, mock_docker_client
+    ):
+        # Container gone (agent disabled, or stopped and removed): the files
+        # stay on the volumes, so the uid waits for a later cleanup.
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        env_ops._agent_remove_env(
+            mock_docker_client, self._settings(team=team), team, "feature/x"
+        )
+
+        assert agent_uids.get_uid(team, "feature/x") is None
+        assert agent_uids.pending_removals(team) == {uid: "feature-x"}
+
+    def test_remove_env_keeps_cleanup_pending_when_it_fails(self, mock_docker_client):
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        agent = MagicMock()
+        agent.exec_run.return_value = (1, b"files of environment remain")
+        mock_docker_client.containers.get.return_value = agent
+
+        env_ops._agent_remove_env(
+            mock_docker_client, self._settings(team=team), team, "feature/x"
+        )
+
+        assert agent_uids.pending_removals(team) == {uid: "feature-x"}
+
+        # A stopped container makes the exec raise; still pending, no crash.
+        agent.exec_run.side_effect = docker.errors.APIError("not running")
+        env_ops._agent_purge_removed(agent, team)
+        assert agent_uids.pending_removals(team) == {uid: "feature-x"}
+
+    def test_remove_env_without_identity_removes_checkout_and_chat_attachments(
+        self, mock_docker_client
+    ):
         team = self._team()
         agent = MagicMock()
         mock_docker_client.containers.get.return_value = agent
@@ -4989,6 +5241,39 @@ class TestAgentContainer:
             "/workspace/feature-x",
             "/workspace/.oduflow-uploads/feature-x",
         ]
+        assert agent.exec_run.call_args.kwargs["user"] == "root"
+
+    def test_rename_env_keeps_the_uid_even_without_a_container(
+        self, mock_docker_client
+    ):
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "old")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        env_ops._agent_rename_env(
+            mock_docker_client, self._settings(team=team), team, "old", "new"
+        )
+
+        assert agent_uids.get_uid(team, "new") == uid
+        assert agent_uids.get_uid(team, "old") is None
+
+    def test_rename_env_moves_checkout_and_attachments_as_root(
+        self, mock_docker_client
+    ):
+        team = self._team()
+        agent = MagicMock()
+        mock_docker_client.containers.get.return_value = agent
+
+        env_ops._agent_rename_env(
+            mock_docker_client, self._settings(team=team), team, "old", "new"
+        )
+
+        moves = [c.args[0][2] for c in agent.exec_run.call_args_list]
+        assert 'mv -- "/workspace/old" "/workspace/new"' in moves[0]
+        assert (
+            'mv -- "/workspace/.oduflow-uploads/old" "/workspace/.oduflow-uploads/new"'
+        ) in moves[1]
+        assert all(c.kwargs["user"] == "root" for c in agent.exec_run.call_args_list)
 
 
 class TestFinalizeShellScript:

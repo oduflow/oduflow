@@ -342,6 +342,27 @@ def get_agent_upload_dir(env_name: str) -> str:
     return f"/workspace/.oduflow-uploads/{slugify_branch(env_name)}"
 
 
+def get_agent_env_home_dir(uid: int) -> str:
+    """HOME of an environment's own uid inside the team's agent container.
+
+    Lives on the persistent home volume, keyed by uid rather than slug so a
+    renamed environment keeps its logins and transcripts. Created (0700) by
+    the coder image's ``env-user.sh``. See
+    specs/0079-per-environment-agent-identities.md.
+    """
+    return f"/home/agent/envs/{uid}"
+
+
+def get_agent_env_tmp_dir(uid: int) -> str:
+    """Private TMPDIR of an environment's own uid in the team's agent container.
+
+    ``/tmp/user`` is root-owned 0711 in the coder image, so no environment can
+    pre-create another's directory; ``env-user.sh`` creates this one (0700)
+    in the container layer, where it is wiped on every recreation.
+    """
+    return f"/tmp/user/{uid}"
+
+
 def get_workspace_path(env_name: str, workspaces_dir: str) -> str:
     return os.path.join(workspaces_dir, env_name.replace("/", "-"))
 
