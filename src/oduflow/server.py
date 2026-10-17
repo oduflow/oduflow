@@ -5760,6 +5760,9 @@ def get_production_info(name: str, ctx: Context | None = None) -> str:
     settings = _get_settings()
     team = _resolve_team(ctx)
     info = production_ops.get_production_info(settings, team, name)
+    # Credential-valued odoo.conf overrides are masked for agents; the
+    # dashboard reads the same function and shows the operator the values.
+    info["odoo_conf"] = production_ops.mask_odoo_conf(info.get("odoo_conf"))
     import json as _json
 
     return _json.dumps(info, indent=2)
@@ -5998,7 +6001,10 @@ def set_production_odoo_conf(
     worker settings, and survive deploys and retunes. Keys managed by Oduflow
     (addons_path, data_dir, db_*, the listen interface/ports and their
     xmlrpc* aliases) cannot be overridden. Current overrides are shown by
-    get_production_info.
+    get_production_info. Enabling Odoo's database manager
+    ("list_db": "True") requires an "admin_passwd" override of at least 12
+    characters. Credential values (admin_passwd, smtp_password) are stored
+    but reported back masked.
 
     Args:
         name: The production name.
@@ -6019,7 +6025,7 @@ def set_production_odoo_conf(
         unset_options=unset_list,
         restart=restart,
     )
-    conf = result["odoo_conf"]
+    conf = production_ops.mask_odoo_conf(result["odoo_conf"])
     conf_desc = "\n".join(f"  {k} = {v}" for k, v in sorted(conf.items())) or "  (none)"
     if result.get("message"):
         return f"{result['message']}\nCurrent overrides:\n{conf_desc}"
@@ -7161,6 +7167,9 @@ def _run_retune_postgres(
         if existing is not None:
             _backup(path)
         path.write_text(candidate, encoding="utf-8")
+        # Same owner-only mode _build_prod_odoo_conf writes: this conf may
+        # carry admin_passwd. _backup copies the mode along with the bytes.
+        path.chmod(0o600)
         print(f"Updated: {path}")
         staged_container = production_ops.stage_prod_odoo_conf(
             client, settings, team, name, str(path)

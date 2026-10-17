@@ -141,6 +141,15 @@ def plan_production(
     if settings.routing_mode != "traefik":
         return [("conflict", "production requires Traefik routing")]
     desired = desired_record(settings, team, manifest, environ)
+    try:
+        # Refused at plan time rather than mid-apply: the manifest alone
+        # cannot tell whether the master password comes from the team's base
+        # conf chain, so the check belongs where that chain is readable.
+        production_ops.validate_db_manager_overrides(
+            team, target.name, desired["odoo_conf"]
+        )
+    except ValueError as exc:
+        return [("conflict", str(exc))]
     production_ops._assert_domain_free(
         settings, target.domain, own_team=team.team_id, own_name=target.name
     )

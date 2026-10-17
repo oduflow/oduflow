@@ -527,3 +527,22 @@ entirely and is responsible for these settings itself. Either way, the
 generated conf always sets `http_interface = 0.0.0.0`: Odoo 20 otherwise
 listens only on `127.0.0.1`, which neither Traefik nor a published port can
 reach.
+
+### The master password (`admin_passwd`)
+
+Oduflow never writes `admin_passwd`, so Odoo's compiled-in default (the
+literal `admin`) is in effect. What keeps that from mattering is
+`list_db = False`: Odoo gates every database management function on it, so
+`/web/database/*` is unreachable regardless of the password.
+
+Productions make the pair explicit. `list_db = True` is refused unless the
+same override set (or the team `odoo.prod.conf`) also provides an
+`admin_passwd` of at least 12 characters that is not `admin`, and a `list_db`
+value other than `True`/`False` is refused because Odoo would read it as a
+truthy string and enable database management. See
+[odoo.conf overrides](production.md#odooconf-overrides).
+
+Development environments keep `list_db = False` from the bundled template and
+are not exposed to the public internet by default; a repository that ships its
+own `.oduflow/odoo.conf` owns that setting — if it enables `list_db`, set a
+master password there too.

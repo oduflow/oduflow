@@ -107,6 +107,10 @@ def test_production_schema_requires_exactly_one_target(setup):
         ("odooConf", {"workers": "2\ndb_host = evil"}),
         ("odooConf", {"workers": "0"}),
         ("odooConf", {"gevent_port": "9000"}),
+        ("odooConf", {"admin_passwd": "admin"}),
+        ("odooConf", {"admin_passwd": "short"}),
+        # Odoo reads anything but True/true/False/false as a truthy string.
+        ("odooConf", {"list_db": "0"}),
         ("serverMode", "threaded"),
         ("env", {"SELF": {"productionField": "url"}}),
         ("env", {"DB": {"database": "x", "databaseField": "url"}}),
@@ -479,6 +483,21 @@ def test_odoo_conf_keys_follow_odoo_case_normalization(setup):
     raw["spec"]["production"]["odooConf"] = {"workers": "2", "Workers": "3"}
     with pytest.raises(ValidationError, match="Duplicate"):
         StackManifest.model_validate(raw)
+
+
+def test_enabling_the_database_manager_needs_a_master_password(setup, tmp_path):
+    # The pair rule lands at plan time, where the team's base conf chain is
+    # readable: the password may legitimately live there instead.
+    setup[2].spec.production.odoo_conf = {"list_db": "True"}
+    plan = build_plan(*setup)
+    assert plan.has_conflicts
+    assert any("admin_passwd" in str(action) for action in plan.actions)
+
+    setup[2].spec.production.odoo_conf = {
+        "list_db": "True",
+        "admin_passwd": "correct-horse-battery",
+    }
+    assert not build_plan(*setup).has_conflicts
 
 
 def test_default_server_mode_keeps_pre_existing_spec_hash(setup):

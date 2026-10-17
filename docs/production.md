@@ -397,6 +397,41 @@ dashboard edits them in the same **Settings** panel. Applying restarts the
 container (brief downtime) unless `restart=false`; a call that leaves the
 overrides unchanged skips the restart entirely.
 
+#### Database manager and the master password
+
+The generated conf sets `list_db = False`, which is what closes Odoo's
+database manager: Odoo gates every database management function (create,
+duplicate, drop, backup, restore) on that setting, and nothing else stands
+between that page and the databases except the **master password**
+(`admin_passwd`). Oduflow never writes one, so Odoo's compiled-in default —
+the literal `admin` — applies.
+
+Turning the manager on therefore requires choosing a real master password in
+the same override set (or in the team `odoo.prod.conf`):
+
+```text
+set_production_odoo_conf(name="erp", options={
+    "list_db": "True",
+    "admin_passwd": "<at least 12 characters, not 'admin'>",
+})
+```
+
+`list_db = True` without one is refused, and so is dropping `admin_passwd`
+while the manager stays on. A `list_db` value other than `True` or `False` is
+refused too: Odoo's conf loader converts only those spellings to a boolean, so
+`list_db = 0` (or `no`, or `FALSE`) would read as a non-empty, truthy string
+and *enable* database management. A hand-edited `productions.json` that opens
+the manager unlocked is overruled on the next conf rebuild, which logs the
+reason and keeps `list_db = False`.
+
+Credential-valued overrides (`admin_passwd`, `smtp_password`) are reported
+back masked by `get_production_info` and `set_production_odoo_conf`, so an
+agent with production MCP access never receives them; the dashboard, which is
+the operator's own console, keeps showing the values. The generated conf is
+written owner-only (`0600`) on the host, since it is the one managed file that
+can carry a credential — the `db_*` connection keys travel as container
+environment variables instead.
+
 ## Deploys and rollback
 
 Module preflight and post-install checks use the production PostgreSQL cluster

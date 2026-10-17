@@ -1115,6 +1115,39 @@ class TestProductionFeatureGate:
         with pytest.raises(ToolError, match="Production hosting is disabled"):
             _call_tool(tool_name)
 
+    def test_credential_overrides_are_masked_for_agents(self):
+        # The dashboard reads production_ops directly and shows the values;
+        # an agent reading a production must not receive the master password.
+        import oduflow.server
+
+        oduflow.server._settings = Settings(prod_enabled=True, teams={"1": TEST_TEAM})
+        info = {
+            "name": "erp",
+            "odoo_conf": {
+                "admin_passwd": "correct-horse-battery",
+                "smtp_password": "mail-secret",
+                "workers": "4",
+            },
+        }
+        import asyncio
+        import inspect
+
+        from oduflow.server import mcp as mcp_server
+
+        with patch(
+            "oduflow.docker_ops.production_ops.get_production_info", return_value=info
+        ):
+            # The tool has its own ``name`` parameter, so call its function.
+            result = mcp_server._tool_manager._tools["get_production_info"].fn(
+                name="erp"
+            )
+            if inspect.isawaitable(result):
+                result = asyncio.run(result)
+        assert "correct-horse-battery" not in result
+        assert "mail-secret" not in result
+        assert result.count("********") == 2
+        assert '"workers": "4"' in result
+
     @patch("oduflow.docker_ops.production_ops.list_productions", return_value=[])
     def test_enabled_production_tool_runs(self, mock_list):
         import oduflow.server

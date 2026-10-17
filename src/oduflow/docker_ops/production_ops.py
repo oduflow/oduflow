@@ -25,6 +25,7 @@ Key differences from dev environments:
 
 from __future__ import annotations
 
+import configparser
 import datetime
 import fcntl
 import json
@@ -178,6 +179,26 @@ RESERVED_ODOO_CONF_KEYS = frozenset(
 # workers on 8069 and the gevent process on 8072, which carries the bus in
 # "workers" mode and every page in "gevent" mode.
 _HEALTH_PORTS = (_HTTP_PORT, _GEVENT_PORT)
+# Odoo's config loader (odoo/tools/config.py load()) turns *only* these exact
+# strings into booleans; every other value stays a non-empty string, which is
+# truthy. So `list_db = 0`, `list_db = no` and even `list_db = FALSE` all
+# ENABLE database management. Refused rather than stored as a footgun.
+_ODOO_CONF_TRUE = ("True", "true")
+_ODOO_CONF_FALSE = ("False", "false")
+# odoo.conf overrides whose value is a credential. Masked on the MCP read
+# surfaces (get_production_info, set_production_odoo_conf) so an agent that
+# can read a production never receives its master password. The dashboard is
+# the operator's own console and keeps showing the values.
+SENSITIVE_ODOO_CONF_KEYS = frozenset({"admin_passwd", "smtp_password"})
+MASKED_VALUE = "********"
+# Odoo's compiled-in default master password is the literal "admin", and the
+# generated conf does not set one — database management is closed by
+# list_db = False instead. Unlocking it therefore means choosing a real
+# password first, and "admin" is not one.
+_MIN_ADMIN_PASSWD_LEN = 12
+# The conf inside the container: Odoo reads it as a non-root user, so it
+# cannot inherit the owner-only mode the host copy carries.
+_CONTAINER_CONF_MODE = 0o644
 
 
 def validate_server_mode(value: str) -> str:
@@ -231,6 +252,101 @@ def validate_workers_override(value: object) -> None:
             f"got '{value}': both server modes run Odoo's multi-process server, "
             "which serves the gevent port Traefik routes to."
         )
+
+
+def parse_list_db_override(value: object) -> bool:
+    """Whether a ``list_db`` value leaves Odoo's database manager reachable.
+
+    Mirrors Odoo's own conf parsing: only the exact strings True/true/False/
+    false become booleans, so anything else is a truthy string that *enables*
+    database management. Raises ValueError for such a value instead of
+    storing an override that reads the opposite of what it looks like.
+    """
+    text = str(value).strip()
+    if text in _ODOO_CONF_TRUE:
+        return True
+    if text in _ODOO_CONF_FALSE:
+        return False
+    raise ValueError(
+        f"odoo.conf 'list_db' must be exactly True or False, got '{value}': "
+        "Odoo converts only those spellings to a boolean and reads every "
+        "other value as a non-empty (truthy) string, which would enable "
+        "database management."
+    )
+
+
+def validate_admin_passwd_override(value: object) -> None:
+    """A master password that actually locks Odoo's database manager."""
+    text = str(value)
+    if text != text.strip() or "\n" in text or "\r" in text:
+        raise ValueError(
+            "odoo.conf 'admin_passwd' must be a single line without leading "
+            "or trailing whitespace (Odoo strips it when reading the conf)."
+        )
+    if text.lower() == "admin" or len(text) < _MIN_ADMIN_PASSWD_LEN:
+        raise ValueError(
+            f"odoo.conf 'admin_passwd' must be at least "
+            f"{_MIN_ADMIN_PASSWD_LEN} characters and not 'admin': it is the "
+            "master password for creating, dropping, backing up and restoring "
+            "databases."
+        )
+
+
+def effective_admin_passwd(team: TeamSettings, name: str, conf: dict[str, str]) -> str:
+    """The master password the next generated conf would carry.
+
+    The per-production override when set, otherwise whatever the base conf
+    chain (team odoo.prod.conf > bundled) defines. The bundled conf sets
+    none, so this is empty unless an operator put one somewhere.
+    """
+    if "admin_passwd" in conf:
+        return str(conf["admin_passwd"])
+    base = configparser.RawConfigParser()
+    base.read(
+        _prod_base_conf_path(
+            team, get_repo_path(prod_env_name(name), team.workspaces_dir)
+        )
+    )
+    return base.get("options", "admin_passwd", fallback="")
+
+
+def validate_db_manager_overrides(
+    team: TeamSettings, name: str, conf: dict[str, str]
+) -> None:
+    """Refuse an override set that opens Odoo's database manager unlocked.
+
+    ``list_db = True`` makes /web/database/* reachable (Odoo gates every
+    database management function on it), and the only thing between that page
+    and the databases is the master password — which Oduflow never generates,
+    so unset means Odoo's default "admin". The two settings are therefore
+    validated as a pair, in whichever order they are sent.
+    """
+    if "list_db" in conf:
+        parse_list_db_override(conf["list_db"])
+    if "admin_passwd" in conf:
+        validate_admin_passwd_override(conf["admin_passwd"])
+    if not parse_list_db_override(conf.get("list_db", "False")):
+        return
+    passwd = effective_admin_passwd(team, name, conf)
+    if not passwd:
+        raise ValueError(
+            "odoo.conf 'list_db = True' exposes Odoo's database manager, so "
+            "it also needs an 'admin_passwd' override (or one in the team "
+            "odoo.prod.conf): without it Odoo falls back to its default "
+            "master password 'admin', which would let anyone who reaches the "
+            "domain create, drop, back up and restore databases."
+        )
+    if "admin_passwd" not in conf:
+        # It came from the base conf chain, so it has not been checked above.
+        validate_admin_passwd_override(passwd)
+
+
+def mask_odoo_conf(conf: dict[str, str] | None) -> dict[str, str]:
+    """A copy of the overrides with credential values replaced by a mask."""
+    return {
+        key: (MASKED_VALUE if key in SENSITIVE_ODOO_CONF_KEYS and value else value)
+        for key, value in (conf or {}).items()
+    }
 
 
 def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
@@ -369,8 +485,10 @@ def _build_prod_odoo_conf(
             name,
             ", ".join(reserved),
         )
-    for key, value in (record.get("odoo_conf") or {}).items():
-        key = str(key).lower()
+    stored = {
+        str(k).lower(): str(v) for k, v in (record.get("odoo_conf") or {}).items()
+    }
+    for key, value in stored.items():
         if key in RESERVED_ODOO_CONF_KEYS:
             continue
         if key == "workers":
@@ -380,6 +498,16 @@ def _build_prod_odoo_conf(
                 logger.warning("Ignoring odoo.conf override for '%s': %s", name, exc)
                 continue
         overrides[key] = str(value)
+    # Fail closed on the database manager: set_production_odoo_conf refuses
+    # these combinations, but a hand-edited productions.json must not end up
+    # serving /web/database/* behind Odoo's default master password. Dropping
+    # the override restores the managed list_db = False.
+    if "list_db" in overrides:
+        try:
+            validate_db_manager_overrides(team, name, stored)
+        except ValueError as exc:
+            logger.warning("Database management stays disabled for '%s': %s", name, exc)
+            overrides["list_db"] = "False"
     from oduflow.production_mcp import MOUNT, managed_module
 
     extra_container_paths = list(extra_container_paths)
@@ -395,6 +523,11 @@ def _build_prod_odoo_conf(
         pinned=_PINNED_LISTEN_CONF,
         remove_keys=_DROPPED_LISTEN_CONF_KEYS,
         odoo_image=odoo_image,
+        # A production conf may carry admin_passwd (the only secret that can
+        # reach it — db_* credentials travel as container env vars), so the
+        # host copy is owner-only. The copy inside the container is widened
+        # to _CONTAINER_CONF_MODE: Odoo reads it as a non-root user.
+        mode=0o600,
     )
     return generated
 
@@ -410,7 +543,9 @@ def stage_prod_odoo_conf(
     container = _get_container(client, settings, team, name)
     if container is None:
         return None
-    _copy_file_to_container(container, generated_path, "/etc/odoo")
+    _copy_file_to_container(
+        container, generated_path, "/etc/odoo", mode=_CONTAINER_CONF_MODE
+    )
     return str(container.name)
 
 
@@ -446,7 +581,9 @@ def reapply_prod_odoo_conf(
         extra_paths,
         odoo_image=(container.labels or {}).get(settings.image_label, ""),
     )
-    _copy_file_to_container(container, generated, "/etc/odoo")
+    _copy_file_to_container(
+        container, generated, "/etc/odoo", mode=_CONTAINER_CONF_MODE
+    )
     return True
 
 
@@ -1105,7 +1242,9 @@ def _run_odoo_container(
         # auto-reloads assets; any change requires at least a restart.
         command=f"odoo -d {prod_db_name(team, name)}",
     )
-    _copy_file_to_container(container, generated_conf, "/etc/odoo")
+    _copy_file_to_container(
+        container, generated_conf, "/etc/odoo", mode=_CONTAINER_CONF_MODE
+    )
     dep_paths = [(repo_path, "/mnt/extra-addons")] + list(extra_mount_paths or [])
     _, _, setup_logs = _install_repo_dependencies(container, dep_paths)
     # One restart picks up both the copied odoo.conf and pip packages.
@@ -1555,6 +1694,10 @@ def set_production_odoo_conf(
     case-variant must not bypass the reserved-key refusal. A call that leaves
     the overrides unchanged returns early without touching (or restarting)
     the container. The caller must hold the production's lock.
+
+    ``list_db`` and ``admin_passwd`` are validated as a pair: enabling
+    Odoo's database manager without a real master password is refused (see
+    validate_db_manager_overrides).
     """
     from oduflow.wal_monitor import assert_writable
 
@@ -1599,6 +1742,10 @@ def set_production_odoo_conf(
         conf.update(cleaned)
         for key in unset_list:
             conf.pop(key, None)
+    # Validated on the resulting set, not on this call's keys: list_db and
+    # admin_passwd guard each other, and either can arrive (or be dropped) in
+    # a separate call.
+    validate_db_manager_overrides(team, name, conf)
     notes = (
         [
             f"Removed odoo.conf overrides Oduflow manages and ignores: "

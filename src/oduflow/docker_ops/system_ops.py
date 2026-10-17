@@ -1454,14 +1454,30 @@ def _copy_file_to_container(
     dest_dir: str,
     *,
     archive_name: str | None = None,
+    mode: int | None = None,
 ) -> None:
+    """Copy one host file into a container directory.
+
+    The archive carries the host file's mode unless ``mode`` overrides it —
+    needed when the host copy is deliberately stricter than what the process
+    inside the container (a non-root user) must still be able to read.
+    """
     import tempfile
+
+    def _set_mode(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        if mode is not None:
+            info.mode = mode
+        return info
 
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         tmp_path = tmp.name
     try:
         with tarfile.open(tmp_path, mode="w") as tar:
-            tar.add(src_path, arcname=archive_name or os.path.basename(src_path))
+            tar.add(
+                src_path,
+                arcname=archive_name or os.path.basename(src_path),
+                filter=_set_mode,
+            )
         with open(tmp_path, "rb") as f:
             container.put_archive(dest_dir, f)
     finally:

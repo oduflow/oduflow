@@ -1,3 +1,4 @@
+import configparser
 import datetime
 import json
 import os
@@ -1078,6 +1079,134 @@ class TestSetProductionOdooConf:
         assert result["odoo_conf"] == {"workers": "3"}
         record = production_registry.get_production(team, "erp")
         assert record["odoo_conf"] == {"workers": "3"}
+
+
+class TestDatabaseManagerOverrides:
+    """list_db unlocks /web/database/*; the master password is the only lock."""
+
+    STRONG = "correct-horse-battery"
+
+    def _conf(self, settings, team, **kwargs):
+        client = _mock_client()
+        with patch.object(production_ops, "get_client", return_value=client):
+            return production_ops.set_production_odoo_conf(
+                settings, team, "erp", **kwargs
+            )
+
+    def test_enabling_without_a_password_is_refused(self, settings, team):
+        production_registry.create_production(team, "erp", {})
+        with pytest.raises(ValueError, match="admin_passwd"):
+            self._conf(settings, team, set_options={"list_db": "True"})
+        # Nothing stored: the refusal happens before the registry write.
+        assert production_registry.get_production(team, "erp")["odoo_conf"] == {}
+
+    @pytest.mark.parametrize("weak", ["admin", "Admin", "short", " padded-password "])
+    def test_weak_password_is_refused(self, settings, team, weak):
+        production_registry.create_production(team, "erp", {})
+        with pytest.raises(ValueError, match="admin_passwd"):
+            self._conf(
+                settings, team, set_options={"list_db": "True", "admin_passwd": weak}
+            )
+
+    def test_enabling_with_a_password_is_accepted(self, settings, team):
+        production_registry.create_production(team, "erp", {})
+        result = self._conf(
+            settings,
+            team,
+            set_options={"list_db": "True", "admin_passwd": self.STRONG},
+        )
+        assert result["odoo_conf"] == {
+            "list_db": "True",
+            "admin_passwd": self.STRONG,
+        }
+
+    @pytest.mark.parametrize("value", ["0", "no", "off", "FALSE", "none"])
+    def test_non_boolean_list_db_is_refused(self, settings, team, value):
+        # Odoo converts only True/true/False/false; everything else stays a
+        # truthy string, so `list_db = 0` would *enable* the manager.
+        production_registry.create_production(team, "erp", {})
+        with pytest.raises(ValueError, match="exactly True or False"):
+            self._conf(settings, team, set_options={"list_db": value})
+
+    def test_disabling_needs_no_password(self, settings, team):
+        production_registry.create_production(team, "erp", {})
+        result = self._conf(settings, team, set_options={"list_db": "False"})
+        assert result["odoo_conf"] == {"list_db": "False"}
+
+    def test_dropping_the_password_while_enabled_is_refused(self, settings, team):
+        production_registry.create_production(
+            team,
+            "erp",
+            {"odoo_conf": {"list_db": "True", "admin_passwd": self.STRONG}},
+        )
+        with pytest.raises(ValueError, match="admin_passwd"):
+            self._conf(settings, team, unset_options=["admin_passwd"])
+        # Turning both off in one call is fine.
+        result = self._conf(settings, team, unset_options=["admin_passwd", "list_db"])
+        assert result["odoo_conf"] == {}
+
+    def test_password_from_the_team_conf_satisfies_the_rule(
+        self, settings, team, tmp_path
+    ):
+        production_registry.create_production(team, "erp", {})
+        (tmp_path / "team_1" / "odoo.prod.conf").write_text(
+            f"[options]\nadmin_passwd = {self.STRONG}\n"
+        )
+        result = self._conf(settings, team, set_options={"list_db": "True"})
+        assert result["odoo_conf"] == {"list_db": "True"}
+
+    def test_hand_edited_record_cannot_open_the_manager(self, settings, team, tmp_path):
+        # productions.json is operator-writable; a conf rebuild must fail
+        # closed rather than serve the manager behind Odoo's default password.
+        production_registry.create_production(
+            team, "erp", {"odoo_conf": {"list_db": "True"}}
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        out = tmp_path / "generated.conf"
+        with patch(
+            "oduflow.pg_tune.detect_resources",
+            return_value={"total_ram_mb": 8192, "cpu_count": 4},
+        ):
+            production_ops._build_prod_odoo_conf(
+                settings, team, "erp", str(repo), [], output_path=str(out)
+            )
+        cp = configparser.RawConfigParser()
+        cp.read(out)
+        assert cp.get("options", "list_db") == "False"
+
+    def test_generated_conf_is_owner_only(self, settings, team, tmp_path):
+        production_registry.create_production(
+            team, "erp", {"odoo_conf": {"admin_passwd": self.STRONG}}
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        out = tmp_path / "generated.conf"
+        with patch(
+            "oduflow.pg_tune.detect_resources",
+            return_value={"total_ram_mb": 8192, "cpu_count": 4},
+        ):
+            production_ops._build_prod_odoo_conf(
+                settings, team, "erp", str(repo), [], output_path=str(out)
+            )
+        assert out.stat().st_mode & 0o777 == 0o600
+        assert self.STRONG in out.read_text()
+
+    def test_masking_hides_credentials_only(self):
+        masked = production_ops.mask_odoo_conf(
+            {
+                "admin_passwd": self.STRONG,
+                "smtp_password": "mail-secret",
+                "smtp_user": "mailer",
+                "workers": "4",
+            }
+        )
+        assert masked == {
+            "admin_passwd": production_ops.MASKED_VALUE,
+            "smtp_password": production_ops.MASKED_VALUE,
+            "smtp_user": "mailer",
+            "workers": "4",
+        }
 
 
 def _seed_prod_record(team, **overrides):

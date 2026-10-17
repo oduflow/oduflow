@@ -1658,6 +1658,7 @@ def generate_odoo_conf(
     pinned: dict[str, str] | None = None,
     remove_keys: tuple[str, ...] = (),
     odoo_image: str = "",
+    mode: int | None = None,
 ) -> str:
     """Merge *base_conf_path* into *output_path*.
 
@@ -1667,6 +1668,8 @@ def generate_odoo_conf(
     The listen interface is always pinned (:data:`LISTEN_INTERFACE_CONF`,
     under any caller pins) and its alias always dropped. When *odoo_image*
     is known to be Odoo 19+, ``without_demo`` is rewritten as ``with_demo``.
+    ``mode`` sets the written file's permissions, for a conf whose contents
+    are sensitive.
     """
     parser = configparser.RawConfigParser()
     # Preserve option case (Odoo config keys are case-sensitive); the default
@@ -1727,6 +1730,8 @@ def generate_odoo_conf(
 
     with open(output_path, "w") as f:
         parser.write(f)
+    if mode is not None:
+        os.chmod(output_path, mode)
 
     logger.info(
         "Generated Odoo config at %s with extra paths: %s", output_path, extra_paths
