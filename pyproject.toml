@@ -19,6 +19,9 @@ dependencies = [
     "PyYAML>=6.0,<7",
 
     "packaging",
+    # Bundled Public Suffix List snapshot (no network): decides whether a team
+    # hostname's parent is a registrable domain or a public suffix (naming.py).
+    "publicsuffixlist",
     "cryptography",
     "itsdangerous",
     "pyotp>=2.9,<3",

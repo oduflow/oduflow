@@ -2,8 +2,12 @@ import hashlib
 import os
 import re
 import shlex
-from typing import Any
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
+
+if TYPE_CHECKING:
+    from publicsuffixlist import PublicSuffixList
 
 # A template name becomes both a filesystem path (templates/<name>, where "/"
 # denotes a sub-directory) and, with "/" replaced by "-", part of a PostgreSQL
@@ -397,17 +401,33 @@ def split_team_hostname(hostname: str) -> tuple[str, str]:
     return prefix, parent_domain
 
 
+@lru_cache(maxsize=1)
+def _public_suffix_list() -> "PublicSuffixList":
+    """Lazy singleton: parsing the bundled Public Suffix List snapshot is too
+    slow for import time (naming is imported by every CLI entry point)."""
+    from publicsuffixlist import PublicSuffixList
+
+    return PublicSuffixList()
+
+
 def team_hostname_parent(hostname: str) -> str:
     """The domain explicit short environment hostnames are placed under.
 
     A short name replaces the team hostname's prefix: ``qa`` on team
     ``dev.example.com`` becomes ``qa.example.com``. A team hostname with no
-    prefix to spare — a bare registrable domain such as ``example.com`` —
-    is kept whole, so ``qa`` becomes ``qa.example.com`` and not ``qa.com``.
+    prefix to spare — a bare registrable domain — is kept whole, so ``qa``
+    on team ``example.com`` becomes ``qa.example.com`` and not ``qa.com``.
+    Registrability is decided with the Public Suffix List, not label
+    counting: stripping the first label of ``example.co.uk`` or
+    ``team.blogspot.com`` would leave a public suffix (``co.uk``,
+    ``blogspot.com``) — a domain the team cannot own and Traefik/ACME must
+    never route or request certificates under.
     """
-    value = hostname.strip().lower().rstrip(".")
+    value = validate_domain(hostname)
     _prefix, _separator, parent_domain = value.partition(".")
-    return parent_domain if "." in parent_domain else value
+    if _public_suffix_list().privatesuffix(parent_domain):
+        return parent_domain
+    return value
 
 
 def get_env_hostname(

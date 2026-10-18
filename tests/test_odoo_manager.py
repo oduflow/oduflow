@@ -803,6 +803,71 @@ class TestCreateEnvironment:
         ]
         assert mock_docker_client.containers.run.call_count == 1
 
+    @patch("oduflow.docker_ops.env_ops._rollback_partial_environment")
+    @patch(
+        "oduflow.extra_addons.generate_odoo_conf",
+        return_value="/tmp/flow-test/workspaces/feature-no-tpl/odoo.conf",
+    )
+    @patch("oduflow.docker_ops.env_ops._copy_file_to_container")
+    @patch("oduflow.docker_ops.env_ops._create_pg_role")
+    @patch(
+        "oduflow.docker_ops.env_ops.create_credentials",
+        return_value={"pg_user": "u_1_feature-no-tpl", "pg_password": "test-pw"},
+    )
+    @patch("oduflow.docker_ops.env_ops._ensure_system_ready")
+    @patch("oduflow.docker_ops.env_ops.get_odoo_uid_gid", return_value="100:101")
+    @patch("oduflow.docker_ops.env_ops._exec_sql")
+    @patch("oduflow.docker_ops.env_ops._db_exists", return_value=False)
+    @patch("oduflow.docker_ops.env_ops._mount_filestore")
+    @patch("oduflow.docker_ops.env_ops._get_used_ports", return_value=set())
+    @patch("oduflow.docker_ops.env_ops.allocate_port", return_value=50001)
+    @patch("oduflow.docker_ops.env_ops.subprocess.run")
+    @patch("oduflow.docker_ops.env_ops.os.chmod")
+    @patch("oduflow.docker_ops.env_ops.os.makedirs")
+    @patch("oduflow.docker_ops.env_ops.os.path.exists", return_value=False)
+    def test_create_no_template_failed_init_rolls_back(
+        self,
+        mock_exists,
+        mock_makedirs,
+        mock_chmod,
+        mock_run,
+        mock_alloc,
+        mock_used,
+        mock_mount,
+        mock_db_exists,
+        mock_sql,
+        mock_uid_gid,
+        mock_ready,
+        mock_creds,
+        mock_role,
+        mock_copy_conf,
+        mock_gen_conf,
+        mock_rollback,
+        mock_docker_client,
+    ):
+        # A non-zero `-i base` exit (e.g. a bad repo .oduflow/odoo.conf) leaves
+        # an empty/partial database: creation must fail and roll back, not
+        # start the serving container and report the environment created.
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 2}
+        init_container.logs.return_value = b"odoo: unrecognized option"
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(ExternalCommandError, match="-i base"):
+            env_ops.create_environment(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "feature/no-tpl",
+                "https://github.com/org/repo.git",
+                "odoo:15.0",
+                template_name=None,
+            )
+
+        # The DB, role, port and workspace already exist at this point.
+        mock_rollback.assert_called_once()
+        # The serving container must never start on the broken database.
+        mock_docker_client.containers.run.assert_not_called()
+
     @patch(
         "oduflow.extra_addons.generate_odoo_conf",
         return_value="/tmp/flow-test/workspaces/feature-local/odoo.conf",
@@ -848,6 +913,8 @@ class TestCreateEnvironment:
         mock_odoo.exec_run.return_value = (0, b"OK")
         mock_odoo.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.run.return_value = mock_odoo
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
         local_dir = str(tmp_path)
@@ -1715,6 +1782,8 @@ class TestCreateEnvironmentEnvVars:
         mock_odoo = MagicMock()
         mock_odoo.exec_run.return_value = (0, b"OK")
         mock_docker_client.containers.run.return_value = mock_odoo
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
         env_ops.create_environment(

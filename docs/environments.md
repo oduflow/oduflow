@@ -45,8 +45,9 @@ certificate reuse is more important than descriptive URLs. For
 `devN.example.com`; assignments survive stops and updates and return to the
 pool on deletion. Pass `hostname="qa"` to request `qa.example.com` in either
 mode. A bare team domain has no prefix to replace, so with
-`hostname = "example.com"` the same call gives `qa.example.com`. Explicit
-hostnames still consume environment capacity.
+`hostname = "example.com"` the same call gives `qa.example.com` (the Public
+Suffix List decides what is bare, so `example.co.uk` is also kept whole).
+Explicit hostnames still consume environment capacity.
 
 When creating an environment, Oduflow:
 

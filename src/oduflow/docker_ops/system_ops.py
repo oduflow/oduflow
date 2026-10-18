@@ -1453,6 +1453,11 @@ def _is_text_dump(path: str) -> bool:
         return False
 
 
+# The odoo.conf inside a container: Odoo reads it as a non-root user, so it
+# cannot inherit the owner-only mode an owner-only host copy carries.
+_CONTAINER_CONF_MODE = 0o644
+
+
 def _copy_file_to_container(
     container: docker.models.containers.Container,
     src_path: str,

@@ -94,6 +94,7 @@ from oduflow.settings import (
     find_toml,
     load_toml_dict,
 )
+from oduflow.stack_loader import StackValidationError
 
 logger = logging.getLogger("oduflow")
 
@@ -8589,43 +8590,52 @@ def _run_cli() -> None:
         manifest = load_stack(args.manifest)
         environ = stack_environ(args.manifest, args.env_file)
         team = _cli_team()
-        if args.stack_command == "plan":
-            print(
-                format_plan(
-                    build_plan(
-                        _settings, team, manifest, args.manifest, environ=environ
+        try:
+            if args.stack_command == "plan":
+                print(
+                    format_plan(
+                        build_plan(
+                            _settings, team, manifest, args.manifest, environ=environ
+                        )
                     )
                 )
-            )
-            return
-        if args.stack_command == "apply":
-            from oduflow import postgres_migration
+                return
+            if args.stack_command == "apply":
+                from oduflow import postgres_migration
 
-            postgres_migration.validate_configuration(_settings)
-            postgres_migration.refuse_pending(_settings)
-            migrations.run_pending(_settings)
-            _ensure_initialized(_settings)
-            quotas.apply_all(_settings)
-            stack_result = apply_stack(
-                _settings,
-                team,
-                manifest,
-                args.manifest,
-                environ=environ,
-                lock_manager=_locks,
-            )
-            print(format_plan(stack_result))
-            return
-        if args.stack_command == "status":
-            print(
-                json.dumps(
-                    stack_status(
-                        _settings, team, manifest, args.manifest, environ=environ
-                    ),
-                    indent=2,
+                postgres_migration.validate_configuration(_settings)
+                postgres_migration.refuse_pending(_settings)
+                migrations.run_pending(_settings)
+                _ensure_initialized(_settings)
+                quotas.apply_all(_settings)
+                stack_result = apply_stack(
+                    _settings,
+                    team,
+                    manifest,
+                    args.manifest,
+                    environ=environ,
+                    lock_manager=_locks,
                 )
-            )
-            return
+                print(format_plan(stack_result))
+                return
+            if args.stack_command == "status":
+                print(
+                    json.dumps(
+                        stack_status(
+                            _settings, team, manifest, args.manifest, environ=environ
+                        ),
+                        indent=2,
+                    )
+                )
+                return
+        except StackValidationError:
+            raise
+        except ValueError as exc:
+            # Manifest values flow into validators that raise bare ValueError
+            # (e.g. an invalid environment hostname): at this boundary that is
+            # a manifest error. Scoped to stack commands on purpose, so a
+            # ValueError bug anywhere else in the CLI keeps its traceback.
+            raise StackValidationError(str(exc)) from exc
 
 
 def _warn_local_path_security(settings: Settings) -> None:
@@ -8968,13 +8978,15 @@ def main() -> None:
     than SystemExit so the long-running server can recover; here at the CLI
     boundary we convert it to an exit code.
 
-    ValueError is treated the same way, as in handle_errors: it is the
-    developer-authored input validation (a bad stack manifest, an invalid
-    environment hostname) whose message is the whole story. The traceback is
-    still logged at --log-level debug."""
+    StackValidationError gets the same treatment: like FlowError it is
+    developer-authored input validation (a bad stack manifest) whose message
+    is the whole story. A bare ValueError stays a traceback on purpose — it
+    is just as likely a programming bug, and the traceback is the one thing
+    that identifies the fault in a bug report. The friendly branch still
+    records its traceback at --log-level debug."""
     try:
         _run_cli()
-    except (FlowError, ValueError) as exc:
+    except (FlowError, StackValidationError) as exc:
         logger.debug("CLI command failed", exc_info=True)
         print(f"\n❌ {exc}", file=sys.stderr)
         sys.exit(1)

@@ -51,6 +51,7 @@ from oduflow.docker_ops.client import (
 )
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
+    _CONTAINER_CONF_MODE,
     _copy_file_from_container,
     _copy_file_to_container,
     _create_pg_role,
@@ -196,9 +197,6 @@ MASKED_VALUE = "********"
 # list_db = False instead. Unlocking it therefore means choosing a real
 # password first, and "admin" is not one.
 _MIN_ADMIN_PASSWD_LEN = 12
-# The conf inside the container: Odoo reads it as a non-root user, so it
-# cannot inherit the owner-only mode the host copy carries.
-_CONTAINER_CONF_MODE = 0o644
 
 
 def validate_server_mode(value: str) -> str:
