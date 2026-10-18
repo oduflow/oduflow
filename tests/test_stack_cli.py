@@ -1,3 +1,4 @@
+import logging
 import sys
 from unittest.mock import patch
 
@@ -6,6 +7,18 @@ import pytest
 from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import StackValidationError
 from oduflow.stack_ops import StackPlan
+
+_MANIFEST = """\
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata: {name: demo}
+spec:
+  environment:
+    name: demo
+    branch: main
+    repoUrl: https://github.com/acme/demo.git
+    odooImage: odoo:18.0
+"""
 
 
 def test_stack_validate_cli(tmp_path, capsys):
@@ -110,6 +123,54 @@ spec:
     assert captured["environ"]["FROM_DOTENV"] == "s3cret"
     # The live process environment is overlaid on top of the file values.
     assert "PATH" in captured["environ"]
+
+
+def test_log_level_flag_quiets_stack_commands(tmp_path):
+    manifest = tmp_path / "oduflow.yaml"
+    manifest.write_text(_MANIFEST, encoding="utf-8")
+    from oduflow import server
+
+    team = TeamSettings(
+        team_id="1",
+        data_dir=str(tmp_path / "team"),
+        port_registry_path=str(tmp_path / "ports.json"),
+    )
+    settings = Settings(
+        base_data_dir=str(tmp_path), db_password="password", teams={"1": team}
+    )
+
+    argv = ["oduflow", "--log-level", "warning", "stack", "plan", str(manifest)]
+    with (
+        patch.object(sys, "argv", argv),
+        patch.object(server, "find_toml"),
+        patch.object(server, "_get_settings", return_value=settings),
+        patch("oduflow.stack_ops.build_plan", return_value=StackPlan("demo", ())),
+        patch.object(logging, "basicConfig") as basic_config,
+    ):
+        server._run_cli()
+
+    assert basic_config.call_args.kwargs["level"] == logging.WARNING
+
+
+def test_cli_input_error_is_one_line_without_traceback(monkeypatch, capsys):
+    # A plain ValueError (here: an invalid environment hostname reached by
+    # `stack apply`) is input validation, reported like a FlowError.
+    from oduflow import server
+
+    def fail():
+        raise ValueError("Invalid environment hostname 'Bad_Name'")
+
+    monkeypatch.setattr(server, "_run_cli", fail)
+
+    with pytest.raises(SystemExit) as exc:
+        server.main()
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert [line for line in err.splitlines() if line.strip()] == [
+        "❌ Invalid environment hostname 'Bad_Name'"
+    ]
 
 
 def test_startup_stack_is_applied_before_server(tmp_path):

@@ -117,11 +117,13 @@ def test_hostname_assignment_can_return_to_capacity_only(tmp_path):
     assert get_hostname(path, "feature-a") == CAPACITY_RESERVATION
 
 
-def _traefik_settings(tmp_path, slots=2, hostname_mode="slots"):
+def _traefik_settings(
+    tmp_path, slots=2, hostname_mode="slots", hostname="dev.example.com"
+):
     data_dir = tmp_path / "team_1"
     team = TeamSettings(
         team_id="1",
-        hostname="dev.example.com",
+        hostname=hostname,
         data_dir=str(data_dir),
         hostname_registry_path=str(data_dir / "hostnames.json"),
         environment_slots=slots,
@@ -183,6 +185,30 @@ def test_create_wrapper_accepts_explicit_parent_domain_prefix(tmp_path):
 
     assert provision.call_args.kwargs["hostname"] == "qa"
     assert provision.call_args.kwargs["hostname_source"] == "custom"
+    assert get_hostname(team.hostname_registry_path, "feature-a") == "qa"
+
+
+def test_create_wrapper_accepts_explicit_hostname_on_bare_team_domain(tmp_path):
+    # example.com has no prefix to split off; an explicit name needs none.
+    settings, team = _traefik_settings(
+        tmp_path, slots=0, hostname_mode="branch", hostname="example.com"
+    )
+    client = MagicMock()
+    client.containers.get.side_effect = docker.errors.NotFound("missing")
+    client.containers.list.return_value = []
+
+    with (
+        patch("oduflow.docker_ops.env_ops.get_client", return_value=client),
+        patch(
+            "oduflow.docker_ops.env_ops._create_environment_impl",
+            return_value={"url": "https://qa.example.com"},
+        ) as provision,
+    ):
+        env_ops.create_environment(
+            settings, team, "feature-a", "repo", "odoo:19.0", hostname="qa"
+        )
+
+    assert provision.call_args.kwargs["hostname"] == "qa"
     assert get_hostname(team.hostname_registry_path, "feature-a") == "qa"
 
 

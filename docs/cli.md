@@ -15,6 +15,18 @@ oduflow --no-telemetry stack apply oduflow.yaml
 `--no-telemetry` overrides `disable_telemetry` in `oduflow.toml` for the
 current process only. See [Telemetry](installation.md#telemetry).
 
+```bash
+# Log only warnings and errors (default: info); also before any subcommand
+oduflow --log-level warning stack apply oduflow.yaml
+```
+
+`--log-level` takes `debug`, `info`, `warning` or `error` and applies to the
+server too, its HTTP access log included. `warning` leaves a one-shot command
+such as `stack apply` printing just its result; at `info` the progress
+messages of long steps (image pulls, environment creation) are shown as well.
+A command that fails on invalid input prints one error line; `debug` adds the
+traceback.
+
 ## Running the Server
 
 ```bash

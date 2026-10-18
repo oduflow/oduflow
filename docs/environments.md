@@ -44,7 +44,9 @@ certificate reuse is more important than descriptive URLs. For
 `hostname = "dev.example.com"`, that mode allocates `dev1.example.com` through
 `devN.example.com`; assignments survive stops and updates and return to the
 pool on deletion. Pass `hostname="qa"` to request `qa.example.com` in either
-mode. Explicit hostnames still consume environment capacity.
+mode. A bare team domain has no prefix to replace, so with
+`hostname = "example.com"` the same call gives `qa.example.com`. Explicit
+hostnames still consume environment capacity.
 
 When creating an environment, Oduflow:
 
@@ -55,7 +57,7 @@ When creating an environment, Oduflow:
 5. **Installs dependencies** — auto-installs from `.oduflow/apt_packages.txt` and `.oduflow/requirements.txt` (the latter falls back to the repo root) if present
 6. **Configures Odoo** — uses repo's `.oduflow/odoo.conf` if available, otherwise the default template; if the repo keeps its modules in a top-level `addons/` directory, `addons_path` points there automatically
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
-8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
+8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init` in a short-lived container *before* step 7, with the same generated `odoo.conf`, so options that only matter when a database is created — demo data (`without_demo`, or `with_demo` on Odoo 19+) — follow the repo's `.oduflow/odoo.conf`. The default template sets `without_demo = True`
 
 ### Starting a New Branch
 

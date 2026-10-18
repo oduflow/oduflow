@@ -88,6 +88,7 @@ from oduflow.naming import (
     sanitize_repo_url,
     slugify_branch,
     split_team_hostname,
+    team_hostname_parent,
     validate_env_hostname,
 )
 from oduflow.port_registry import allocate_port, release_port
@@ -277,8 +278,7 @@ def _team_parent_domain(team: TeamSettings) -> str:
     (slots/custom-hostname legacy layout)."""
     if team.base_domain:
         return team.base_domain
-    _prefix, parent_domain = split_team_hostname(team.hostname)
-    return parent_domain
+    return team_hostname_parent(team.hostname)
 
 
 def _assert_env_hostname_available(
@@ -1854,9 +1854,15 @@ def _init_empty_database(
     odoo_env: dict[str, Any],
     odoo_volumes: dict[str, Any],
     env_name: str,
+    odoo_conf_path: str,
 ) -> str:
     """Initialize a fresh empty database with ``-i base`` in an isolated,
     short-lived container, then remove it. Returns a setup-log line.
+
+    The init reads the same generated *odoo_conf_path* as the serving
+    container, not the image's stock conf: options that only take effect
+    when a database is created — demo data above all — would otherwise be
+    decided by the image, whatever the repository or team conf says.
 
     This runs *before* the long-running serving container exists, so the init
     is the only Odoo process touching the database. It avoids the registry
@@ -1872,10 +1878,9 @@ def _init_empty_database(
     except docker.errors.NotFound:
         pass
 
-    init_container = client.containers.run(
+    init_container = client.containers.create(
         image=odoo_image,
         name=init_name,
-        detach=True,
         network=get_team_network_name(team.team_id, settings.prefix),
         extra_hosts={"host.docker.internal": "host-gateway"},
         **default_env_limits(),
@@ -1886,6 +1891,17 @@ def _init_empty_database(
     exit_code: int = -1
     logs = ""
     try:
+        # Copied in before start, the way the serving container gets it, and
+        # widened like there: a production conf is owner-only on the host
+        # and Odoo reads it as a non-root user.
+        _copy_file_to_container(
+            init_container,
+            odoo_conf_path,
+            "/etc/odoo",
+            archive_name="odoo.conf",
+            mode=0o644,
+        )
+        init_container.start()
         result = init_container.wait(timeout=600)
         exit_code = (
             result.get("StatusCode", -1) if isinstance(result, dict) else int(result)
@@ -2277,7 +2293,11 @@ def create_environment(
             hostname_prefix = ""
             used_hostnames: set[str] = set()
             if wants_hostname:
-                hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
+                if not requested_hostname:
+                    # Only an automatic slot name is built from the team
+                    # prefix; an explicit name needs none, so a bare team
+                    # hostname like example.com must not be split here.
+                    hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
                 active_envs, used_hostnames = _environment_hostname_usage(
                     client, settings, team, exclude_env=resolved_env_name
                 )
@@ -2773,6 +2793,7 @@ def _create_environment_impl(
                 odoo_env,
                 odoo_volumes,
                 env_name,
+                odoo_conf_to_copy,
             )
         )
 
@@ -5712,7 +5733,6 @@ def update_environment(
                 ) from exc
 
     if requested_hostname:
-        hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
         active_envs, used_hostnames = _environment_hostname_usage(
             client, settings, team, exclude_env=env_name
         )
@@ -5723,7 +5743,7 @@ def update_environment(
             env_name,
             0,  # An update does not consume a new environment slot.
             requested_hostname=requested_hostname,
-            hostname_prefix=hostname_prefix,
+            hostname_prefix="",  # Only automatic slot names use the prefix.
             active_envs=active_envs,
             used_hostnames=used_hostnames,
         )

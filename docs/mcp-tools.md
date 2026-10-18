@@ -285,7 +285,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Comma- or newline-separated `KEY=VALUE` pairs injected into the container. Commas inside values are preserved unless what follows looks like another `KEY=`; put one pair per line when in doubt. Merged per key over the template's own values, with these winning. A value `secret:<name>` references a [team secret](#list_secrets).
 
 `hostname`
-:   *str · default empty* — Short Traefik hostname (e.g. `"qa"` → `qa.example.com`). Replaces the team prefix in either hostname mode.
+:   *str · default empty* — Short Traefik hostname (e.g. `"qa"` → `qa.example.com`). Replaces the team prefix in either hostname mode; a bare team domain (`example.com`) has no prefix, so the name goes under it — again `qa.example.com`.
 
 `from_production`
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.

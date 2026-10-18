@@ -94,7 +94,6 @@ from oduflow.settings import (
     find_toml,
     load_toml_dict,
 )
-from oduflow.stack_loader import StackValidationError
 
 logger = logging.getLogger("oduflow")
 
@@ -1115,7 +1114,7 @@ def create_environment(
     Args:
         branch: The git branch to clone (e.g. "19.0", "feature/my-feature").
         env_name: Optional environment name. If empty, defaults to the branch name. Use this to create multiple environments from the same branch (e.g. env_name="client-a" with branch="19.0").
-        hostname: Optional short Traefik hostname (for example "qa"). By default public hostnames remain environment-derived (feature.dev.example.com). Teams that explicitly set environment_hostname_mode="slots" reuse dev1.example.com through devN.example.com. An explicit value replaces the team prefix in either mode, so hostname="qa" produces qa.example.com.
+        hostname: Optional short Traefik hostname (for example "qa"). By default public hostnames remain environment-derived (feature.dev.example.com). Teams that explicitly set environment_hostname_mode="slots" reuse dev1.example.com through devN.example.com. An explicit value replaces the team prefix in either mode, so hostname="qa" produces qa.example.com; a bare team domain (example.com) has no prefix to replace, so it also produces qa.example.com.
         template_name: Name of the template profile to use as database template. Pass "none" to skip template and initialise Odoo from scratch with -i base. When a template is specified, repo_url and odoo_image are loaded from template metadata (but can be overridden). A template saved from a live-mounted environment supplies local_path instead of repo_url and recreates the live-mount when allow_local_path is enabled. Installed modules whose __manifest__.py version in the checkout is higher than the one recorded in the template database are upgraded (-u) before the environment is reported ready; the setup log lists them under [TEMPLATE-UPGRADE].
         repo_url: URL of the git repository to clone. Optional when template_name is specified (loaded from template metadata).
         odoo_image: Full Docker image name with tag (e.g. "odoo:19.0"). Optional when template_name is specified (loaded from template metadata).
@@ -7974,6 +7973,12 @@ def _run_cli() -> None:
         action="store_true",
         help="disable anonymous usage telemetry for this run (e.g. test runs)",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["debug", "info", "warning", "error"],
+        default="info",
+        help="log verbosity (default: info; warning hides progress messages)",
+    )
     sub = parser.add_subparsers(dest="command", title="commands", metavar="")
 
     p_ui_2fa = sub.add_parser(
@@ -8391,7 +8396,7 @@ def _run_cli() -> None:
     # --- Load TOML settings ----------------------------------------
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     logging.getLogger("docker").setLevel(logging.WARNING)
@@ -8840,6 +8845,8 @@ def _start_http() -> None:
         timeout_graceful_shutdown=10,
         proxy_headers=True,
         forwarded_allow_ips=forwarded_allow_ips,
+        # Follow --log-level, so its access log is quieted along with ours.
+        log_level=logging.getLogger().getEffectiveLevel(),
     )
     server = uvicorn.Server(config)
     global _uvicorn_server
@@ -8959,13 +8966,16 @@ def main() -> None:
     prerequisite (e.g. Docker daemon unreachable) into a friendly process exit
     instead of a traceback. get_client() raises PrerequisiteNotMetError rather
     than SystemExit so the long-running server can recover; here at the CLI
-    boundary we convert it to an exit code."""
+    boundary we convert it to an exit code.
+
+    ValueError is treated the same way, as in handle_errors: it is the
+    developer-authored input validation (a bad stack manifest, an invalid
+    environment hostname) whose message is the whole story. The traceback is
+    still logged at --log-level debug."""
     try:
         _run_cli()
-    except FlowError as exc:
-        print(f"\n❌ {exc}", file=sys.stderr)
-        sys.exit(1)
-    except StackValidationError as exc:
+    except (FlowError, ValueError) as exc:
+        logger.debug("CLI command failed", exc_info=True)
         print(f"\n❌ {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

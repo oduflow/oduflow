@@ -1574,6 +1574,7 @@ def create_production(
                     odoo_env,
                     odoo_volumes,
                     env_name,
+                    generated_conf,
                 )
             )
 

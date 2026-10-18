@@ -397,6 +397,19 @@ def split_team_hostname(hostname: str) -> tuple[str, str]:
     return prefix, parent_domain
 
 
+def team_hostname_parent(hostname: str) -> str:
+    """The domain explicit short environment hostnames are placed under.
+
+    A short name replaces the team hostname's prefix: ``qa`` on team
+    ``dev.example.com`` becomes ``qa.example.com``. A team hostname with no
+    prefix to spare — a bare registrable domain such as ``example.com`` —
+    is kept whole, so ``qa`` becomes ``qa.example.com`` and not ``qa.com``.
+    """
+    value = hostname.strip().lower().rstrip(".")
+    _prefix, _separator, parent_domain = value.partition(".")
+    return parent_domain if "." in parent_domain else value
+
+
 def get_env_hostname(
     env_name: str, hostname: str, route_hostname: str = "", base_domain: str = ""
 ) -> str:
@@ -407,8 +420,7 @@ def get_env_hostname(
         return f"{short_hostname}.{base_domain}"
     if not route_hostname:
         return f"{short_hostname}.{hostname}"
-    _prefix, parent_domain = split_team_hostname(hostname)
-    return f"{short_hostname}.{parent_domain}"
+    return f"{short_hostname}.{team_hostname_parent(hostname)}"
 
 
 def validate_env_hostname(hostname: str) -> str:

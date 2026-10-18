@@ -219,6 +219,24 @@ class TestCreateProduction:
         # The addon series is chosen from the freshly pulled image.
         assert order == ["pull", "prepare"]
 
+    def test_greenfield_init_reads_production_conf(self, settings, team):
+        # Without it the image's stock conf decides demo data for a new
+        # production database, whatever odoo.prod.conf says.
+        client = _mock_client()
+        with _PatchAll(_patch_create_stack(client)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "erp.example.com",
+                "odoo:19.0",
+            )
+        init = mocks["_init_empty_database"]
+        init.assert_called_once()
+        assert init.call_args.args[-1] == "/tmp/odoo.conf"
+
     def test_requires_traefik_mode(self, settings, team):
         port_settings = Settings(
             routing_mode="port",

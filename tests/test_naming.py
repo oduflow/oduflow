@@ -58,6 +58,11 @@ class TestEnvironmentHostname:
             == "dev3.demo.example.com"
         )
 
+    @pytest.mark.parametrize("team_hostname", ["example.com", "Example.COM."])
+    def test_explicit_hostname_nests_under_bare_team_domain(self, team_hostname):
+        # No prefix to replace: "qa" must not become qa.com.
+        assert get_env_hostname("feature-a", team_hostname, "qa") == "qa.example.com"
+
     def test_team_hostname_splits_first_label(self):
         assert split_team_hostname("odoo.dev.example.com") == (
             "odoo",

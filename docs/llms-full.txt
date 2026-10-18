@@ -2170,7 +2170,9 @@ certificate reuse is more important than descriptive URLs. For
 `hostname = "dev.example.com"`, that mode allocates `dev1.example.com` through
 `devN.example.com`; assignments survive stops and updates and return to the
 pool on deletion. Pass `hostname="qa"` to request `qa.example.com` in either
-mode. Explicit hostnames still consume environment capacity.
+mode. A bare team domain has no prefix to replace, so with
+`hostname = "example.com"` the same call gives `qa.example.com`. Explicit
+hostnames still consume environment capacity.
 
 When creating an environment, Oduflow:
 
@@ -2181,7 +2183,7 @@ When creating an environment, Oduflow:
 5. **Installs dependencies** — auto-installs from `.oduflow/apt_packages.txt` and `.oduflow/requirements.txt` (the latter falls back to the repo root) if present
 6. **Configures Odoo** — uses repo's `.oduflow/odoo.conf` if available, otherwise the default template; if the repo keeps its modules in a top-level `addons/` directory, `addons_path` points there automatically
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
-8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
+8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init` in a short-lived container *before* step 7, with the same generated `odoo.conf`, so options that only matter when a database is created — demo data (`without_demo`, or `with_demo` on Odoo 19+) — follow the repo's `.oduflow/odoo.conf`. The default template sets `without_demo = True`
 
 ### Starting a New Branch
 
@@ -4557,6 +4559,11 @@ and last successful apply record. `plan`, `apply`, and `status` also accept
 `--env-file` to supply `fromEnv` values from a dotenv file; see
 [Secrets from a `.env` file](#secrets-from-a-env-file).
 
+`apply` logs its progress at the `info` level. For output that shows only the
+resulting plan plus any warnings, pass the global
+`oduflow --log-level warning stack apply oduflow.yaml`
+(see [CLI Reference](cli.md#global-options)).
+
 To reconcile before the MCP server accepts clients:
 
 ```bash
@@ -5459,7 +5466,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Comma- or newline-separated `KEY=VALUE` pairs injected into the container. Commas inside values are preserved unless what follows looks like another `KEY=`; put one pair per line when in doubt. Merged per key over the template's own values, with these winning. A value `secret:<name>` references a [team secret](#list_secrets).
 
 `hostname`
-:   *str · default empty* — Short Traefik hostname (e.g. `"qa"` → `qa.example.com`). Replaces the team prefix in either hostname mode.
+:   *str · default empty* — Short Traefik hostname (e.g. `"qa"` → `qa.example.com`). Replaces the team prefix in either hostname mode; a bare team domain (`example.com`) has no prefix, so the name goes under it — again `qa.example.com`.
 
 `from_production`
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.
@@ -8507,6 +8514,18 @@ oduflow --no-telemetry stack apply oduflow.yaml
 `--no-telemetry` overrides `disable_telemetry` in `oduflow.toml` for the
 current process only. See [Telemetry](installation.md#telemetry).
 
+```bash
+# Log only warnings and errors (default: info); also before any subcommand
+oduflow --log-level warning stack apply oduflow.yaml
+```
+
+`--log-level` takes `debug`, `info`, `warning` or `error` and applies to the
+server too, its HTTP access log included. `warning` leaves a one-shot command
+such as `stack apply` printing just its result; at `info` the progress
+messages of long steps (image pulls, environment creation) are shown as well.
+A command that fails on invalid input prints one error line; `debug` adds the
+traceback.
+
 ## Running the Server
 
 ```bash
@@ -9017,9 +9036,12 @@ than branch-derived routes: configure individual `dev1`…`dev20` records or a
 wildcard record for `*.example.com`. A `*.dev.example.com` record or certificate
 does not cover `dev1.example.com`.
 
-`create_environment(hostname="qa")` requests `qa.example.com` in either mode.
-The configured team hostname must include a distinct prefix
-(`dev.example.com`, not bare `example.com`) for pooled or explicit short names.
+`create_environment(hostname="qa")` requests `qa.example.com` in either mode:
+the short name replaces the team hostname's prefix. A bare team domain such as
+`example.com` has no prefix to replace, so `qa` goes under it —
+`qa.example.com`, the same layer as the branch-derived names. The pooled
+`slots` mode still needs a distinct prefix (`dev.example.com`, not bare
+`example.com`) to number.
 
 ## Team base domain
 
