@@ -541,3 +541,36 @@ class TestKeyedMutex:
         with keyed_mutex("test:reentrant"):
             with keyed_mutex("test:reentrant"):
                 pass
+
+
+class TestCanonicalEnvKey:
+    """P-M4/P-M8: every name-derived resource normalises the branch name
+    (slugify/replace), so 'feature/x' and 'feature-x' are ONE environment —
+    but raw-name lock keys let both spellings run destructive operations
+    concurrently and made the create-time DB-collision guard (#41) a TOCTOU."""
+
+    def test_spellings_of_one_environment_share_the_lock(self):
+        locks = LockManager()
+        locks.acquire_env("feature/x", "1", operation="update_environment")
+        with pytest.raises(BusyError, match="feature-x"):
+            locks.acquire_env("feature-x", "1", operation="pull_and_apply")
+        # Release through the other spelling frees the same lock.
+        locks.release_env("feature-x")
+        locks.acquire_env("feature/x", "1")
+        locks.release_env("feature/x")
+
+    def test_structured_kind_keys_pass_through(self):
+        locks = LockManager()
+        locks.acquire_env("prod:1:erp", operation="deploy")
+        # A dev env whose slug happens to resemble the prod name is unrelated.
+        locks.acquire_env("erp", "1")
+        locks.release_env("prod:1:erp")
+        locks.release_env("erp")
+
+    def test_blocking_acquire_uses_the_canonical_key(self):
+        locks = LockManager()
+        locks.acquire_env("release/v1.2", "1")
+        assert locks.acquire_env_blocking("release-v12", timeout=0.05) is False
+        locks.release_env("release/v1.2")
+        assert locks.acquire_env_blocking("release-v12", timeout=0.05) is True
+        locks.release_env("release-v12")

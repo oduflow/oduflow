@@ -8,7 +8,7 @@ import tempfile
 
 import pytest
 
-from oduflow.oauth_provider import OduflowOAuthProvider
+from oduflow.oauth_provider import OduflowOAuthProvider, team_id_for_client_id
 from oduflow.settings import Settings, TeamSettings
 
 
@@ -158,11 +158,12 @@ class TestOduflowOAuthProvider:
         assert token.token_type == "Bearer"
         # The access token expires.
         assert token.expires_in == 3600
-        # It resolves to the team (numeric team_id) so _resolve_team routes it
-        # exactly like the auth_token, preserving requested scopes.
+        # It surfaces the PUBLIC client id so the SDK revocation handler's
+        # ownership check can match; _resolve_team maps it back to the team
+        # via team_id_for_client_id, preserving requested scopes.
         access = _run(provider.load_access_token(token.access_token))
         assert access is not None
-        assert access.client_id == "1"
+        assert access.client_id == "team_1"
         assert access.scopes == ["mcp"]
         assert access.expires_at is not None
 
@@ -197,7 +198,7 @@ class TestOduflowOAuthProvider:
         # The new access token still resolves to the team.
         new_access = _run(provider.load_access_token(rotated.access_token))
         assert new_access is not None
-        assert new_access.client_id == "1"
+        assert new_access.client_id == "team_1"
         # A non-issued value is not a valid refresh token.
         assert _run(provider.load_refresh_token(client, "team_1")) is None
 
@@ -267,7 +268,7 @@ class TestOduflowOAuthProvider:
         restarted = OduflowOAuthProvider(_settings(base_data_dir=data_dir))
         access = _run(restarted.load_access_token(token.access_token))
         assert access is not None
-        assert access.client_id == "1"
+        assert access.client_id == "team_1"
 
         # A revoke persists too: a third instance sees it gone.
         _run(restarted.revoke_token(access))
@@ -694,3 +695,38 @@ class TestForwardedSchemeHost:
 
     def test_no_headers_at_all_yields_an_empty_host(self):
         assert self._call({}) == ("https", "")
+
+
+class TestRevokeOwnership:
+    """P-M10: the SDK revocation handler only calls revoke_token when
+    token.client_id == client.client_id. Minted access tokens surfaced the raw
+    team id ("1") while the authenticated client is "team_1", so POST /revoke
+    returned HTTP 200 without deleting anything — the access token stayed valid
+    until its 1h TTL. (The old test called provider.revoke_token directly and
+    bypassed exactly this gate.)"""
+
+    def test_minted_access_token_passes_the_handler_ownership_check(self):
+        provider = OduflowOAuthProvider(_settings())
+        token = _mint(provider)
+        access = _run(provider.load_access_token(token.access_token))
+        client = _run(provider.get_client("team_1"))
+        assert access is not None and client is not None
+
+        # The exact comparison the SDK RevocationHandler performs:
+        assert access.client_id == client.client_id
+
+        # ...so its guarded revoke now actually fires and deletes the token.
+        if access.client_id == client.client_id:
+            _run(provider.revoke_token(access))
+        assert _run(provider.load_access_token(token.access_token)) is None
+
+    def test_team_id_for_client_id_normalisation(self):
+        teams = {"1": object(), "team_x": object()}
+        assert team_id_for_client_id("1", teams) == "1"
+        assert team_id_for_client_id("team_1", teams) == "1"
+        # A team literally named "team_x" is matched by membership first and
+        # never mis-stripped; its own public id still maps back to it.
+        assert team_id_for_client_id("team_x", teams) == "team_x"
+        assert team_id_for_client_id("team_team_x", teams) == "team_x"
+        # Unknown ids pass through untouched (hostname/default routing applies).
+        assert team_id_for_client_id("unknown", teams) == "unknown"

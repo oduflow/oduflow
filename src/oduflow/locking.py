@@ -21,10 +21,32 @@ from contextlib import contextmanager
 from typing import Iterator, cast
 
 from oduflow.errors import BusyError, PrerequisiteNotMetError
+from oduflow.naming import slugify_branch
 
 # Keys in the production keyspace. The system lock (cluster-wide PITR) and every
 # `prod:` key are mutually exclusive; see acquire_system.
 PROD_KEY_PREFIX = "prod:"
+
+
+def _canonical_env_key(key: str) -> str:
+    """Canonical lock key for a plain dev-environment name.
+
+    Every name-derived resource folds the branch name through the same
+    normalisation (``get_db_name`` via ``slugify_branch``; container/workspace
+    names via ``replace('/', '-')``), so ``feature/x`` and ``feature-x`` are the
+    SAME environment on disk and in PostgreSQL. Locking on the raw name let two
+    spellings of one environment run destructive operations concurrently — and
+    made the create-time DB-collision guard (#41) a TOCTOU, since the colliding
+    creates never serialised. Structured keys ("kind:..." — prod/svc/tpl/...)
+    contain ':' , which git refnames cannot, and pass through untouched.
+
+    Deliberately NOT team-scoped: release_env() is called without a team id all
+    over the codebase, so same-named environments in different teams still
+    contend (a brief false BusyError, never corruption).
+    """
+    if ":" in key:
+        return key
+    return slugify_branch(key)
 
 
 def _is_prod_key(key: str) -> bool:
@@ -190,6 +212,7 @@ def report_progress(key: str, phase: str, detail: str = "") -> None:
     the phase changes. *detail* is free-form progress within the phase
     ("filestore 1200/12340 files") and may be updated as often as needed.
     """
+    key = _canonical_env_key(key)
     now = time.monotonic()
     with _progress_guard:
         current = _progress.get(key)
@@ -419,6 +442,8 @@ class LockManager:
     def acquire_env(
         self, env_name: str, team_id: str | None = None, operation: str = ""
     ) -> None:
+        raw_name = env_name
+        env_name = _canonical_env_key(env_name)
         with self._map_lock:
             if team_id is not None and team_id in self._active_team_locks:
                 raise BusyError(
@@ -436,7 +461,7 @@ class LockManager:
             lock = self._env_locks[env_name]
             if not lock.acquire(blocking=False):
                 raise BusyError(
-                    f"Another operation on {_describe_key(env_name)}"
+                    f"Another operation on {_describe_key(raw_name)}"
                     f"{self._env_holder_hint(env_name)} is in progress. "
                     "It is still running server-side — wait for it to finish "
                     "rather than restarting it."
@@ -467,6 +492,7 @@ class LockManager:
         deploys queue behind a running one instead of dropping the push.
         Returns False when the timeout expires (caller skips the run).
         While waiting, the caller is listed by :func:`current_waiters`."""
+        env_name = _canonical_env_key(env_name)
         deadline = time.monotonic() + timeout
         lock = self._get_env_lock(env_name)
         waiter: dict[str, object] = {"operation": operation, "since": time.monotonic()}
@@ -519,6 +545,7 @@ class LockManager:
 
     def describe_env_holder(self, env_name: str) -> str:
         """Holder hint for callers that report contention without raising."""
+        env_name = _canonical_env_key(env_name)
         with self._map_lock:
             return self._env_holder_hint(env_name)
 
@@ -535,6 +562,7 @@ class LockManager:
             self.release_env(env_name)
 
     def release_env(self, env_name: str) -> None:
+        env_name = _canonical_env_key(env_name)
         with self._map_lock:
             lock = self._env_locks.get(env_name)
             if lock is None:

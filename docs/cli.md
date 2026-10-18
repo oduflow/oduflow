@@ -175,6 +175,38 @@ oduflow self-update --force
 oduflow self-update --no-restart
 ```
 
+### Cluster Disaster Recovery
+
+Cluster-wide WAL control and whole-cluster PITR are operator actions: they
+affect every team's productions at once, so they are not MCP tools. They are
+available in the [server settings console](admin.md) (**/admin → Cluster DR**)
+and on the owner CLI:
+
+```bash
+# Cached cluster WAL state (queue, disk reserve, protection latch)
+oduflow wal status
+
+# Archiving control / disk-protection recovery (see Production Hosting docs)
+oduflow wal pause   --confirm ALL-PRODUCTIONS
+oduflow wal resume  --confirm ALL-PRODUCTIONS
+oduflow wal retry   --confirm ALL-PRODUCTIONS
+oduflow wal recover --confirm ALL-PRODUCTIONS
+oduflow wal release --confirm ALL-PRODUCTIONS
+
+# DISASTER RECOVERY: restore the whole production PostgreSQL cluster from
+# WAL-G (optionally to a point in time). Also the "resurrect production
+# elsewhere" path: a fresh install with the same [backup] section rebuilds
+# the cluster from S3.
+oduflow restore-cluster --confirm RESTORE-CLUSTER
+oduflow restore-cluster --target-time "2026-07-10 12:00:00+00" --confirm RESTORE-CLUSTER
+```
+
+`restore-cluster` stops every production Odoo container, restores the cluster
+from the newest suitable base backup plus WAL replay, and restarts the
+productions it stopped. The displaced data directory is kept inside the Docker
+volume for manual cleanup. See
+[Production Hosting](production.md#backups) for the full semantics.
+
 `retune-postgres` accounts for `[production].enabled` and does not restart
 containers. For existing productions, `--apply` also regenerates `odoo.conf`
 with the planned worker count and copies it into the container; the command

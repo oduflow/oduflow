@@ -208,7 +208,9 @@ automatic code rollback, GitHub webhook auto-deploy, and optional S3 snapshots,
 WAL-G archiving, retention, and cluster PITR. The MCP surface includes
 `create_production`, list/info/lifecycle tools, `update_production`,
 `rollback_production`, deploy history/logs, snapshot/restore/schedule/status,
-`prune_production_backups`, `restore_cluster_pitr`, and `delete_production`.
+`prune_production_backups`, and `delete_production`. Cluster-wide WAL control
+and whole-cluster PITR are operator-only (the `/admin` console or the
+`oduflow wal` / `oduflow restore-cluster` CLI), not MCP tools.
 Production REST routes and `/api/webhooks/github` are registered only while the
 feature is enabled; public `/healthz` reports dev/prod infrastructure health.
 

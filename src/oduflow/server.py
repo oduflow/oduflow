@@ -223,6 +223,12 @@ def _resolve_team(ctx: Context | None) -> TeamSettings:
     # not the verified credential. Only trust the access token established by auth.
     access_token = get_access_token()
     team_id = access_token.client_id if access_token else None
+    if team_id:
+        # Minted OAuth access tokens carry the PUBLIC client id ("team_<id>")
+        # so the SDK revocation handler can match ownership; map it back.
+        from oduflow.oauth_provider import team_id_for_client_id
+
+        team_id = team_id_for_client_id(team_id, settings.teams)
     if team_id and team_id in settings.teams:
         return settings.teams[team_id]
     # 2. Hostname-based: match Host header against team hostnames
@@ -436,13 +442,7 @@ def with_env_lock(fn: Callable[P, R]) -> Callable[P, R]:
         # Dev environment tools must never operate on the production
         # namespace (their name-derived container/DB chains would resolve to
         # production resources). Productions have their own tool stack.
-        from oduflow.naming import PROD_ENV_PREFIX
-
-        if env_name.startswith(PROD_ENV_PREFIX):
-            raise ToolError(
-                f"'{env_name}' is a production environment. Use the "
-                "*_production tools instead of the dev environment tools."
-            )
+        _reject_prod_env(env_name)
         _locks.acquire_env(env_name, team.team_id, operation=fn.__name__)
         try:
             try:
@@ -456,6 +456,25 @@ def with_env_lock(fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+def _reject_prod_env(env_name: str) -> None:
+    """Dev-environment tools must never touch the production namespace.
+
+    Production containers share the dev naming scheme under the reserved
+    ``prod-`` prefix, so without this guard a lock-free dev tool accepts
+    env_name="prod-<name>" and operates on the production directly — including
+    _wake_for_work STARTING a production that stop_production deliberately took
+    offline, and http_request_to_odoo/odoo_* sending mutations around the
+    production tool stack (locks, approvals, deploy history).
+    """
+    from oduflow.naming import PROD_ENV_PREFIX
+
+    if env_name.startswith(PROD_ENV_PREFIX):
+        raise ToolError(
+            f"'{env_name}' is a production environment. Use the "
+            "*_production tools instead of the dev environment tools."
+        )
+
+
 def _wake_for_work(
     settings: Settings,
     team: TeamSettings,
@@ -465,6 +484,7 @@ def _wake_for_work(
     """Container-level tools start a stopped environment instead of failing:
     with auto-stop, 'stopped' is a routine state, not an error. Returns the
     one-line note to prepend to the tool response ('' if already running)."""
+    _reject_prod_env(env_name)
     if env_ops.ensure_running(settings, env_name, team):
         activity.mark_started(team, env_name)
         return f"Note: environment was stopped; started it {purpose}.\n"
@@ -2322,6 +2342,7 @@ def get_environment_logs(
         grep: Filter logs to only show lines matching this pattern (case-insensitive substring search). Useful to find specific errors, modules, or messages.
         level: Filter by Odoo log level. One of: "ERROR", "WARNING", "CRITICAL". Returns only lines containing the specified level marker. Can be combined with grep.
     """
+    _reject_prod_env(env_name)
     output = odoo_ops.get_environment_logs(
         _get_settings(),
         env_name,
@@ -2484,6 +2505,7 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
     Args:
         env_name: The name of the environment to check.
     """
+    _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
     info = env_ops.get_environment_info(settings, team, env_name)
@@ -3069,6 +3091,7 @@ def get_image_build(
     """
     from oduflow.docker_ops import build_ops
 
+    _reject_prod_env(env_name)
     team = _resolve_team(ctx)
     _image_registry_settings(team)
     settings = _get_settings()
@@ -3135,6 +3158,7 @@ def publish_image_build(
     from oduflow.docker_ops import build_ops
     from oduflow.locking import image_publish_lock_key
 
+    _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
     registry_cfg = _image_registry_settings(team)
@@ -3187,6 +3211,7 @@ def cancel_image_build(env_name: str, build_id: str, ctx: Context | None = None)
         env_name: The environment the build belongs to.
         build_id: The build to cancel.
     """
+    _reject_prod_env(env_name)
     team = _resolve_team(ctx)
     _image_registry_settings(team)
     settings = _get_settings()
@@ -3859,6 +3884,7 @@ def list_installed_modules(
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY name"
 
+    _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
     result = odoo_ops.run_db_query(settings, team, env_name, query, "csv")
@@ -6435,35 +6461,6 @@ def production_wal_status(ctx: Context | None = None) -> str:
 @mcp.tool()
 @handle_errors
 @production_enabled
-def control_production_wal(
-    action: str, confirm: str = "", ctx: Context | None = None
-) -> str:
-    """Control the shared production cluster, affecting ALL teams.
-
-    action: pause (retain WAL), resume, retry (interrupt only wal-push),
-    recover (start PostgreSQL only under disk protection), or release
-    (clear protection after checks; applications remain stopped).
-    confirm must equal ALL-PRODUCTIONS. Never discards unarchived WAL.
-    """
-    import json as _json
-
-    from oduflow import wal_monitor
-    from oduflow.docker_ops.client import get_client
-
-    _resolve_team(ctx)
-    _locks.acquire_system(operation="control_production_wal")
-    try:
-        return _json.dumps(
-            wal_monitor.control(_get_settings(), get_client(), action, confirm),
-            indent=2,
-        )
-    finally:
-        _locks.release_system()
-
-
-@mcp.tool()
-@handle_errors
-@production_enabled
 @with_prod_lock
 def set_production_backup_schedule(
     name: str, schedule: str, ctx: Context | None = None
@@ -6505,100 +6502,6 @@ def prune_production_backups(ctx: Context | None = None) -> str:
     import json as _json
 
     return _json.dumps(result, indent=2)
-
-
-@mcp.tool()
-@handle_errors
-@production_enabled
-def restore_cluster_pitr(
-    target_time: str = "", confirm: str = "", ctx: Context | None = None
-) -> str:
-    """
-    DISASTER RECOVERY: restore the WHOLE production PostgreSQL cluster from
-    WAL-G (base backup + WAL replay). Affects EVERY production database at
-    once — for restoring a single production use restore_production.
-
-    Also the "resurrect production elsewhere" path: a fresh Oduflow server
-    with the same [backup] section can rebuild the cluster from S3.
-
-    The current data directory is displaced inside the volume (not
-    destroyed); production Odoo containers are stopped and restarted.
-
-    Args:
-        target_time: Optional PITR target, e.g. "2026-07-10 12:00:00+00"
-                (empty = replay the whole archive to the latest state).
-        confirm: Must equal "RESTORE-CLUSTER" (safety check).
-    """
-    if confirm != "RESTORE-CLUSTER":
-        raise ToolError(
-            'Confirmation failed: pass confirm="RESTORE-CLUSTER" to restore '
-            "the whole production cluster."
-        )
-    from oduflow import walg
-
-    settings = _get_settings()
-    _resolve_team(ctx)  # authenticate the caller; PITR spans all teams
-    # The one true system-level operation: it rewrites the cluster every team's
-    # productions live in, so it excludes the whole `prod:` keyspace at once
-    # (per-production locks would each have to be enumerated and could still be
-    # taken behind our back).
-    _locks.acquire_system(operation="restore_cluster_pitr")
-    try:
-        # Fail before stopping anything: walg re-checks this, but by then every
-        # team's productions would already be down with nothing restored.
-        if settings.backup is None:
-            raise PrerequisiteNotMetError(
-                "Cluster PITR requires a configured [backup] section."
-            )
-        from oduflow.docker_ops.client import get_client
-
-        client = get_client()
-        # Stop every production Odoo container (all teams share the cluster).
-        stopped: list[str] = []
-
-        def _restart_stopped(suffix: str = "") -> None:
-            for entry in stopped:
-                team_id, prod_name = entry.split("/", 1)
-                try:
-                    production_ops.start_production(
-                        settings, settings.teams[team_id], prod_name
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Could not restart production %s%s: %s", entry, suffix, exc
-                    )
-
-        try:
-            # The stop loop is inside the guarded block: a failure on the Nth
-            # production (container stop, registry read) must restart the ones
-            # already stopped, not leave them offline with nothing restored.
-            for team_cfg in settings.teams.values():
-                for prod_name in production_registry.list_productions(team_cfg):
-                    container = production_ops._get_container(
-                        client, settings, team_cfg, prod_name
-                    )
-                    if container is not None and container.status == "running":
-                        container.stop()
-                        stopped.append(f"{team_cfg.team_id}/{prod_name}")
-            result = walg.pitr_restore_cluster(settings, target_time=target_time)
-        except BaseException:
-            # The restore failed. walg raises before touching PGDATA for
-            # config/S3/base-backup-selection problems, so in those cases the
-            # cluster is untouched; bring the productions we stopped back up
-            # best-effort instead of leaving every team offline. (After a
-            # mid-restore failure the restart is still best-effort: containers
-            # that cannot serve just log a warning.)
-            _restart_stopped(" after failed PITR")
-            raise
-        _restart_stopped()
-    finally:
-        _locks.release_system()
-    return (
-        f"Cluster restored to {result['target_time']}. Previous data "
-        f"directory kept inside the volume as {result['displaced_data_dir']} "
-        f"(remove manually after verifying). Restarted productions: "
-        f"{', '.join(stopped) or 'none'}."
-    )
 
 
 @mcp.tool()
@@ -7846,6 +7749,41 @@ def _run_destroy(settings: Settings) -> None:
     print(f"System {result['status']}.\nRemoved: {result['removed']}")
 
 
+def _run_restore_cluster(settings: Settings, target_time: str, confirm: str) -> None:
+    """Operator CLI for cluster PITR — also the "resurrect production
+    elsewhere" path: a fresh Oduflow install with the same [backup] section
+    rebuilds the cluster from S3."""
+    from oduflow import backup_ops
+
+    result = backup_ops.restore_cluster_pitr(
+        settings, _locks, target_time=target_time, confirm=confirm
+    )
+    print(
+        f"Cluster restored to {result['target_time']}. Previous data "
+        f"directory kept inside the volume as {result['displaced_data_dir']} "
+        f"(remove manually after verifying). Restarted productions: "
+        f"{', '.join(result['restarted']) or 'none'}."
+    )
+
+
+def _run_wal(settings: Settings, action: str, confirm: str) -> None:
+    import json as _json
+
+    from oduflow import wal_monitor
+
+    if action == "status":
+        print(_json.dumps(wal_monitor.status(settings), indent=2))
+        return
+    from oduflow.docker_ops.client import get_client
+
+    _locks.acquire_system(operation="control_production_wal")
+    try:
+        result = wal_monitor.control(settings, get_client(), action, confirm)
+    finally:
+        _locks.release_system()
+    print(_json.dumps(result, indent=2))
+
+
 def _print_tools(verbose: bool = False) -> None:
     import inspect
 
@@ -8214,6 +8152,43 @@ def _run_cli() -> None:
 
     # --- System commands ---
     sub.add_parser("destroy", help="Destroy all shared infrastructure")
+    p_restore_cluster = sub.add_parser(
+        "restore-cluster",
+        help=(
+            "DISASTER RECOVERY: restore the whole production PostgreSQL "
+            "cluster from WAL-G (every team's productions at once)"
+        ),
+    )
+    p_restore_cluster.add_argument(
+        "--target-time",
+        default="",
+        help=(
+            'optional PITR target, e.g. "2026-07-10 12:00:00+00" '
+            "(default: replay the whole archive to the latest state)"
+        ),
+    )
+    p_restore_cluster.add_argument(
+        "--confirm",
+        default="",
+        help="must be RESTORE-CLUSTER — this rewrites every production database",
+    )
+    p_wal = sub.add_parser(
+        "wal",
+        help="Inspect or control production cluster WAL archiving",
+    )
+    p_wal.add_argument(
+        "wal_action",
+        choices=["status", "pause", "resume", "retry", "recover", "release"],
+        help=(
+            "status: cached cluster WAL state; pause/resume/retry: archiving "
+            "control; recover/release: disk-protection recovery steps"
+        ),
+    )
+    p_wal.add_argument(
+        "--confirm",
+        default="",
+        help="must be ALL-PRODUCTIONS for any action other than status",
+    )
     p_upgrade = sub.add_parser(
         "upgrade",
         help="Merge bundled configs, agent guides, and sanitize scripts",
@@ -8673,6 +8648,14 @@ def _run_cli() -> None:
 
     if args.command == "destroy":
         _run_destroy(_settings)
+        return
+
+    if args.command == "restore-cluster":
+        _run_restore_cluster(_settings, args.target_time, args.confirm)
+        return
+
+    if args.command == "wal":
+        _run_wal(_settings, args.wal_action, args.confirm)
         return
 
     if args.command == "upgrade":

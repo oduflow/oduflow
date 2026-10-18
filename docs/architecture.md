@@ -113,15 +113,16 @@ flowchart LR
     filestore -->|chunkstore, content-defined dedup| snaps
     proddb -->|WAL archiving| wal
     snaps -.restore_production — one database.-> proddb
-    wal -.restore_cluster_pitr — whole cluster,<br/>any point in time.-> proddb
+    wal -.cluster PITR (operator-only) — whole cluster,<br/>any point in time.-> proddb
 ```
 
 - **Snapshots** are logical, per-database backups: a `pg_dump` plus the
   filestore deduplicated by the built-in chunkstore engine. They restore one
   production at a time (`restore_production`), including to a brand-new host.
 - **WAL-G** continuously archives WAL and takes scheduled base backups of the
-  whole production cluster. `restore_cluster_pitr` rewinds the entire cluster
-  to an arbitrary point in time — the disaster-recovery path.
+  whole production cluster. Cluster PITR — an operator action in the `/admin`
+  console or `oduflow restore-cluster`, deliberately not an MCP tool — rewinds
+  the entire cluster to an arbitrary point in time: the disaster-recovery path.
 - Retention, scheduling, and pruning run in the server's background scheduler.
   Details in [Production Hosting](production.md#backups).
 

@@ -151,25 +151,19 @@ def test_dev_cannot_address_production_namespace(http_client):
     assert "error" in result or result["result"].get("isError")
 
 
-def test_shared_cluster_mutations_require_owner_on_multi_team(settings, monkeypatch):
-    from types import SimpleNamespace
+def test_shared_cluster_mutations_are_not_mcp_tools():
+    """Cluster-wide WAL control and PITR are operator actions: they live in
+    the /admin console and the owner CLI, never on any team's MCP surface."""
+    import ast
+    from pathlib import Path
 
-    from fastmcp.exceptions import ToolError
+    for name in ("restore_cluster_pitr", "control_production_wal"):
+        assert name not in access.PRODUCTION_TOOLS
 
-    settings.teams["2"] = replace(
-        settings.teams["1"], team_id="2", production_token="q" * 40
-    )
-    middleware = access.ProductionAccessMiddleware(lambda: settings)
-    monkeypatch.setattr(middleware, "_production", lambda: True)
-    context = SimpleNamespace(
-        message=SimpleNamespace(name="restore_cluster_pitr", arguments={})
-    )
-
-    async def backend(_context):
-        pytest.fail("cluster restore must not reach the backend")
-
-    with pytest.raises(ToolError, match="every team's"):
-        asyncio.run(middleware.on_call_tool(context, backend))
+    tree = ast.parse(Path("src/oduflow/server.py").read_text())
+    tools = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    assert "restore_cluster_pitr" not in tools
+    assert "control_production_wal" not in tools
 
 
 def test_every_production_decorator_is_in_separate_surface():

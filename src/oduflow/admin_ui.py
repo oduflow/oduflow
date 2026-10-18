@@ -36,7 +36,8 @@ from starlette.routing import BaseRoute, Route
 
 from oduflow import branding, config_store, feedback, ui_totp
 from oduflow import config_schema as schema
-from oduflow.errors import ConfigError, ConflictError, FlowError
+from oduflow.errors import BusyError, ConfigError, ConflictError, FlowError
+from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings, secret_matches
 
 logger = logging.getLogger("oduflow")
@@ -190,6 +191,7 @@ def _next_team_suggestion(raw: dict[str, Any]) -> dict[str, Any]:
 def build_admin_routes(
     get_settings: Callable[[], Settings],
     runtime: config_store.ConfigRuntime | None,
+    locks: LockManager | None = None,
 ) -> list[BaseRoute]:
     from oduflow.web_ui import _is_cross_origin, _is_secure_request, _LoginRateLimiter
 
@@ -214,7 +216,7 @@ def build_admin_routes(
                 return _json_error("Cross-origin request blocked", 403)
             try:
                 return await handler(request)
-            except ConflictError as exc:
+            except (BusyError, ConflictError) as exc:
                 return _json_error(str(exc), 409)
             except FlowError as exc:
                 return _json_error(str(exc), 400)
@@ -518,6 +520,83 @@ def build_admin_routes(
         entry_id = request.path_params["entry_id"]
         return JSONResponse(await run_in_threadpool(_history_entry, entry_id))
 
+    # ── Cluster backup / DR ──
+    # Cluster-wide WAL control and PITR affect every team's productions at
+    # once, so they are operator actions behind the console credential; the
+    # team MCP surface only ever reads cluster WAL status.
+
+    def _wal_state() -> dict[str, Any]:
+        from oduflow import wal_monitor
+
+        settings = get_settings()
+        out: dict[str, Any] = {
+            "ok": True,
+            "wal": wal_monitor.status(settings),
+            "backups": [],
+            "backups_error": "",
+        }
+        if settings.backup is not None:
+            from oduflow import walg
+            from oduflow.docker_ops.client import get_client
+
+            try:
+                out["backups"] = walg.backup_list(get_client(), settings)
+            except Exception as exc:
+                # The monitor status is still useful when the inventory is
+                # unreadable (PostgreSQL down, S3 unreachable): report, don't fail.
+                out["backups_error"] = str(exc)
+        return out
+
+    async def api_wal(request: Request) -> Response:
+        return JSONResponse(await run_in_threadpool(_wal_state))
+
+    def _wal_control(body: dict[str, Any], ip: str) -> dict[str, Any]:
+        from oduflow import wal_monitor
+        from oduflow.docker_ops.client import get_client
+
+        if locks is None:
+            raise ConfigError("WAL control is not available in this server mode.")
+        action = str(body.get("action", ""))
+        logger.warning(
+            "Server settings console: WAL control '%s' requested from %s", action, ip
+        )
+        locks.acquire_system(operation="control_production_wal")
+        try:
+            status = wal_monitor.control(
+                get_settings(), get_client(), action, str(body.get("confirm", ""))
+            )
+        finally:
+            locks.release_system()
+        return {"ok": True, "wal": status}
+
+    async def api_wal_control(request: Request) -> Response:
+        body = await _json_body(request)
+        return JSONResponse(
+            await run_in_threadpool(_wal_control, body, _client_ip(request))
+        )
+
+    def _pitr(body: dict[str, Any], ip: str) -> dict[str, Any]:
+        from oduflow import backup_ops
+
+        if locks is None:
+            raise ConfigError("Cluster PITR is not available in this server mode.")
+        logger.warning(
+            "Server settings console: cluster PITR requested from %s (target=%r)",
+            ip,
+            str(body.get("target_time", "")),
+        )
+        result = backup_ops.restore_cluster_pitr(
+            get_settings(),
+            locks,
+            target_time=str(body.get("target_time", "")),
+            confirm=str(body.get("confirm", "")),
+        )
+        return {"ok": True, **result}
+
+    async def api_pitr(request: Request) -> Response:
+        body = await _json_body(request)
+        return JSONResponse(await run_in_threadpool(_pitr, body, _client_ip(request)))
+
     async def api_restart(request: Request) -> Response:
         if runtime is None or runtime.restart is None:
             return _json_error("Restart is only available in HTTP mode.", 400)
@@ -552,5 +631,8 @@ def build_admin_routes(
             guarded(api_history_entry),
             methods=["GET"],
         ),
+        Route(f"{PREFIX}/api/wal", guarded(api_wal), methods=["GET"]),
+        Route(f"{PREFIX}/api/wal/control", guarded(api_wal_control), methods=["POST"]),
+        Route(f"{PREFIX}/api/pitr", guarded(api_pitr), methods=["POST"]),
         Route(f"{PREFIX}/api/restart", guarded(api_restart), methods=["POST"]),
     ]

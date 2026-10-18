@@ -46,6 +46,7 @@ For authenticator-app 2FA, run `oduflow ui-2fa setup --admin` on the server
 | Coding agent | Agent image and model overrides |
 | Production | Production hosting, workers cap, WAL safety thresholds |
 | Backups | S3 backups: enable, credentials, schedule, retention |
+| Cluster DR | Cluster WAL archiving status and control, base-backup inventory, whole-cluster PITR |
 | Storage, Database | Shown read-only (see below) |
 | Console access | The console's own password |
 | Raw TOML | The whole file, for anything the forms do not cover |
@@ -116,6 +117,27 @@ keep the stored value, or press **Generate** for a new random one. Diffs and
 history show `********` instead of values, plus `(changed)` where a secret
 changed.
 
+## Cluster disaster recovery
+
+The **Cluster DR** section operates on the shared production PostgreSQL
+cluster — every team's productions at once — which is why it lives here and
+not on any team dashboard or MCP surface:
+
+- **WAL archiving**: the cached monitor state (queue, disk reserve,
+  disk-protection latch, storage preflight) with the cluster-wide actions
+  `pause` / `resume` / `retry`, and `recover` / `release` while disk
+  protection is latched. Every action asks you to type `ALL-PRODUCTIONS`.
+- **Cluster restore (PITR)**: the base-backup inventory from S3 and a restore
+  form (optional target time). The restore stops every production, rewrites
+  the cluster from WAL-G, and restarts the productions it stopped; it asks you
+  to type `RESTORE-CLUSTER`. The previous data directory is displaced inside
+  the Docker volume, not destroyed.
+
+The same actions exist on the owner CLI (`oduflow wal`,
+`oduflow restore-cluster`) for headless servers and for resurrecting a cluster
+on a fresh install — see [CLI](cli.md#cluster-disaster-recovery) and
+[Production Hosting](production.md#backups).
+
 ## Security model
 
 - Separate credential: `[admin] password` must differ from every team
@@ -151,6 +173,9 @@ console session cookie; every POST must be same-origin.
 | GET | `/admin/api/raw` | The whole file and its revision |
 | GET | `/admin/api/history` | Saved versions, newest first |
 | GET | `/admin/api/history/{id}` | One save's masked diff |
+| GET | `/admin/api/wal` | Cluster WAL monitor state plus the WAL-G base-backup inventory |
+| POST | `/admin/api/wal/control` | Body `{"action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS"}` — cluster-wide WAL action under the system lock |
+| POST | `/admin/api/pitr` | Body `{"target_time": "...", "confirm": "RESTORE-CLUSTER"}` — whole-cluster PITR under the system lock |
 | POST | `/admin/api/restart` | Restart Oduflow (refused while operations hold locks) |
 
 `preview` and `apply` take one candidate: `{"changes": [{"path": [...],

@@ -55,7 +55,7 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.locking import prod_lock_key, report_progress
+from oduflow.locking import LockManager, prod_lock_key, report_progress
 from oduflow.naming import (
     PRODUCTION_TEMPLATE_PREFIX,
     get_filestore_paths,
@@ -1051,6 +1051,92 @@ def prune_backups(settings: Settings, team: TeamSettings) -> dict[str, Any]:
             "deleted_chunks": prune_result.deleted_chunks,
             "resurrected_chunks": prune_result.resurrected_chunks,
         },
+    }
+
+
+def restore_cluster_pitr(
+    settings: Settings,
+    locks: LockManager,
+    *,
+    target_time: str = "",
+    confirm: str = "",
+) -> dict[str, Any]:
+    """DISASTER RECOVERY: restore the WHOLE production PostgreSQL cluster
+    from WAL-G (base backup + WAL replay). Affects EVERY production database
+    at once; it is an operator-only action, reachable from the /admin console
+    and the ``oduflow restore-cluster`` CLI, never from the team MCP surface.
+
+    The current data directory is displaced inside the volume (not
+    destroyed); production Odoo containers are stopped and restarted.
+
+    ``target_time`` is an optional PITR target such as
+    ``"2026-07-10 12:00:00+00"`` (empty = replay the whole archive).
+    ``confirm`` must equal ``"RESTORE-CLUSTER"``.
+    """
+    if confirm != "RESTORE-CLUSTER":
+        raise PrerequisiteNotMetError(
+            'Confirmation failed: pass confirm="RESTORE-CLUSTER" to restore '
+            "the whole production cluster."
+        )
+    from oduflow import walg
+
+    # The one true system-level operation: it rewrites the cluster every team's
+    # productions live in, so it excludes the whole `prod:` keyspace at once
+    # (per-production locks would each have to be enumerated and could still be
+    # taken behind our back).
+    locks.acquire_system(operation="restore_cluster_pitr")
+    try:
+        # Fail before stopping anything: walg re-checks this, but by then every
+        # team's productions would already be down with nothing restored.
+        if settings.backup is None:
+            raise PrerequisiteNotMetError(
+                "Cluster PITR requires a configured [backup] section."
+            )
+        client = get_client()
+        # Stop every production Odoo container (all teams share the cluster).
+        stopped: list[str] = []
+
+        def _restart_stopped(suffix: str = "") -> None:
+            for entry in stopped:
+                team_id, prod_name = entry.split("/", 1)
+                try:
+                    production_ops.start_production(
+                        settings, settings.teams[team_id], prod_name
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not restart production %s%s: %s", entry, suffix, exc
+                    )
+
+        try:
+            # The stop loop is inside the guarded block: a failure on the Nth
+            # production (container stop, registry read) must restart the ones
+            # already stopped, not leave them offline with nothing restored.
+            for team_cfg in settings.teams.values():
+                for prod_name in production_registry.list_productions(team_cfg):
+                    container = production_ops._get_container(
+                        client, settings, team_cfg, prod_name
+                    )
+                    if container is not None and container.status == "running":
+                        container.stop()
+                        stopped.append(f"{team_cfg.team_id}/{prod_name}")
+            result = walg.pitr_restore_cluster(settings, target_time=target_time)
+        except BaseException:
+            # The restore failed. walg raises before touching PGDATA for
+            # config/S3/base-backup-selection problems, so in those cases the
+            # cluster is untouched; bring the productions we stopped back up
+            # best-effort instead of leaving every team offline. (After a
+            # mid-restore failure the restart is still best-effort: containers
+            # that cannot serve just log a warning.)
+            _restart_stopped(" after failed PITR")
+            raise
+        _restart_stopped()
+    finally:
+        locks.release_system()
+    return {
+        "target_time": result["target_time"],
+        "displaced_data_dir": result["displaced_data_dir"],
+        "restarted": stopped,
     }
 
 
