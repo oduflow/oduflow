@@ -316,7 +316,169 @@ This reloads the template DB from the dump found in the directory, re-reads
 the Odoo version and module list from the restored database, fixes filestore
 ownership, recomputes sizes/overlay mode in `metadata.json`, and remounts
 live overlay environments against the updated filestore (keeping their
-changes).
+changes). Environment databases are **not** reloaded. Copy-mode environments
+are unchanged. Retained generations created by scheduled sync are unchanged.
+The dashboard exposes this operation as **Templates → More → Refresh**.
+`refresh-template` is a separate command that only remounts the filestore.
+For an already-used template, prefer staging via a local source and
+`--overwrite`: direct writes happen before Oduflow can stop live overlays.
+
+## Scheduled SSH sync (system cron)
+
+Open **Templates → More → Source / schedule / log**. Set the SSH host, user,
+port, absolute backup directory and five-field cron schedule; enable the
+schedule and save. Times use the **host cron timezone**. **Sync now** queues a
+request for cron's next minute tick using the saved settings. It works even
+with the schedule disabled. The web server never starts the sync worker.
+
+Prerequisites:
+
+- A running system cron daemon and write access as root to `/etc/cron.d`.
+  Oduflow manages only its own `oduflow-template-*` files; existing jobs remain
+  untouched. Remove the configuration in the dialog before renaming or
+  deleting the template; removing it also deletes the downloaded backup copy
+  (the inbox) but keeps status and logs, and deleting the template then
+  removes those too. Disabling its schedule keeps the manual-request job.
+- `rsync` and OpenSSH on the Oduflow host, and rsync on the source host.
+- Add the team's public SSH key (dashboard **Credentials**) to the source
+  account's `authorized_keys`. Verify the remote SSH host key independently
+  and put it in `{team.data_dir}/ssh/known_hosts`. Sync uses strict host-key
+  verification, the team's key,
+  and noninteractive authentication. For a non-default port the known_hosts
+  entry uses `[host]:port`. Key rotation requires updating the source account.
+
+The source must be a **completed, immutable backup**, not a live PostgreSQL
+storage directory:
+
+```text
+/backups/completed/
+├── dump.pgdump          # or dump.sql / dump.sql.gz / dump.pgdump.gz / db.dump
+├── filestore/           # matching Odoo attachments; required, may be empty
+└── READY                # unique snapshot ID, e.g. 2026-10-07T030000Z
+```
+
+The client is responsible for producing a consistent dump and filestore.
+Publish `READY` last, containing 1–256 ASCII letters/digits or `_ . : -`.
+Do not change the published directory while it is being fetched. Publish a
+new unique ID for every backup. The worker verifies the ID before and after
+rsync and in the downloaded copy, then imports from its local inbox. Failed
+or changing transfers never reach the live template. Symlinks are not copied.
+No remote dump commands are executed by Oduflow.
+
+The worker runs `rsync → import → optional environment refresh`, writes
+`{team.data_dir}/template_sync/{template}/status.json` and `run.log`, and
+rotates the log at 2 MiB with three retained files. The dialog reads the last
+64 KiB and shows timestamps, queued/running/success/partial/failed/interrupted
+state, and errors. **Refresh status / log** reads current files. If no worker
+has ever started, check the host cron service/log for configuration or CLI
+startup errors. Repeated execution of an active job is rejected; scheduled
+failures retry on the next scheduled run or a manual request.
+
+The minute tick that picks up manual requests first checks for the queued
+request file (`test -e`, through `docker exec` under Docker), so an idle
+template costs no Python start. A run is never dropped for being busy: a
+scheduled run that finds the template in use (another sync, a dashboard save,
+an MCP template operation) is queued for the next minute instead, and a run
+whose environments stay busy for five minutes after the transfer is reported
+as **deferred** and queued again.
+
+Deployment settings in `oduflow.toml`:
+
+```toml
+[template_sync]
+cron_dir = "/etc/cron.d"
+cron_user = ""          # empty: the user running Oduflow (natively the only one allowed)
+cron_container = ""     # native host install; see Docker setup below
+```
+
+Natively the worker must run as the same user as the server: everything it
+writes (locks, status, pins, imported template files) has to stay readable and
+replaceable by the server, so a different `cron_user` is rejected.
+
+The generated command pins the current Python executable and `ODUFLOW_TOML`
+path. Re-save schedules after moving the installation/configuration. The
+worker can also be run directly with the same saved configuration:
+
+```bash
+oduflow sync-template prod --team 1             # enabled schedule
+oduflow sync-template prod --team 1 --pending   # consume a queued UI request only
+```
+
+### Optional environment data refresh
+
+Use **Environment → More → Auto-refresh data: Off** to opt in. The confirmation
+covers subsequent resets: local database and filestore changes are discarded.
+Code, container settings, credentials, URL and ports stay in place. Protected
+environments are skipped and reported. Stopped environments stay stopped.
+
+Before updating a shared lower filestore, cron pins existing overlay
+workspaces to a retained generation. This initial pin briefly stops/remounts
+those containers, including ones whose database auto-refresh is off. Subsequent
+syncs leave them on their old generation. Copy-mode environments already have
+an independent filestore. This keeps old databases and attachments together.
+
+Template refreshes, filestore attaches and imports leave pinned environments
+on their retained generation and name them in their result, instead of
+remounting them silently. To move a pinned environment onto the current
+template, enable its data auto-refresh (the next sync resets it) or recreate
+it. Saving an environment as its template unpins that environment: what it
+published is now the template's filestore.
+
+An environment cloned from a template that a sync last imported remembers the
+snapshot it came from, so a later sync of the same snapshot leaves it alone
+even if it opted in after it was created. Any other import into the template
+clears that record.
+
+An opted-in environment receives a staged database clone and a fresh
+filestore. A separate maintenance container uses its code/configuration to
+install configured modules, neutralize Odoo and run team/project sanitization
+before the serving container can access the new data. Preparation or
+sanitization errors leave the old environment intact. The worker stops the
+serving container for the switch, verifies readiness if it was running, and
+rolls back both database and filestore on a switch/startup error. Odoo major
+versions must match; environments created without a managed filestore mount
+must first be recreated from a template that includes one.
+
+Workspace pins survive container updates and restarts. Retained generations
+use hardlinks for Odoo's content-addressed attachments; unused generations are
+removed after a sync, and when the last environment pinned to one is deleted.
+A sync only hardlinks a new generation when an opted-in environment actually
+moves to the new snapshot. **Never edit attachment files in place** or use rsync's
+`--inplace` against template/inbox/generation trees. Use staged imports. Old
+generations consume space for attachments no longer present in the current
+snapshot; preparation also needs space for an additional database and any
+copy-mode filestore. Busy operations are excluded through shared file locks
+under `{data_dir}/.locks`; never delete these files to "unlock" a job.
+
+An OS/process crash during refresh can leave a workspace
+`.template-refresh.json` recovery journal. Oduflow blocks start/restart/update/delete
+and overlay recovery for that workspace until an operator reconciles the
+recorded database names, old/new filestore paths and pin, and restores the
+recorded restart policy. In this case it retains recovery files/generations;
+do not simply delete the journal. Ordinary caught failures roll back
+automatically. A new sync will report the affected environment as failed.
+
+### Cron when Oduflow runs in Docker
+
+Run cron **on the host**. Bind-mount its cron directory into the Oduflow
+container, adding `-v /etc/cron.d:/etc/cron.d` to the existing deployment, and
+set:
+
+```toml
+[template_sync]
+cron_dir = "/etc/cron.d"
+cron_user = ""              # host user running `docker exec`; empty means root
+cron_container = "oduflow"  # actual container name
+```
+
+Generated host jobs use `/usr/bin/docker exec` to run the worker in the
+existing Oduflow container, sharing its configuration, filesystem, Docker
+socket and mount namespace. The container must run as root to write
+root-owned cron files. The host needs cron and the Docker CLI at that path;
+no cron daemon is started inside the Oduflow server/container. **Do not run a
+separate worker container**: overlay mounts must be created in the same mount
+namespace as the server. The native installation uses the configured Python
+executable directly.
 
 ## Listing and Dropping Templates
 

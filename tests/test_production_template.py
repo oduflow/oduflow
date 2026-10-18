@@ -98,6 +98,7 @@ def _db_map(existing):
 class _Remount:
     affected: list[str] = []
     failures: list[tuple[str, str]] = []
+    pinned: list[str] = []
 
 
 @contextmanager

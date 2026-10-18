@@ -164,3 +164,11 @@ Alternatively, set a high threshold in `oduflow.toml` to avoid overlayfs entirel
 [storage]
 overlay_threshold_mb = 999999
 ```
+
+## Scheduled template sync
+
+System cron runs on the Docker host and invokes the worker via `docker exec`
+in this existing container. Add a writable `/etc/cron.d:/etc/cron.d` mount and
+set `[template_sync] cron_container = "oduflow"` to the actual container name.
+See [the complete setup](templates.md#cron-when-oduflow-runs-in-docker), including
+SSH source requirements. The Oduflow web process does not launch sync workers.

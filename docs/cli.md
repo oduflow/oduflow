@@ -286,6 +286,11 @@ oduflow import-template s3://bucket/backups/mydb-2026-10-13.zip --template-name 
 # Reload the template DB from files already placed in the template directory
 # (an external rsync/scp drop) and refresh its metadata
 oduflow import-template --template-name myproject --refresh [--team 1]
+
+# Run a saved, enabled SSH sync schedule (cron normally invokes this)
+oduflow sync-template myproject [--team 1]
+# Only consume a manual request queued by the dashboard
+oduflow sync-template myproject --pending [--team 1]
 ```
 
 For a private bucket, pass `--s3-access-key` with `--s3-secret-key` (plus
@@ -298,6 +303,11 @@ the endpoint or access key changes. `--s3-secret-key` defaults to
 `secret:<name>` to sign with an existing team secret instead.
 
 `template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
+
+Scheduled SSH sync uses retained filestore generations and opt-in environment
+DB/filestore resets. Ordinary template refresh leaves pinned environments on
+their previous generation and lists them in its output. See [Scheduled SSH sync](templates.md#scheduled-ssh-sync-system-cron)
+for source preparation, cron installation and recovery.
 
 ## Service Commands
 

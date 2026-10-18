@@ -187,6 +187,7 @@ def _get_settings() -> Settings:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
         if _no_telemetry:
             settings = dataclasses.replace(settings, disable_telemetry=True)
+        _locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")
         _settings = settings
         _settings_raw = raw
     return _settings
@@ -1413,6 +1414,7 @@ def save_as_template(
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
     else:
         lines.append("No other environments were affected.")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1500,6 +1502,7 @@ def save_production_as_template(
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
     else:
         lines.append("No other environments were affected.")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1548,6 +1551,17 @@ def list_templates(ctx: Context | None = None) -> str:
     return output
 
 
+def _pinned_envs_lines(result: dict[str, object]) -> list[str]:
+    pinned = cast("list[str]", result.get("pinned_envs", []))
+    if not pinned:
+        return []
+    return [
+        "Left on the filestore a scheduled sync retained for them (enable "
+        "Auto-refresh data or recreate them to follow the template): "
+        + ", ".join(pinned)
+    ]
+
+
 def _format_template_import_result(result: dict[str, object]) -> str:
     """Human-readable summary shared by the MCP tool and the CLI runner."""
     if "dump_reloaded" in result:  # s3 / local-path / refresh engine
@@ -1588,6 +1602,7 @@ def _format_template_import_result(result: dict[str, object]) -> str:
             "Remounted (changes preserved) filestore overlays for: "
             + ", ".join(affected)
         )
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1717,11 +1732,14 @@ def refresh_template(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines = [f"{verb} filestore overlays for: {', '.join(affected)}"]
+    elif result.get("pinned_envs"):
+        lines = []
     else:
         lines = [
             f"No live overlay environments use template '{template_name}'; "
             "nothing to do."
         ]
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1781,6 +1799,7 @@ def attach_filestore(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -7432,6 +7451,55 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
     return _get_settings()
 
 
+def _cli_locks(settings: Settings) -> LockManager:
+    return LockManager(os.path.join(settings.base_data_dir, ".locks"))
+
+
+def _cli_template_lock(
+    team_wide: Callable[[dict[str, Any]], bool] = lambda arguments: True,
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Direct CLI mutations share the server/cron file lock space.
+
+    Like the MCP tools, every command takes its template's key, and only the
+    ones that remount other environments (``team_wide`` of the bound
+    arguments) add the team lock. That acquire waits up to
+    ATTACH_SWAP_LOCK_TIMEOUT instead of failing the moment the server runs any
+    environment operation in the team.
+    """
+
+    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+        @functools.wraps(fn)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            values = inspect.signature(fn).bind(*args, **kwargs)
+            values.apply_defaults()
+            arguments = values.arguments
+            settings = arguments["settings"]
+            team = arguments["team"]
+            name = arguments.get("template_name") or arguments.get("branch", "default")
+            locks = _cli_locks(settings)
+            with locks.env_lock(
+                template_lock_key(team.team_id, name), operation=fn.__name__
+            ):
+                guard = (
+                    locks.team_lock_blocking(
+                        team.team_id, ATTACH_SWAP_LOCK_TIMEOUT, operation=fn.__name__
+                    )
+                    if team_wide(arguments)
+                    else contextlib.nullcontext()
+                )
+                with guard:
+                    return fn(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+# Re-initialising an existing template replaces the lower layer under its
+# environments; a new one has none yet.
+@_cli_template_lock(
+    lambda a: os.path.isdir(a["team"].get_template_dir(a["template_name"]))
+)
 def _run_init_template(
     settings: Settings,
     team: TeamSettings,
@@ -7459,6 +7527,7 @@ def _run_init_template(
     print(msg)
 
 
+@_cli_template_lock()
 def _run_template_from_env(
     settings: Settings,
     team: TeamSettings,
@@ -7484,6 +7553,7 @@ def _run_template_from_env(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
@@ -7491,6 +7561,7 @@ def _run_template_from_env(
     print("\n".join(lines))
 
 
+@_cli_template_lock()
 def _run_refresh_template(
     settings: Settings,
     team: TeamSettings,
@@ -7505,11 +7576,14 @@ def _run_refresh_template(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines = [f"{verb} filestore overlays for: {', '.join(affected)}"]
+    elif result.get("pinned_envs"):
+        lines = []
     else:
         lines = [
             f"No live overlay environments use template '{template_name}'; "
             "nothing to do."
         ]
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
@@ -7517,6 +7591,9 @@ def _run_refresh_template(
     print("\n".join(lines))
 
 
+# As in the MCP tool, the team lock covers only the remount-and-swap window,
+# not the staging of a possibly very large source.
+@_cli_template_lock(lambda a: False)
 def _run_attach_filestore(
     settings: Settings,
     team: TeamSettings,
@@ -7525,6 +7602,7 @@ def _run_attach_filestore(
     reset_env_changes: bool = False,
     strip_prefix: str = "auto",
 ) -> None:
+    locks = _cli_locks(settings)
     result = system_ops.attach_filestore(
         settings,
         team,
@@ -7532,6 +7610,9 @@ def _run_attach_filestore(
         source,
         reset_env_changes=reset_env_changes,
         strip_prefix=strip_prefix,
+        lock=lambda: locks.team_lock_blocking(
+            team.team_id, ATTACH_SWAP_LOCK_TIMEOUT, operation="attach_filestore"
+        ),
     )
     lines = [
         f"Filestore attached to template '{result['template_name']}'.",
@@ -7546,6 +7627,7 @@ def _run_attach_filestore(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
@@ -7553,6 +7635,7 @@ def _run_attach_filestore(
     print("\n".join(lines))
 
 
+@_cli_template_lock()
 def _run_delete_template(
     settings: Settings, team: TeamSettings, template_name: str
 ) -> None:
@@ -7562,6 +7645,8 @@ def _run_delete_template(
     )
 
 
+# Replacement imports mutate lower layers under existing environments.
+@_cli_template_lock(lambda a: bool(a["overwrite"] or a["refresh"]))
 def _run_import_template(
     settings: Settings,
     team: TeamSettings,
@@ -8282,6 +8367,15 @@ def _run_cli() -> None:
     )
     p_import.add_argument("--team", default="1", help="Team ID (default: 1)")
 
+    p_sync_tpl = sub.add_parser(
+        "sync-template", help="Run a cron-owned SSH template sync"
+    )
+    p_sync_tpl.add_argument("template_name")
+    p_sync_tpl.add_argument("--team", default="1")
+    p_sync_tpl.add_argument(
+        "--pending", action="store_true", help="Only consume a UI-queued request"
+    )
+
     p_lt = sub.add_parser("list-templates", help="List available template profiles")
     p_lt.add_argument("--team", default="1", help="Team ID (default: 1)")
 
@@ -8622,6 +8716,20 @@ def _run_cli() -> None:
             s3_secret_key=args.s3_secret_key,
             s3_region=args.s3_region,
         )
+        return
+
+    if args.command == "sync-template":
+        from oduflow import template_sync
+
+        result = template_sync.run(
+            _settings, _cli_team(), args.template_name, pending=args.pending
+        )
+        # Quiet ticks print nothing, so cron mails only real outcomes: nothing
+        # queued, or a request left queued behind a busy template.
+        if result.get("status") not in ("idle", "busy", "unconfigured", "disabled"):
+            print(json.dumps(result))
+        if result.get("status") == "partial":
+            raise SystemExit(1)
         return
 
     if args.command == "list-templates":

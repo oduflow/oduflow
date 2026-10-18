@@ -13,6 +13,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -59,6 +60,7 @@ from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
 from oduflow.env_tokens import invalidate_cache
 from oduflow.errors import (
+    BusyError,
     ConflictError,
     ExternalCommandError,
     FlowError,
@@ -76,7 +78,7 @@ from oduflow.hostname_registry import (
     reserve_environment_slot,
 )
 from oduflow.hostname_registry import rename_env as rename_hostname_env
-from oduflow.locking import env_wake_key, keyed_mutex
+from oduflow.locking import LockManager, env_wake_key, keyed_mutex
 from oduflow.naming import (
     get_agent_checkout_dir,
     get_agent_container_name,
@@ -676,8 +678,14 @@ def _mount_filestore(
     *,
     template_name: str,
     force_overlay: bool = False,
+    generation: str = "",
+    paths_override: dict[str, str] | None = None,
 ) -> None:
-    template_filestore = team.get_template_filestore_path(template_name)
+    from oduflow.template_generations import lower_paths
+
+    template_filestore, metadata_path = lower_paths(
+        team, env_name, template_name, generation
+    )
     if not template_filestore or not os.path.isdir(template_filestore):
         if force_overlay:
             raise PrerequisiteNotMetError(
@@ -688,7 +696,7 @@ def _mount_filestore(
         )
         return
 
-    paths = get_filestore_paths(env_name, team.workspaces_dir)
+    paths = paths_override or get_filestore_paths(env_name, team.workspaces_dir)
     if force_overlay and not _is_directory_strict(paths["upper"]):
         raise PrerequisiteNotMetError(
             f"Overlay upper layer is missing: {paths['upper']}"
@@ -703,7 +711,7 @@ def _mount_filestore(
             paths["merged"],
             extra={"env_name": env_name},
         )
-        _unmount_filestore(env_name, team)
+        _unmount_filestore(env_name, team, paths_override=paths)
         _wait_unmounted(paths["merged"])
         if overlay_mount_state(paths["merged"]) != MOUNT_ABSENT:
             raise PrerequisiteNotMetError(
@@ -712,7 +720,6 @@ def _mount_filestore(
 
     # Read use_overlay flag from template metadata (avoids slow filestore scan)
     use_overlay = None
-    metadata_path = team.get_template_metadata_path(template_name)
     if os.path.isfile(metadata_path):
         try:
             with open(metadata_path) as f:
@@ -823,8 +830,10 @@ def _mount_filestore(
     logger.info("Filestore overlay mounted", extra={"env_name": env_name})
 
 
-def _unmount_filestore(env_name: str, team: TeamSettings) -> None:
-    paths = get_filestore_paths(env_name, team.workspaces_dir)
+def _unmount_filestore(
+    env_name: str, team: TeamSettings, *, paths_override: dict[str, str] | None = None
+) -> None:
+    paths = paths_override or get_filestore_paths(env_name, team.workspaces_dir)
     merged = paths["merged"]
     # Deliberately not ``isdir``/``ismount``: both report False for a stale
     # mount, because the stat they rely on fails with ENOTCONN — and that is
@@ -869,9 +878,12 @@ def _wait_unmounted(merged: str, timeout: float = 3.0) -> None:
 class RemountResult:
     """Outcome of :func:`remount_template_overlays`."""
 
-    def __init__(self, affected: list[str]) -> None:
+    def __init__(self, affected: list[str], pinned: list[str] | None = None) -> None:
         self.affected = affected
         self.failures: list[tuple[str, str]] = []
+        # Environments a scheduled sync pinned to a retained filestore
+        # generation: deliberately left on it, never remounted here.
+        self.pinned: list[str] = pinned or []
 
 
 @contextlib.contextmanager
@@ -909,14 +921,21 @@ def remount_template_overlays(
     Copy-mode environments (``use_overlay=False``) are not mounted, so they are
     skipped — updating the lower layer does not affect their independent copy.
     """
+    from oduflow.template_generations import is_pinned
+
     exclude = set(exclude_envs)
     affected: list[dict[str, Any]] = []
+    pinned: list[str] = []
 
     for env in list_environments(settings, team):
         env_name = env["env_name"]
         if env_name in exclude:
             continue
         if env.get("template_name") != template_name:
+            continue
+        if is_pinned(team, env_name):
+            logger.info("Leaving %s on its retained filestore generation", env_name)
+            pinned.append(env_name)
             continue
         merged = get_filestore_paths(env_name, team.workspaces_dir)["merged"]
         # Stale mounts are included: they need the very same stop / unmount /
@@ -947,7 +966,7 @@ def remount_template_overlays(
             }
         )
 
-    result = RemountResult([a["env_name"] for a in affected])
+    result = RemountResult([a["env_name"] for a in affected], pinned)
 
     # Stop containers and unmount overlays (keeping upper/work).
     for a in affected:
@@ -1029,185 +1048,274 @@ def reconcile_overlay_mounts(settings: Settings) -> list[dict[str, Any]]:
     """
     results: list[dict[str, Any]] = []
     client = get_client()
-
+    locks = LockManager(
+        os.path.join(settings.base_data_dir, ".locks")
+        if settings.base_data_dir
+        else None
+    )
+    busy: list[TeamSettings] = []
     for team in settings.teams.values():
         try:
-            envs = list_environments(settings, team)
-        except Exception as exc:  # noqa: BLE001 - startup must survive this
-            logger.warning(
-                "[team.%s] Could not list environments to reconcile overlays: %s",
-                team.team_id,
-                exc,
-            )
+            locks.acquire_team(team.team_id, operation="reconcile_overlays")
+        except BusyError:
+            busy.append(team)
             continue
+        try:
+            _reconcile_team_overlays(settings, team, client, results)
+        finally:
+            locks.release_team(team.team_id)
+    if busy:
+        # Another process (a scheduled template sync) holds these teams. This
+        # pass runs only at startup, so skipping them would leave their stale
+        # filestores broken until the next restart: repair once they are free.
+        logger.info(
+            "Overlay reconciliation deferred for busy teams: %s",
+            ", ".join(team.team_id for team in busy),
+        )
+        threading.Thread(
+            target=_reconcile_when_free,
+            args=(settings, busy, locks),
+            name="oduflow-overlay-reconcile",
+            daemon=True,
+        ).start()
+    return results
 
-        for env in envs:
-            env_name = env["env_name"]
-            paths = get_filestore_paths(env_name, team.workspaces_dir)
-            record: dict[str, Any] = {
-                "team_id": team.team_id,
-                "env_name": env_name,
-                "repaired": False,
-                "detail": "",
-            }
+
+# How often the deferred startup reconciliation retries a busy team.
+_RECONCILE_RETRY_POLL = 5.0
+
+
+def _reconcile_when_free(
+    settings: Settings, teams: list[TeamSettings], locks: LockManager
+) -> None:
+    client = get_client()
+    for team in teams:
+        while True:
             try:
-                mount_state = overlay_mount_state(paths["merged"])
-                has_overlay_upper = _is_directory_strict(paths["upper"])
-            except OSError as exc:
-                record["detail"] = f"mount probe failed: {exc}"
-                logger.error(
-                    "Could not inspect filestore overlay for %s: %s", env_name, exc
+                locks.acquire_team_blocking(
+                    team.team_id,
+                    3600,
+                    operation="reconcile_overlays",
+                    poll=_RECONCILE_RETRY_POLL,
                 )
-                results.append(record)
+                break
+            except BusyError:
                 continue
-            if mount_state != MOUNT_STALE and not (
-                mount_state == MOUNT_ABSENT and has_overlay_upper
-            ):
-                continue
-            if not has_overlay_upper:
-                record["detail"] = "overlay upper layer is missing"
-                logger.error(
-                    "Broken filestore overlay for %s has no upper layer at %s; "
-                    "leaving the mount alone for manual recovery",
-                    env_name,
-                    paths["upper"],
-                )
-                results.append(record)
-                continue
-
-            template_name = env.get("template_name") or ""
-            if not template_name or template_name == "none":
-                # Without a template there is no lower layer to remount against,
-                # and only an operator can decide what to restore this from.
-                record["detail"] = "no template to remount against"
-                logger.error(
-                    "Broken filestore overlay for %s has no template: %s needs "
-                    "manual recovery",
-                    env_name,
-                    paths["merged"],
-                )
-                results.append(record)
-                continue
-
-            # _mount_filestore returns quietly when the lower layer is gone, so
-            # check it here — before detaching anything. Otherwise this pass
-            # would unmount the environment and report a repair it never made.
-            template_filestore = team.get_template_filestore_path(template_name)
-            if not template_filestore or not os.path.isdir(template_filestore):
-                record["detail"] = f"template filestore missing: {template_filestore}"
-                logger.error(
-                    "Broken filestore overlay for %s: template '%s' has no "
-                    "filestore at %s; leaving the mount alone for manual recovery",
-                    env_name,
-                    template_name,
-                    template_filestore,
-                )
-                results.append(record)
-                continue
-
+        results: list[dict[str, Any]] = []
+        try:
+            _reconcile_team_overlays(settings, team, client, results)
+        except Exception:  # noqa: BLE001 - a background repair must not die loudly
             logger.warning(
-                "[team.%s] Broken filestore overlay for %s (%s); repairing",
+                "[team.%s] Deferred overlay reconciliation failed",
                 team.team_id,
-                env_name,
-                mount_state,
+                exc_info=True,
             )
-            container_name = get_resource_name(
-                env_name, "odoo", settings.prefix, team.team_id
-            )
-            image = env.get("odoo_image") or "odoo:19.0"
-            was_running = False
-            container = None
-            try:
-                container = client.containers.get(container_name)
-                was_running = container.status == "running"
-                if container.image.tags:
-                    image = container.image.tags[0]
-            except docker.errors.NotFound:
-                pass
-            except Exception as exc:  # noqa: BLE001 - fail closed per environment
-                record["detail"] = f"container lookup failed: {exc}"
-                logger.error("Could not inspect %s: %s", container_name, exc)
-                results.append(record)
-                continue
-
-            if container is not None:
-                status = container.status
-                if status == "running":
-                    try:
-                        container.stop(timeout=10)
-                        container.reload()
-                    except Exception as exc:  # noqa: BLE001 - fail closed
-                        record["detail"] = f"stop failed: {exc}"
-                        logger.error("Could not stop %s: %s", container_name, exc)
-                        results.append(record)
-                        continue
-                    if container.status == "running":
-                        record["detail"] = "stop failed: container is still running"
-                        logger.error("Container %s is still running", container_name)
-                        results.append(record)
-                        continue
-                elif status not in {"created", "exited", "dead"}:
-                    record["detail"] = f"unsafe container state: {status}"
-                    logger.error(
-                        "Will not detach overlay while %s is %s",
-                        container_name,
-                        status,
-                    )
-                    results.append(record)
-                    continue
-
-            try:
-                _unmount_filestore(env_name, team)
-                _wait_unmounted(paths["merged"])
-                if overlay_mount_state(paths["merged"]) != MOUNT_ABSENT:
-                    raise PrerequisiteNotMetError("mount did not detach")
-                _mount_filestore(
-                    client,
-                    settings,
-                    team,
-                    env_name,
-                    get_db_name(env_name, team.team_id),
-                    image,
-                    {},
-                    template_name=template_name,
-                    force_overlay=True,
-                )
-                state = overlay_mount_state(paths["merged"])
-                if state != MOUNT_ALIVE:
-                    raise PrerequisiteNotMetError(
-                        f"remount did not become live (state: {state})"
-                    )
-            except Exception as exc:  # noqa: BLE001 - never block startup
-                record["detail"] = str(exc)
-                logger.error(
-                    "Could not repair filestore overlay for %s: %s", env_name, exc
-                )
-                # Do not restart against an absent or unverified filestore.
-                results.append(record)
-                continue
-
-            if was_running and container is not None:
-                try:
-                    container.start()
-                    container.reload()
-                    if container.status != "running":
-                        raise RuntimeError(
-                            f"container status after start is {container.status}"
-                        )
-                except Exception as exc:  # noqa: BLE001 - best-effort
-                    record["detail"] = f"restart failed: {exc}"
-                    logger.error("Could not restart %s: %s", container_name, exc)
-                    results.append(record)
-                    continue
-
-            record["repaired"] = True
+        finally:
+            locks.release_team(team.team_id)
+        if results:
             logger.warning(
-                "Remounted filestore overlay for %s (upper deltas kept)",
-                env_name,
+                "[team.%s] Deferred overlay reconciliation: %d repaired, %d need attention",
+                team.team_id,
+                sum(1 for r in results if r["repaired"]),
+                sum(1 for r in results if not r["repaired"]),
+            )
+
+
+def _reconcile_team_overlays(
+    settings: Settings,
+    team: TeamSettings,
+    client: DockerClient,
+    results: list[dict[str, Any]],
+) -> None:
+    """One team's pass of :func:`reconcile_overlay_mounts`, under its team lock."""
+    from oduflow.template_generations import require_no_recovery
+
+    try:
+        envs = list_environments(settings, team)
+    except Exception as exc:  # noqa: BLE001 - startup must survive this
+        logger.warning(
+            "[team.%s] Could not list environments to reconcile overlays: %s",
+            team.team_id,
+            exc,
+        )
+        return
+
+    for env in envs:
+        env_name = env["env_name"]
+        paths = get_filestore_paths(env_name, team.workspaces_dir)
+        record: dict[str, Any] = {
+            "team_id": team.team_id,
+            "env_name": env_name,
+            "repaired": False,
+            "detail": "",
+        }
+        try:
+            require_no_recovery(team, env_name)
+            mount_state = overlay_mount_state(paths["merged"])
+            has_overlay_upper = _is_directory_strict(paths["upper"])
+        except (OSError, PrerequisiteNotMetError) as exc:
+            record["detail"] = f"mount probe failed: {exc}"
+            logger.error(
+                "Could not inspect filestore overlay for %s: %s", env_name, exc
             )
             results.append(record)
+            continue
+        if mount_state != MOUNT_STALE and not (
+            mount_state == MOUNT_ABSENT and has_overlay_upper
+        ):
+            continue
+        if not has_overlay_upper:
+            record["detail"] = "overlay upper layer is missing"
+            logger.error(
+                "Broken filestore overlay for %s has no upper layer at %s; "
+                "leaving the mount alone for manual recovery",
+                env_name,
+                paths["upper"],
+            )
+            results.append(record)
+            continue
 
-    return results
+        template_name = env.get("template_name") or ""
+        if not template_name or template_name == "none":
+            # Without a template there is no lower layer to remount against,
+            # and only an operator can decide what to restore this from.
+            record["detail"] = "no template to remount against"
+            logger.error(
+                "Broken filestore overlay for %s has no template: %s needs "
+                "manual recovery",
+                env_name,
+                paths["merged"],
+            )
+            results.append(record)
+            continue
+
+        # _mount_filestore returns quietly when the lower layer is gone, so
+        # check it here — before detaching anything. Otherwise this pass
+        # would unmount the environment and report a repair it never made.
+        from oduflow.template_generations import lower_paths
+
+        try:
+            template_filestore, _ = lower_paths(team, env_name, template_name)
+        except (OSError, PrerequisiteNotMetError) as exc:
+            record["detail"] = f"lower layer lookup failed: {exc}"
+            logger.error(
+                "Could not resolve the filestore lower layer for %s: %s",
+                env_name,
+                exc,
+            )
+            results.append(record)
+            continue
+        if not template_filestore or not os.path.isdir(template_filestore):
+            record["detail"] = f"template filestore missing: {template_filestore}"
+            logger.error(
+                "Broken filestore overlay for %s: template '%s' has no "
+                "filestore at %s; leaving the mount alone for manual recovery",
+                env_name,
+                template_name,
+                template_filestore,
+            )
+            results.append(record)
+            continue
+
+        logger.warning(
+            "[team.%s] Broken filestore overlay for %s (%s); repairing",
+            team.team_id,
+            env_name,
+            mount_state,
+        )
+        container_name = get_resource_name(
+            env_name, "odoo", settings.prefix, team.team_id
+        )
+        image = env.get("odoo_image") or "odoo:19.0"
+        was_running = False
+        container = None
+        try:
+            container = client.containers.get(container_name)
+            was_running = container.status == "running"
+            if container.image.tags:
+                image = container.image.tags[0]
+        except docker.errors.NotFound:
+            pass
+        except Exception as exc:  # noqa: BLE001 - fail closed per environment
+            record["detail"] = f"container lookup failed: {exc}"
+            logger.error("Could not inspect %s: %s", container_name, exc)
+            results.append(record)
+            continue
+
+        if container is not None:
+            status = container.status
+            if status == "running":
+                try:
+                    container.stop(timeout=10)
+                    container.reload()
+                except Exception as exc:  # noqa: BLE001 - fail closed
+                    record["detail"] = f"stop failed: {exc}"
+                    logger.error("Could not stop %s: %s", container_name, exc)
+                    results.append(record)
+                    continue
+                if container.status == "running":
+                    record["detail"] = "stop failed: container is still running"
+                    logger.error("Container %s is still running", container_name)
+                    results.append(record)
+                    continue
+            elif status not in {"created", "exited", "dead"}:
+                record["detail"] = f"unsafe container state: {status}"
+                logger.error(
+                    "Will not detach overlay while %s is %s",
+                    container_name,
+                    status,
+                )
+                results.append(record)
+                continue
+
+        try:
+            _unmount_filestore(env_name, team)
+            _wait_unmounted(paths["merged"])
+            if overlay_mount_state(paths["merged"]) != MOUNT_ABSENT:
+                raise PrerequisiteNotMetError("mount did not detach")
+            _mount_filestore(
+                client,
+                settings,
+                team,
+                env_name,
+                get_db_name(env_name, team.team_id),
+                image,
+                {},
+                template_name=template_name,
+                force_overlay=True,
+            )
+            state = overlay_mount_state(paths["merged"])
+            if state != MOUNT_ALIVE:
+                raise PrerequisiteNotMetError(
+                    f"remount did not become live (state: {state})"
+                )
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            record["detail"] = str(exc)
+            logger.error("Could not repair filestore overlay for %s: %s", env_name, exc)
+            # Do not restart against an absent or unverified filestore.
+            results.append(record)
+            continue
+
+        if was_running and container is not None:
+            try:
+                container.start()
+                container.reload()
+                if container.status != "running":
+                    raise RuntimeError(
+                        f"container status after start is {container.status}"
+                    )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                record["detail"] = f"restart failed: {exc}"
+                logger.error("Could not restart %s: %s", container_name, exc)
+                results.append(record)
+                continue
+
+        record["repaired"] = True
+        logger.warning(
+            "Remounted filestore overlay for %s (upper deltas kept)",
+            env_name,
+        )
+        results.append(record)
 
 
 def _install_apt_packages(container: Any, repo_path: str) -> str:
@@ -2644,6 +2752,11 @@ def _create_environment_impl(
             f'CREATE DATABASE "{env_db}" TEMPLATE "{tpl_db}"{strategy} '
             f'TABLESPACE "{ts_name}";',
         )
+        # The scheduled-sync snapshot this database came from, so a later sync
+        # of the same snapshot does not reset it.
+        from oduflow.template_generations import record_provenance
+
+        record_provenance(team, env_name, template_name)
     else:
         _exec_sql(
             client,
@@ -3887,6 +4000,15 @@ def delete_environment(
         raise ProtectedError(
             f"Environment '{env_name}' is protected. Unprotect it before deleting."
         )
+    from oduflow.template_generations import (
+        collect_best_effort,
+        has_pin,
+        require_no_recovery,
+    )
+
+    require_no_recovery(team, env_name)
+    retained_generation = has_pin(team, env_name)
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -3976,6 +4098,10 @@ def delete_environment(
                 if os.path.isdir(wt_path):
                     remove_worktree(team, repo_name, wt_path)
         shutil.rmtree(workspace_path)
+    if retained_generation:
+        # Its pin is gone: free the retained filestore if nothing else uses it.
+        # Callers hold the environment lock with the team (the shared team gate).
+        collect_best_effort(team)
 
     activity.remove(team, env_name)
     if not preserve_access:
@@ -4098,6 +4224,12 @@ def recreate_environment(
         raise
 
 
+def _template_auto_refresh(team: TeamSettings, env_name: str) -> bool:
+    from oduflow.template_sync import env_policy
+
+    return bool(env_policy(team, env_name).get("auto_refresh", False))
+
+
 def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
     client = get_client()
     filters = {
@@ -4143,6 +4275,7 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
                 ),
                 "db_name": get_db_name(env_name, team.team_id),
                 "protected": is_protected(settings, team, env_name),
+                "auto_refresh_template": _template_auto_refresh(team, env_name),
                 "auto_install_modules": container.labels.get(
                     "oduflow.auto_install_modules", ""
                 ),
@@ -4278,6 +4411,10 @@ def _assert_team_owns(
 def restart_environment(
     settings: Settings, env_name: str, team: TeamSettings
 ) -> dict[str, str]:
+    from oduflow.template_generations import require_no_recovery
+
+    require_no_recovery(team, env_name)
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -4378,6 +4515,10 @@ def ensure_overlay_mounted(
 def start_environment(
     settings: Settings, env_name: str, team: TeamSettings
 ) -> dict[str, Any]:
+    from oduflow.template_generations import require_no_recovery
+
+    require_no_recovery(team, env_name)
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -6002,6 +6143,10 @@ def update_environment(
             raise ValueError(
                 "hostname is supported only when routing.mode = 'traefik'."
             )
+
+    from oduflow.template_generations import require_no_recovery
+
+    require_no_recovery(team, env_name)
 
     client = get_client()
     odoo_container_name = get_resource_name(

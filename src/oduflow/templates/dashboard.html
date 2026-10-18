@@ -2249,6 +2249,33 @@
     </div>
   </div>
 </div>
+<div class="modal-overlay" id="template-sync-modal" onclick="closeTemplateSync(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="template-sync-title">Template sync</h2>
+      <button class="modal-close" aria-label="Close template sync" onclick="closeTemplateSync()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="template-sync-error"></div>
+      <p>Pull a completed backup using the team SSH key (Credentials tab). The source directory must contain a dump, filestore/ and a READY snapshot ID. Register the server's verified host key before the first run.</p>
+      <div class="form-group"><label for="template-sync-host">SSH host</label><input id="template-sync-host" autocomplete="off" placeholder="backup.example.com"></div>
+      <div class="form-group"><label for="template-sync-user">SSH user</label><input id="template-sync-user" autocomplete="off" placeholder="backup"></div>
+      <div class="form-group"><label for="template-sync-port">SSH port</label><input id="template-sync-port" type="number" min="1" max="65535" value="22"></div>
+      <div class="form-group"><label for="template-sync-path">Backup directory</label><input id="template-sync-path" placeholder="/srv/backups/odoo/completed"></div>
+      <div class="form-group"><label for="template-sync-schedule">Cron schedule (host timezone)</label><input id="template-sync-schedule" value="0 3 * * *" placeholder="0 3 * * *"></div>
+      <div class="check-row"><input id="template-sync-enabled" type="checkbox"><label for="template-sync-enabled">Enable scheduled sync</label></div>
+      <p>Each sync replaces the template. Environments with “Auto-refresh data” enabled have their database and filestore reset. Protected environments are skipped.</p>
+      <p class="modal-note" id="template-sync-state" role="status"></p>
+      <button class="btn btn-sm" onclick="loadTemplateSync(false)">Refresh status / log</button>
+      <pre id="template-sync-log" style="max-height:320px;overflow:auto;white-space:pre-wrap;font-family:var(--font-mono);font-size:var(--text-xs);"></pre>
+      <div class="form-actions">
+        <button class="btn" onclick="templateSyncAction('DELETE')">Remove configuration</button>
+        <button class="btn" onclick="templateSyncAction('queue')">Sync now</button>
+        <button class="btn-create" onclick="templateSyncAction('POST')">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="import-from-odoo-modal" onclick="closeImportFromOdooModal(event)">
   <div class="modal">
     <div class="modal-header">
@@ -3789,6 +3816,8 @@ function renderEnvironments(envs, force) {
               (SCOPED_ENV ? '' :
                 '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
                   (env.note ? 'Edit note' : 'Add note') + '</button>' +
+                (env.template_name && env.template_name !== 'none'
+                  ? '<button role="menuitem" onclick="toggleTemplateAutoRefresh(\'' + escAttr(env.branch) + '\')">Auto-refresh data: ' + (env.auto_refresh_template ? 'On' : 'Off') + '</button>' : '') +
                 '<button role="menuitem" title="' + (env.protected ? 'Allow Stop, Update, Recreate and Delete again' : 'Disable Stop, Update, Recreate and Delete') + '" onclick="doProtect(\'' + escAttr(env.branch) + '\',' + (env.protected ? 'true' : 'false') + ')" ' + dis + '>' +
                   (env.protected ? 'Unprotect' : 'Protect') + '</button>' +
                 (env.local_path
@@ -5319,7 +5348,7 @@ async function submitImportFromOdoo() {
     if (r.ok && data.ok) {
       var result = data.result || {};
       closeImportFromOdooModal();
-      showToast('Imported template "' + templateName + '" from ' + (result.source_url || odooUrl));
+      showToast('Imported template "' + templateName + '" from ' + (result.source_url || odooUrl) + pinnedEnvsNote(result));
       await loadTemplates();
       var failures = result.remount_failures || [];
       if (failures.length) {
@@ -5597,7 +5626,8 @@ async function submitS3Template() {
       closeS3TemplateModal();
       showToast((isSync ? 'Synced template "' : 'Imported template "') + templateName +
         '" from ' + (result.source_url || source) +
-        (result.dump_reloaded === false ? ' (dump unchanged, database kept)' : ''));
+        (result.dump_reloaded === false ? ' (dump unchanged, database kept)' : '') +
+        pinnedEnvsNote(result));
       await loadTemplates();
       var failures = result.remount_failures || [];
       if (failures.length) {
@@ -6534,6 +6564,126 @@ async function submitNewTemplate() {
   }
 }
 
+var templateSyncName = '';
+var refreshingTemplates = new Set();
+
+// Environments a scheduled sync pinned keep their retained filestore; template
+// updates report them instead of remounting them.
+function pinnedEnvsNote(result) {
+  var pinned = (result && result.pinned_envs) || [];
+  return pinned.length
+    ? ' Left on the filestore a scheduled sync retained for them: ' + pinned.join(', ') + '.'
+    : '';
+}
+
+async function refreshTemplateFiles(name) {
+  if (refreshingTemplates.has(name)) return;
+  if (!(await confirmDialog({title: 'Refresh template',
+    message: 'Reload "' + name + '" from the dump already in its directory? Overlay environments using its live filestore will briefly stop and remount, preserving local file changes. Environment databases are unchanged. Retained filestore generations are unchanged.',
+    confirmLabel: 'Refresh template', danger: true}))) return;
+  refreshingTemplates.add(name);
+  renderTemplates(cachedTemplates);
+  try {
+    var response = await fetch(API_TEMPLATES + '/import-from-odoo', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({template_name: name, refresh: true})});
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Refresh failed');
+    var failures = data.result.remount_failures || [];
+    showToast((failures.length ? 'Template loaded; remount errors: ' + failures.map(function(f) { return f.join(': '); }).join('; ') : 'Template "' + name + '" refreshed') + pinnedEnvsNote(data.result), !!failures.length);
+  } catch (e) { showToast(e.message, true); }
+  finally {
+    refreshingTemplates.delete(name);
+    await loadTemplates();
+    loadEnvironments();
+  }
+}
+
+function closeTemplateSync(event) {
+  if (event && event.target !== event.currentTarget) return;
+  hideModal('template-sync-modal');
+  templateSyncName = '';
+}
+
+async function openTemplateSync(name) {
+  templateSyncName = name;
+  document.getElementById('template-sync-title').textContent = 'Template sync — ' + name;
+  document.getElementById('template-sync-log').textContent = '';
+  document.getElementById('template-sync-state').textContent = 'Loading...';
+  ['host', 'user', 'path', 'port', 'schedule'].forEach(function(key) { document.getElementById('template-sync-' + key).value = ''; });
+  document.getElementById('template-sync-enabled').checked = false;
+  document.getElementById('template-sync-error').style.display = 'none';
+  showModal('template-sync-modal');
+  await loadTemplateSync(true);
+}
+
+async function loadTemplateSync(fill) {
+  var name = templateSyncName;
+  if (!name) return;
+  var error = document.getElementById('template-sync-error');
+  if (fill) document.querySelectorAll('#template-sync-modal input, #template-sync-modal .form-actions button').forEach(function(el) { el.disabled = true; });
+  try {
+    var data = await readResult(await fetch(API_TEMPLATES + '/' + encodeURIComponent(name) + '/sync'));
+    if (name !== templateSyncName) return;
+    if (!data.ok) throw new Error(data.error || 'Could not load sync settings');
+    if (fill) {
+      ['host', 'user', 'path', 'port', 'schedule'].forEach(function(key) {
+        document.getElementById('template-sync-' + key).value = data.config[key] || (key === 'port' ? 22 : key === 'schedule' ? '0 3 * * *' : '');
+      });
+      document.getElementById('template-sync-enabled').checked = !!data.config.enabled;
+    }
+    var state = data.state || {};
+    document.getElementById('template-sync-state').textContent =
+      (data.pending ? 'Queued — cron will pick up the request within a minute. ' : '') +
+      'Status: ' + (state.status || 'Never run') +
+      (state.started_at ? ' | Started: ' + state.started_at : '') +
+      (state.finished_at ? ' | Finished: ' + state.finished_at : '') +
+      (state.error ? ' | ' + state.error : '') +
+      (state.failed_envs && Object.keys(state.failed_envs).length ? ' | Failed environments: ' + JSON.stringify(state.failed_envs) : '') +
+      (state.skipped_envs && state.skipped_envs.length ? ' | Protected: ' + state.skipped_envs.join(', ') : '') +
+      (data.cron_installed ? '' : ' | Cron job is not installed');
+    document.getElementById('template-sync-log').textContent = data.log || '(no log yet)';
+  } catch (e) { error.textContent = e.message; error.style.display = 'block'; }
+  finally {
+    if (fill && name === templateSyncName) document.querySelectorAll('#template-sync-modal input, #template-sync-modal .form-actions button').forEach(function(el) { el.disabled = false; });
+  }
+}
+
+async function templateSyncAction(action) {
+  var name = templateSyncName;
+  if (!name) return;
+  var body;
+  if (action === 'POST') {
+    body = {enabled: document.getElementById('template-sync-enabled').checked};
+    ['host', 'user', 'port', 'path', 'schedule'].forEach(function(key) { body[key] = document.getElementById('template-sync-' + key).value; });
+  }
+  if (action === 'DELETE' && !(await confirmDialog({title: 'Remove sync configuration', message: 'Remove the cron schedule and queued request for "' + name + '"? The downloaded backup copy is deleted; template data and logs remain.', confirmLabel: 'Remove configuration'}))) return;
+  var buttons = document.querySelectorAll('#template-sync-modal .form-actions button');
+  buttons.forEach(function(el) { el.disabled = true; });
+  var error = document.getElementById('template-sync-error');
+  error.style.display = 'none';
+  try {
+    var response = await fetch(API_TEMPLATES + '/' + encodeURIComponent(name) + (action === 'queue' ? '/sync-now' : '/sync'), {
+      method: action === 'queue' ? 'POST' : action, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined
+    });
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Operation failed');
+    showToast(action === 'queue' ? 'Sync queued for cron (uses saved settings)' : action === 'DELETE' ? 'Sync configuration removed' : 'Sync configuration saved');
+    await loadTemplateSync(action === 'DELETE');
+  } catch (e) { error.textContent = e.message; error.style.display = 'block'; }
+  finally { buttons.forEach(function(el) { el.disabled = false; }); }
+}
+
+async function toggleTemplateAutoRefresh(name) {
+  var env = cachedEnvs.find(function(e) { return e.branch === name; });
+  if (!env) return;
+  var enabled = !env.auto_refresh_template;
+  if (enabled && !(await confirmDialog({title: 'Enable automatic data refresh', message: 'Every successful source sync will replace the database and filestore of "' + name + '". Local data changes will be lost. Code and environment settings are preserved; protected environments are skipped.', confirmLabel: 'Enable auto-refresh', danger: true}))) return;
+  try {
+    var data = await readResult(await fetch(API + '/' + encodeURIComponent(name) + '/template-sync', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({auto_refresh: enabled})}));
+    if (!data.ok) throw new Error(data.error || 'Could not save preference');
+    await loadEnvironments();
+  } catch (e) { showToast(e.message, true); }
+}
+
 function renderTemplates(templates) {
   var el = document.getElementById('tpl-list');
   if (!templates || templates.length === 0) {
@@ -6595,8 +6745,12 @@ function renderTemplates(templates) {
             ? '<button class="btn btn-sm" onclick="openS3SyncModal(\'' + escAttr(t.template_name) + '\')">Sync</button>'
             : '') +
           '<button class="btn btn-sm" onclick="openTemplateSettingsModal(\'' + escAttr(t.template_name) + '\')">Settings</button>' +
-          '<button class="btn btn-sm" onclick="openRenameTemplateModal(\'' + escAttr(t.template_name) + '\')">Rename</button>' +
-          '<button class="btn btn-delete btn-sm" onclick="doDeleteTemplate(\'' + escAttr(t.template_name) + '\')">Remove</button>' +
+          '<div class="menu-wrap"><button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button><div class="menu" role="menu">' +
+          '<button role="menuitem" onclick="refreshTemplateFiles(\'' + escAttr(t.template_name) + '\')" ' + (refreshingTemplates.has(t.template_name) || !t.has_sql ? 'disabled' : '') + '>' + (refreshingTemplates.has(t.template_name) ? 'Refreshing...' : 'Refresh') + '</button>' +
+          '<button role="menuitem" onclick="openTemplateSync(\'' + escAttr(t.template_name) + '\')">Source / schedule / log</button>' +
+          '<button role="menuitem" onclick="openRenameTemplateModal(\'' + escAttr(t.template_name) + '\')">Rename</button>' +
+          '<button role="menuitem" class="danger" onclick="doDeleteTemplate(\'' + escAttr(t.template_name) + '\')">Remove</button>' +
+          '</div></div>' +
         '</div>' +
       '</div>' +
       metaHtml +
@@ -10297,6 +10451,7 @@ var MODAL_CLOSERS = {
   'secret-modal': closeSecretModal,
   'import-from-odoo-modal': closeImportFromOdooModal,
   's3-template-modal': closeS3TemplateModal,
+  'template-sync-modal': closeTemplateSync,
   'import-odoo-modal': closeImportOdooModal,
   'template-settings-modal': closeTemplateSettingsModal,
   'confirm-modal': cancelConfirm,
@@ -11061,6 +11216,7 @@ async function _prodPublishTemplate(name, template, overwrite) {
       msg += affected.length
         ? '. Remounted (changes preserved): ' + affected.join(', ')
         : '. No other environments were affected.';
+      msg += pinnedEnvsNote(res);
       var failures = res.remount_failures || [];
       if (failures.length) {
         msg += ' Remount issues: ' + failures.map(function(f) {

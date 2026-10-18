@@ -133,9 +133,16 @@ would let work in the environment.
 
 ## Templates and Odoo imports
 
+Scheduled sync uses system cron; these routes save configuration or queue requests, never spawn a worker.
+
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/templates` | List template profiles. A template imported from a bucket carries an `s3_source` object (`url`, `endpoint`, `region`, `access_key`, `has_secret`, `dump`, `synced_at`) — the connection needed to re-sync it, never the secret key; `null` for every other template |
+| `GET` | `/api/templates/{name}/sync` | Sync config, status, pending flag, cron-file presence and bounded log tail |
+| `POST` | `/api/templates/{name}/sync` | Save `host`, `user`, `port`, absolute `path`, five-field `schedule`, boolean `enabled`; install managed cron entries |
+| `DELETE` | `/api/templates/{name}/sync` | Remove managed cron entries, saved config, pending request and the downloaded backup copy; keep template data, status and logs |
+| `POST` | `/api/templates/{name}/sync-now` | Queue a manual sync for cron's next minute tick |
+| `POST` | `/api/environments/{branch}/template-sync` | Persist boolean `auto_refresh`; defaults to false; true authorizes recurring DB/filestore reset |
 | `GET` | `/api/templates/{name:path}/metadata` | Read the complete `metadata.json` content and its optimistic revision |
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |

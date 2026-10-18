@@ -77,6 +77,9 @@ def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
         prod_db_container=f"{_TEST_PROD_DB_CONTAINER}-{suffix}",
         prod_db_volume=f"{_TEST_PROD_DB_VOLUME}-{suffix}",
         managed_label=f"{_TEST_PREFIX}{suffix}.managed",
+        # Generated sync cron jobs `docker exec` into this container: never the
+        # developer's own Oduflow.
+        template_cron_container=f"{_TEST_PREFIX}{suffix}-cron",
         base_data_dir=tmp_dir,
         teams={"1": team},
     )

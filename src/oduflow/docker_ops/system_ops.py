@@ -3486,6 +3486,7 @@ def publish_env_as_template(
     reset_env_changes: bool = False,
     overwrite: bool = False,
 ) -> dict[str, object]:
+    from oduflow import template_generations
     from oduflow.docker_ops import env_ops
     from oduflow.naming import get_db_name, get_filestore_paths, get_resource_name
 
@@ -3619,6 +3620,9 @@ def publish_env_as_template(
                 # Remount the source overlay against the new lower (always
                 # reset) + restart.
                 if source_is_overlay:
+                    # Its merged view is now the template's filestore, so a
+                    # retained generation a sync pinned it to no longer applies.
+                    template_generations.unpin(team, env_name)
                     for key in ("upper", "work"):
                         d = env_paths[key]
                         if os.path.isdir(d):
@@ -3645,6 +3649,9 @@ def publish_env_as_template(
             # next to the environment's filestore.
             if snapshot_dir and os.path.isdir(snapshot_dir):
                 shutil.rmtree(snapshot_dir, ignore_errors=True)
+        if source_is_overlay:
+            # The generation the source was pinned to may be unreferenced now.
+            template_generations.collect_best_effort(team)
 
         # Save template metadata from source environment. `source_container` is
         # the team-scoped container name computed above — a hand-built
@@ -3668,6 +3675,7 @@ def publish_env_as_template(
         "template_db": tpl_db,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "reset_env_changes": reset_env_changes,
     }
 
@@ -3830,6 +3838,7 @@ def publish_production_as_template(
         "template_db": tpl_db,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "reset_env_changes": reset_env_changes,
     }
 
@@ -3873,6 +3882,7 @@ def refresh_template(
         "template_db": tpl_db,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "reset_env_changes": reset_env_changes,
     }
 
@@ -4003,6 +4013,7 @@ def attach_filestore(
             "use_overlay": metadata.get("use_overlay"),
             "affected_envs": remount.affected,
             "remount_failures": remount.failures,
+            "pinned_envs": remount.pinned,
             "reset_env_changes": reset_env_changes,
         }
     finally:
@@ -4356,6 +4367,7 @@ def import_template(
     manifest = {}
     affected_envs: list[str] = []
     remount_failures: list[tuple[str, str]] = []
+    pinned_envs: list[str] = []
     try:
         try:
             with urllib.request.urlopen(req, timeout=600) as resp:
@@ -4428,6 +4440,7 @@ def import_template(
                     logger.warning("Could not chown template filestore: %s", exc)
         affected_envs = remount.affected
         remount_failures = remount.failures
+        pinned_envs = remount.pinned
     finally:
         if os.path.exists(tmp_backup):
             os.remove(tmp_backup)
@@ -4492,6 +4505,7 @@ def import_template(
         "includes_filestore": includes_filestore,
         "affected_envs": affected_envs,
         "remount_failures": remount_failures,
+        "pinned_envs": pinned_envs,
     }
 
 
@@ -4901,6 +4915,7 @@ def finalize_imported_template(
         "filestore": filestore,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "extra_addons": wired,
         "addon_warnings": addon_warnings,
     }
@@ -5119,6 +5134,11 @@ def cleanup_orphans(
 def delete_template(
     settings: Settings, team: TeamSettings, template_name: str
 ) -> dict[str, str]:
+    from oduflow import template_generations
+    from oduflow.template_sync import remove_job, require_unconfigured
+
+    require_unconfigured(team, template_name)
+
     client = get_client()
 
     # Refuse if any environment was created from this template: its filestore is
@@ -5176,6 +5196,11 @@ def delete_template(
         logger.info("Removed template directory %s", template_dir_path)
         template_import.delete_managed_secret(team, carried)
 
+    # Its sync inbox (a full copy once the template is gone) and logs, and any
+    # retained generation nothing references any more.
+    remove_job(team, template_name)
+    template_generations.collect_best_effort(team)
+
     return {"status": "dropped", "template_name": template_name, "template_db": tpl_db}
 
 
@@ -5205,6 +5230,10 @@ def rename_template(
         raise NotFoundError(f"Template '{template_name}' not found.")
     if os.path.isdir(new_dir):
         raise ConflictError(f"Template '{new_name}' already exists.")
+
+    from oduflow.template_sync import require_unconfigured
+
+    require_unconfigured(team, template_name)
 
     client = get_client()
     old_db = get_template_db_name(template_name, team.team_id)

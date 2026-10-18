@@ -1950,6 +1950,7 @@ def _build_routes(
                         "template_db": result.get("template_db"),
                         "affected_envs": result.get("affected_envs", []),
                         "remount_failures": result.get("remount_failures", []),
+                        "pinned_envs": result.get("pinned_envs", []),
                     },
                 }
             )
@@ -2391,6 +2392,70 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    async def api_template_sync(request: Request) -> JSONResponse:
+        from oduflow import template_sync
+
+        team = _get_ui_team(request)
+        settings = get_settings()
+        name = request.path_params["name"]
+        try:
+            validate_template_name(name)
+            if not os.path.isdir(team.get_template_dir(name)):
+                raise NotFoundError(f"Template '{name}' not found")
+            if request.method == "GET":
+                return JSONResponse(
+                    {"ok": True, **template_sync.inspect_job(settings, team, name)}
+                )
+            with locks.env_lock(
+                template_lock_key(team.team_id, name),
+                operation="configure_template_sync",
+            ):
+                if request.method == "DELETE":
+                    template_sync.remove_config(settings, team, name)
+                elif request.url.path.endswith("/sync-now"):
+                    template_sync.request_run(team, name)
+                else:
+                    body = await request.json()
+                    if not isinstance(body, dict):
+                        raise ValueError("JSON body must be an object")
+                    template_sync.save_config(settings, team, name, body)
+            return JSONResponse({"ok": True})
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except FlowError as exc:
+            return _error_response(exc)
+
+    async def api_env_template_sync(request: Request) -> JSONResponse:
+        from oduflow import template_sync
+
+        team = _get_ui_team(request)
+        name = request.path_params["branch"]
+        try:
+            _validate_dev_env_name(name)
+            body = await request.json()
+            if not isinstance(body, dict) or type(body.get("auto_refresh")) is not bool:
+                raise ValueError("auto_refresh must be a boolean")
+            with locks.env_lock(
+                name, team.team_id, operation="set_template_auto_refresh"
+            ):
+                env_ops.require_environment(get_settings(), team, name)
+                env = next(
+                    (
+                        e
+                        for e in env_ops.list_environments(get_settings(), team)
+                        if e["env_name"] == name
+                    ),
+                    {},
+                )
+                if env.get("template_name") in (None, "", "none"):
+                    raise PrerequisiteNotMetError("Environment has no source template")
+                template_sync.set_env_policy(team, name, body["auto_refresh"])
+            return JSONResponse({"ok": True})
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except FlowError as exc:
+            return _error_response(exc)
+
     async def api_import_template_from_odoo(request: Request) -> JSONResponse:
         team = _get_ui_team(request)
         try:
@@ -2482,6 +2547,7 @@ def _build_routes(
                 "restore_seconds": result.get("restore_seconds"),
                 "affected_envs": result.get("affected_envs", []),
                 "remount_failures": result.get("remount_failures", []),
+                "pinned_envs": result.get("pinned_envs", []),
             }
             if "dump_reloaded" in result:  # s3 / local-path / refresh engine
                 payload.update(
@@ -6709,6 +6775,7 @@ def _build_routes(
                         "template_db": result.get("template_db"),
                         "affected_envs": result.get("affected_envs", []),
                         "remount_failures": result.get("remount_failures", []),
+                        "pinned_envs": result.get("pinned_envs", []),
                     },
                 }
             )
@@ -7122,6 +7189,17 @@ def _build_routes(
         Route("/api/license/checkout", api_license_checkout, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),
         Route("/api/templates", api_templates, methods=["GET"]),
+        Route(
+            "/api/templates/{name}/sync",
+            api_template_sync,
+            methods=["GET", "POST", "DELETE"],
+        ),
+        Route("/api/templates/{name}/sync-now", api_template_sync, methods=["POST"]),
+        Route(
+            "/api/environments/{branch:path}/template-sync",
+            api_env_template_sync,
+            methods=["POST"],
+        ),
         Route("/import-odoo.sh", import_odoo_script, methods=["GET"]),
         Route("/api/templates/import-token", api_import_token, methods=["POST"]),
         Route(
@@ -7398,6 +7476,8 @@ def mount_web_ui(
     sub_app: ASGIApp = Router(routes=routes)
 
     settings = get_settings()
+    if settings.base_data_dir:
+        locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")
     has_ui_passwords = any(t.ui_password for t in settings.teams.values())
     if has_ui_passwords:
         sub_app = UIAuthMiddleware(sub_app, get_settings)

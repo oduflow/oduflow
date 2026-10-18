@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Features
+
+- **Template Refresh in the dashboard** — reload a template from its own
+  dump files and report overlay remount errors.
+- **Cron-owned SSH template sync** — manage source/schedule/logs from
+  Templates; manual requests are queued for host cron. Optional environment
+  data refresh prepares and sanitizes new data before switching, retains old
+  filestore generations for environments that stay behind, and rolls back
+  caught switch failures. CLI/UI/MCP mutations share process-safe file locks.
+
 ### Security
 
 - **Environments are isolated inside the team's coding-agent container** —

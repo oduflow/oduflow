@@ -58,6 +58,7 @@ from oduflow.errors import (
 from oduflow.fsutil import atomic_write_private_json
 from oduflow.naming import get_template_db_name, validate_template_name
 from oduflow.settings import Settings, TeamSettings
+from oduflow.template_generations import TEMPLATE_SNAPSHOT_KEY
 
 logger = logging.getLogger("oduflow")
 
@@ -759,9 +760,14 @@ def _load_carried_metadata(team: TeamSettings, template_name: str) -> dict[str, 
     try:
         with open(path) as f:
             loaded: dict[str, Any] = json.load(f)
-            return loaded
     except (OSError, ValueError):
         return {}
+    if not isinstance(loaded, dict):
+        return {}
+    # New data is no longer the scheduled-sync snapshot the template held; the
+    # sync worker records its snapshot again once its own import succeeds.
+    loaded.pop(TEMPLATE_SNAPSHOT_KEY, None)
+    return loaded
 
 
 def _check_fresh_conflicts(
@@ -851,7 +857,8 @@ def _promote_and_reload(
     """Swap the staged tree into the live template under the remount guard,
     reload the template DB when the dump changed, and finalize metadata.
 
-    Returns ``restore_seconds``, ``affected_envs``, ``remount_failures`` and
+    Returns ``restore_seconds``, ``affected_envs``, ``remount_failures``,
+    ``pinned_envs`` and
     the persisted metadata.
     """
     from oduflow.docker_ops import env_ops, system_ops
@@ -927,6 +934,7 @@ def _promote_and_reload(
         "metadata": metadata,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "status": "synced" if overwrite else "imported",
     }
 
@@ -1331,6 +1339,7 @@ def import_from_s3_archive(
             "removed_files": 0,
             "affected_envs": [],
             "remount_failures": [],
+            "pinned_envs": [],
         }
 
     staging = team.get_import_staging_dir(template_name)
@@ -1397,6 +1406,7 @@ def import_from_s3_archive(
         "removed_files": 0,
         "affected_envs": final["affected_envs"],
         "remount_failures": final["remount_failures"],
+        "pinned_envs": final["pinned_envs"],
     }
 
 
@@ -1587,6 +1597,7 @@ def refresh_from_own_files(
         "removed_files": 0,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
     }
 
 
@@ -1619,4 +1630,5 @@ def _import_result(
         "removed_files": plan.removed,
         "affected_envs": final["affected_envs"],
         "remount_failures": final["remount_failures"],
+        "pinned_envs": final["pinned_envs"],
     }

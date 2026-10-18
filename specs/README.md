@@ -101,6 +101,7 @@ precursors).
 | [0078](0078-custom-white-label-license.md) | 2026-10-07 | Custom license: operator brand instead of Oduflow in the dashboard and MCP, domain-bound key, 30-day grace |
 | [0079](0079-per-environment-agent-identities.md) | 2026-10-17 | Per-environment uids inside the team agent container: private sessions, checkouts, attachments and HOMEs |
 | [0080](0080-stable-environment-identity-across-recreate.md) | 2026-10-18 | Stable environment identity across recreate: MCP token registry + `recreate_environment` tool |
+| [0081](0081-cron-owned-template-sync.md) | 2026-10-07 | Host-cron SSH template sync, retained filestores and opt-in environment data refresh |
 
 ## Design docs
 
