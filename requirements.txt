@@ -6,6 +6,7 @@ python-dotenv
 setuptools
 fastapi
 packaging
+publicsuffixlist
 cryptography
 itsdangerous
 pyotp>=2.9,<3
