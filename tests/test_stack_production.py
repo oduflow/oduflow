@@ -555,3 +555,57 @@ def test_legacy_record_without_server_mode_is_not_reconfigured(setup):
     ) as reconfigure:
         apply_stack(*setup)
     reconfigure.assert_not_called()
+
+
+class _ReachedContainer(Exception):
+    """The real reconfigure got past its env_vars check to the container."""
+
+
+def test_layout_env_var_refuses_stack_creation(setup):
+    settings, team, manifest, path = setup
+    team = replace(team, production_token="p" * 40)
+    settings = replace(settings, teams={"1": team})
+    manifest.spec.production.env = {"PYTHONUSERBASE": "/tmp/empty"}
+    with (
+        patch("oduflow.stack_production.production_ops.get_client"),
+        patch("oduflow.stack_production.production_ops.ensure_prod_infra") as provision,
+    ):
+        with pytest.raises(ValueError, match="Cannot set PYTHONUSERBASE"):
+            apply_stack(settings, team, manifest, path)
+    provision.assert_not_called()
+    assert production_registry.list_productions(team) == {}
+
+
+def test_changed_env_with_layout_var_refuses_stack_update(setup):
+    register(setup, owned=True)
+    settings, team, manifest, _ = setup
+    manifest.spec.production.env = {"MODE": "production", "HOME": "/srv/odoo"}
+    with (
+        patch("oduflow.stack_production.production_ops.get_client"),
+        patch(
+            "oduflow.stack_production.production_ops._get_container",
+            side_effect=_ReachedContainer,
+        ),
+    ):
+        with pytest.raises(ValueError, match="Cannot set HOME"):
+            apply_stack(*setup)
+    record = production_registry.get_production(team, "control")
+    assert record["env_vars"] == {"MODE": "production"}
+
+
+def test_stored_layout_var_does_not_block_stack_update(setup):
+    # Recorded before the check existed: re-applying the same env with another
+    # change reaches the container instead of being refused.
+    settings, team, manifest, _ = setup
+    manifest.spec.production.env = {"PYTHONUSERBASE": "/opt/pyuser"}
+    register(setup, owned=True)
+    manifest.spec.production.server_mode = "gevent"
+    with (
+        patch("oduflow.stack_production.production_ops.get_client"),
+        patch(
+            "oduflow.stack_production.production_ops._get_container",
+            side_effect=_ReachedContainer,
+        ),
+    ):
+        with pytest.raises(_ReachedContainer):
+            apply_stack(*setup)

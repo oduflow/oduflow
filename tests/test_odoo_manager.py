@@ -4195,6 +4195,9 @@ class TestApplyActionsExitCode:
 
         assert result["exit_code"] == 1
         assert "install traceback" in result["output"]
+        # The step behind exit_code, with its own output, not the upgrade's.
+        assert result["failed_step"] == "install"
+        assert result["failed_step_output"] == "install traceback"
 
     @patch(
         "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
@@ -4205,7 +4208,11 @@ class TestApplyActionsExitCode:
         return_value={"exit_code": 0, "output": "installed"},
     )
     def test_failed_upgrade_is_reported(self, mock_install, mock_up):
-        assert self._apply()["exit_code"] == 2
+        result = self._apply()
+
+        assert result["exit_code"] == 2
+        assert result["failed_step"] == "upgrade"
+        assert result["failed_step_output"] == "upgrade traceback"
 
     @patch(
         "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
@@ -4216,7 +4223,11 @@ class TestApplyActionsExitCode:
         return_value={"exit_code": 0, "output": "installed"},
     )
     def test_all_successful_reports_zero(self, mock_install, mock_up):
-        assert self._apply()["exit_code"] == 0
+        result = self._apply()
+
+        assert result["exit_code"] == 0
+        assert "failed_step" not in result
+        assert "dependencies_exit_code" not in result
 
 
 class TestApplyActionsDeps:
@@ -4327,7 +4338,73 @@ class TestApplyActionsDeps:
         assert result["action"] == "restart"
         assert "FAILED" in result["output"]
         assert result["exit_code"] == 1
+        assert result["failed_step"] == "dependencies"
+        assert result["dependencies_exit_code"] == 1
+        assert "boom" in result["failed_step_output"]
         container.restart.assert_called_once()
+
+    @patch(
+        "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
+        return_value={"exit_code": 255, "output": "ModuleNotFoundError: boto3"},
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        side_effect=[
+            (True, "[PIP] Requirements installed successfully:\nfine"),
+            (False, "[PIP] install FAILED (exit 1):\nno boto3 for you"),
+        ],
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_upgrade_failure_keeps_the_dependency_code_visible(
+        self, mock_apt, mock_pip, mock_upgrade
+    ):
+        # The upgrade's code is the apply's status; the reinstall that failed
+        # before it — the likely cause — stays visible next to it.
+        client, _ = self._client_with_container()
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=[],
+            to_upgrade=["sale"],
+            do_restart=False,
+            changed_files=["requirements.txt", "sale/models/sale.py"],
+            dep_units=[("/repo", "/mnt/extra-addons"), ("/x", "/mnt/extra-addons-x")],
+        )
+        assert result["exit_code"] == 255
+        assert result["failed_step"] == "upgrade"
+        assert result["failed_step_output"] == "ModuleNotFoundError: boto3"
+        assert result["dependencies_exit_code"] == 1
+
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        side_effect=[
+            (True, "[PIP] Requirements installed successfully:\nfine"),
+            (False, "[PIP] install FAILED (exit 1):\nERROR: No matching dist"),
+        ],
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_dependency_failure_output_is_the_failed_install_only(
+        self, mock_apt, mock_pip
+    ):
+        client, _ = self._client_with_container()
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=[],
+            to_upgrade=[],
+            do_restart=False,
+            changed_files=["requirements.txt"],
+            dep_units=[("/repo", "/mnt/extra-addons"), ("/x", "/mnt/extra-addons-x")],
+        )
+        assert result["failed_step"] == "dependencies"
+        assert "No matching dist" in result["failed_step_output"]
+        assert "fine" not in result["failed_step_output"]
 
     @patch("oduflow.docker_ops.env_ops._install_pip_requirements")
     @patch("oduflow.docker_ops.env_ops._install_apt_packages")

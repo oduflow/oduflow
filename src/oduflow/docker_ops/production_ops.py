@@ -37,6 +37,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from dataclasses import replace
+from pathlib import PurePosixPath
 from typing import Any, Callable, ContextManager, overload
 
 import docker
@@ -632,6 +633,137 @@ def read_deploys(
     return deploys[-limit:] if limit else deploys
 
 
+# Diagnostics stored on a failed deploy record. Whoever started the deploy may
+# never read its response (an MCP client gives up long before a big -u ends; a
+# webhook has no caller), so the record itself must explain the failure. Kept
+# bounded: deploys.json holds _DEPLOYS_CAP records.
+_OUTPUT_TAIL_LINES = 200
+_OUTPUT_TAIL_CHARS = 16 * 1024
+_EXCERPT_LINES = 80
+_EXCERPT_CHARS = 8 * 1024
+_CAUSE_CHARS = 300
+# The header of one Odoo log record ("2026-10-18 13:57:01,123 42 CRITICAL db
+# odoo.service.server: ..."); traceback lines under it have none.
+_ODOO_LOG_RECORD_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \d+ (?P<level>[A-Z]+) "
+)
+# pip ("ERROR: ...") and apt ("E: ...") state their failure on such a line.
+_TOOL_ERROR_RE = re.compile(r"^(ERROR|E):\s")
+
+
+def _output_tail(output: str) -> str:
+    """The last lines of *output*, bounded for a deploy record."""
+    tail = "\n".join(output.splitlines()[-_OUTPUT_TAIL_LINES:])
+    if len(tail) > _OUTPUT_TAIL_CHARS:
+        tail = tail[-_OUTPUT_TAIL_CHARS:]
+        # Drop the line the cut went through.
+        _, newline, rest = tail.partition("\n")
+        if newline:
+            tail = rest
+    return tail
+
+
+def _failure_excerpt(output: str) -> str:
+    """The log record that explains a failed Odoo run, with its traceback.
+
+    A failed ``-i``/``-u`` ends with Odoo's CRITICAL "Failed to initialize
+    database" record (``preload_registries`` returns -1: exit code 255) and
+    the traceback under it, so the last CRITICAL record wins, then the last
+    ERROR one — but a bare CRITICAL summary (some Odoo versions log it
+    without ``exc_info``) yields to an earlier ERROR record that carries the
+    traceback, the actual cause. Output without Odoo log records (a crash
+    before logging is set up) falls back to its last Python traceback; empty
+    when there is neither.
+    """
+    lines = output.splitlines()
+    records = [
+        (i, match.group("level"))
+        for i, line in enumerate(lines)
+        if (match := _ODOO_LOG_RECORD_RE.match(line))
+    ]
+
+    def _last_record(level: str) -> int | None:
+        return next((i for i, lv in reversed(records) if lv == level), None)
+
+    def _record_block(start: int) -> list[str]:
+        end = next((i for i, _ in records if i > start), len(lines))
+        return lines[start:end]
+
+    def _has_traceback(candidate: list[str]) -> bool:
+        return any(
+            line.startswith("Traceback (most recent call last):") for line in candidate
+        )
+
+    block: list[str] | None = None
+    start = _last_record("CRITICAL")
+    if start is not None:
+        block = _record_block(start)
+    error_start = _last_record("ERROR")
+    if error_start is not None and (block is None or not _has_traceback(block)):
+        error_block = _record_block(error_start)
+        if block is None or _has_traceback(error_block):
+            block = error_block
+    if block is None:
+        start = next(
+            (
+                i
+                for i in range(len(lines) - 1, -1, -1)
+                if lines[i].startswith("Traceback (most recent call last):")
+            ),
+            None,
+        )
+        if start is None:
+            return ""
+        block = _record_block(start)
+    if len(block) > _EXCERPT_LINES:
+        # The record's own line, then the end of the traceback: the exception.
+        block = [block[0], "..."] + block[-(_EXCERPT_LINES - 2) :]
+    excerpt = "\n".join(block).rstrip()
+    if len(excerpt) > _EXCERPT_CHARS:
+        head = block[0][:512]
+        excerpt = f"{head}\n...\n{excerpt[-(_EXCERPT_CHARS - len(head) - 5) :]}"
+    return excerpt
+
+
+def _failure_cause(step: str, excerpt: str, output: str) -> str:
+    """One line naming the failure, for the deploy's error message: the
+    exception closing the excerpt's traceback, else the last pip/apt error
+    line; an Oduflow exception is its own first line."""
+    lines = [line.strip() for line in excerpt.splitlines() if line.strip()]
+    if not lines:
+        lines = [
+            line.strip()
+            for line in output.splitlines()
+            if _TOOL_ERROR_RE.match(line.strip())
+        ]
+    if not lines and step == "exception":
+        lines = [line.strip() for line in output.splitlines()[:1] if line.strip()]
+    return lines[-1][:_CAUSE_CHARS] if lines else ""
+
+
+def _container_log_tail(settings: Settings, team: TeamSettings, name: str) -> str:
+    """The production container's recent log: the evidence for a deploy whose
+    module commands succeeded but whose server never answered the health
+    check."""
+    try:
+        return production_logs(settings, team, name, n_lines=_OUTPUT_TAIL_LINES)
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        return f"(container logs unavailable: {exc})"
+
+
+def _failure_diagnostics(step: str, output: str) -> tuple[dict[str, str], str]:
+    """Deploy-record fields describing a failed *step*, plus its one-line
+    cause (empty when the output names none)."""
+    excerpt = _failure_excerpt(output)
+    tail = _output_tail(output)
+    fields = {"failed_step": step}
+    if excerpt:
+        fields["failure_excerpt"] = excerpt
+    if tail:
+        fields["output_tail"] = tail
+    return fields, _failure_cause(step, excerpt, output)
+
+
 # ---------------------------------------------------------------------------
 # Health probe
 # ---------------------------------------------------------------------------
@@ -661,6 +793,19 @@ def _probe_odoo_health(container: Any) -> bool:
     return bool(code == 0)
 
 
+# Restarts by Docker's restart policy, during one health wait, that count as a
+# crash loop. More than one: a single restart can be a transient failure.
+_CRASH_LOOP_RESTARTS = 2
+
+
+def _restart_count(container: Any) -> int:
+    """Docker's restart-policy counter for *container* (0 when unknown)."""
+    try:
+        return int((container.attrs or {}).get("RestartCount") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def wait_production_healthy(
     client: DockerClient,
     settings: Settings,
@@ -668,15 +813,36 @@ def wait_production_healthy(
     name: str,
     timeout: int = 180,
 ) -> bool:
-    """Poll the production's Odoo until healthy or timeout."""
+    """Poll the production's Odoo until healthy or timeout.
+
+    Gives up early on a crash loop: once Docker has restarted the container
+    :data:`_CRASH_LOOP_RESTARTS` times during the wait, its main process keeps
+    dying (an env var that hides the Python packages, a broken import) and
+    waiting out the timeout only holds the production's lock longer.
+    """
     deadline = time.monotonic() + timeout
+    baseline: int | None = None
     while time.monotonic() < deadline:
         container = _get_container(client, settings, team, name)
         if container is not None:
             try:
                 container.reload()
+                restarts = _restart_count(container)
+                # A manual start/restart resets the counter: re-baseline.
+                if baseline is None or restarts < baseline:
+                    baseline = restarts
+                # Probe before the crash-loop verdict: a container that
+                # restarted transiently but answers NOW is healthy.
                 if container.status == "running" and _probe_odoo_health(container):
                     return True
+                if restarts - baseline >= _CRASH_LOOP_RESTARTS:
+                    logger.error(
+                        "Production '%s' is crash-looping (%d restarts while "
+                        "waiting for health); giving up early",
+                        name,
+                        restarts - baseline,
+                    )
+                    return False
             except docker.errors.APIError:
                 pass
         time.sleep(3)
@@ -911,6 +1077,46 @@ def _production_env_vars(raw: object) -> dict[str, str]:
             "Managed production environment variables: " + ", ".join(sorted(reserved))
         )
     return env_vars
+
+
+# Variables the production container's layout depends on: Odoo's data_dir (the
+# bind-mounted filestore and sessions) is under HOME, and the requirements
+# Oduflow installs live in the odoo user's pip --user site. Every process in
+# the container inherits them — the server, the deploy's `odoo -u`, pip — so
+# an override hides the installed packages or moves data out of the mounts.
+_LAYOUT_ENV_VARS = ("HOME", "PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONUSERBASE")
+
+
+def _check_new_production_env_vars(env_vars: dict[str, str]) -> None:
+    """Refuse variables that break the container's Python/data layout.
+
+    Applied to variables being set (create, the variables a reconfigure adds
+    or changes), not to stored ones, so a production recorded before this
+    check still recreates and keeps taking unrelated edits.
+    """
+    layout = [key for key in _LAYOUT_ENV_VARS if key in env_vars]
+    if layout:
+        raise ValueError(
+            "Cannot set " + ", ".join(layout) + " on a production: Odoo keeps "
+            "its filestore and sessions under HOME and the repositories' pip "
+            "requirements are installed into the odoo user's pip --user site; "
+            "overriding them hides the installed packages or moves data out "
+            "of the mounted volumes."
+        )
+    site_dirs = [
+        entry
+        for entry in env_vars.get("PYTHONPATH", "").split(":")
+        if PurePosixPath(entry).name in ("site-packages", "dist-packages")
+    ]
+    if site_dirs:
+        raise ValueError(
+            "PYTHONPATH must not list a site-packages directory ("
+            + ", ".join(site_dirs)
+            + "): Python searches PYTHONPATH before the standard library, so a "
+            "backport installed there (such as dataclasses) shadows the "
+            "stdlib module and Odoo fails to start. The pip --user site is "
+            "already on sys.path."
+        )
 
 
 def _source_env_info(
@@ -1361,6 +1567,7 @@ def create_production(
     workspace = _workspace(team, name)
 
     env_vars = _production_env_vars(env_vars)
+    _check_new_production_env_vars(env_vars)
     # Fail before creating resources or interrupting the source environment.
     secret_store.resolve_env_secrets(team, env_vars)
 
@@ -1916,7 +2123,13 @@ def reconfigure_production(
 
     if env_vars is not None:
         env_vars = _production_env_vars(env_vars)
-        if env_vars != (record.get("env_vars") or {}):
+        stored_env = record.get("env_vars") or {}
+        if env_vars != stored_env:
+            # Only the variables this call adds or changes: a layout variable
+            # stored before the check existed must not block unrelated edits.
+            _check_new_production_env_vars(
+                {k: v for k, v in env_vars.items() if stored_env.get(k) != v}
+            )
             updates["env_vars"] = env_vars
     server_mode = resolve_server_mode(server_mode, None)
     if server_mode is not None and server_mode != server_mode_of(record):
@@ -2779,7 +2992,13 @@ def _update_production(
         except Exception as exc:
             # A preflight SQL error can happen after Git advanced. Route it
             # through the same code rollback as a nonzero module exit code.
-            result = {"action": "error", "exit_code": 1, "output": str(exc)}
+            result = {
+                "action": "error",
+                "exit_code": 1,
+                "output": str(exc),
+                "failed_step": "exception",
+                "failed_step_output": f"{type(exc).__name__}: {exc}",
+            }
         new_head = rev_parse(repo_path)
         deploy.update(
             {
@@ -2791,6 +3010,10 @@ def _update_production(
                 "changed_files_count": len(result.get("changed_files", []) or []),
             }
         )
+        if "dependencies_exit_code" in result:
+            deploy["dependencies_exit_code"] = int(
+                result["dependencies_exit_code"] or 0
+            )
 
         if result.get("action") == "none" and new_head == old_head:
             # Nothing pulled, nothing applied — not a deploy.
@@ -2839,12 +3062,33 @@ def _update_production(
             }
 
         # ------------------------- rollback (code only) -------------------
+        # Record the evidence before the rollback restart buries it: the
+        # failed step's own output, or the server log when every command
+        # succeeded and the health check did not.
+        if deploy["exit_code"]:
+            step = str(result.get("failed_step") or "apply")
+            failed_output = str(
+                result.get("failed_step_output") or result.get("output") or ""
+            )
+        else:
+            step = "health"
+            failed_output = _container_log_tail(settings, team, name)
+        diagnostics, cause = _failure_diagnostics(step, failed_output)
+        deploy.update(diagnostics)
+        failure = f"Deploy failed at step '{step}' (exit_code={deploy['exit_code']})"
+        cause_note = f" Cause: {cause}" if cause else ""
+        evidence = diagnostics.get("failure_excerpt") or "\n".join(
+            diagnostics.get("output_tail", "").splitlines()[-40:]
+        )
         logger.error(
-            "Production '%s' deploy failed (exit_code=%s) — rolling back code %s -> %s",
+            "Production '%s' deploy failed at step '%s' (exit_code=%s) — rolling "
+            "back code %s -> %s%s",
             name,
+            step,
             deploy["exit_code"],
             new_head[:10],
             old_head[:10],
+            f"\n{evidence}" if evidence else "",
         )
         report_progress(progress_key, "rolling back code")
         rollback_error = ""
@@ -2866,8 +3110,7 @@ def _update_production(
         if recovered:
             deploy["status"] = "rolled_back"
             deploy["error"] = (
-                f"Deploy failed (exit_code={deploy['exit_code']}); code "
-                f"reverted to {old_head[:10]}."
+                f"{failure}; code reverted to {old_head[:10]}.{cause_note}"
             )
             production_registry.update_production(
                 team, name, {"deploy_in_progress": False, "unhealthy": False}
@@ -2882,8 +3125,10 @@ def _update_production(
                 "output": result.get("output", ""),
                 "deploy": deploy,
                 "message": (
-                    f"Deploy of {new_head[:10]} FAILED; code was rolled back "
-                    f"to {old_head[:10]} and the production is healthy again. "
+                    f"Deploy of {new_head[:10]} FAILED at step '{step}'"
+                    + (f" ({cause})" if cause else "")
+                    + f"; code was rolled back to {old_head[:10]} and the "
+                    "production is healthy again. "
                     "The DATABASE was NOT rolled back — if module upgrades "
                     "left it inconsistent, restore a snapshot manually "
                     "(restore_production)."
@@ -2891,8 +3136,11 @@ def _update_production(
             }
 
         deploy["status"] = "rollback_failed"
-        deploy["error"] = rollback_error or (
-            "Rollback restart did not become healthy within 120s."
+        rollback_problem = (
+            rollback_error or "the restart did not become healthy within 120s"
+        ).rstrip(".")
+        deploy["error"] = (
+            f"{failure}; the rollback did not recover: {rollback_problem}.{cause_note}"
         )
         production_registry.update_production(
             team, name, {"deploy_in_progress": False, "unhealthy": True}
@@ -2922,11 +3170,27 @@ def _update_production(
         # no-op poll does not clear it).
         deploy["ts_end"] = _now_iso()
         deploy["status"] = "error"
-        deploy["error"] = str(exc)
+        deploy["error"] = str(exc) or type(exc).__name__
+        deploy.setdefault("failed_step", "exception")
         try:
             serving = wait_production_healthy(client, settings, team, name, timeout=15)
         except Exception:
             serving = False
+        if not serving and "output_tail" not in deploy:
+            # The record may be the caller's only evidence (a timed-out MCP
+            # client, a webhook): keep the server log and the failure record
+            # it names alongside the exception. Skipped when the site still
+            # serves — the log then predates this failure.
+            try:
+                diagnostics, cause = _failure_diagnostics(
+                    str(deploy["failed_step"]),
+                    _container_log_tail(settings, team, name),
+                )
+                deploy.update(diagnostics)
+                if cause:
+                    deploy["error"] += f" Cause: {cause}"
+            except Exception:  # noqa: BLE001 - diagnostics must not mask exc
+                pass
         production_registry.update_production(
             team, name, {"deploy_in_progress": False, "unhealthy": not serving}
         )

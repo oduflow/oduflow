@@ -6836,6 +6836,17 @@ def _build_routes(
             name = request.path_params["name"]
             production_registry.get_production(team, name)
             deploys = production_ops.read_deploys(team, name, limit=20)
+            # The dashboard renders only the summary fields; keep the bulky
+            # diagnostics (16 KB output_tail + 8 KB failure_excerpt per failed
+            # deploy) out of every poll of this panel.
+            deploys = [
+                {
+                    key: value
+                    for key, value in deploy.items()
+                    if key not in ("output_tail", "failure_excerpt")
+                }
+                for deploy in deploys
+            ]
             return JSONResponse({"ok": True, "deploys": deploys})
         except FlowError as e:
             return _error_response(e)

@@ -1658,6 +1658,158 @@ class TestReconfigureProduction:
         assert production_registry.get_production(team, "erp")["git_user"] == ""
 
 
+class TestHealthWaitCrashLoop:
+    """A container whose main process keeps dying fails the health wait early
+    instead of holding the production's lock for the whole timeout."""
+
+    def _wait(self, settings, team, restart_counts, statuses=None, probes=None):
+        container = MagicMock()
+        counts = iter(restart_counts)
+        status_iter = iter(statuses or ["restarting"] * len(restart_counts))
+
+        def reload():
+            container.attrs = {"RestartCount": next(counts)}
+            container.status = next(status_iter)
+
+        container.reload.side_effect = reload
+        probe = MagicMock(side_effect=probes or [False] * len(restart_counts))
+        with (
+            patch.object(production_ops, "_get_container", return_value=container),
+            patch.object(production_ops, "_probe_odoo_health", probe),
+            patch.object(production_ops.time, "sleep"),
+        ):
+            healthy = production_ops.wait_production_healthy(
+                MagicMock(), settings, team, "erp", timeout=3600
+            )
+        return healthy, container, probe
+
+    def test_restarts_during_the_wait_give_up_early(self, settings, team):
+        healthy, container, _ = self._wait(settings, team, [0, 1, 2, 3, 4])
+        assert healthy is False
+        assert container.reload.call_count == 3
+
+    def test_restarts_before_the_wait_are_not_a_crash_loop(self, settings, team):
+        # A long-lived container with restarts in its past, healthy now.
+        healthy, _, probe = self._wait(
+            settings,
+            team,
+            [7, 7, 7],
+            statuses=["running"] * 3,
+            probes=[False, False, True],
+        )
+        assert healthy is True
+        assert probe.call_count == 3
+
+    def test_a_recovered_container_beats_the_crash_loop_verdict(self, settings, team):
+        # Two transient restarts during the wait, but the server answers the
+        # probe on the same poll: healthy, not a crash loop.
+        healthy, _, probe = self._wait(
+            settings,
+            team,
+            [0, 2],
+            statuses=["restarting", "running"],
+            probes=[True],
+        )
+        assert healthy is True
+        assert probe.call_count == 1
+
+    def test_a_manual_restart_rebaselines(self, settings, team):
+        # docker restart resets RestartCount to 0: that is not a crash.
+        container = MagicMock()
+        counts = iter([5, 0, 1, 1])
+
+        def reload():
+            container.attrs = {"RestartCount": next(counts)}
+            container.status = "running"
+
+        container.reload.side_effect = reload
+        probe = MagicMock(side_effect=[False, False, False, True])
+        with (
+            patch.object(production_ops, "_get_container", return_value=container),
+            patch.object(production_ops, "_probe_odoo_health", probe),
+            patch.object(production_ops.time, "sleep"),
+        ):
+            assert production_ops.wait_production_healthy(
+                MagicMock(), settings, team, "erp", timeout=3600
+            )
+
+
+class TestLayoutEnvVars:
+    """Variables that hide the pip --user packages or move Odoo's data out of
+    the mounts are refused when set, but never block a stored record."""
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"PYTHONUSERBASE": "/tmp/empty"},
+            {"HOME": "/root"},
+            {"PYTHONNOUSERSITE": "1"},
+            {"PYTHONHOME": "/opt/py"},
+            {"PYTHONPATH": "/var/lib/odoo/.local/lib/python3.12/site-packages"},
+            {"PYTHONPATH": "/opt/lib:/usr/lib/python3/dist-packages/"},
+        ],
+    )
+    def test_refused(self, env):
+        with pytest.raises(ValueError):
+            production_ops._check_new_production_env_vars(env)
+
+    def test_an_ordinary_python_path_is_allowed(self):
+        production_ops._check_new_production_env_vars(
+            {"PYTHONPATH": "/mnt/extra-addons/lib", "MODE": "live"}
+        )
+
+    def test_reconfigure_refuses_a_new_layout_variable(self, settings, team):
+        _seed_prod_record(team)
+        client = TestReconfigureProduction()._client_with_container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(ValueError, match="PYTHONUSERBASE"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", env_vars={"PYTHONUSERBASE": "/tmp/x"}
+                )
+        client.containers.run.assert_not_called()
+        assert not production_registry.get_production(team, "erp").get("env_vars")
+
+    def test_a_stored_layout_variable_still_recreates(self, settings, team):
+        # Recorded before the check existed: an unrelated change, or the same
+        # set passed again, must not be refused.
+        _seed_prod_record(team, env_vars={"PYTHONUSERBASE": "/opt/pyuser"})
+        client = TestReconfigureProduction()._client_with_container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings,
+                team,
+                "erp",
+                domain="new.example.com",
+                env_vars={"PYTHONUSERBASE": "/opt/pyuser"},
+            )
+        assert result["changed"] == ["domain"]
+        spec = client.containers.run.call_args.kwargs
+        assert spec["environment"]["PYTHONUSERBASE"] == "/opt/pyuser"
+
+    def test_a_stored_layout_variable_does_not_block_other_edits(self, settings, team):
+        # Legacy record with HOME: editing an unrelated variable must work
+        # without dropping HOME from the set.
+        _seed_prod_record(team, env_vars={"HOME": "/srv/odoo", "MODE": "x"})
+        client = TestReconfigureProduction()._client_with_container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", env_vars={"HOME": "/srv/odoo", "MODE": "y"}
+            )
+        assert result["changed"] == ["env_vars"]
+        spec = client.containers.run.call_args.kwargs
+        assert spec["environment"]["MODE"] == "y"
+        assert spec["environment"]["HOME"] == "/srv/odoo"
+
+    def test_changing_a_stored_layout_variable_is_refused(self, settings, team):
+        _seed_prod_record(team, env_vars={"HOME": "/srv/odoo"})
+        client = TestReconfigureProduction()._client_with_container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            with pytest.raises(ValueError, match="HOME"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", env_vars={"HOME": "/elsewhere"}
+                )
+
+
 class TestServerMode:
     ROUTER = "traefik.http.routers.oduflow-1-prod-erp"
     BUS = "traefik.http.routers.oduflow-1-prod-erp_bus"
@@ -2270,6 +2422,28 @@ class TestProductionEnvironmentVariables(TestCreateFromEnvironment):
         client.containers.run.assert_not_called()
         with pytest.raises(NotFoundError):
             production_registry.get_production(team, "erp")
+
+    def test_inherited_layout_variable_is_refused_before_the_source_stops(
+        self, settings, team
+    ):
+        source = self._env_container(settings)
+        source.labels["oduflow.env_vars"] = json.dumps({"HOME": "/srv/odoo"})
+        client = self._client_with_env(settings, source)
+        with _PatchAll(self._stack(client)) as mocks:
+            with pytest.raises(ValueError, match="HOME"):
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "",
+                    "",
+                    "erp.example.com",
+                    "",
+                    from_environment="feature-x",
+                )
+        source.stop.assert_not_called()
+        mocks["ensure_prod_infra"].assert_not_called()
+        client.containers.run.assert_not_called()
 
     def test_explicit_empty_set_does_not_inherit(self, settings, team):
         source = self._env_container(settings)

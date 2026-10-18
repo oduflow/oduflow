@@ -6127,20 +6127,38 @@ def rollback_production(
 @mcp.tool()
 @handle_errors
 @production_enabled
-def production_deploys(name: str, limit: int = 20, ctx: Context | None = None) -> str:
+def production_deploys(
+    name: str,
+    limit: int = 20,
+    include_output: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """
     Deploy history of a production (newest last): commits, actions, modules,
     status (success / rolled_back / rollback_failed / skipped), errors.
 
+    A failed deploy also records the step that failed (failed_step:
+    dependencies / install / upgrade / health / exception) and
+    failure_excerpt — the Odoo error record with its traceback. Exit code 255
+    from install/upgrade means Odoo could not load or upgrade the registry;
+    the excerpt says why.
+
     Args:
         name: The production name.
         limit: Max number of records (default 20).
+        include_output: Also return output_tail, the last lines of a failed
+            step's output (or of the server log for a failed health check).
     """
     team = _resolve_team(ctx)
     production_registry.get_production(team, name)
     deploys = production_ops.read_deploys(team, name, limit=limit)
     if not deploys:
         return f"No deploys recorded for production '{name}'."
+    if not include_output:
+        deploys = [
+            {key: value for key, value in deploy.items() if key != "output_tail"}
+            for deploy in deploys
+        ]
     import json as _json
 
     return _json.dumps(deploys, indent=2)

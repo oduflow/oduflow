@@ -3140,6 +3140,19 @@ or `{}` to inherit none. `reconfigure_production(env_vars={...})` replaces the
 stored set; omitting it preserves the existing variables. The managed database
 variables `HOST`, `PORT`, `USER`, and `PASSWORD` cannot be overridden.
 
+Every process in the container inherits these variables: the server, the
+deploy's `odoo -u` and the pip installs. For that reason, a new set may not
+contain `HOME`, `PYTHONHOME`, `PYTHONUSERBASE` or `PYTHONNOUSERSITE`. Odoo
+keeps its filestore and sessions under `HOME`, and the repositories'
+requirements are installed into the `odoo` user's pip `--user` site.
+Overriding these variables hides the installed packages or moves data out of
+the mounted volumes. `PYTHONPATH` may not list a `site-packages` or
+`dist-packages` directory either. Python searches `PYTHONPATH` before the
+standard library, so a backport installed there (such as `dataclasses`)
+shadows the stdlib module and Odoo fails to start. A production that already
+stores such a variable keeps it and still recreates; only setting a new
+variable set is refused.
+
 No sanitization happens — the data goes *into* production. One caveat: if
 the source environment was itself created from a production
 (`from_production`), its data was sanitized on that copy, and the new
@@ -3178,6 +3191,13 @@ also recreated, without a separate maintenance window, by the next deploy
 that changes code (`update_production` or an auto-deploy) and by
 `restart_production`; a plain `reconfigure_production(name="erp")` does it
 immediately.
+
+After recreating the container, reconfigure waits up to 180 s for Odoo to
+become healthy. A container that crash-loops, for example on an environment
+variable that breaks Python, fails the wait early: Docker restarts it twice
+during the wait, and the production lock is released for the next call. The
+same rule applies to every production health wait, including deploy
+verification and the rollback restart.
 
 **Applying a rotated secret.** Secret values reach the container only when it
 is created, so `restart_production` keeps running with the old value. After
@@ -3315,6 +3335,61 @@ commits, action, modules, status (`success` / `rolled_back` /
 `rollback_failed` / `skipped`), trigger (mcp / ui / webhook / schedule).
 
 Manual code rollback to any commit: `rollback_production(name, to_commit)`.
+
+### Diagnosing a failed deploy
+
+A large `-u` can outlast the MCP client's request timeout. The deploy still
+finishes on the server, but the client never receives the response or its
+Odoo output. So a failed deploy keeps its evidence in the deploy record
+itself:
+
+| Field | Content |
+|---|---|
+| `failed_step` | `dependencies` (apt/pip reinstall), `install` (`odoo -i`), `upgrade` (`odoo -u`), `health` (every command succeeded, but Odoo did not answer `/web/health`), or `exception` (Oduflow raised an exception, for example a module preflight query) |
+| `exit_code` | The exit code of that step |
+| `dependencies_exit_code` | The apt/pip reinstall's own exit code, when one ran: a failed upgrade next to a failed reinstall usually means a missing Python package |
+| `failure_excerpt` | The Odoo log record that explains the failure, with its traceback: the last `CRITICAL` record, else the last `ERROR` one, else the last bare Python traceback |
+| `output_tail` | The last 200 lines (16 KB at most) of the failed step's output. For a failed health check, this is the server log instead |
+| `error` | One line: the step, the exit code, the rollback, and the cause (the exception that closes the traceback) |
+
+`production_deploys` returns `failure_excerpt` by default. Pass
+`include_output=true` for `output_tail` too. The dashboard shows `error`
+under the deploy's status. The server log gets the same excerpt on the
+`deploy failed at step …` line.
+
+What the exit codes mean:
+
+| Exit code | Meaning |
+|---|---|
+| `255` from `install`/`upgrade` | Odoo could not load or upgrade the registry: `preload_registries()` caught an exception, logged `CRITICAL Failed to initialize database` with the traceback, and returned `-1`. The excerpt says why |
+| `1` from `dependencies` | An apt or pip install failed. Oduflow reports 1 for any failed dependency step |
+| `1` from `exception` | Oduflow raised an exception after the code moved. The exception's text is in `error` |
+| `137` | The command was killed by `SIGKILL`, typically by the container's memory limit |
+| `0` with `failed_step: health` | The commands succeeded, but the restarted server did not answer within 180 s |
+
+**Where the upgrade runs.** `odoo -i` / `odoo -u` is a `docker exec` into the
+production's running container: `/entrypoint.sh odoo -d <db>
+--stop-after-init --no-http -u <modules>`. It uses the same image, the same
+`/etc/odoo/odoo.conf`, the same environment variables (including
+`env_vars`) and the same `odoo` user with `HOME=/var/lib/odoo`, so it sees
+the same pip `--user` packages under `/var/lib/odoo/.local` as the server.
+Two things differ from the server process:
+
+- **The upgrade runs next to the live server.** The production's HTTP
+  workers and its cron worker keep using the same database during the
+  upgrade. A cron job or request can hold locks on rows or tables the upgrade
+  rewrites. PostgreSQL then aborts the upgrade's transaction with
+  `could not serialize access due to concurrent update` or
+  `deadlock detected`, and Odoo exits with 255. A dev environment never has
+  this concurrency, because it runs with `workers = 0` and
+  `max_cron_threads = 0`, so the same `-u` can pass there. The production
+  PostgreSQL cluster logs lock waits (`log_lock_waits = on`).
+- With `workers > 0`, the upgrade is Odoo's prefork master process, which
+  does not apply `limit_memory_hard` to itself. It shares the container's
+  memory limit with the workers.
+
+If the team's `odoo.prod.conf` sets `logfile`, Odoo writes its log there
+instead of to the command's output, and the excerpt stays empty.
 
 ## GitHub webhooks (auto-deploy)
 
@@ -7699,7 +7774,7 @@ Lock: production.
 :   *str · default empty* — Dev environment to **promote**: its database and filestore are copied (Odoo briefly stopped for a consistent copy, then restarted — the environment is not reset), and empty `repo_url` / `branch` / `odoo_image` / `git_user` / `extra_addons` default to the environment's own. **No sanitization** — the data goes *into* production.
 
 `env_vars`
-:   *dict · default none* — User environment variables; values may be `secret:<name>` references. Omit to inherit the source environment's variables; pass `{}` to inherit none. Managed `HOST`/`PORT`/`USER`/`PASSWORD` cannot be overridden. References survive reconfiguration.
+:   *dict · default none* — User environment variables; values may be `secret:<name>` references. Omit to inherit the source environment's variables; pass `{}` to inherit none. Managed `HOST`/`PORT`/`USER`/`PASSWORD` cannot be overridden. `HOME`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONNOUSERSITE` and a `PYTHONPATH` that lists a `site-packages` directory are refused: they hide the installed pip packages or move data out of the mounts. References survive reconfiguration.
 
 `server_mode`
 :   *str · default `workers`* — How Odoo serves HTTP. `workers` (sync): worker processes on port 8069 serve the pages and Traefik sends only the live bus (`/websocket`, `/longpolling`) to the gevent port 8072. `gevent` (async): Traefik sends **all** traffic to the single gevent process on 8072 — suits many long-lived or I/O-bound requests, but one CPU-heavy request slows everyone. Crons run in both modes. See [Server mode](production.md#server-mode).
@@ -7860,7 +7935,7 @@ Lock: production.
 :   *dict · default none* — New **full set** of extra addon repos `{repo_name: branch}`. Pass `{}` to remove all; omit to leave unchanged.
 
 `env_vars`
-:   *dict · default none* — **Full replacement** user environment variables, including `secret:<name>` references. Omit to preserve; `{}` clears them.
+:   *dict · default none* — **Full replacement** user environment variables, including `secret:<name>` references. Omit to preserve; `{}` clears them. A changed set may not contain `HOME`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONNOUSERSITE` or a `PYTHONPATH` that lists a `site-packages` directory.
 
 `server_mode`
 :   *str · default empty* — `workers` (sync: pages on 8069, bus on 8072) or `gevent` (async: everything on 8072). Re-tunes the `odoo.conf` workers and re-points Traefik. Omit to leave unchanged.
@@ -7967,6 +8042,11 @@ are classified automatically). Note that in production a "refresh"-class change
 (XML/JS) still restarts the container, because there is no `--dev=xml` in
 production.
 
+A large upgrade can outlast the client's request timeout; the deploy still
+finishes on the server. A failed deploy records the failed step, the Odoo
+error with its traceback, and the output tail in
+[`production_deploys`](#production_deploys).
+
 Lock: production.
 { .odu-tool-meta }
 
@@ -8046,6 +8126,12 @@ Lock: production.
 Deploy history, newest last: commits, actions, modules, status
 (`success` / `rolled_back` / `rollback_failed` / `skipped`) and errors.
 
+A failed deploy also records `failed_step` (`dependencies` / `install` /
+`upgrade` / `health` / `exception`) and `failure_excerpt`: the Odoo error
+record with its traceback. Exit code 255 from `install`/`upgrade` means Odoo
+could not load or upgrade the registry; the excerpt says why. See
+[Diagnosing a failed deploy](production.md#diagnosing-a-failed-deploy).
+
 **Parameters**
 
 `name`
@@ -8054,9 +8140,14 @@ Deploy history, newest last: commits, actions, modules, status
 `limit`
 :   *int · default `20`* — Maximum number of records.
 
+`include_output`
+:   *bool · default `False`* — Also return `output_tail`: the last 200 lines of the failed step's output, or of the server log for a failed health check.
+
 **Use it when**
 
 - Correlating "it broke on Tuesday" with what was deployed.
+- Finding out why an `update_production` failed after the client timed out
+  before the response arrived.
 - Finding the commit to pass to [`rollback_production`](#rollback_production).
 - Auditing whether an auto-update deploy silently rolled back.
 

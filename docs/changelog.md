@@ -22,6 +22,34 @@
 
 ### Fixes
 
+- **Failed production deploys explain themselves** — a failed
+  `update_production` used to record only `Deploy failed (exit_code=255)`.
+  The Odoo output that held the cause reached only the response, which a
+  client that timed out on a long upgrade never received. The deploy record
+  in `production_deploys` now names the step that failed (`dependencies`,
+  `install`, `upgrade`, `health` or `exception`), keeps the reinstall's own
+  exit code, and stores the Odoo error record with its traceback
+  (`failure_excerpt`) and the last 200 lines of the step's output
+  (`output_tail`, returned with `include_output=true`). For a failed health
+  check, that is the server log. The deploy's error line ends with the cause,
+  for example `Cause: psycopg2.errors.SerializationFailure: …`, and the
+  server log gets the excerpt. The production docs now describe the
+  environment the upgrade runs in and what the exit codes mean.
+- **Oversized command output keeps its end** — an output over the 10 MB
+  output cache limit kept only its start, which can drop the traceback that
+  Odoo prints last. The cache now keeps the first 1 MB and the end.
+- **Production health waits stop on a crash loop** — a container that Docker
+  restarts twice while Oduflow waits for health now fails the wait at once.
+  Before, `reconfigure_production` and deploy verification kept the
+  production's lock for the full 180 s, so a broken setting could not be
+  reverted during that time.
+- **Production environment variables that break the container are refused**
+  — `create_production` and a changed `reconfigure_production(env_vars=…)`
+  refuse `HOME`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONNOUSERSITE` and a
+  `PYTHONPATH` that lists a `site-packages` directory. These variables hid the
+  pip packages installed for the repositories (`ModuleNotFoundError`) or let a
+  `dataclasses` backport shadow the standard library, which took the server
+  down. Existing productions that store such a variable still recreate.
 - **Share links open from email** — a share link opened from another site, such
   as a button in a webmail message, landed on "This link is missing its key":
   the browser kept the other site as initiator across the redirect and withheld

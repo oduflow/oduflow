@@ -8,6 +8,12 @@ from dataclasses import dataclass, field
 _CACHE_TTL = 3600  # 1 hour
 _MAX_ENTRIES = 50
 _MAX_OUTPUT_SIZE = 10_000_000  # 10 MB
+# An oversized output keeps its first _TRUNCATED_HEAD_SIZE chars and its end:
+# a failing Odoo run prints the fatal traceback last.
+_TRUNCATED_HEAD_SIZE = 1_000_000
+_TRUNCATION_MARKER = (
+    "\n[... middle of the output omitted: over the cache size limit ...]\n"
+)
 
 
 @dataclass
@@ -60,7 +66,12 @@ class OutputCache:
     ) -> CachedOutput:
         """Cache output, return CachedOutput with generated ID."""
         if len(output) > _MAX_OUTPUT_SIZE:
-            output = output[:_MAX_OUTPUT_SIZE]
+            tail_size = (
+                _MAX_OUTPUT_SIZE - _TRUNCATED_HEAD_SIZE - len(_TRUNCATION_MARKER)
+            )
+            output = (
+                output[:_TRUNCATED_HEAD_SIZE] + _TRUNCATION_MARKER + output[-tail_size:]
+            )
 
         # A process-wide sequence guarantees a unique id even when two outputs
         # share the same 1000-char prefix within one clock tick (identical

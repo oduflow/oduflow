@@ -4640,6 +4640,34 @@ def _reapply_odoo_conf(
     return True
 
 
+def _failure_details(
+    dep_units: list[tuple[str, str]] | None,
+    dep_exit: int,
+    dep_logs: list[str],
+    failed_step: str = "",
+    failed_output: str = "",
+) -> dict[str, Any]:
+    """Diagnostic keys of an :func:`_apply_actions` result.
+
+    ``failed_step`` names the step whose code the result reports as
+    ``exit_code`` (``install`` / ``upgrade``, else ``dependencies``) and
+    ``failed_step_output`` is that step's own output, not the combined log.
+    ``dependencies_exit_code`` is reported whenever a reinstall ran, so a
+    failed module command can be told apart from one that failed because a
+    dependency did not install.
+    """
+    details: dict[str, Any] = {}
+    if dep_units:
+        details["dependencies_exit_code"] = dep_exit
+    if not failed_step and dep_exit:
+        failed_step = "dependencies"
+        failed_output = "\n".join(log for log in dep_logs if "FAILED" in log)
+    if failed_step:
+        details["failed_step"] = failed_step
+        details["failed_step_output"] = failed_output
+    return details
+
+
 def _apply_actions(
     client: DockerClient,
     settings: Settings,
@@ -4684,15 +4712,23 @@ def _apply_actions(
         # log behind an output_id, and the live-mount snapshot is only written
         # on 0), so a later success must not overwrite an earlier failure.
         apply_exit_code = 0
+        # The command that set apply_exit_code, with its own output: a
+        # production deploy records both, since its caller may be gone (an MCP
+        # client timeout, a webhook) by the time the command fails.
+        failed_step, failed_output = "", ""
         if to_install:
             res = install_odoo_modules(settings, team, env_name, *to_install)
-            apply_exit_code = apply_exit_code or res["exit_code"]
+            if res["exit_code"] and not apply_exit_code:
+                apply_exit_code = res["exit_code"]
+                failed_step, failed_output = "install", res.get("output", "")
             messages.append(f"Installed modules: {','.join(to_install)}")
             if res.get("output"):
                 odoo_output_parts.append(res["output"])
         if to_upgrade:
             res = upgrade_odoo_modules(settings, team, env_name, *to_upgrade)
-            apply_exit_code = apply_exit_code or res["exit_code"]
+            if res["exit_code"] and not apply_exit_code:
+                apply_exit_code = res["exit_code"]
+                failed_step, failed_output = "upgrade", res.get("output", "")
             messages.append(f"Upgraded modules: {','.join(to_upgrade)}")
             if res.get("output"):
                 odoo_output_parts.append(res["output"])
@@ -4714,6 +4750,9 @@ def _apply_actions(
             "changed_files": changed_files,
             "message": " ".join(messages),
             "output": "\n".join(dep_logs + odoo_output_parts),
+            **_failure_details(
+                dep_units, dep_exit, dep_logs, failed_step, failed_output
+            ),
         }
 
     if do_restart or deps_changed:
@@ -4740,6 +4779,7 @@ def _apply_actions(
             "message": " ".join(parts),
             "output": "\n".join(dep_logs),
             "exit_code": dep_exit,
+            **_failure_details(dep_units, dep_exit, dep_logs),
         }
 
     if do_refresh:
