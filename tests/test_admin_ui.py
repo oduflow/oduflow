@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from starlette.applications import Starlette
@@ -438,3 +439,104 @@ def test_admin_cli_enable_and_disable(tmp_path, monkeypatch, capsys):
 
     server._admin_cli("disable")
     assert "password" not in cs.parse_text(s.path.read_text()).get("admin", {})
+
+
+class TestClusterDr:
+    """Cluster WAL control and PITR are operator actions behind the console
+    session; they were deliberately removed from the team MCP surface."""
+
+    def test_wal_endpoints_require_a_session(self, srv):
+        assert srv.client.get("/admin/api/wal").status_code == 401
+        assert srv.client.post("/admin/api/wal/control", json={}).status_code == 401
+        assert srv.client.post("/admin/api/pitr", json={}).status_code == 401
+
+    def test_wal_state_reports_monitor_and_inventory(self, srv):
+        srv.login()
+        with patch(
+            "oduflow.wal_monitor.status",
+            return_value={"status": "off", "configured": False},
+        ) as status:
+            r = srv.client.get("/admin/api/wal")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["ok"] and data["wal"]["status"] == "off"
+        # No [backup] section: the inventory is not even attempted.
+        assert data["backups"] == [] and data["backups_error"] == ""
+        status.assert_called_once()
+
+    def test_wal_control_passes_the_typed_confirmation_through(self, srv):
+        srv.login()
+        with (
+            patch(
+                "oduflow.wal_monitor.control", return_value={"status": "ok"}
+            ) as control,
+            patch("oduflow.docker_ops.client.get_client"),
+        ):
+            r = srv.client.post(
+                "/admin/api/wal/control",
+                json={"action": "pause", "confirm": "ALL-PRODUCTIONS"},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["wal"] == {"status": "ok"}
+        assert control.call_args.args[2:] == ("pause", "ALL-PRODUCTIONS")
+
+    def test_wal_control_without_confirmation_is_a_client_error(self, srv):
+        srv.login()
+        with patch("oduflow.docker_ops.client.get_client"):
+            r = srv.client.post("/admin/api/wal/control", json={"action": "pause"})
+        assert r.status_code == 400
+        assert "ALL-PRODUCTIONS" in r.json()["error"]
+
+    def test_pitr_runs_the_shared_orchestration_with_the_server_locks(self, srv):
+        from oduflow.locking import LockManager
+
+        srv.login()
+        result = {
+            "target_time": "latest",
+            "displaced_data_dir": "data.pre-pitr",
+            "restarted": ["1/erp"],
+        }
+        with patch(
+            "oduflow.backup_ops.restore_cluster_pitr", return_value=result
+        ) as pitr:
+            r = srv.client.post(
+                "/admin/api/pitr",
+                json={
+                    "target_time": "2026-07-10 12:00:00+00",
+                    "confirm": "RESTORE-CLUSTER",
+                },
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["displaced_data_dir"] == "data.pre-pitr"
+        assert isinstance(pitr.call_args.args[1], LockManager)
+        assert pitr.call_args.kwargs == {
+            "target_time": "2026-07-10 12:00:00+00",
+            "confirm": "RESTORE-CLUSTER",
+        }
+
+    def test_pitr_wrong_confirmation_is_a_client_error(self, srv):
+        srv.login()
+        r = srv.client.post("/admin/api/pitr", json={"confirm": "nope"})
+        assert r.status_code == 400
+        assert "RESTORE-CLUSTER" in r.json()["error"]
+
+    def test_busy_cluster_is_a_conflict(self, srv):
+        from oduflow.errors import BusyError
+
+        srv.login()
+        with patch(
+            "oduflow.backup_ops.restore_cluster_pitr",
+            side_effect=BusyError("System is busy: update_production"),
+        ):
+            r = srv.client.post("/admin/api/pitr", json={"confirm": "RESTORE-CLUSTER"})
+        assert r.status_code == 409
+        assert "update_production" in r.json()["error"]
+
+    def test_cross_origin_wal_control_is_rejected(self, srv):
+        srv.login()
+        r = srv.client.post(
+            "/admin/api/wal/control",
+            json={"action": "pause", "confirm": "ALL-PRODUCTIONS"},
+            headers={"Origin": "https://evil.example"},
+        )
+        assert r.status_code == 403

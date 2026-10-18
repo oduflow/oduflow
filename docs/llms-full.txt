@@ -208,7 +208,9 @@ automatic code rollback, GitHub webhook auto-deploy, and optional S3 snapshots,
 WAL-G archiving, retention, and cluster PITR. The MCP surface includes
 `create_production`, list/info/lifecycle tools, `update_production`,
 `rollback_production`, deploy history/logs, snapshot/restore/schedule/status,
-`prune_production_backups`, `restore_cluster_pitr`, and `delete_production`.
+`prune_production_backups`, and `delete_production`. Cluster-wide WAL control
+and whole-cluster PITR are operator-only (the `/admin` console or the
+`oduflow wal` / `oduflow restore-cluster` CLI), not MCP tools.
 Production REST routes and `/api/webhooks/github` are registered only while the
 feature is enabled; public `/healthz` reports dev/prod infrastructure health.
 
@@ -1449,15 +1451,16 @@ flowchart LR
     filestore -->|chunkstore, content-defined dedup| snaps
     proddb -->|WAL archiving| wal
     snaps -.restore_production — one database.-> proddb
-    wal -.restore_cluster_pitr — whole cluster,<br/>any point in time.-> proddb
+    wal -.cluster PITR (operator-only) — whole cluster,<br/>any point in time.-> proddb
 ```
 
 - **Snapshots** are logical, per-database backups: a `pg_dump` plus the
   filestore deduplicated by the built-in chunkstore engine. They restore one
   production at a time (`restore_production`), including to a brand-new host.
 - **WAL-G** continuously archives WAL and takes scheduled base backups of the
-  whole production cluster. `restore_cluster_pitr` rewinds the entire cluster
-  to an arbitrary point in time — the disaster-recovery path.
+  whole production cluster. Cluster PITR — an operator action in the `/admin`
+  console or `oduflow restore-cluster`, deliberately not an MCP tool — rewinds
+  the entire cluster to an arbitrary point in time: the disaster-recovery path.
 - Retention, scheduling, and pruning run in the server's background scheduler.
   Details in [Production Hosting](production.md#backups).
 
@@ -3682,19 +3685,21 @@ collection.
 
 **WAL-G — cluster disaster recovery.** Continuous WAL archiving plus daily
 base backups of the whole production cluster. This is the "server burned
-down" path:
+down" path. Because it rewrites **every team's** productions at once, it is
+an operator action, not an MCP tool: run it from the server settings console
+(**/admin → Cluster DR**) or the owner CLI:
 
-```text
-restore_cluster_pitr(target_time="", confirm="RESTORE-CLUSTER")
+```bash
+oduflow restore-cluster --target-time "2026-07-10 12:00:00+00" --confirm RESTORE-CLUSTER
 ```
 
-restores the **entire cluster** (every production database at once — including
-auxiliary service databases created with `cluster="prod"`) from the
-latest base backup + WAL replay — optionally to a point in time
-(`target_time="2026-07-10 12:00:00+00"`). The displaced data directory is
-kept inside the Docker volume for manual cleanup. Because the state lives in
-S3, a **fresh Oduflow server** with the same `[backup]` section can resurrect
-the cluster the same way.
+Either surface restores the **entire cluster** (every production database at
+once — including auxiliary service databases created with `cluster="prod"`)
+from the newest suitable base backup + WAL replay — optionally to a point in
+time (empty `--target-time` replays the whole archive). The displaced data
+directory is kept inside the Docker volume for manual cleanup. Because the
+state lives in S3, a **fresh Oduflow server** with the same `[backup]`
+section can resurrect the cluster the same way with the CLI command above.
 
 `production_backup_status()` shows per-production snapshot state, WAL
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
@@ -3863,8 +3868,9 @@ Oduflow and Docker to be responsive; it cannot guarantee protection against
 arbitrarily fast disk exhaustion or other host processes filling the same
 filesystem after PostgreSQL stops. Monitor `/healthz` externally as well.
 
-The panel and MCP offer these cluster-wide actions (MCP mutations require
-`confirm="ALL-PRODUCTIONS"`):
+The server settings console (**/admin → Cluster DR**) and the owner CLI
+(`oduflow wal <action> --confirm ALL-PRODUCTIONS`) offer these cluster-wide
+actions:
 
 | Action | Effect |
 | --- | --- |
@@ -3874,11 +3880,11 @@ The panel and MCP offer these cluster-wide actions (MCP mutations require
 | `recover` | Requires recovery headroom; starts only PostgreSQL, keeping applications stopped and rejecting network database connections. Local maintenance and outbound S3 access remain available. Requests a WAL switch to verify real archiving. |
 | `release` | Requires recovery headroom, a safe consumption rate, working storage access, and a successful archive after recovery began. Restores normal connections and restart policies; applications remain stopped until explicitly started. |
 
-Use `production_wal_status()` for cached diagnostics and
-`control_production_wal(action="recover", confirm="ALL-PRODUCTIONS")` for
-control. REST equivalents are `GET /api/productions/wal-status` and
-`POST /api/productions/wal-control`. Full team authentication follows the
-existing cluster PITR access model; environment-scoped access is excluded.
+Use `production_wal_status()` (MCP), `GET /api/productions/wal-status`
+(dashboard) or `oduflow wal status` for cached read-only diagnostics;
+mutating actions are operator-only — the `/admin` console or
+`oduflow wal <action> --confirm ALL-PRODUCTIONS`. Environment-scoped access
+is excluded even from the read-only status.
 Queue size warns at `warn_queue_gb` and protects at `stop_queue_gb`. During
 fenced PostgreSQL-only recovery the queue may exceed the stop threshold so
 it can drain; disk pressure still stops PostgreSQL. Releasing protection
@@ -4025,8 +4031,13 @@ check that they hold nothing you need.
 | `production_backup_status` | Backup posture (snapshots + WAL-G + S3) |
 | `save_production_as_template` | Publish the production's DB + filestore as a dev template (unsanitized) |
 | `prune_production_backups` | Apply retention now |
-| `restore_cluster_pitr` | Cluster-wide disaster recovery / PITR |
 | `delete_production` | Remove (database/files kept unless `drop_database`) |
+
+Cluster-wide disaster recovery (whole-cluster PITR) and WAL archiving control
+are deliberately **not** MCP tools: they rewrite or pause every team's
+productions at once, so they live on the operator surfaces only — the server
+settings console (**/admin → Cluster DR**) and the owner CLI
+(`oduflow restore-cluster`, `oduflow wal`).
 
 ---
 
@@ -5472,8 +5483,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `GET` | `/api/productions` | List productions (each with its OduMCP `mcp_status`: `ready`, `sync_failed`, `unsupported`, or empty) and return webhook/backup state and whether the team's `production_token` is set (`production_token_set`) |
 | `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image). Optional `server_mode`: `workers` (default) or `gevent`. Optional body `env_vars` (object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas) overrides the inherited/template variables; an absent key inherits them, an empty object/string means none. `HOST`, `PORT`, `USER` and `PASSWORD` are reserved |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
-| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
-| `POST` | `/api/productions/wal-control` | Body `{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }`; cluster-wide action under the system lock |
+| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request. Read-only: cluster-wide WAL control (pause/resume/retry/recover/release) and cluster PITR are operator actions in the [server settings console](admin.md) |
 | `GET` | `/api/productions/{name}` | Detailed production information |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |
@@ -5725,9 +5735,7 @@ end to end.
     [`set_production_backup_schedule`](#set_production_backup_schedule)&nbsp;·
     [`prune_production_backups`](#prune_production_backups)&nbsp;·
     [`production_backup_status`](#production_backup_status)&nbsp;·
-    [`production_wal_status`](#production_wal_status)&nbsp;·
-    [`control_production_wal`](#control_production_wal)&nbsp;·
-    [`restore_cluster_pitr`](#restore_cluster_pitr)
+    [`production_wal_status`](#production_wal_status)
 
 -   __[Production Odoo API](#production-odoo-api)__
 
@@ -8135,7 +8143,7 @@ Lock: production.
 **Use it when**
 
 - Bringing a production back online after maintenance.
-- Restarting applications after a WAL disk-protection recovery — see [`control_production_wal`](#control_production_wal).
+- Restarting applications after a WAL disk-protection recovery (recovery itself is an operator action in the [server settings console](admin.md)).
 
 ### `stop_production`
 
@@ -8589,62 +8597,11 @@ protection state.
 - WAL archiving is falling behind and the PostgreSQL volume is filling up.
 - Confirming the cluster has left disk-protection mode.
 
-### `control_production_wal`
-
-Control the shared production cluster's WAL handling. **Affects all teams on
-this server.** Unarchived WAL is never discarded.
-
-Lock: none — but cluster-wide in effect.
-{ .odu-tool-meta }
-
-**Parameters**
-
-`action`
-:   *str · required* — One of `pause` (retain WAL), `resume`, `retry` (interrupt only `wal-push`), `recover` (start PostgreSQL only, under disk protection), `release` (clear protection after checks; applications remain stopped).
-
-`confirm`
-:   *str · required in practice* — Must equal `ALL-PRODUCTIONS`.
-
-**Use it when**
-
-- S3 is unreachable and WAL uploads must be paused deliberately.
-- Recovering a cluster that hit the disk reserve and stopped.
-
-!!! warning "Recovery is deliberately partial"
-    `recover` starts PostgreSQL only; `release` clears protection but leaves
-    applications stopped. Bring each production back with
-    [`start_production`](#start_production) once you are satisfied the cluster
-    is healthy.
-
-### `restore_cluster_pitr`
-
-**Disaster recovery.** Restore the whole production PostgreSQL cluster from
-WAL-G — base backup plus WAL replay. This affects **every production database
-at once**; to restore a single production use
-[`restore_production`](#restore_production).
-
-This is also the "resurrect production elsewhere" path: a fresh Oduflow server
-with the same `[backup]` section can rebuild the cluster from S3.
-
-The current data directory is *displaced* inside the volume, not destroyed.
-Production Odoo containers are stopped and restarted.
-
-Destructive and cluster-wide.
-{ .odu-tool-meta }
-
-**Parameters**
-
-`target_time`
-:   *str · default empty* — PITR target, e.g. `"2026-07-10 12:00:00+00"`. Empty replays the whole archive to the latest state.
-
-`confirm`
-:   *str · required in practice* — Must equal `RESTORE-CLUSTER`.
-
-**Use it when**
-
-- The cluster is lost or corrupted at the storage layer.
-- Rebuilding production on new hardware from S3 alone.
-- Rewinding every database to a point in time before a catastrophic change.
+Cluster-wide WAL control (pause/resume/retry/recover/release) and
+whole-cluster PITR are deliberately **not** MCP tools: they act on every
+team's productions at once. They live on the operator surfaces — the
+[server settings console](admin.md) (**/admin → Cluster DR**) and the owner
+CLI ([`oduflow wal`](cli.md) and [`oduflow restore-cluster`](cli.md)).
 
 ## Production Odoo API
 
@@ -9072,6 +9029,38 @@ oduflow self-update
 oduflow self-update --force
 oduflow self-update --no-restart
 ```
+
+### Cluster Disaster Recovery
+
+Cluster-wide WAL control and whole-cluster PITR are operator actions: they
+affect every team's productions at once, so they are not MCP tools. They are
+available in the [server settings console](admin.md) (**/admin → Cluster DR**)
+and on the owner CLI:
+
+```bash
+# Cached cluster WAL state (queue, disk reserve, protection latch)
+oduflow wal status
+
+# Archiving control / disk-protection recovery (see Production Hosting docs)
+oduflow wal pause   --confirm ALL-PRODUCTIONS
+oduflow wal resume  --confirm ALL-PRODUCTIONS
+oduflow wal retry   --confirm ALL-PRODUCTIONS
+oduflow wal recover --confirm ALL-PRODUCTIONS
+oduflow wal release --confirm ALL-PRODUCTIONS
+
+# DISASTER RECOVERY: restore the whole production PostgreSQL cluster from
+# WAL-G (optionally to a point in time). Also the "resurrect production
+# elsewhere" path: a fresh install with the same [backup] section rebuilds
+# the cluster from S3.
+oduflow restore-cluster --confirm RESTORE-CLUSTER
+oduflow restore-cluster --target-time "2026-07-10 12:00:00+00" --confirm RESTORE-CLUSTER
+```
+
+`restore-cluster` stops every production Odoo container, restores the cluster
+from the newest suitable base backup plus WAL replay, and restarts the
+productions it stopped. The displaced data directory is kept inside the Docker
+volume for manual cleanup. See
+[Production Hosting](production.md#backups) for the full semantics.
 
 `retune-postgres` accounts for `[production].enabled` and does not restart
 containers. For existing productions, `--apply` also regenerates `odoo.conf`
@@ -10529,6 +10518,7 @@ For authenticator-app 2FA, run `oduflow ui-2fa setup --admin` on the server
 | Coding agent | Agent image and model overrides |
 | Production | Production hosting, workers cap, WAL safety thresholds |
 | Backups | S3 backups: enable, credentials, schedule, retention |
+| Cluster DR | Cluster WAL archiving status and control, base-backup inventory, whole-cluster PITR |
 | Storage, Database | Shown read-only (see below) |
 | Console access | The console's own password |
 | Raw TOML | The whole file, for anything the forms do not cover |
@@ -10599,6 +10589,27 @@ keep the stored value, or press **Generate** for a new random one. Diffs and
 history show `********` instead of values, plus `(changed)` where a secret
 changed.
 
+## Cluster disaster recovery
+
+The **Cluster DR** section operates on the shared production PostgreSQL
+cluster — every team's productions at once — which is why it lives here and
+not on any team dashboard or MCP surface:
+
+- **WAL archiving**: the cached monitor state (queue, disk reserve,
+  disk-protection latch, storage preflight) with the cluster-wide actions
+  `pause` / `resume` / `retry`, and `recover` / `release` while disk
+  protection is latched. Every action asks you to type `ALL-PRODUCTIONS`.
+- **Cluster restore (PITR)**: the base-backup inventory from S3 and a restore
+  form (optional target time). The restore stops every production, rewrites
+  the cluster from WAL-G, and restarts the productions it stopped; it asks you
+  to type `RESTORE-CLUSTER`. The previous data directory is displaced inside
+  the Docker volume, not destroyed.
+
+The same actions exist on the owner CLI (`oduflow wal`,
+`oduflow restore-cluster`) for headless servers and for resurrecting a cluster
+on a fresh install — see [CLI](cli.md#cluster-disaster-recovery) and
+[Production Hosting](production.md#backups).
+
 ## Security model
 
 - Separate credential: `[admin] password` must differ from every team
@@ -10634,6 +10645,9 @@ console session cookie; every POST must be same-origin.
 | GET | `/admin/api/raw` | The whole file and its revision |
 | GET | `/admin/api/history` | Saved versions, newest first |
 | GET | `/admin/api/history/{id}` | One save's masked diff |
+| GET | `/admin/api/wal` | Cluster WAL monitor state plus the WAL-G base-backup inventory |
+| POST | `/admin/api/wal/control` | Body `{"action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS"}` — cluster-wide WAL action under the system lock |
+| POST | `/admin/api/pitr` | Body `{"target_time": "...", "confirm": "RESTORE-CLUSTER"}` — whole-cluster PITR under the system lock |
 | POST | `/admin/api/restart` | Restart Oduflow (refused while operations hold locks) |
 
 `preview` and `apply` take one candidate: `{"changes": [{"path": [...],
@@ -11016,7 +11030,7 @@ resource an operation actually touches:
 | **Per-branch** | One operation per branch at a time | `create_environment`, `delete_environment`, `install_odoo_modules`, `pull_and_apply`, `export_module_translations` |
 | **Per-resource** | One operation per service / volume / production / template / credential store | `create_service`, `delete_volume`, `setup_repo_auth`, `snapshot_production`, `import_template` |
 | **Per-team** | One team-wide operation at a time | template mutations that remount other environments' overlay filestores (`save_as_template`, `save_production_as_template`, `refresh_template`, `attach_filestore`), plus `delete_template` / `rename_template`, which must exclude a concurrent `create_environment` |
-| **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, `restore_cluster_pitr` (excludes every production lock) |
+| **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, cluster PITR via `/admin` or `oduflow restore-cluster` (excludes every production lock) |
 
 Every template operation also takes that template's own key, so a publish and an import can never interleave on the same template name; only the ones listed above add the team lock on top. `attach_filestore` stages its source (an rsync or an archive unpack) before taking the team lock, so a large transfer does not hold the team; it is also the one operation whose team acquire *waits* (up to five minutes) instead of failing immediately, because by then the transfer is already done and discarding it would be far more expensive than queueing.
 

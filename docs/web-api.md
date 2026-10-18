@@ -276,8 +276,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `GET` | `/api/productions` | List productions (each with its OduMCP `mcp_status`: `ready`, `sync_failed`, `unsupported`, or empty) and return webhook/backup state and whether the team's `production_token` is set (`production_token_set`) |
 | `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image). Optional `server_mode`: `workers` (default) or `gevent`. Optional body `env_vars` (object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas) overrides the inherited/template variables; an absent key inherits them, an empty object/string means none. `HOST`, `PORT`, `USER` and `PASSWORD` are reserved |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
-| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
-| `POST` | `/api/productions/wal-control` | Body `{ "action": "pause\|resume\|retry\|recover\|release", "confirm": "ALL-PRODUCTIONS" }`; cluster-wide action under the system lock |
+| `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request. Read-only: cluster-wide WAL control (pause/resume/retry/recover/release) and cluster PITR are operator actions in the [server settings console](admin.md) |
 | `GET` | `/api/productions/{name}` | Detailed production information |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |

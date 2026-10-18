@@ -50,7 +50,6 @@ def test_disabled_hides_production_tab_and_omits_routes(tmp_path):
     assert client.get("/api/productions").status_code == 404
     assert client.post("/api/webhooks/github").status_code == 404
     assert client.get("/api/productions/wal-status").status_code == 404
-    assert client.post("/api/productions/wal-control").status_code == 404
 
 
 def test_enabled_shows_production_tab_and_registers_routes(tmp_path):
@@ -84,12 +83,15 @@ def test_wal_status_failure_stays_json(tmp_path):
     assert response.json() == {"ok": False, "error": "Internal server error."}
 
 
-def test_wal_control_requires_cluster_confirmation(tmp_path):
+def test_wal_control_is_not_a_team_dashboard_route(tmp_path):
+    # Cluster-wide WAL control acts on every team at once, so it lives in the
+    # server settings console (/admin), not behind any team's session.
     client = _client(tmp_path, enabled=True)
-    with patch("oduflow.docker_ops.client.get_client"):
-        response = client.post("/api/productions/wal-control", json={"action": "pause"})
-    assert response.json()["ok"] is False
-    assert "ALL-PRODUCTIONS" in response.json()["error"]
+    # 405: the path only matches the GET-only /api/productions/{name} route.
+    assert client.post("/api/productions/wal-control", json={}).status_code in {
+        404,
+        405,
+    }
 
 
 def test_missing_production_token_is_announced_before_the_form(tmp_path):

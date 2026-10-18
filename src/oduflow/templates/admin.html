@@ -477,6 +477,7 @@ const SECTIONS = [
   { id: 'agent', title: 'Coding agent', groups: ['agent', 'agent_opencode_provider'] },
   { id: 'production', title: 'Production', groups: ['production', 'production_wal'] },
   { id: 'backup', title: 'Backups', groups: ['backup'] },
+  { id: 'cluster', title: 'Cluster DR' },
   { id: 'storage', title: 'Storage', groups: ['storage'] },
   { id: 'database', title: 'Database', groups: ['database'] },
   { id: 'admin', title: 'Console access', groups: ['admin'] },
@@ -1006,6 +1007,7 @@ function renderSection() {
   var sec = SECTIONS.find(function (s) { return s.id === SECTION; }) || SECTIONS[0];
   if (sec.id === 'raw') { renderRaw(main); return; }
   if (sec.id === 'history') { renderHistory(main); return; }
+  if (sec.id === 'cluster') { renderCluster(main); return; }
   if (STATE.file_error && !STATE.values) { main.innerHTML = '<div class="panel"><p class="empty">Fix the file in Raw TOML first.</p></div>'; return; }
   if (sec.collection === 'team') { DETAIL ? renderTeam(main, DETAIL) : renderTeams(main); return; }
   if (sec.collection === 'routes') { renderRoutes(main); return; }
@@ -1249,6 +1251,163 @@ async function showHistory(id) {
   openModal('diff-modal');
 }
 function revertHistory(id) { startReview({ restore: id, revision: STATE.revision }, 'restore'); }
+
+// ── Cluster backup / DR ────────────────────────────────────────────────────
+// Operator-only surface for the shared production cluster: WAL archiving
+// control and whole-cluster PITR. These act on every team at once, which is
+// why they live here and not on any team's MCP surface.
+var CLUSTER = { data: null, pitrBusy: false, pitrTarget: '', result: null };
+function fmtGib(bytes) {
+  if (bytes === undefined || bytes === null) return '—';
+  var gib = bytes / 1073741824;
+  return (gib >= 100 ? gib.toFixed(0) : gib >= 1 ? gib.toFixed(1) : gib.toFixed(2)) + ' GiB';
+}
+function fmtEpoch(seconds) { return seconds ? new Date(seconds * 1000).toLocaleString() : '—'; }
+function fmtAge(seconds) {
+  if (!seconds) return '—';
+  if (seconds < 90) return Math.round(seconds) + 's';
+  if (seconds < 5400) return Math.round(seconds / 60) + 'min';
+  return (seconds / 3600).toFixed(1) + 'h';
+}
+function walBadge(status) {
+  var cls = status === 'ok' ? 'badge-ok' : status === 'warn' ? 'badge-restart' : status === 'error' ? 'badge-missing' : '';
+  return '<span class="badge ' + cls + '">' + esc(status || 'unknown') + '</span>';
+}
+async function renderCluster(main) {
+  main.innerHTML = '<section class="panel"><div class="panel-head"><h2>WAL archiving</h2></div><p class="empty"><span class="spinner"></span> Loading…</p></section>';
+  var data = await api('/wal');
+  if (SECTION !== 'cluster') return;
+  if (!data.ok) {
+    main.innerHTML = '<section class="panel"><div class="panel-head"><h2>WAL archiving</h2></div>' +
+      '<div class="callout error">' + esc(data.error || 'Cannot load the cluster WAL state') + '</div></section>';
+    return;
+  }
+  CLUSTER.data = data;
+  drawCluster(main);
+}
+function clusterRow(label, value) {
+  return '<tr><th scope="row" style="width:220px">' + esc(label) + '</th><td>' + value + '</td></tr>';
+}
+function drawCluster(main) {
+  var wal = CLUSTER.data.wal || {};
+  var guard = wal.guard || {};
+  var preflight = wal.preflight || {};
+  var configured = !!wal.configured;
+
+  var rows = clusterRow('Status', walBadge(wal.status) + (wal.detail ? ' <span class="field-help">' + esc(wal.detail) + '</span>' : ''));
+  rows += clusterRow('Archiving', configured
+    ? (guard.paused ? '<span class="badge badge-restart">paused</span>' : '<span class="badge badge-ok">enabled</span>')
+    : '<span class="badge">not configured</span> <span class="field-help">Add a [backup] section in Backups.</span>');
+  rows += clusterRow('WAL queue', '<span class="mono">' + esc(wal.ready_count === undefined ? '—' : wal.ready_count) + ' segment(s) · ' +
+    esc(fmtGib(wal.ready_bytes)) + '</span>' + (wal.oldest_ready_seconds ? ' <span class="field-help">oldest waiting ' + esc(fmtAge(wal.oldest_ready_seconds)) + '</span>' : ''));
+  rows += clusterRow('Disk (WAL volume)', '<span class="mono">' + esc(fmtGib(wal.disk_free_bytes)) + ' free of ' + esc(fmtGib(wal.disk_total_bytes)) + '</span>');
+  rows += clusterRow('Disk protection', guard.latched
+    ? '<span class="badge badge-missing">latched</span>' + (guard.recovering ? ' <span class="badge badge-restart">recovering</span>' : '') +
+      (guard.reason ? ' <span class="field-help">' + esc(guard.reason) + '</span>' : '')
+    : '<span class="badge badge-ok">inactive</span>');
+  if (preflight.status) rows += clusterRow('Storage preflight', walBadge(preflight.status) + (preflight.detail ? ' <span class="field-help">' + esc(preflight.detail) + '</span>' : ''));
+  rows += clusterRow('Last sample', '<span class="mono">' + esc(fmtEpoch(wal.sampled_at)) + '</span>' + (wal.stale ? ' <span class="badge badge-missing">stale</span>' : ''));
+
+  var actions = '<button class="btn" type="button" onclick="renderCluster(document.getElementById(\'panel\'))">Refresh</button>';
+  if (configured) {
+    actions += guard.paused
+      ? '<button class="btn warn" type="button" onclick="walAction(\'resume\')">Resume archiving</button>'
+      : '<button class="btn warn" type="button" onclick="walAction(\'pause\')">Pause archiving</button>' +
+        '<button class="btn warn" type="button" onclick="walAction(\'retry\')">Retry now</button>';
+  }
+  if (guard.latched) {
+    actions += '<button class="btn danger" type="button" onclick="walAction(\'recover\')">Recover PostgreSQL</button>' +
+      '<button class="btn danger" type="button" onclick="walAction(\'release\')">Release protection</button>';
+  }
+
+  var html = '<section class="panel"><div class="panel-head"><h2>WAL archiving</h2><div class="panel-actions">' + actions + '</div></div>' +
+    '<p class="panel-desc">The shared production PostgreSQL cluster ships its WAL to S3 (WAL-G). Every action here affects all teams on this server.</p>' +
+    '<div class="table-wrap"><table class="grid"><tbody>' + rows + '</tbody></table></div></section>';
+
+  // Base backup inventory + PITR
+  var backups = CLUSTER.data.backups || [];
+  var inv;
+  if (CLUSTER.data.backups_error) {
+    inv = '<div class="callout error">Backup inventory unavailable: ' + esc(CLUSTER.data.backups_error) + '</div>';
+  } else if (!backups.length) {
+    inv = '<p class="empty">' + (configured ? 'No base backups in S3 yet.' : 'Backups are not configured.') + '</p>';
+  } else {
+    inv = '<div class="table-wrap"><table class="grid"><thead><tr><th>Base backup</th><th>Created (UTC)</th><th>WAL segment</th><th>Compressed</th></tr></thead><tbody>' +
+      backups.map(function (b) {
+        return '<tr><td class="mono">' + esc(b.backup_name || '') + '</td><td class="mono">' + esc(b.time || b.start_time || '') + '</td>' +
+          '<td class="mono">' + esc(b.wal_file_name || '') + '</td><td class="mono">' + esc(b.compressed_size ? fmtGib(b.compressed_size) : '—') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  var result = '';
+  if (CLUSTER.result) {
+    result = '<p class="field-note">Cluster restored to <span class="mono">' + esc(CLUSTER.result.target_time) + '</span>. ' +
+      'The previous data directory is kept inside the volume as <span class="mono">' + esc(CLUSTER.result.displaced_data_dir) + '</span> — remove it manually after verifying. ' +
+      'Restarted productions: <span class="mono">' + esc((CLUSTER.result.restarted || []).join(', ') || 'none') + '</span>.</p>';
+  }
+
+  var pitrControls = CLUSTER.pitrBusy
+    ? '<p class="modal-note"><span class="spinner"></span> Restoring the cluster — this can take a long time. Keep this tab open; the result appears here.</p>'
+    : '<div class="field-row"><input class="text-input mono" id="pitr-target" value="' + esc(CLUSTER.pitrTarget) + '" placeholder="2026-07-10 12:00:00+00 (empty = latest)" ' +
+      'spellcheck="false" autocomplete="off" aria-label="PITR target time"' + (configured ? '' : ' disabled') + '>' +
+      '<button class="btn-create danger" type="button" onclick="runPitr()"' + (configured ? '' : ' disabled') + '>Restore cluster…</button></div>' +
+      '<div class="field-help">Optional target time (UTC). Empty replays the whole archive to the latest state. The restore picks the newest base backup at or before the target, then replays WAL.</div>';
+
+  html += '<section class="panel"><div class="panel-head"><h2>Cluster restore (PITR)</h2></div>' +
+    '<p class="panel-desc">Disaster recovery: rewrite the WHOLE production PostgreSQL cluster from a base backup plus WAL replay. ' +
+    'Every team\'s productions are stopped, the cluster is restored from S3, then productions restart. ' +
+    'For a single production use its own snapshot restore on the dashboard instead.</p>' +
+    '<div class="callout">This affects every production database of every team at once. The current data directory is displaced inside the volume, not destroyed.</div>' +
+    pitrControls + result + inv + '</section>';
+
+  main.innerHTML = html;
+}
+var WAL_ACTION_TEXT = {
+  pause: 'Pause WAL archiving for the shared production cluster. WAL keeps accumulating on the production disk until resumed; nothing is discarded.',
+  resume: 'Resume WAL archiving for the shared production cluster.',
+  retry: 'Interrupt the current wal-push attempt and retry archiving immediately.',
+  recover: 'Start production PostgreSQL alone while disk protection is latched. Applications remain stopped.',
+  release: 'Clear disk protection after recovery checks pass. Applications remain stopped — start the desired productions afterwards.'
+};
+async function walAction(action) {
+  if (!(await confirmDialog({
+    title: 'WAL: ' + action,
+    message: WAL_ACTION_TEXT[action] + ' This affects every team on this server.',
+    confirmLabel: action.charAt(0).toUpperCase() + action.slice(1),
+    danger: true, typed: 'ALL-PRODUCTIONS'
+  }))) return;
+  var data = await api('/wal/control', { action: action, confirm: 'ALL-PRODUCTIONS' });
+  if (!data.ok) { showToast(data.error || 'WAL ' + action + ' failed', true); return; }
+  CLUSTER.data.wal = data.wal;
+  showToast('WAL ' + action + ' done');
+  if (SECTION === 'cluster') drawCluster(document.getElementById('panel'));
+}
+async function runPitr() {
+  if (CLUSTER.pitrBusy) return;
+  var input = document.getElementById('pitr-target');
+  var target = input ? input.value.trim() : '';
+  CLUSTER.pitrTarget = target;
+  if (!(await confirmDialog({
+    title: 'Restore the whole cluster',
+    message: (target ? 'Restore every production database to ' + target + '.' : 'Restore every production database to the latest archived state.') +
+      ' Every team’s productions are stopped, the PostgreSQL cluster is rewritten from S3, then productions restart. This can take a long time.',
+    confirmLabel: 'Restore cluster', danger: true, typed: 'RESTORE-CLUSTER'
+  }))) return;
+  CLUSTER.pitrBusy = true;
+  CLUSTER.result = null;
+  if (SECTION === 'cluster') drawCluster(document.getElementById('panel'));
+  var data = await api('/pitr', { target_time: target, confirm: 'RESTORE-CLUSTER' });
+  CLUSTER.pitrBusy = false;
+  if (!data.ok) {
+    showToast(data.error || 'Cluster restore failed', true);
+    if (SECTION === 'cluster') drawCluster(document.getElementById('panel'));
+    return;
+  }
+  CLUSTER.result = data;
+  CLUSTER.pitrTarget = '';
+  showToast('Cluster restored to ' + data.target_time);
+  if (SECTION === 'cluster') renderCluster(document.getElementById('panel'));
+}
 
 // ── review & save ──────────────────────────────────────────────────────────
 function diffHtml(diff) {

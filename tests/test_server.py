@@ -121,6 +121,76 @@ class TestCLIInitDestroy:
         assert exc_info.value.code == 1
 
 
+class TestCLIClusterDr:
+    """Operator CLI for the cluster DR actions removed from the MCP surface."""
+
+    def test_cli_restore_cluster_dispatches_to_backup_ops(self, capsys):
+        from oduflow import server
+
+        result = {
+            "target_time": "2026-07-10 12:00:00+00",
+            "displaced_data_dir": "data.pre-pitr",
+            "restarted": ["1/erp"],
+        }
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "oduflow",
+                    "restore-cluster",
+                    "--target-time",
+                    "2026-07-10 12:00:00+00",
+                    "--confirm",
+                    "RESTORE-CLUSTER",
+                ],
+            ),
+            patch.object(server, "_get_settings", return_value=TEST_SETTINGS),
+            patch(
+                "oduflow.backup_ops.restore_cluster_pitr", return_value=result
+            ) as pitr,
+        ):
+            server._run_cli()
+
+        assert pitr.call_args.args == (TEST_SETTINGS, server._locks)
+        assert pitr.call_args.kwargs == {
+            "target_time": "2026-07-10 12:00:00+00",
+            "confirm": "RESTORE-CLUSTER",
+        }
+        out = capsys.readouterr().out
+        assert "data.pre-pitr" in out and "1/erp" in out
+
+    def test_cli_wal_status_needs_no_confirmation_or_docker(self, capsys):
+        from oduflow import server
+
+        with (
+            patch.object(sys, "argv", ["oduflow", "wal", "status"]),
+            patch.object(server, "_get_settings", return_value=TEST_SETTINGS),
+            patch(
+                "oduflow.wal_monitor.status", return_value={"status": "off"}
+            ) as status,
+        ):
+            server._run_cli()
+
+        status.assert_called_once_with(TEST_SETTINGS)
+        assert '"off"' in capsys.readouterr().out
+
+    def test_cli_wal_control_requires_the_typed_confirmation(self):
+        from oduflow import server
+        from oduflow.errors import PrerequisiteNotMetError
+
+        with (
+            patch.object(sys, "argv", ["oduflow", "wal", "pause"]),
+            patch.object(server, "_get_settings", return_value=TEST_SETTINGS),
+            patch("oduflow.docker_ops.client.get_client"),
+        ):
+            with pytest.raises(PrerequisiteNotMetError, match="ALL-PRODUCTIONS"):
+                server._run_cli()
+        # The system lock was handed back on the failure path.
+        server._locks.acquire_system(operation="test")
+        server._locks.release_system()
+
+
 class TestCLIUpgrade:
     @pytest.fixture(autouse=True)
     def _no_postgres_preflight(self, monkeypatch):
@@ -1104,10 +1174,8 @@ class TestProductionFeatureGate:
             "restore_production",
             "production_backup_status",
             "production_wal_status",
-            "control_production_wal",
             "set_production_backup_schedule",
             "prune_production_backups",
-            "restore_cluster_pitr",
             "delete_production",
         ],
     )
@@ -2288,142 +2356,6 @@ class TestProductionBackupLocks:
         # The production's own lock was handed back, not leaked.
         locks.acquire_env(oduflow.server.prod_lock_key("1", "erp"))
         locks.release_env(oduflow.server.prod_lock_key("1", "erp"))
-
-    def test_cluster_pitr_excludes_a_running_production_operation(self):
-        import oduflow.server
-
-        locks = oduflow.server._locks
-        key = oduflow.server.prod_lock_key("1", "erp")
-        locks.acquire_env(key, operation="update_production")
-        with patch.object(oduflow.server, "_settings", self._prod_settings()):
-            try:
-                with pytest.raises(ToolError, match="update_production"):
-                    _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
-            finally:
-                locks.release_env(key)
-
-
-class TestClusterPitrSafety:
-    """P-H11: a failed cluster PITR must not leave every production stopped,
-    and a missing [backup] section must fail before anything is stopped."""
-
-    @staticmethod
-    def _settings_with_backup():
-        from oduflow.settings import BackupSettings
-
-        return replace(
-            TEST_SETTINGS,
-            prod_enabled=True,
-            backup=BackupSettings(bucket="b", access_key="k", secret_key="s"),
-        )
-
-    def test_failed_restore_restarts_stopped_productions(self):
-        from unittest.mock import MagicMock
-
-        import oduflow.server
-        from oduflow.errors import PrerequisiteNotMetError
-
-        container = MagicMock()
-        container.status = "running"
-        restarted: list[str] = []
-
-        with (
-            patch.object(oduflow.server, "_settings", self._settings_with_backup()),
-            patch("oduflow.docker_ops.client.get_client", return_value=MagicMock()),
-            patch(
-                "oduflow.production_registry.list_productions",
-                return_value={"erp": {}},
-            ),
-            patch(
-                "oduflow.docker_ops.production_ops._get_container",
-                return_value=container,
-            ),
-            patch(
-                "oduflow.docker_ops.production_ops.start_production",
-                side_effect=lambda s, t, n: restarted.append(n),
-            ),
-            patch(
-                "oduflow.walg.pitr_restore_cluster",
-                side_effect=PrerequisiteNotMetError("wal-g exploded"),
-            ),
-        ):
-            with pytest.raises(ToolError, match="wal-g exploded"):
-                _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
-
-        # The production we stopped was brought back up before the error
-        # surfaced, instead of every team being left offline.
-        container.stop.assert_called_once()
-        assert restarted == ["erp"]
-
-    def test_failed_stop_loop_restarts_already_stopped_productions(self):
-        from unittest.mock import MagicMock
-
-        import oduflow.server
-
-        # Two productions: the first stops cleanly, the second fails to stop.
-        # The failure happens before the restore ever runs (PostgreSQL is
-        # untouched), so the first production must be brought back up instead
-        # of being left offline.
-        ok = MagicMock()
-        ok.status = "running"
-        broken = MagicMock()
-        broken.status = "running"
-        broken.stop.side_effect = RuntimeError("stop exploded")
-        restarted: list[str] = []
-
-        with (
-            patch.object(oduflow.server, "_settings", self._settings_with_backup()),
-            patch("oduflow.docker_ops.client.get_client", return_value=MagicMock()),
-            patch(
-                "oduflow.production_registry.list_productions",
-                return_value={"erp": {}, "crm": {}},
-            ),
-            patch(
-                "oduflow.docker_ops.production_ops._get_container",
-                side_effect=[ok, broken],
-            ),
-            patch(
-                "oduflow.docker_ops.production_ops.start_production",
-                side_effect=lambda s, t, n: restarted.append(n),
-            ),
-            patch("oduflow.walg.pitr_restore_cluster") as restore,
-        ):
-            with pytest.raises(RuntimeError, match="stop exploded"):
-                _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
-
-        restore.assert_not_called()
-        ok.stop.assert_called_once()
-        assert restarted == ["erp"]
-
-    def test_missing_backup_section_fails_before_stopping(self):
-        from unittest.mock import MagicMock
-
-        import oduflow.server
-
-        container = MagicMock()
-        container.status = "running"
-
-        with (
-            patch.object(
-                oduflow.server,
-                "_settings",
-                replace(TEST_SETTINGS, prod_enabled=True, backup=None),
-            ),
-            patch(
-                "oduflow.production_registry.list_productions",
-                return_value={"erp": {}},
-            ) as list_prods,
-            patch(
-                "oduflow.docker_ops.production_ops._get_container",
-                return_value=container,
-            ),
-        ):
-            with pytest.raises(ToolError, match=r"\[backup\]"):
-                _get_tool_fn("restore_cluster_pitr")(confirm="RESTORE-CLUSTER")
-
-        # Validation happened before the stop loop even enumerated productions.
-        list_prods.assert_not_called()
-        container.stop.assert_not_called()
 
 
 class TestOdooRpcToolsAreLockFree:

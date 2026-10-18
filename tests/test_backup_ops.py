@@ -531,3 +531,153 @@ def test_failed_database_compensation_keeps_production_stopped(tmp_path):
 
     container.stop.assert_called_once_with()
     container.start.assert_not_called()
+
+
+class TestClusterPitr:
+    """Operator-only cluster PITR (moved off the MCP surface): a failed
+    restore must not leave every production stopped, a missing [backup]
+    section must fail before anything is stopped, and the system lock must
+    exclude running production operations."""
+
+    @staticmethod
+    def _settings_with_backup(tmp_path):
+        return Settings(
+            base_data_dir=str(tmp_path),
+            backup=BackupSettings(bucket="b", access_key="k", secret_key="s"),
+            teams={"1": TeamSettings(team_id="1", data_dir=str(tmp_path / "team_1"))},
+        )
+
+    @staticmethod
+    def _locks():
+        from oduflow.locking import LockManager
+
+        return LockManager()
+
+    def test_wrong_confirmation_is_rejected_before_locking(self, tmp_path):
+        locks = MagicMock()
+        with pytest.raises(PrerequisiteNotMetError, match="RESTORE-CLUSTER"):
+            backup_ops.restore_cluster_pitr(
+                self._settings_with_backup(tmp_path), locks, confirm="yes"
+            )
+        locks.acquire_system.assert_not_called()
+
+    def test_failed_restore_restarts_stopped_productions(self, tmp_path):
+        container = MagicMock(status="running")
+        restarted: list[str] = []
+
+        with (
+            patch.object(backup_ops, "get_client", return_value=MagicMock()),
+            patch.object(
+                backup_ops.production_registry,
+                "list_productions",
+                return_value={"erp": {}},
+            ),
+            patch.object(
+                backup_ops.production_ops, "_get_container", return_value=container
+            ),
+            patch.object(
+                backup_ops.production_ops,
+                "start_production",
+                side_effect=lambda s, t, n: restarted.append(n),
+            ),
+            patch(
+                "oduflow.walg.pitr_restore_cluster",
+                side_effect=PrerequisiteNotMetError("wal-g exploded"),
+            ),
+        ):
+            with pytest.raises(PrerequisiteNotMetError, match="wal-g exploded"):
+                backup_ops.restore_cluster_pitr(
+                    self._settings_with_backup(tmp_path),
+                    self._locks(),
+                    confirm="RESTORE-CLUSTER",
+                )
+
+        # The production we stopped was brought back up before the error
+        # surfaced, instead of every team being left offline.
+        container.stop.assert_called_once()
+        assert restarted == ["erp"]
+
+    def test_failed_stop_loop_restarts_already_stopped_productions(self, tmp_path):
+        # Two productions: the first stops cleanly, the second fails to stop.
+        # The failure happens before the restore ever runs (PostgreSQL is
+        # untouched), so the first production must be brought back up instead
+        # of being left offline.
+        ok = MagicMock(status="running")
+        broken = MagicMock(status="running")
+        broken.stop.side_effect = RuntimeError("stop exploded")
+        restarted: list[str] = []
+
+        with (
+            patch.object(backup_ops, "get_client", return_value=MagicMock()),
+            patch.object(
+                backup_ops.production_registry,
+                "list_productions",
+                return_value={"erp": {}, "crm": {}},
+            ),
+            patch.object(
+                backup_ops.production_ops, "_get_container", side_effect=[ok, broken]
+            ),
+            patch.object(
+                backup_ops.production_ops,
+                "start_production",
+                side_effect=lambda s, t, n: restarted.append(n),
+            ),
+            patch("oduflow.walg.pitr_restore_cluster") as restore,
+        ):
+            with pytest.raises(RuntimeError, match="stop exploded"):
+                backup_ops.restore_cluster_pitr(
+                    self._settings_with_backup(tmp_path),
+                    self._locks(),
+                    confirm="RESTORE-CLUSTER",
+                )
+
+        restore.assert_not_called()
+        ok.stop.assert_called_once()
+        assert restarted == ["erp"]
+
+    def test_missing_backup_section_fails_before_stopping(self, tmp_path):
+        container = MagicMock(status="running")
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            backup=None,
+            teams={"1": TeamSettings(team_id="1", data_dir=str(tmp_path / "team_1"))},
+        )
+        locks = self._locks()
+
+        with (
+            patch.object(
+                backup_ops.production_registry,
+                "list_productions",
+                return_value={"erp": {}},
+            ) as list_prods,
+            patch.object(
+                backup_ops.production_ops, "_get_container", return_value=container
+            ),
+        ):
+            with pytest.raises(PrerequisiteNotMetError, match=r"\[backup\]"):
+                backup_ops.restore_cluster_pitr(
+                    settings, locks, confirm="RESTORE-CLUSTER"
+                )
+
+        # Validation happened before the stop loop even enumerated productions,
+        # and the system lock was handed back.
+        list_prods.assert_not_called()
+        container.stop.assert_not_called()
+        locks.acquire_system(operation="test")
+        locks.release_system()
+
+    def test_cluster_pitr_excludes_a_running_production_operation(self, tmp_path):
+        from oduflow.errors import BusyError
+        from oduflow.locking import prod_lock_key
+
+        locks = self._locks()
+        locks.acquire_env(prod_lock_key("1", "erp"), operation="update_production")
+        try:
+            with pytest.raises(BusyError, match="update_production"):
+                backup_ops.restore_cluster_pitr(
+                    self._settings_with_backup(tmp_path),
+                    locks,
+                    confirm="RESTORE-CLUSTER",
+                )
+        finally:
+            locks.release_env(prod_lock_key("1", "erp"))

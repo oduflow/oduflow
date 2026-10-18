@@ -37,10 +37,8 @@ PRODUCTION_TOOLS = frozenset(
         "restore_production",
         "production_backup_status",
         "production_wal_status",
-        "control_production_wal",
         "set_production_backup_schedule",
         "prune_production_backups",
-        "restore_cluster_pitr",
         "delete_production",
         "save_production_as_template",
         "sync_production_mcp",
@@ -145,14 +143,6 @@ class ProductionAccessMiddleware(Middleware):
         if name not in SHARED_TOOLS and (name in PRODUCTION_TOOLS) != production:
             raise ToolError(
                 "This tool is not available with this development/production credential."
-            )
-        if (
-            production
-            and name in {"restore_cluster_pitr", "control_production_wal"}
-            and len(self._settings().teams) > 1
-        ):
-            raise ToolError(
-                "This operation affects every team's shared production cluster. Use the owner CLI or dashboard on a multi-team server."
             )
         if not production:
             args = context.message.arguments or {}

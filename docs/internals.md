@@ -194,7 +194,7 @@ resource an operation actually touches:
 | **Per-branch** | One operation per branch at a time | `create_environment`, `delete_environment`, `install_odoo_modules`, `pull_and_apply`, `export_module_translations` |
 | **Per-resource** | One operation per service / volume / production / template / credential store | `create_service`, `delete_volume`, `setup_repo_auth`, `snapshot_production`, `import_template` |
 | **Per-team** | One team-wide operation at a time | template mutations that remount other environments' overlay filestores (`save_as_template`, `save_production_as_template`, `refresh_template`, `attach_filestore`), plus `delete_template` / `rename_template`, which must exclude a concurrent `create_environment` |
-| **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, `restore_cluster_pitr` (excludes every production lock) |
+| **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, cluster PITR via `/admin` or `oduflow restore-cluster` (excludes every production lock) |
 
 Every template operation also takes that template's own key, so a publish and an import can never interleave on the same template name; only the ones listed above add the team lock on top. `attach_filestore` stages its source (an rsync or an archive unpack) before taking the team lock, so a large transfer does not hold the team; it is also the one operation whose team acquire *waits* (up to five minutes) instead of failing immediately, because by then the transfer is already done and discarding it would be far more expensive than queueing.
 

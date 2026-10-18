@@ -214,9 +214,7 @@ end to end.
     [`set_production_backup_schedule`](#set_production_backup_schedule)&nbsp;·
     [`prune_production_backups`](#prune_production_backups)&nbsp;·
     [`production_backup_status`](#production_backup_status)&nbsp;·
-    [`production_wal_status`](#production_wal_status)&nbsp;·
-    [`control_production_wal`](#control_production_wal)&nbsp;·
-    [`restore_cluster_pitr`](#restore_cluster_pitr)
+    [`production_wal_status`](#production_wal_status)
 
 -   __[Production Odoo API](#production-odoo-api)__
 
@@ -2624,7 +2622,7 @@ Lock: production.
 **Use it when**
 
 - Bringing a production back online after maintenance.
-- Restarting applications after a WAL disk-protection recovery — see [`control_production_wal`](#control_production_wal).
+- Restarting applications after a WAL disk-protection recovery (recovery itself is an operator action in the [server settings console](admin.md)).
 
 ### `stop_production`
 
@@ -3078,62 +3076,11 @@ protection state.
 - WAL archiving is falling behind and the PostgreSQL volume is filling up.
 - Confirming the cluster has left disk-protection mode.
 
-### `control_production_wal`
-
-Control the shared production cluster's WAL handling. **Affects all teams on
-this server.** Unarchived WAL is never discarded.
-
-Lock: none — but cluster-wide in effect.
-{ .odu-tool-meta }
-
-**Parameters**
-
-`action`
-:   *str · required* — One of `pause` (retain WAL), `resume`, `retry` (interrupt only `wal-push`), `recover` (start PostgreSQL only, under disk protection), `release` (clear protection after checks; applications remain stopped).
-
-`confirm`
-:   *str · required in practice* — Must equal `ALL-PRODUCTIONS`.
-
-**Use it when**
-
-- S3 is unreachable and WAL uploads must be paused deliberately.
-- Recovering a cluster that hit the disk reserve and stopped.
-
-!!! warning "Recovery is deliberately partial"
-    `recover` starts PostgreSQL only; `release` clears protection but leaves
-    applications stopped. Bring each production back with
-    [`start_production`](#start_production) once you are satisfied the cluster
-    is healthy.
-
-### `restore_cluster_pitr`
-
-**Disaster recovery.** Restore the whole production PostgreSQL cluster from
-WAL-G — base backup plus WAL replay. This affects **every production database
-at once**; to restore a single production use
-[`restore_production`](#restore_production).
-
-This is also the "resurrect production elsewhere" path: a fresh Oduflow server
-with the same `[backup]` section can rebuild the cluster from S3.
-
-The current data directory is *displaced* inside the volume, not destroyed.
-Production Odoo containers are stopped and restarted.
-
-Destructive and cluster-wide.
-{ .odu-tool-meta }
-
-**Parameters**
-
-`target_time`
-:   *str · default empty* — PITR target, e.g. `"2026-07-10 12:00:00+00"`. Empty replays the whole archive to the latest state.
-
-`confirm`
-:   *str · required in practice* — Must equal `RESTORE-CLUSTER`.
-
-**Use it when**
-
-- The cluster is lost or corrupted at the storage layer.
-- Rebuilding production on new hardware from S3 alone.
-- Rewinding every database to a point in time before a catastrophic change.
+Cluster-wide WAL control (pause/resume/retry/recover/release) and
+whole-cluster PITR are deliberately **not** MCP tools: they act on every
+team's productions at once. They live on the operator surfaces — the
+[server settings console](admin.md) (**/admin → Cluster DR**) and the owner
+CLI ([`oduflow wal`](cli.md) and [`oduflow restore-cluster`](cli.md)).
 
 ## Production Odoo API
 
