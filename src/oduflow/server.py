@@ -223,6 +223,12 @@ def _resolve_team(ctx: Context | None) -> TeamSettings:
     # not the verified credential. Only trust the access token established by auth.
     access_token = get_access_token()
     team_id = access_token.client_id if access_token else None
+    if team_id:
+        # Minted OAuth access tokens carry the PUBLIC client id ("team_<id>")
+        # so the SDK revocation handler can match ownership; map it back.
+        from oduflow.oauth_provider import team_id_for_client_id
+
+        team_id = team_id_for_client_id(team_id, settings.teams)
     if team_id and team_id in settings.teams:
         return settings.teams[team_id]
     # 2. Hostname-based: match Host header against team hostnames

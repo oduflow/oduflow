@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -71,6 +72,22 @@ _RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"')
 # sensible default (matches the SDK's DEFAULT_ACCESS_TOKEN_EXPIRY_SECONDS).
 _ACCESS_TOKEN_TTL_SECONDS = 3600
 _TOKEN_STORE_FILENAME = "oauth_tokens.json"
+
+
+def team_id_for_client_id(client_id: str, teams: Mapping[str, object]) -> str:
+    """Raw team id behind an access token's ``client_id``.
+
+    Minted OAuth access tokens surface the PUBLIC client id ("team_<id>") so
+    the SDK revocation handler's ownership check (``token.client_id ==
+    client.client_id``) can ever be true; every other token kind carries the
+    raw team id. Membership-checked, so a team literally named "team_x" can
+    never be mis-stripped.
+    """
+    if client_id in teams:
+        return client_id
+    if client_id.startswith("team_") and client_id[5:] in teams:
+        return client_id[5:]
+    return client_id
 
 
 def public_client_id(team_id: str) -> str:
@@ -413,14 +430,18 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
         existing = await super().load_access_token(token)
         if existing is not None:
             return _as_fastmcp_token(existing)
-        # 2. A minted OAuth access token from the persistent store. Its stored
-        # client_id is the numeric team_id, so it routes like the auth_token.
+        # 2. A minted OAuth access token from the persistent store. The stored
+        # client_id is the raw team_id; surface the PUBLIC client id
+        # ("team_<id>") so the SDK revocation handler's ownership check
+        # (token.client_id == client.client_id) can match — with the raw id,
+        # POST /revoke returned 200 without ever deleting an access token.
+        # _resolve_team() normalises it back via team_id_for_client_id().
         # get_access() drops the token and returns None once expired.
         record = self._token_store.get_access(token)
         if record is not None:
             return AccessToken(
                 token=token,
-                client_id=str(record.get("client_id", "")),
+                client_id=public_client_id(str(record.get("client_id", ""))),
                 scopes=list(record.get("scopes", [])),
                 expires_at=record.get("expires_at"),
             )
