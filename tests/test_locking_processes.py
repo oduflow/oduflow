@@ -1,12 +1,28 @@
 """Actual independent interpreters must contend with the live server's gates."""
 
+import os
 import subprocess
 import sys
 
 import pytest
 
+import oduflow
 from oduflow.errors import BusyError
 from oduflow.locking import LockManager
+
+
+def _holder(script: str) -> subprocess.Popen:
+    """A separate interpreter running *script*, importing this checkout's
+    oduflow even where it is not installed (CI runs from the source tree)."""
+    source = os.path.dirname(os.path.dirname(os.path.abspath(oduflow.__file__)))
+    path = os.pathsep.join(filter(None, [source, os.environ.get("PYTHONPATH")]))
+    return subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONPATH": path},
+    )
 
 
 @pytest.mark.parametrize(
@@ -21,12 +37,7 @@ from oduflow.locking import LockManager
 )
 def test_cross_process_exclusion_and_release_after_exit(tmp_path, held, attempt):
     script = f"from oduflow.locking import LockManager\nl=LockManager({str(tmp_path)!r})\n{held}\nprint('locked', flush=True)\ninput()\n"
-    child = subprocess.Popen(
-        [sys.executable, "-c", script],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    child = _holder(script)
     try:
         assert child.stdout.readline().strip() == "locked"
         manager = LockManager(str(tmp_path))
@@ -59,12 +70,7 @@ def test_blocking_acquire_skips_at_once_while_another_process_runs_pitr(tmp_path
     import time
 
     script = f"from oduflow.locking import LockManager\nl=LockManager({str(tmp_path)!r})\nl.acquire_system()\nprint('locked', flush=True)\ninput()\n"
-    child = subprocess.Popen(
-        [sys.executable, "-c", script],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    child = _holder(script)
     try:
         assert child.stdout.readline().strip() == "locked"
         manager = LockManager(str(tmp_path))
