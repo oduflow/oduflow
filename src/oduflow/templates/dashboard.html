@@ -3136,7 +3136,7 @@ function closeSyncResult(event) {
 }
 
 function showSyncResult(branch, result, title) {
-  var actionLabels = {none: 'No changes', refresh: 'Refresh', restart: 'Restart', install: 'Install', upgrade: 'Upgrade', blocked: 'Blocked'};
+  var actionLabels = {none: 'No changes', refresh: 'Refresh', restart: 'Restart', install: 'Install', upgrade: 'Upgrade', recreate: 'Recreate', blocked: 'Blocked'};
   var action = result.exit_code ? 'blocked' : (result.action || 'none');
   var label = result.exit_code ? 'Failed' : (actionLabels[action] || action);
 

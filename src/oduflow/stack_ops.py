@@ -23,7 +23,7 @@ from oduflow.docker_ops import (
     volume_ops,
 )
 from oduflow.domains import service_hostname
-from oduflow.errors import ConflictError, NotFoundError
+from oduflow.errors import ConflictError, ExternalCommandError, NotFoundError
 from oduflow.locking import prod_lock_key
 from oduflow.naming import sanitize_repo_url, validate_env_name
 from oduflow.service_runtime import normalize_runtime
@@ -787,12 +787,14 @@ def apply_stack(
                     label_overrides=env_labels,
                 )
                 if updated.get("exit_code"):
-                    raise ConflictError(
+                    raise ExternalCommandError(
+                        "dependency install",
+                        int(updated["exit_code"]),
                         f"Stack environment '{desired_env.name}' was recreated, "
                         "but its dependencies failed to install. Remaining stack "
                         "operations were not applied. Fix the dependency error, "
                         "run update_environment for this environment, then rerun "
-                        "stack apply.\n" + "\n".join(updated.get("setup_logs", []))
+                        "stack apply.\n" + "\n".join(updated.get("setup_logs", [])),
                     )
 
         else:

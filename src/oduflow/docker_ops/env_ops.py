@@ -4422,11 +4422,14 @@ def _dependency_failure_result(
             "refresh": do_refresh,
             "config_changed": config_changed,
         },
-        "retry": {"tool": "pull_and_apply", "arguments": arguments},
+        "retry": [
+            {"tool": "update_environment", "arguments": {"env_name": env_name}},
+            {"tool": "pull_and_apply", "arguments": arguments},
+        ],
         "message": (
             "Dependency installation failed; module actions were not run. "
-            f"Fix the dependency error, run update_environment for '{env_name}', "
-            "then call pull_and_apply explicitly with "
+            f"Fix the dependency error, run update_environment for '{env_name}' "
+            "to restore dependencies, then call pull_and_apply explicitly with "
             + json.dumps(arguments)
             + ". The automatic diff has already been consumed."
         ),
@@ -4500,13 +4503,25 @@ def _apply_actions(
         if to_install:
             res = install_odoo_modules(settings, team, env_name, *to_install)
             apply_exit_code = apply_exit_code or res["exit_code"]
-            messages.append(f"Installed modules: {','.join(to_install)}")
+            if res["exit_code"]:
+                messages.append(
+                    f"Module install FAILED (exit {res['exit_code']}): "
+                    f"{','.join(to_install)}."
+                )
+            else:
+                messages.append(f"Installed modules: {','.join(to_install)}")
             if res.get("output"):
                 odoo_output_parts.append(res["output"])
         if to_upgrade:
             res = upgrade_odoo_modules(settings, team, env_name, *to_upgrade)
             apply_exit_code = apply_exit_code or res["exit_code"]
-            messages.append(f"Upgraded modules: {','.join(to_upgrade)}")
+            if res["exit_code"]:
+                messages.append(
+                    f"Module upgrade FAILED (exit {res['exit_code']}): "
+                    f"{','.join(to_upgrade)}."
+                )
+            else:
+                messages.append(f"Upgraded modules: {','.join(to_upgrade)}")
             if res.get("output"):
                 odoo_output_parts.append(res["output"])
         if dep_logs:
@@ -4523,7 +4538,7 @@ def _apply_actions(
             "action": "install" if to_install else "upgrade",
             "modules_installed": to_install,
             "modules_upgraded": to_upgrade,
-            "exit_code": apply_exit_code or dep_exit,
+            "exit_code": apply_exit_code,
             "changed_files": changed_files,
             "message": " ".join(messages),
             "output": "\n".join(dep_logs + odoo_output_parts),
@@ -4789,12 +4804,12 @@ def pull_environment(
     # the running container and restart. Checked per repo — the "active" rule
     # (.oduflow/ shadows the repo root) applies within each repo separately;
     # applies to both explicit and auto modes (a prerequisite, not an agent action).
+    # With reinstall_all_deps the full list (one container inspection per extra
+    # repo) is computed lazily below, only once it is clear the container
+    # survives: an extra-mount switch or rename recreates it, and
+    # update_environment then reinstalls every repo's dependencies itself.
     dep_units: list[tuple[str, str]] = []
-    if reinstall_all_deps:
-        dep_units = _environment_dependency_paths(
-            container_obj, repo_path, extra_addons
-        )
-    else:
+    if not reinstall_all_deps:
         if any(_is_active_dep_file(f, repo_path) for f in main_changed_files):
             dep_units.append((repo_path, "/mnt/extra-addons"))
         for dep_host, dep_base, dep_files in extra_dep_candidates:
@@ -4824,7 +4839,9 @@ def pull_environment(
                     to_upgrade=[],
                     do_restart=False,
                     changed_files=all_changed,
-                    dep_units=dep_units,
+                    dep_units=_environment_dependency_paths(
+                        container_obj, repo_path, extra_addons
+                    ),
                     deps_changed=False,
                 )
                 if recovery.get("exit_code"):
@@ -4977,6 +4994,12 @@ def pull_environment(
             result.update(identity)
             result["warnings"] = warnings
             return result
+    elif reinstall_all_deps:
+        # The container survives this pull, so restore every repo's
+        # dependencies into it (deferred from above).
+        dep_units = _environment_dependency_paths(
+            container_obj, repo_path, extra_addons
+        )
 
     result = _apply_actions(
         client,
@@ -5961,7 +5984,11 @@ def update_environment(
     return {
         "exit_code": dep_exit,
         "message": message,
-        "action": "error" if dep_exit else "restart",
+        # "recreate", not "restart": the pull-result vocabulary
+        # (none/refresh/restart/install/upgrade) describes what was applied to a
+        # running container, while this function always rebuilt it — and the
+        # post-boot restart above is skipped when nothing landed after boot.
+        "action": "error" if dep_exit else "recreate",
         "output": "\n".join(setup_logs),
         "url": url,
         "env_name": env_name,

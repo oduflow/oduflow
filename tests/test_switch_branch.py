@@ -1015,8 +1015,15 @@ def test_environment_http_reports_failed_dependency_result(tmp_path, operation):
         response = TestClient(app).post(
             f"/api/environments/dev1/{operation}", json={"branch": "feature/new"}
         )
-    assert response.status_code == 500
-    assert response.json()["ok"] is False
+    if operation == "switch-branch":
+        # The switch persisted; the failed module/dependency apply is still a
+        # completed request, reported via the result like /sync does.
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert response.json()["result"]["exit_code"] == 1
+    else:
+        assert response.status_code == 500
+        assert response.json()["ok"] is False
     assert response.json()["result"]["output"] == result["output"]
 
 
@@ -1087,8 +1094,15 @@ def test_auto_dependency_failure_reports_exact_pending_modules(
     result = state.switch()
     assert result["pending_actions"]["install"] == ["new_module"]
     assert result["pending_actions"]["upgrade"] == ["sale"]
-    assert result["retry"]["arguments"]["install"] == "new_module"
-    assert result["retry"]["arguments"]["upgrade"] == "sale"
+    # The machine-readable retry is an ordered plan: restore dependencies
+    # first (update_environment), then replay the module actions.
+    assert [step["tool"] for step in result["retry"]] == [
+        "update_environment",
+        "pull_and_apply",
+    ]
+    assert result["retry"][0]["arguments"] == {"env_name": "dev1"}
+    assert result["retry"][1]["arguments"]["install"] == "new_module"
+    assert result["retry"][1]["arguments"]["upgrade"] == "sale"
     assert "new_module" in result["message"]
     assert "sale" in result["message"]
 
@@ -1154,15 +1168,18 @@ def test_auto_plan_can_be_replayed_after_dependency_repair(
     )
     failed = state.switch()
     assert failed["pending_actions"]["upgrade"] == ["sale"]
-    assert failed["retry"]["arguments"]["install"] == "new_module"
+    repair, replay = failed["retry"]
+    assert repair["tool"] == "update_environment"
+    assert replay["tool"] == "pull_and_apply"
+    assert replay["arguments"]["install"] == "new_module"
 
     state.files = []
     state.pip_failure = False
     updated = env_ops.update_environment(
-        state.settings, state.team, "dev1", pull_image=False
+        state.settings, state.team, repair["arguments"]["env_name"], pull_image=False
     )
     assert updated["exit_code"] == 0
-    retry = failed["retry"]["arguments"]
+    retry = replay["arguments"]
     with (
         patch(
             "oduflow.docker_ops.odoo_ops.install_odoo_modules",
