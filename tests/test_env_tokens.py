@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 
 import pytest
 
@@ -111,6 +112,76 @@ def test_recreate_keeps_token(tmp_path):
     # so the next create finds and returns the same credential.
     assert env_tokens.create_or_get(team, "main") == token
     assert env_tokens.resolve_token(s, token) == ("1", "main")
+
+
+def test_create_or_get_concurrent_returns_one_stored_token(tmp_path):
+    """Racing creates agree on a single token, and it is the persisted one."""
+    s = _settings(tmp_path)
+    team = s.teams["1"]
+    results: list[str] = []
+
+    def worker() -> None:
+        results.append(env_tokens.create_or_get(team, "main"))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(results)) == 1
+    assert env_tokens.get(team, "main") == results[0]
+
+
+def test_label_fallback_resolves_and_adopts(tmp_path, monkeypatch):
+    """A token living only in the container label authenticates, and the hit
+    is adopted into the registry so later lookups skip the scan."""
+    s = _settings(tmp_path)
+    team = s.teams["1"]
+    monkeypatch.setattr(
+        env_tokens, "_scan_labels", lambda settings: {"label-tok": ("1", "main")}
+    )
+    assert env_tokens.resolve_token(s, "label-tok") == ("1", "main")
+    assert env_tokens.get(team, "main") == "label-tok"
+    # Registry now serves it without the scan.
+    monkeypatch.setattr(env_tokens, "_scan_labels", lambda settings: {})
+    env_tokens.invalidate_cache()
+    assert env_tokens.resolve_token(s, "label-tok") == ("1", "main")
+
+
+def test_label_fallback_rejects_rotated_token(tmp_path, monkeypatch):
+    """A stale label left from before a registry rotation must not resolve."""
+    s = _settings(tmp_path)
+    team = s.teams["1"]
+    current = env_tokens.create_or_get(team, "main")
+    monkeypatch.setattr(
+        env_tokens, "_scan_labels", lambda settings: {"old-label-tok": ("1", "main")}
+    )
+    assert env_tokens.resolve_token(s, "old-label-tok") is None
+    assert env_tokens.get(team, "main") == current
+
+
+def test_label_fallback_ignores_unknown_team(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    monkeypatch.setattr(
+        env_tokens, "_scan_labels", lambda settings: {"t": ("9", "main")}
+    )
+    assert env_tokens.resolve_token(s, "t") is None
+
+
+def test_label_scan_is_throttled(tmp_path, monkeypatch):
+    """An unknown-token flood costs one Docker scan per TTL window, not one
+    per request."""
+    s = _settings(tmp_path)
+    calls: list[int] = []
+
+    def scan(settings):
+        calls.append(1)
+        return {}
+
+    monkeypatch.setattr(env_tokens, "_scan_labels", scan)
+    assert env_tokens.resolve_token(s, "nope-1") is None
+    assert env_tokens.resolve_token(s, "nope-2") is None
+    assert len(calls) == 1
 
 
 def test_adopt_keeps_existing_record(tmp_path):

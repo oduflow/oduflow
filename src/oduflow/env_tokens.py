@@ -33,6 +33,10 @@ Resolution must stay cheap on the hot path: token verification runs on *every*
 HTTP request. Lookups are served from an in-memory reverse map per registry
 file, revalidated with one ``os.stat`` per team and rebuilt only when a file
 actually changed, so an unauthenticated token flood costs stats, not reads.
+The label fallback honors the same budget: tokens found in no registry are
+matched against a reverse map of the ``oduflow.mcp_token`` container labels
+that is rebuilt from one Docker scan at most once per TTL window, and a hit is
+adopted into the registry so later requests take the fast path.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ import os
 import secrets
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
@@ -65,6 +70,13 @@ _path_locks: dict[str, threading.Lock] = {}
 _cache_lock = threading.Lock()
 # path -> ((st_ino, st_mtime_ns, st_size), {token: env_name})
 _cache: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+
+# Label-fallback scan cache: (monotonic time, {label token: (team_id, env)}).
+# Rebuilt from one Docker scan at most once per TTL, so an unknown-token flood
+# is bounded by one container listing per window, not one per request.
+_LABEL_SCAN_TTL = 60.0
+_label_scan_lock = threading.Lock()
+_label_scan: tuple[float, dict[str, tuple[str, str]]] | None = None
 
 
 def tokens_path(team: TeamSettings) -> str:
@@ -167,22 +179,22 @@ def get(team: TeamSettings, env_name: str) -> str | None:
 
 def create_or_get(team: TeamSettings, env_name: str) -> str:
     """Return the environment's MCP token, minting one on first use."""
-    existing = get(team, env_name)
-    if existing:
-        return existing
-    fresh = generate_token()
+    token = ""
 
     def fn(records: dict[str, dict[str, Any]]) -> bool:
-        # Re-check under the lock: two concurrent creates must end up with
-        # the same token, not overwrite each other.
+        # Decide under the lock: two concurrent creates must end up with the
+        # same token, and the value returned must be the one stored.
+        nonlocal token
         record = records.get(env_name)
         if record and isinstance(record.get("token"), str):
+            token = record["token"]
             return False
-        records[env_name] = {"token": fresh, "created_at": _now_iso()}
+        token = generate_token()
+        records[env_name] = {"token": token, "created_at": _now_iso()}
         return True
 
     _mutate(team, fn)
-    return get(team, env_name) or fresh
+    return token
 
 
 def adopt(team: TeamSettings, env_name: str, token: str) -> None:
@@ -265,6 +277,64 @@ def _reverse_map(team: TeamSettings) -> dict[str, str]:
     return reverse
 
 
+def _scan_labels(settings: Settings) -> dict[str, tuple[str, str]]:
+    """One Docker pass over managed containers: ``{label token: (team, env)}``.
+
+    Best effort — no Docker (unit tests, misconfiguration) means no fallback,
+    never a failed registry-token resolution.
+    """
+    try:
+        from oduflow.docker_ops.client import get_client
+
+        containers = get_client().containers.list(
+            all=True, filters={"label": [f"{settings.managed_label}=true"]}
+        )
+    except Exception as e:
+        logger.debug("Legacy MCP token label scan unavailable: %s", e)
+        return {}
+    reverse: dict[str, tuple[str, str]] = {}
+    for container in containers:
+        labels = container.labels or {}
+        token = labels.get(MCP_TOKEN_LABEL)
+        env_name = labels.get(settings.branch_label)
+        team_id = labels.get(settings.team_label)
+        if token and env_name and team_id in settings.teams:
+            reverse[token] = (team_id, env_name)
+    return reverse
+
+
+def _label_fallback(settings: Settings, token: str) -> tuple[str, str] | None:
+    """Last-resort resolution against the legacy ``oduflow.mcp_token`` labels.
+
+    Covers state where the registry record is gone but the label survived: a
+    team data dir restored from a pre-registry backup, or a failed migration
+    adopt. A hit is adopted into the registry so the next request resolves on
+    the fast path.
+    """
+    global _label_scan
+    now = time.monotonic()
+    with _label_scan_lock:
+        if _label_scan is None or now - _label_scan[0] >= _LABEL_SCAN_TTL:
+            _label_scan = (now, _scan_labels(settings))
+        found = _label_scan[1].get(token)
+    if found is None:
+        return None
+    team_id, env_name = found
+    team = settings.teams.get(team_id)
+    if team is None or not team.data_dir:
+        return None
+    stored = get(team, env_name)
+    if stored is not None:
+        # The registry already holds this environment's credential; a label
+        # that differs is a rotated-out token and must not authenticate.
+        return (team_id, env_name) if stored == token else None
+    try:
+        adopt(team, env_name, token)
+    except (OSError, ValueError) as e:
+        logger.warning("Could not adopt legacy MCP token for '%s': %s", env_name, e)
+    return (team_id, env_name)
+
+
 def resolve_token(settings: Settings, token: str) -> tuple[str, str | None] | None:
     """Resolve a presented token to ``(team_id, env_name)``.
 
@@ -272,8 +342,9 @@ def resolve_token(settings: Settings, token: str) -> tuple[str, str | None] | No
     ``(team_id, env_name)`` for a per-environment token (scoped access), or
     ``None`` if the token is unknown.
 
-    Touches only settings and the per-team registry files; async callers
-    should still prefer :func:`resolve_token_async` to keep file I/O off the
+    Touches settings and the per-team registry files, plus at most one
+    TTL-throttled Docker scan for the legacy label fallback; async callers
+    should still prefer :func:`resolve_token_async` to keep the I/O off the
     event loop.
     """
     if not token:
@@ -289,7 +360,8 @@ def resolve_token(settings: Settings, token: str) -> tuple[str, str | None] | No
         env_name = _reverse_map(team).get(token)
         if env_name is not None:
             return (team_id, env_name)
-    return None
+    # 3. Legacy container labels, for registries lost to a backup restore.
+    return _label_fallback(settings, token)
 
 
 async def resolve_token_async(
@@ -303,5 +375,8 @@ async def resolve_token_async(
 
 def invalidate_cache() -> None:
     """Drop the cached reverse maps; the next lookup re-reads the registries."""
+    global _label_scan
     with _cache_lock:
         _cache.clear()
+    with _label_scan_lock:
+        _label_scan = None

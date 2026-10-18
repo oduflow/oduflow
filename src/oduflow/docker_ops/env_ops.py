@@ -4058,22 +4058,44 @@ def recreate_environment(
     # Same for a stopped database server or a template without its database.
     _ensure_system_ready(client, settings, team, template_name, odoo_image)
 
+    # A token still living only in the legacy container label (registry record
+    # lost to a pre-registry backup restore or a failed migration adopt) dies
+    # with the container below. Adopt it into the registry first — same
+    # pattern as get_env_token — so the recreate preserves it instead of
+    # rotating exactly the credential preserve_access exists to keep.
+    legacy_token = labels.get(env_tokens.MCP_TOKEN_LABEL) or None
+    if legacy_token:
+        try:
+            env_tokens.adopt(team, env_name, legacy_token)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not adopt legacy MCP token for '%s': %s", env_name, e)
+
     delete_environment(settings, team, env_name, preserve_access=True)
-    return create_environment(
-        settings,
-        team,
-        git_branch,
-        repo_url,
-        odoo_image,
-        env_name=env_name,
-        template_name=template_name,
-        extra_addons=extra_addons,
-        git_user=git_user,
-        env_vars=env_vars,
-        local_path=local_path,
-        hostname=hostname,
-        hostname_source=hostname_source,
-    )
+    try:
+        return create_environment(
+            settings,
+            team,
+            git_branch,
+            repo_url,
+            odoo_image,
+            env_name=env_name,
+            template_name=template_name,
+            extra_addons=extra_addons,
+            git_user=git_user,
+            env_vars=env_vars,
+            local_path=local_path,
+            hostname=hostname,
+            hostname_source=hostname_source,
+        )
+    except BaseException:
+        # The old environment is gone and its replacement never appeared, so
+        # the preserved credentials now reference nothing. Revoke them before
+        # propagating: a future unrelated environment created under this name
+        # must not be reachable with them (delete_environment's invariant).
+        env_share.remove(team, env_name)
+        env_tokens.remove(team, env_name)
+        invalidate_cache()
+        raise
 
 
 def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
