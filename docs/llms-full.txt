@@ -63,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.2"
+# image = "oduist/oduflow-coder:0.4.0"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -214,7 +214,7 @@ feature is enabled; public `/healthz` reports dev/prod infrastructure health.
 
 ## Coding Agent (hosting)
 
-An opt-in, per-team hosting feature: Oduflow runs one coding-agent container per team (`oduist/oduflow-coder`, Claude Code + OpenAI Codex + OpenCode) and exposes two dashboard surfaces — **Agent CLI** (the agent's TUI in the browser) and **Agent Chat** (a browser ACP chat with per-environment conversation history). The agent edits its own git checkout, `git push`es, and drives the environment through the Oduflow MCP server with a scoped per-environment token. A built-in Agent Browser MCP and Chromium provide browser automation to all three agents, with one persistent profile per environment. Hosted agents run installed MCP methods without interactive approval prompts. OpenCode supports arbitrary provider environment variables or persistent `opencode auth login`. It is off by default; enable it per team with `agent_enabled` and set provider credentials under `[team.X.agent_env]`. The agent UI is hidden for live-mount (`local_path`) environments.
+An opt-in, per-team hosting feature: Oduflow runs one coding-agent container per team (`oduist/oduflow-coder`, Claude Code + OpenAI Codex + OpenCode) and exposes two dashboard surfaces — **Agent CLI** (the agent's TUI in the browser) and **Agent Chat** (a browser ACP chat with per-environment conversation history). The agent edits its own git checkout, `git push`es, and drives the environment through the Oduflow MCP server with a scoped per-environment token. Every environment runs as its own Linux user inside the container, so environments cannot see each other's checkouts, conversations or tokens; interactive logins are per environment. A built-in Agent Browser MCP and Chromium provide browser automation to all three agents, with one persistent profile per environment. Hosted agents run installed MCP methods without interactive approval prompts. OpenCode supports arbitrary provider environment variables or persistent `opencode auth login`. It is off by default; enable it per team with `agent_enabled` and set provider credentials under `[team.X.agent_env]`. The agent UI is hidden for live-mount (`local_path`) environments.
 
 ## Database Sanitization
 
@@ -958,7 +958,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # from the dashboard (Agent Chat / Agent CLI). Opt-in per team via
 # agent_enabled below.
 # [agent]
-# image = "oduist/oduflow-coder:0.3.3"
+# image = "oduist/oduflow-coder:0.4.0"
 # claude_model = ""         # optional Claude model override; empty = CLI default
 # codex_model = ""          # optional Codex model override; empty = CLI default
 # opencode_model = ""       # optional provider/model override; empty = OpenCode default
@@ -976,6 +976,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # enabled = true            # opt in; requires routing.mode = "traefik"
 # walg_version = ""         # empty = Oduflow's pinned WAL-G version
 # workers_cap = 8           # upper bound for auto-tuned Odoo workers
+# health_timeout = 180      # seconds a production may take to become healthy
 
 # [backup]                  # optional; requires all three credentials below
 # bucket = ""
@@ -1077,7 +1078,7 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 
 | Key | Default | Description |
 |---|---|---|
-| `[agent].image` | `oduist/oduflow-coder:0.3.3` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
+| `[agent].image` | `oduist/oduflow-coder:0.4.0` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
 | `[agent].claude_model` | *(empty)* | Optional Claude model override for the agent; empty = CLI default |
 | `[agent].codex_model` | *(empty)* | Optional Codex model override for the agent; empty = CLI default |
 | `[agent].opencode_model` | *(empty)* | Optional OpenCode model override in `provider/model` format; empty = OpenCode default |
@@ -1100,9 +1101,9 @@ hosting at call time.
 |---|---|---|
 | `[production].enabled` | `false` | Enable long-lived production environments and their dedicated PostgreSQL cluster. Requires Traefik routing |
 | `[production].walg_version` | *(empty)* | WAL-G release override. Empty uses the version pinned by Oduflow |
-| `[production].odumcp_repo_url` | `https://github.com/oduflow/oduflow-client-addons.git` | Fallback source for automatic OduMCP installation when production repositories do not provide the addon |
-| `[production].odumcp_ref` | `19.0` | Connector branch or tag; must contain Odoo 19 addon version 19.0.1.1.0 or later with managed-key support |
+| `[production].odumcp_repo_url` | `https://github.com/oduflow/oduflow-client-addons.git` | Source of the managed OduMCP checkout when production repositories do not provide the addon, and of `sync_production_mcp(refresh=true)`, which re-clones it. Needs one branch per Odoo version (`16.0` … `20.0`); each production uses the branch of its own Odoo version |
 | `[production].workers_cap` | `8` | Upper bound for automatically calculated Odoo workers; must be at least `1` |
+| `[production].health_timeout` | `180` | Seconds a production may take to become healthy after a deploy, rollback, reconfigure, restore, Stack apply or recovery start/restart; raise it for workers-mode productions with many modules |
 | `[production].wal` | *(defaults below)* | Nested `[production.wal]` table for cluster-wide WAL timeouts and disk protection; active whenever production hosting is enabled |
 | `[production.wal].upload_timeout` | `120` | Seconds per WAL upload before termination; forced kill follows after 5 seconds |
 | `[production.wal].warn_after` | `120` | Seconds without archive progress while a queue exists before warning |
@@ -1938,6 +1939,19 @@ aws s3 sync ~/.local/share/Odoo/filestore/mydb/ s3://mybucket/backups/mydb/files
 oduflow import-template s3://mybucket/backups/mydb/ --template-name prod
 ```
 
+### In the dashboard
+
+**Templates → Import from S3** fills the same request in a form. Enter the
+connection (endpoint — empty for AWS — region, access key ID, secret key),
+type a bucket or leave it empty, and **Browse**: the dialog walks the bucket
+one folder at a time, newest files first, and marks the folder that holds a
+recognized dump. **Use this folder** fills in the source and suggests a
+template name. You can also type the prefix directly.
+
+A template imported this way is tagged **S3** in the list and gains a **Sync**
+button — the same incremental re-sync as `--overwrite`, with the connection
+and the stored secret already filled in.
+
 How it behaves, in the order it matters at scale:
 
 - **Parallel + resumable.** Filestore files download on several connections;
@@ -1951,15 +1965,55 @@ How it behaves, in the order it matters at scale:
   if the dump's S3 ETag is unchanged since the last sync — skips the dump
   download *and* the template DB reload. This makes a periodic
   "pull the latest production backup into dev" job cheap.
-- **Credentials.** `--s3-access-key`/`--s3-secret-key` (with `--s3-endpoint`
-  for MinIO or other S3-compatible stores, and `--s3-region` when required)
-  win; otherwise the `[backup]` settings are reused when the bucket matches;
+- **Credentials, remembered.** `--s3-access-key`/`--s3-secret-key` (with
+  `--s3-endpoint` for MinIO or other S3-compatible stores, and `--s3-region`
+  when required) win; otherwise the secret remembered for this template is
+  reused; otherwise the `[backup]` settings when the bucket matches;
   otherwise the bucket is read anonymously (public bucket).
+
+    **The secret key is never written into template metadata.** A raw value is
+    stored as the team secret `s3-template-<template>` (visible under
+    **Credentials → Secrets** in the dashboard, where it can be rotated) and
+    the metadata records only a `secret:<name>` reference, so no template
+    listing, metadata editor or MCP tool can echo it back. Pass
+    `secret:<name>` yourself to sign with an existing team secret instead —
+    Oduflow then leaves that secret alone.
+
+    So a re-sync of a private bucket needs **no key at all**: omit
+    `--s3-secret-key` and the stored one signs the request. It is required
+    again when the endpoint or the access key changes, so a stored secret is
+    never sent to a different endpoint or key pair. To keep the key out of
+    `~/.bash_history`, `--s3-secret-key` defaults to `$ODUFLOW_S3_SECRET_KEY`.
+
+    A secret Oduflow created is deleted together with the template, and
+    released when the template is re-published from an environment or a
+    production (its data no longer comes from the bucket).
 - **Metadata.** The Odoo version, image, and installed modules are read from
   the restored database; `snapshot_at` records the dump's upload time, so
   template freshness reflects the data, not the import.
 
 `--without-filestore` skips the `filestore/` tree for a database-only import.
+
+### An Odoo backup `.zip` already in the bucket
+
+If what you have is a backup `.zip` — written by Odoo's own database manager,
+or downloaded from Odoo.sh — point the import straight at that object instead
+of a folder:
+
+```bash
+oduflow import-template s3://mybucket/backups/acme-2026-10-13.zip --template-name prod
+```
+
+A key ending in `.zip` is unpacked as an Odoo backup (`dump.sql` plus
+`filestore/`); anything else is read as a prefix holding the raw layout. A
+re-sync with `--overwrite` still costs nothing while the object's ETag is
+unchanged.
+
+Prefer the raw layout for a large database when you can choose. A zip has to
+be fetched whole every time it changes, its filestore replaces the template's
+wholesale instead of syncing file by file, and an interrupted download starts
+over — all of which the raw layout avoids. The `.zip` shape exists for the
+archive you already have, not as the recommended way to make one.
 
 ## Importing from a Local Path
 
@@ -1998,7 +2052,169 @@ This reloads the template DB from the dump found in the directory, re-reads
 the Odoo version and module list from the restored database, fixes filestore
 ownership, recomputes sizes/overlay mode in `metadata.json`, and remounts
 live overlay environments against the updated filestore (keeping their
-changes).
+changes). Environment databases are **not** reloaded. Copy-mode environments
+are unchanged. Retained generations created by scheduled sync are unchanged.
+The dashboard exposes this operation as **Templates → More → Refresh**.
+`refresh-template` is a separate command that only remounts the filestore.
+For an already-used template, prefer staging via a local source and
+`--overwrite`: direct writes happen before Oduflow can stop live overlays.
+
+## Scheduled SSH sync (system cron)
+
+Open **Templates → More → Source / schedule / log**. Set the SSH host, user,
+port, absolute backup directory and five-field cron schedule; enable the
+schedule and save. Times use the **host cron timezone**. **Sync now** queues a
+request for cron's next minute tick using the saved settings. It works even
+with the schedule disabled. The web server never starts the sync worker.
+
+Prerequisites:
+
+- A running system cron daemon and write access as root to `/etc/cron.d`.
+  Oduflow manages only its own `oduflow-template-*` files; existing jobs remain
+  untouched. Remove the configuration in the dialog before renaming or
+  deleting the template; removing it also deletes the downloaded backup copy
+  (the inbox) but keeps status and logs, and deleting the template then
+  removes those too. Disabling its schedule keeps the manual-request job.
+- `rsync` and OpenSSH on the Oduflow host, and rsync on the source host.
+- Add the team's public SSH key (dashboard **Credentials**) to the source
+  account's `authorized_keys`. Verify the remote SSH host key independently
+  and put it in `{team.data_dir}/ssh/known_hosts`. Sync uses strict host-key
+  verification, the team's key,
+  and noninteractive authentication. For a non-default port the known_hosts
+  entry uses `[host]:port`. Key rotation requires updating the source account.
+
+The source must be a **completed, immutable backup**, not a live PostgreSQL
+storage directory:
+
+```text
+/backups/completed/
+├── dump.pgdump          # or dump.sql / dump.sql.gz / dump.pgdump.gz / db.dump
+├── filestore/           # matching Odoo attachments; required, may be empty
+└── READY                # unique snapshot ID, e.g. 2026-10-07T030000Z
+```
+
+The client is responsible for producing a consistent dump and filestore.
+Publish `READY` last, containing 1–256 ASCII letters/digits or `_ . : -`.
+Do not change the published directory while it is being fetched. Publish a
+new unique ID for every backup. The worker verifies the ID before and after
+rsync and in the downloaded copy, then imports from its local inbox. Failed
+or changing transfers never reach the live template. Symlinks are not copied.
+No remote dump commands are executed by Oduflow.
+
+The worker runs `rsync → import → optional environment refresh`, writes
+`{team.data_dir}/template_sync/{template}/status.json` and `run.log`, and
+rotates the log at 2 MiB with three retained files. The dialog reads the last
+64 KiB and shows timestamps, queued/running/success/partial/failed/interrupted
+state, and errors. **Refresh status / log** reads current files. If no worker
+has ever started, check the host cron service/log for configuration or CLI
+startup errors. Repeated execution of an active job is rejected; scheduled
+failures retry on the next scheduled run or a manual request.
+
+The minute tick that picks up manual requests first checks for the queued
+request file (`test -e`, through `docker exec` under Docker), so an idle
+template costs no Python start. A run is never dropped for being busy: a
+scheduled run that finds the template in use (another sync, a dashboard save,
+an MCP template operation) is queued for the next minute instead, and a run
+whose environments stay busy for five minutes after the transfer is reported
+as **deferred** and queued again.
+
+Deployment settings in `oduflow.toml`:
+
+```toml
+[template_sync]
+cron_dir = "/etc/cron.d"
+cron_user = ""          # empty: the user running Oduflow (natively the only one allowed)
+cron_container = ""     # native host install; see Docker setup below
+```
+
+Natively the worker must run as the same user as the server: everything it
+writes (locks, status, pins, imported template files) has to stay readable and
+replaceable by the server, so a different `cron_user` is rejected.
+
+The generated command pins the current Python executable and `ODUFLOW_TOML`
+path. Re-save schedules after moving the installation/configuration. The
+worker can also be run directly with the same saved configuration:
+
+```bash
+oduflow sync-template prod --team 1             # enabled schedule
+oduflow sync-template prod --team 1 --pending   # consume a queued UI request only
+```
+
+### Optional environment data refresh
+
+Use **Environment → More → Auto-refresh data: Off** to opt in. The confirmation
+covers subsequent resets: local database and filestore changes are discarded.
+Code, container settings, credentials, URL and ports stay in place. Protected
+environments are skipped and reported. Stopped environments stay stopped.
+
+Before updating a shared lower filestore, cron pins existing overlay
+workspaces to a retained generation. This initial pin briefly stops/remounts
+those containers, including ones whose database auto-refresh is off. Subsequent
+syncs leave them on their old generation. Copy-mode environments already have
+an independent filestore. This keeps old databases and attachments together.
+
+Template refreshes, filestore attaches and imports leave pinned environments
+on their retained generation and name them in their result, instead of
+remounting them silently. To move a pinned environment onto the current
+template, enable its data auto-refresh (the next sync resets it) or recreate
+it. Saving an environment as its template unpins that environment: what it
+published is now the template's filestore.
+
+An environment cloned from a template that a sync last imported remembers the
+snapshot it came from, so a later sync of the same snapshot leaves it alone
+even if it opted in after it was created. Any other import into the template
+clears that record.
+
+An opted-in environment receives a staged database clone and a fresh
+filestore. A separate maintenance container uses its code/configuration to
+install configured modules, neutralize Odoo and run team/project sanitization
+before the serving container can access the new data. Preparation or
+sanitization errors leave the old environment intact. The worker stops the
+serving container for the switch, verifies readiness if it was running, and
+rolls back both database and filestore on a switch/startup error. Odoo major
+versions must match; environments created without a managed filestore mount
+must first be recreated from a template that includes one.
+
+Workspace pins survive container updates and restarts. Retained generations
+use hardlinks for Odoo's content-addressed attachments; unused generations are
+removed after a sync, and when the last environment pinned to one is deleted.
+A sync only hardlinks a new generation when an opted-in environment actually
+moves to the new snapshot. **Never edit attachment files in place** or use rsync's
+`--inplace` against template/inbox/generation trees. Use staged imports. Old
+generations consume space for attachments no longer present in the current
+snapshot; preparation also needs space for an additional database and any
+copy-mode filestore. Busy operations are excluded through shared file locks
+under `{data_dir}/.locks`; never delete these files to "unlock" a job.
+
+An OS/process crash during refresh can leave a workspace
+`.template-refresh.json` recovery journal. Oduflow blocks start/restart/update/delete
+and overlay recovery for that workspace until an operator reconciles the
+recorded database names, old/new filestore paths and pin, and restores the
+recorded restart policy. In this case it retains recovery files/generations;
+do not simply delete the journal. Ordinary caught failures roll back
+automatically. A new sync will report the affected environment as failed.
+
+### Cron when Oduflow runs in Docker
+
+Run cron **on the host**. Bind-mount its cron directory into the Oduflow
+container, adding `-v /etc/cron.d:/etc/cron.d` to the existing deployment, and
+set:
+
+```toml
+[template_sync]
+cron_dir = "/etc/cron.d"
+cron_user = ""              # host user running `docker exec`; empty means root
+cron_container = "oduflow"  # actual container name
+```
+
+Generated host jobs use `/usr/bin/docker exec` to run the worker in the
+existing Oduflow container, sharing its configuration, filesystem, Docker
+socket and mount namespace. The container must run as root to write
+root-owned cron files. The host needs cron and the Docker CLI at that path;
+no cron daemon is started inside the Oduflow server/container. **Do not run a
+separate worker container**: overlay mounts must be created in the same mount
+namespace as the server. The native installation uses the configured Python
+executable directly.
 
 ## Listing and Dropping Templates
 
@@ -2118,7 +2334,10 @@ certificate reuse is more important than descriptive URLs. For
 `hostname = "dev.example.com"`, that mode allocates `dev1.example.com` through
 `devN.example.com`; assignments survive stops and updates and return to the
 pool on deletion. Pass `hostname="qa"` to request `qa.example.com` in either
-mode. Explicit hostnames still consume environment capacity.
+mode. A bare team domain has no prefix to replace, so with
+`hostname = "example.com"` the same call gives `qa.example.com` (the Public
+Suffix List decides what is bare, so `example.co.uk` is also kept whole).
+Explicit hostnames still consume environment capacity.
 
 When creating an environment, Oduflow:
 
@@ -2129,7 +2348,7 @@ When creating an environment, Oduflow:
 5. **Installs dependencies** — auto-installs from `.oduflow/apt_packages.txt` and `.oduflow/requirements.txt` (the latter falls back to the repo root) if present
 6. **Configures Odoo** — uses repo's `.oduflow/odoo.conf` if available, otherwise the default template; if the repo keeps its modules in a top-level `addons/` directory, `addons_path` points there automatically
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
-8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
+8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init` in a short-lived container *before* step 7, with the same generated `odoo.conf`, so options that only matter when a database is created — demo data (`without_demo`, or `with_demo` on Odoo 19+) — follow the repo's `.oduflow/odoo.conf`. The default template sets `without_demo = True`
 
 ### Starting a New Branch
 
@@ -2259,17 +2478,15 @@ Both folders support `.sql` and `.py` files, executed in alphabetical order (fir
 
 ### Team-level sanitization
 
-On startup, the folder `{team_data_dir}/odoo_sanitize/` is created and seeded with a default script:
-
-**`01_disable_mail.sql`** — disables incoming and outgoing mail servers:
+On startup, the folder `{team_data_dir}/odoo_sanitize/` is created and seeded with an example script, **`01_disable_mail.sql`**. All of its statements are commented out, so it runs without changing anything. On Odoo 16+, the native neutralization already deactivates outgoing and incoming mail servers. The example shows the format:
 
 ```sql
--- Disable incoming mail servers (fetchmail)
-UPDATE fetchmail_server SET active = false WHERE active = true;
-
--- Disable outgoing mail servers
-UPDATE ir_mail_server SET active = false WHERE active = true;
+-- Examples:
+-- UPDATE ir_mail_server SET active = false WHERE active = true;
+-- UPDATE fetchmail_server SET active = false WHERE active = true;
 ```
+
+Each `.sql` file runs as one transaction. If any statement fails, for example on a table whose module is not installed (`fetchmail_server` is absent until `mail` is installed), the whole file is rolled back.
 
 The team administrator can add, modify, or remove scripts in this folder to control sanitization for all environments in the team.
 
@@ -2497,7 +2714,7 @@ recorded in `productions.json`) or of an environment managed by a
 
 ### Recreating Environments
 
-The **Recreate** action (available via the Web Dashboard and REST API) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
+The **Recreate** action (available via the Web Dashboard, the REST API and the `recreate_environment` MCP tool) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
 
 ```bash
 # Via REST API
@@ -2505,6 +2722,15 @@ curl -X POST http://localhost:8000/api/environments/feature-login/recreate
 ```
 
 Recreate reads the original configuration from the container's Docker labels, so all parameters (repo URL, image, template, extra addons, git user) are preserved automatically.
+
+Recreate also preserves the environment's **identity**, which a manual delete +
+create does not: the [share link](security.md#shared-single-environment-dashboard-envname)
+already handed to a client keeps opening
+the scoped dashboard, and the scoped `/mcp/<env>` endpoint keeps the same
+Secret Key, so configured MCP clients reconnect without changes. Agents should
+therefore prefer `recreate_environment` over `delete_environment` +
+`create_environment` whenever the environment is being replaced rather than
+retired.
 
 ### Automatic Stop and Cleanup
 
@@ -2838,29 +3064,73 @@ all productions in its team; it does not identify individual administrators.
 
 ### Automatic OduMCP installation
 
-New production creation requires a configured production token and automatically
-attempts to install `odumcp` if it is absent. The supported addon release currently targets
-**Odoo 19**. Existing older productions can still be managed with infrastructure
-tools; automatic OduMCP provisioning requires a compatible Odoo 19 deployment.
+New production creation requires a configured production token. Until one is set,
+the dashboard's Production tab and its Create Production dialog show a setup
+notice, and the dialog cannot be submitted. Creation automatically
+attempts to install `odumcp` if it is absent. Automatic provisioning supports
+**Odoo 16 and later**. Older productions can still be managed with infrastructure
+tools.
 
-Oduflow uses addon code in the main or extra repositories when available. Otherwise
-it clones the configured connector repository and mounts **only** its `odumcp`
-addon read-only. This managed checkout survives container recreation and is not
-silently updated by unrelated deployments:
+**Oduflow ships `odumcp` as a managed component by default.** When neither the
+main nor the extra repositories contain the module, Oduflow clones the connector
+repository at the branch of the production's own Odoo version (`18.0` for
+`odoo:18.0`) into a managed checkout and mounts **only** its `odumcp` addon
+read-only. The version comes from the image tag; for a custom image without a
+version in its tag, Oduflow asks the image's `odoo --version`. This managed
+checkout survives container recreation and is never silently updated: neither
+production creation nor deployments pull newer connector code. It changes in
+exactly two cases:
+
+- **Odoo version change.** When `reconfigure_production` moves a production to
+  another Odoo version, the checkout is replaced with the new version's branch
+  before the container is recreated; run `sync_production_mcp` afterwards to
+  upgrade the installed module. A synchronization also replaces a checkout made
+  for another version.
+- **Explicit refresh.** `sync_production_mcp(name, refresh=true)` re-clones the
+  same version's branch from `odumcp_repo_url`, recreates the container and
+  upgrades the module (even at an unchanged manifest version, so data and view
+  changes land). This is the only way the managed module is updated, and it is
+  an operator action — nothing refreshes it automatically. A refresh requires
+  an explicit `name`: one production per call, never the whole team.
+
+**A client takes the module over by committing `odumcp` into their own
+repository** (main or extra, where Odoo scans it) **and deploying.** The deploy
+that brings the module in completes the takeover by itself: once the new code is
+verified healthy, Oduflow recreates the container without the managed mount and
+removes its managed checkout, records `odumcp_takeover: completed` in the deploy
+history entry and says so in the deploy result (`odumcp now comes from the
+repository; the managed copy was removed`). This holds for manual,
+webhook and auto-update deploys alike, and also when the deploy classified the
+change as nothing to apply (the detection keys on the repository state after the
+pull, not on the changed files). `sync_production_mcp` does the same for a
+production whose takeover is still pending (for example because that recreate
+failed). From then on the module is client code: Oduflow never touches it again —
+`refresh=true` is a documented no-op for a client-shipped module, and
+installs/upgrades follow the repository's deployments like any other addon.
+Removing the module from the repository again puts Oduflow back in charge on the
+next synchronization.
+
+Whether the managed copy is mounted at all is decided by the repository state
+whenever a container is built: any recreate (reconfiguration, image change,
+synchronization) leaves the mount out as soon as the client repositories ship
+`odumcp`. A synchronization recreates the container whenever the container does
+not see the current checkout (or still mounts a removed one), which repairs an
+earlier synchronization whose recreation failed. Provisioning refuses to install
+an addon built for a different Odoo version than the one running:
 
 ```toml
 [production]
 enabled = true
 odumcp_repo_url = "https://github.com/oduflow/oduflow-client-addons.git"
-odumcp_ref = "19.0"  # branch or tag containing odumcp >= 19.0.1.1.0
 ```
 
-Deploy the accompanying addon changes before enabling this feature. The addon
-must implement `_set_oduflow_key`; an older release cannot synchronize credentials.
-For reproducible installations, select a released immutable tag. Source checkout
-failures, unavailable or incompatible modules and failed key provisioning do not
-fail production creation. Production remains available with a warning and an
-OduMCP status of `sync_failed`. Infrastructure tools continue to work. The
+The addon must implement `_set_oduflow_key`; an older release cannot synchronize
+credentials. Source checkout failures, unsupported Odoo versions, unavailable or
+incompatible modules and failed key provisioning do not fail production creation.
+Production remains available with a warning and an OduMCP status of `sync_failed`,
+which the dashboard shows as an **MCP FAILED** badge on the production card. A
+production on Odoo 15 or older gets the status `unsupported` instead, shown as
+**MCP N/A**: no synchronization can help there. Infrastructure tools continue to work. The
 `production_odoo_*` tools remain listed but return a configuration error until
 `sync_production_mcp` succeeds. Fix the addon source or compatibility issue and
 retry synchronization; recreating production is unnecessary.
@@ -2898,8 +3168,18 @@ After changing `production_token` in TOML and restarting Oduflow, connect with t
 new token and call `sync_production_mcp(name)`; omit `name` to process all team
 productions. The call installs/configures the addon and replaces only its managed
 key. It reports each production independently; start stopped productions and retry
-failures. Adding a missing managed addon mount recreates the container briefly.
-Reapplying the same key is a no-op for the key itself.
+failures. Adding a missing managed addon mount — or dropping it once the client
+repository provides `odumcp` — recreates the container briefly. Reapplying the
+same key is a no-op for the key itself.
+
+Each result states where the addon comes from (`addon_source`: `managed` or
+`repository`), what happened to the managed checkout (`checkout`: `kept`,
+`cloned`, `replaced`, `refreshed`, `removed` or `repository`), whether the
+container was recreated and, for a managed checkout, the connector branch and
+commit it is at. Pass `refresh=true` (with an explicit `name`) to re-clone the
+managed checkout from `odumcp_repo_url` for the same Odoo version and upgrade the
+module; the result reports `refreshed` and, for a client-shipped module, a note
+that nothing was refreshed.
 
 The new token immediately controls the Oduflow endpoint after restart. Each Odoo
 accepts the new key only after its synchronization succeeds; until then its old
@@ -2926,6 +3206,7 @@ restart Oduflow; productions themselves are then created at runtime:
 [production]
 enabled = true          # required; restart Oduflow after changing
 workers_cap = 8         # upper bound for auto-tuned Odoo workers
+health_timeout = 180    # seconds a production may take to become healthy
 
 [backup]                # configures backups; production must also be enabled
 bucket = "acme-backups"
@@ -3035,9 +3316,11 @@ worker's 2 GB, so it does not recycle itself — dropping every connection — u
 normal load.
 
 The listen settings are pinned in the generated `odoo.conf` whatever the base
-conf (team or repo `.oduflow/odoo.prod.conf`) says: `http_port = 8069`,
-`gevent_port`/`longpolling_port = 8072`, `http_enable = True`, and
-`http_interface`/`xmlrpc_*` are dropped; a base conf that set them is logged.
+conf (team `odoo.prod.conf`) says: `http_interface = 0.0.0.0` (Odoo 20
+otherwise listens only on `127.0.0.1`, which Traefik cannot reach),
+`http_port = 8069`, `gevent_port`/`longpolling_port = 8072`,
+`http_enable = True`, and the legacy `xmlrpc`, `xmlrpc_port` and
+`xmlrpc_interface` keys are dropped; a base conf that set them is logged.
 The deploy health check requires **both** ports to answer `/web/health` in
 either mode, so a dead gevent process (a broken bus in `workers` mode, a
 dead site in `gevent` mode) fails the deploy and triggers the code rollback.
@@ -3073,6 +3356,19 @@ before the source is stopped. Pass `env_vars={...}` to replace the inherited set
 or `{}` to inherit none. `reconfigure_production(env_vars={...})` replaces the
 stored set; omitting it preserves the existing variables. The managed database
 variables `HOST`, `PORT`, `USER`, and `PASSWORD` cannot be overridden.
+
+Every process in the container inherits these variables: the server, the
+deploy's `odoo -u` and the pip installs. For that reason, a new set may not
+contain `HOME`, `PYTHONHOME`, `PYTHONUSERBASE` or `PYTHONNOUSERSITE`. Odoo
+keeps its filestore and sessions under `HOME`, and the repositories'
+requirements are installed into the `odoo` user's pip `--user` site.
+Overriding these variables hides the installed packages or moves data out of
+the mounted volumes. `PYTHONPATH` may not list a `site-packages` or
+`dist-packages` directory either. Python searches `PYTHONPATH` before the
+standard library, so a backport installed there (such as `dataclasses`)
+shadows the stdlib module and Odoo fails to start. A production that already
+stores such a variable keeps it and still recreates; only setting a new
+variable set is refused.
 
 No sanitization happens — the data goes *into* production. One caveat: if
 the source environment was itself created from a production
@@ -3113,6 +3409,13 @@ that changes code (`update_production` or an auto-deploy) and by
 `restart_production`; a plain `reconfigure_production(name="erp")` does it
 immediately.
 
+After recreating the container, reconfigure waits up to
+`[production] health_timeout` seconds (default 180) for Odoo to become healthy. A container that crash-loops, for example on an environment
+variable that breaks Python, fails the wait early: Docker restarts it twice
+during the wait, and the production lock is released for the next call. The
+same rule applies to every production health wait, including deploy
+verification and the rollback restart.
+
 **Applying a rotated secret.** Secret values reach the container only when it
 is created, so `restart_production` keeps running with the old value. After
 replacing a secret's value in the dashboard, call
@@ -3137,21 +3440,28 @@ The dashboard offers the same settings on each production card under
 
 ### odoo.conf overrides
 
-The generated production `odoo.conf` merges a base conf chain
-(`.oduflow/odoo.prod.conf` in the repo > team `odoo.prod.conf` > bundled)
-with [auto-tuned](#configuration) worker/limit settings. Per-production
-overrides sit on top of both and survive deploys, retunes and reconfigures:
+The generated production `odoo.conf` merges a base conf chain (team
+`odoo.prod.conf` > bundled) with [auto-tuned](#configuration) worker/limit
+settings. Per-production overrides sit on top of both and survive deploys,
+retunes and reconfigures:
 
 ```text
 set_production_odoo_conf(name="erp", options={"limit_time_real": "300"})
 set_production_odoo_conf(name="erp", unset="limit_time_real")
 ```
 
+The repository is never part of the chain: a `.oduflow/odoo.prod.conf`
+(honoured by earlier versions) is ignored and logged, so pushing to the
+deployed branch cannot change how the production server runs. Move such
+settings into overrides or the team `odoo.prod.conf`.
+
 An explicit override beats the auto-tuned value (e.g. pin `workers`; it must
 be at least 1, see [Server mode](#server-mode)). Keys managed by Oduflow are
 refused: `addons_path` and `data_dir` are generated, the `db_*` connection
-keys come from container env vars, and the listen ports (`http_port`,
-`xmlrpc_port`, `gevent_port`, `longpolling_port`) are what Traefik routes to.
+keys come from container env vars, and the listen settings (`http_interface`,
+`http_port`, `gevent_port`, `longpolling_port`, `http_enable` and the legacy
+`xmlrpc`, `xmlrpc_port`, `xmlrpc_interface`) are pinned to what Traefik
+routes to.
 Such keys saved before they became managed are ignored (and logged) and are
 removed from the record by the next override save or reconfigure (option names
 are compared case-insensitively and stored lowercased, matching how Odoo
@@ -3159,6 +3469,41 @@ reads them). Current overrides are shown by `get_production_info`; the
 dashboard edits them in the same **Settings** panel. Applying restarts the
 container (brief downtime) unless `restart=false`; a call that leaves the
 overrides unchanged skips the restart entirely.
+
+#### Database manager and the master password
+
+The generated conf sets `list_db = False`, which is what closes Odoo's
+database manager: Odoo gates every database management function (create,
+duplicate, drop, backup, restore) on that setting, and nothing else stands
+between that page and the databases except the **master password**
+(`admin_passwd`). Oduflow never writes one, so Odoo's compiled-in default —
+the literal `admin` — applies.
+
+Turning the manager on therefore requires choosing a real master password in
+the same override set (or in the team `odoo.prod.conf`):
+
+```text
+set_production_odoo_conf(name="erp", options={
+    "list_db": "True",
+    "admin_passwd": "<at least 12 characters, not 'admin'>",
+})
+```
+
+`list_db = True` without one is refused, and so is dropping `admin_passwd`
+while the manager stays on. A `list_db` value other than `True` or `False` is
+refused too: Odoo's conf loader converts only those spellings to a boolean, so
+`list_db = 0` (or `no`, or `FALSE`) would read as a non-empty, truthy string
+and *enable* database management. A hand-edited `productions.json` that opens
+the manager unlocked is overruled on the next conf rebuild, which logs the
+reason and keeps `list_db = False`.
+
+Credential-valued overrides (`admin_passwd`, `smtp_password`) are reported
+back masked by `get_production_info` and `set_production_odoo_conf`, so an
+agent with production MCP access never receives them; the dashboard, which is
+the operator's own console, keeps showing the values. The generated conf is
+written owner-only (`0600`) on the host, since it is the one managed file that
+can carry a credential — the `db_*` connection keys travel as container
+environment variables instead.
 
 ## Deploys and rollback
 
@@ -3170,7 +3515,16 @@ preflight SQL failure, triggers code rollback just like a failed module command.
 `update_production(name)` pulls the branch (and extra-addon worktrees),
 classifies the changes (or takes explicit `install=` / `upgrade=` /
 `restart=true`), applies them, and **verifies** the deploy — module exit
-codes plus an in-container health check. A changed `.oduflow/requirements.txt`
+codes plus an in-container health check. In auto mode (no explicit
+`install`/`upgrade`/`restart`), only modules **installed in the database** are
+upgraded: an extra-addon repo typically bundles many modules of which a few
+are installed, and a routine fast-forward touching uninstalled ones must not
+fail the deploy — their changes are dropped with a warning and the rest is
+classified again, so a JS or view change in an installed module still
+reloads and a changed `.py` still restarts. A module already in the database
+is upgraded even when it looks new (moved between directories or repos), and
+new modules are never auto-installed on a production. Explicit
+`install=`/`upgrade=` requests keep the strict behaviour. A changed `.oduflow/requirements.txt`
 or `.oduflow/apt_packages.txt` — in the main repo or an extra-addon repo —
 reinstalls the pip/apt dependencies into the container before the restart
 (they are also installed from scratch whenever the container is recreated:
@@ -3206,7 +3560,70 @@ Every deploy lands in the production's history (`production_deploys`):
 commits, action, modules, status (`success` / `rolled_back` /
 `rollback_failed` / `skipped`), trigger (mcp / ui / webhook / schedule).
 
+The health checks after a deploy, rollback, reconfigure, restore or Stack
+apply wait up to `[production] health_timeout` seconds (default 180). Raise it
+for workers-mode productions with many modules — they can take minutes to
+start serving. A production stuck with an `unhealthy` flag after a timed-out
+rollback recovers with `restart_production` or `start_production`: on a
+flagged production either one re-judges health and clears the flag once the
+service answers again (and says so when it still does not).
+
 Manual code rollback to any commit: `rollback_production(name, to_commit)`.
+
+### Diagnosing a failed deploy
+
+A large `-u` can outlast the MCP client's request timeout. The deploy still
+finishes on the server, but the client never receives the response or its
+Odoo output. So a failed deploy keeps its evidence in the deploy record
+itself:
+
+| Field | Content |
+|---|---|
+| `failed_step` | `dependencies` (apt/pip reinstall), `install` (`odoo -i`), `upgrade` (`odoo -u`), `health` (every command succeeded, but Odoo did not answer `/web/health`), or `exception` (Oduflow raised an exception, for example a module preflight query) |
+| `exit_code` | The exit code of that step |
+| `dependencies_exit_code` | The apt/pip reinstall's own exit code, when one ran: a failed upgrade next to a failed reinstall usually means a missing Python package |
+| `failure_excerpt` | The Odoo log record that explains the failure, with its traceback: the last `CRITICAL` record, else the last `ERROR` one, else the last bare Python traceback |
+| `output_tail` | The last 200 lines (16 KB at most) of the failed step's output. For a failed health check, this is the server log instead |
+| `error` | One line: the step, the exit code, the rollback, and the cause (the exception that closes the traceback) |
+
+`production_deploys` returns `failure_excerpt` by default. Pass
+`include_output=true` for `output_tail` too. The dashboard shows `error`
+under the deploy's status. The server log gets the same excerpt on the
+`deploy failed at step …` line.
+
+What the exit codes mean:
+
+| Exit code | Meaning |
+|---|---|
+| `255` from `install`/`upgrade` | Odoo could not load or upgrade the registry: `preload_registries()` caught an exception, logged `CRITICAL Failed to initialize database` with the traceback, and returned `-1`. The excerpt says why |
+| `1` from `dependencies` | An apt or pip install failed. Oduflow reports 1 for any failed dependency step |
+| `1` from `exception` | Oduflow raised an exception after the code moved. The exception's text is in `error` |
+| `137` | The command was killed by `SIGKILL`, typically by the container's memory limit |
+| `0` with `failed_step: health` | The commands succeeded, but the restarted server did not answer within `[production] health_timeout` seconds |
+
+**Where the upgrade runs.** `odoo -i` / `odoo -u` is a `docker exec` into the
+production's running container: `/entrypoint.sh odoo -d <db>
+--stop-after-init --no-http -u <modules>`. It uses the same image, the same
+`/etc/odoo/odoo.conf`, the same environment variables (including
+`env_vars`) and the same `odoo` user with `HOME=/var/lib/odoo`, so it sees
+the same pip `--user` packages under `/var/lib/odoo/.local` as the server.
+Two things differ from the server process:
+
+- **The upgrade runs next to the live server.** The production's HTTP
+  workers and its cron worker keep using the same database during the
+  upgrade. A cron job or request can hold locks on rows or tables the upgrade
+  rewrites. PostgreSQL then aborts the upgrade's transaction with
+  `could not serialize access due to concurrent update` or
+  `deadlock detected`, and Odoo exits with 255. A dev environment never has
+  this concurrency, because it runs with `workers = 0` and
+  `max_cron_threads = 0`, so the same `-u` can pass there. The production
+  PostgreSQL cluster logs lock waits (`log_lock_waits = on`).
+- With `workers > 0`, the upgrade is Odoo's prefork master process, which
+  does not apply `limit_memory_hard` to itself. It shares the container's
+  memory limit with the workers.
+
+If the team's `odoo.prod.conf` sets `logfile`, Odoo writes its log there
+instead of to the command's output, and the excerpt stays empty.
 
 ## GitHub webhooks (auto-deploy)
 
@@ -3359,11 +3776,16 @@ emergency recovery.
 
 ### WAL monitoring and automatic disk protection
 
+PostgreSQL records every change in 16 MiB WAL segments, and WAL-G uploads each
+finished segment to S3; that stream is what makes point-in-time recovery
+possible. PostgreSQL cannot delete or recycle a segment until it has been
+archived, so when uploads stop, WAL keeps accumulating on the same disk as the
+production databases. The monitor watches two things: whether archiving is
+making progress, and whether the disk will run out before it does.
+
 The **PostgreSQL WAL** panel in Production is shared by every production and
-team. It shows the queue's segment count and bytes, age of the oldest waiting
-segment, time without archive progress, current upload duration, last upload
-exit status, PostgreSQL restart count, and free space on the actual WAL
-filesystem. Space reserved for root is excluded. A dedicated daemon samples
+team. Free space is measured on the actual WAL filesystem; space reserved for
+root is excluded. A dedicated daemon samples
 locally every 15 seconds, independently of backup jobs and dashboard polling;
 the storage probe runs only after the local protection decision. Missing or
 older-than-60-second samples are errors, never healthy results.
@@ -3373,6 +3795,39 @@ progress triggers warning/error thresholds. A draining but old backlog stays
 visible. WAL upload attempts have a hard timeout and return failure on timeout
 or termination; PostgreSQL retains the segment and retries. Failed downloads
 of the WAL-G executable never switch configured archiving to a success no-op.
+
+#### Reading the WAL panel
+
+The badge is `ok`, `warn`, `error`, `off` (archiving not configured, or
+production PostgreSQL not provisioned) or `unknown` (the sample is stale, or
+the browser could not fetch the status), always with a text summary such as
+*Archiving is idle* (empty queue), *Archiving WAL*, or the reason for a
+warning or error.
+
+| Field | Meaning |
+| --- | --- |
+| **Queue** | Segments waiting for upload (`.ready` files in `pg_wal/archive_status`) and their total size. |
+| **Queue stop limit** | `stop_queue_gb`. A queue this large trips protection even with ample free disk. A queue above `warn_queue_gb` only warns. |
+| **Oldest waiting** | Age of the oldest segment still waiting for upload. |
+| **No progress** | How long archiving has made no progress while a queue exists. Warns after `warn_after`, errors after `stall_after`. |
+| **WAL on disk** | Total size of `pg_wal`, including already-archived segments that PostgreSQL keeps for reuse. With an empty queue, anything between `min_wal_size` and `max_wal_size` (512 MiB to a few GiB with the default tuning) is normal. |
+| **Available to PostgreSQL** | Free space on the filesystem holding `pg_wal` (the WAL filesystem), as available to the non-root postgres user. The status warns below 15% of the filesystem. |
+| **Safety reserve** | `stop_free_gb`. When free space reaches it, protection stops the cluster. Releasing protection requires `resume_free_gb`. |
+| **Disk consumption** | How fast free space is shrinking: the larger of the five-minute average and the slope since the previous sample. It covers the whole filesystem, not just WAL. |
+| **Estimated time to reserve** | `(available − reserve) / consumption`: how long until the reserve is reached at the current rate. |
+| **Archived** | `pg_stat_archiver.archived_count`: segments archived since the statistics were last reset. |
+| **Last archive** | Time of the last successful upload, in the browser's local time. It should keep advancing while WAL is generated. |
+| **Failed attempts** | `pg_stat_archiver.failed_count`: failed `archive_command` runs. |
+| **PG restarts** | Docker restart count of the shared PostgreSQL container. |
+| **Current upload** | Shown only while an upload runs: the segment and its elapsed time. |
+| **Last upload failed** | Shown only when the last `wal-push` exited non-zero: its exit code. Details are in the PostgreSQL logs. |
+| **Storage probe** | How storage access was verified: a WAL-G list run inside production PostgreSQL (see above). |
+| **Last startup check** | Result of the deployment preflight, when one has run. |
+| **Sample** | When the shown data was collected, in the browser's local time. |
+
+**Pause archiving** / **Resume archiving**, **Retry upload**, **Start
+PostgreSQL recovery** and **Release protection** correspond to the `pause` /
+`resume`, `retry`, `recover` and `release` actions below.
 
 Defaults can be changed in TOML:
 
@@ -3527,8 +3982,7 @@ they can be reclaimed later:
 - **Deferred purge** — set `[lifecycle] prod_purge_hours = N` in
   `oduflow.toml` and the background sweep permanently purges the leftovers
   (database, PostgreSQL role, workspace) N hours after the deletion. `0`
-  (default) keeps them forever. Re-creating a production with the same name
-  clears the tombstone, so a revived production is never purged.
+  (default) keeps them forever.
 - **Immediate purge** — `oduflow cleanup --purge-deleted-productions`
   lists tombstoned leftovers; add `--force` to purge them now, regardless of
   age.
@@ -3536,6 +3990,20 @@ they can be reclaimed later:
 Only tombstoned leftovers are ever purged: a workspace without the marker is
 presumed alive and is never touched (`oduflow cleanup` skips the whole
 `prod-*` namespace for the same reason).
+
+A deleted production's name stays taken while its leftovers are kept:
+`create_production` refuses a name whose database is still in the production
+cluster, or whose workspace is still on disk. Creating over a kept workspace
+would collide with its repository and mix the old filestore and deploy history
+into the new production. Copy out anything you still need, purge the
+leftovers, and create again.
+
+A failed `create_production` rolls back what it created. If the rollback
+cannot drop the new database, it tombstones the attempt, so the same purge
+reclaims it. The refusal names the remedy that applies: purge for tombstoned
+leftovers; for unmarked ones (a production deleted before tombstones existed,
+for example), a manual `DROP DATABASE` and removal of the workspace, after you
+check that they hold nothing you need.
 
 ## MCP tool reference
 
@@ -3604,18 +4072,30 @@ its tools appear as `development_*` in OpenCode and `mcp__development__*` in
 Claude Code and Codex. Checkouts created by earlier releases had it under
 `oduflow`; that entry is replaced before the next session.
 
+One container serves the whole team, but **every environment runs as its own
+Linux user**. Each environment's sessions, checkout, chat attachments and HOME
+(logins, conversation transcripts, settings) are private to it: an agent
+working in one environment cannot see other environments' checkouts, sessions
+or credentials. Other branches remain readable through git
+(`git fetch`, `git show origin/<branch>:<path>`).
+
 The image also includes **Agent Browser MCP** backed by Debian Chromium. It is
 wired automatically into Claude, Codex, and OpenCode with the complete Agent
-Browser tool set. Each environment gets a separate browser profile, while
-browser data persists with the team's agent HOME volume across container
+Browser tool set. Each environment gets a separate browser profile, kept
+in that environment's own HOME on the persistent agent volume across container
 recreation.
 
 Lifecycle is automatic: the container is created on startup for each enabled
 team and removed for disabled ones; `create_environment` adds the environment's
-checkout, `delete_environment` removes it. The container carries a hash of its
-injected config as a label and is **recreated automatically** when the config
-changes. The only runtime state is a durable ACP conversation-history file in
-the team's data directory; transcripts remain owned by the agent adapters.
+identity and checkout, `delete_environment` removes them, together with the
+environment's HOME and running sessions. If the agent container is stopped or
+gone at that moment, the removal is completed the next time it runs, before any
+environment (including a new one with the same name) is set up, so a later
+environment never inherits a deleted one's files. The container carries a hash
+of its injected config as a label and is **recreated automatically** when the
+config changes. The only runtime state is a durable ACP conversation-history
+file in the team's data directory; transcripts remain owned by the agent
+adapters.
 
 The coder image includes OpenSSH client tools for Git remotes authenticated
 with a team SSH deploy key. Use an SSH repository URL for deploy-key access;
@@ -3630,7 +4110,7 @@ enablement and credentials live in the `[team.*]` sections:
 ```toml
 # Deployment-wide (optional)
 [agent]
-image = "oduist/oduflow-coder:0.3.3"
+image = "oduist/oduflow-coder:0.4.0"
 # claude_model = ""     # optional Claude model override; empty = CLI default
 # codex_model = ""      # optional Codex model override; empty = CLI default
 # opencode_model = ""   # optional provider/model override; empty = OpenCode default
@@ -3645,7 +4125,7 @@ agent_default = "claude"  # "claude" | "codex" | "opencode"
 [team.1.agent_env]
 CLAUDE_CODE_OAUTH_TOKEN = ""   # Claude subscription token (`claude setup-token`); outranks the API key
 ANTHROPIC_API_KEY = ""         # Claude API key (used when no OAuth token)
-OPENAI_API_KEY = ""            # Codex API key
+OPENAI_API_KEY = ""            # Codex API key; replaces a ChatGPT sign-in
 OPENCODE_API_KEY = ""          # OpenCode Zen; other providers use their own variables
 ```
 
@@ -3662,7 +4142,8 @@ so Agent CLI opens directly in the REPL without asking to select a login method.
 Claude supports three alternative authentication modes. Oduflow selects exactly
 one for each team: a non-empty `CLAUDE_CODE_OAUTH_TOKEN` wins, otherwise a
 non-empty `ANTHROPIC_API_KEY` uses Console API billing, otherwise Claude uses the
-interactive `/login` stored on the team's persistent agent home volume. Known
+interactive `/login` stored in the environment's own HOME on the persistent
+agent volume. Known
 credential values are trimmed when loaded, so whitespace accidentally copied
 around a token is not sent to Anthropic. A configured environment credential
 always overrides the persisted interactive login; if Anthropic rejects it,
@@ -3673,10 +4154,54 @@ OpenCode is provider-neutral. Any provider environment variable can be placed
 under `[team.X.agent_env]`; `OPENCODE_API_KEY` is the standard OpenCode Zen
 credential and is also inherited from the server environment in single-team
 deployments. Alternatively, open **Agent CLI** and run `opencode auth login`;
-the resulting provider credentials live on the team's persistent HOME volume
-and survive container recreation. OpenCode's runtime self-update is disabled,
-so its executable changes only when Oduflow moves to a new immutable coder
-image.
+the resulting provider credentials live in the environment's own HOME on the
+persistent agent volume and survive container recreation. OpenCode's runtime
+self-update is disabled, so its executable changes only when Oduflow moves to a
+new immutable coder image. The same applies to Codex: Agent CLI starts it with the startup update
+check turned off.
+
+### Codex with a ChatGPT subscription
+
+Instead of `OPENAI_API_KEY`, Codex can use a ChatGPT plan (Plus, Pro, Business
+or Enterprise). Sign in once per environment (each environment keeps its own
+login):
+
+1. With Codex as the team's default agent (`agent_default = "codex"`), open
+   **More ▾ → Agent CLI** on the environment.
+2. Choose **2. Sign in with Device Code**. Option 1, **Sign in with ChatGPT**,
+   does not work here: its callback goes to `localhost` inside the agent
+   container, which your browser cannot reach.
+3. Open <https://auth.openai.com/codex/device> in any browser, sign in to
+   ChatGPT and enter the one-time code that Codex shows. The code expires after
+   15 minutes.
+4. Codex reports **Signed in to Codex**. Agent CLI and Agent Chat of that
+   environment now use the subscription.
+
+Business and Enterprise workspaces may need a workspace admin to enable
+device-code sign-in for Codex first.
+
+The sign-in is stored in the environment's own HOME on the persistent agent
+home volume and survives container recreation. A configured `OPENAI_API_KEY`
+overrides it: every environment signs in with the key
+(`codex login --with-api-key`) when the container starts and when the key
+changes. The key's sign-in stays in the HOME after the key is removed, so to
+switch to the subscription, remove the key, restart Oduflow, then run `/logout`
+in Agent CLI and sign in again. To check or reset an environment's sign-in from
+the host, run Codex as that environment's user (the container is
+`<prefix><team>-agent`; the environment's uid is in the team's
+`agent_uids.json`):
+
+```bash
+uid=20000   # from <team data_dir>/agent_uids.json
+docker exec -u $uid:$uid -e HOME=/home/agent/envs/$uid \
+    -e CODEX_HOME=/home/agent/envs/$uid/.codex oduflow-1-agent codex login status
+```
+
+Use `codex logout`, or `docker exec -it ... codex login --device-auth` to sign
+in without Agent CLI. Many concurrent sessions of one environment can fail a
+token refresh with `refresh_token_reused`; run `/logout` in Agent CLI and sign
+in again, or use an API key for a busy team. When Codex is not signed in, Agent Chat's error
+message includes these recovery steps.
 
 ### OpenAI-compatible gateway for OpenCode
 
@@ -3750,6 +4275,17 @@ reference.
 - **Per-team isolation.** Each team gets its own agent container, volumes, and
   network. Cross-team reach is blocked; the dashboard auth middleware resolves
   the team, so a team can only ever reach its own agent.
+- **Per-environment isolation.** Inside the team's container, each
+  environment's sessions run as that environment's own unprivileged uid (never
+  reused, even after the environment is deleted). Its checkout, attachments and
+  HOME are private to it, and so are its temporary files (a private `TMPDIR`,
+  and sessions start with umask `077`). No session can read another
+  environment's process environment (where its scoped token lives). The
+  npm-installed Claude Code is shared read-only, so no environment can alter
+  what another runs.
+  Not separated between environments: the container network (local ports,
+  browser sessions) and the team-wide provider credentials from
+  `[team.X.agent_env]`.
 - **Scoped MCP access.** The team `auth_token` never enters the agent
   container. Each session injects that **environment's** scoped per-environment
   token, which grants only the dev-loop allowlist on the one environment the
@@ -3761,13 +4297,13 @@ reference.
   keys in `[team.X.agent_env]` so an operator credential never leaks to
   tenants.
 - **Sandbox and approvals.** All three agents run approval-free — the security
-  boundary is the unprivileged `agent` user inside the per-team Docker
+  boundary is the environment's unprivileged uid inside the per-team Docker
   container, not per-tool prompts. Codex CLI uses
   `--dangerously-bypass-approvals-and-sandbox` and Codex ACP starts in
   `agent-full-access` (no nested Bubblewrap sandbox). Claude matches this: the
   Agent CLI console runs `claude --dangerously-skip-permissions`, and Agent
   Chat's ACP adapter (`claude-agent-acp`) starts in `bypassPermissions`, seeded
-  via the container's user-tier `~/.claude/settings.json`
+  via the environment's user-tier `~/.claude/settings.json`
   (`permissions.defaultMode`). OpenCode CLI uses `--auto`; both CLI and its
   native `opencode acp` runtime receive a high-precedence session config with
   `permission = "allow"`. So installed MCP tools run without interactive
@@ -3776,6 +4312,13 @@ reference.
 ## Limitations
 
 - The agent UI is hidden for live-mount (`local_path`) environments.
+- Interactive logins (Claude `/login`, `codex login`, `opencode auth login`) are
+  per environment: log in once in each environment, or set the team's
+  credentials in `[team.X.agent_env]`, which every environment uses
+  automatically.
+- On the upgrade to per-environment users, existing Claude and Codex
+  conversations move to their environment once, on the agent container's first
+  start; OpenCode conversations from before the upgrade are not carried over.
 - Environments created before per-environment tokens existed have no scoped
   token; their consoles warn and the agent works without MCP until the
   environment is updated/recreated.
@@ -3788,7 +4331,8 @@ The published image contains redistributable open-source software: Codex CLI,
 Codex ACP and Agent Browser are Apache-2.0, OpenCode is MIT, and Debian Chromium
 includes its upstream component license notices. Claude Code and its adapter
 are installed at first container start onto the persistent home volume —
-downloaded directly from npm by the end user's container.
+downloaded directly from npm by the end user's container — and refreshed in the
+background on every later container start.
 
 ---
 
@@ -4160,6 +4704,42 @@ so the next update does not bring the branch back.
 A stalled HTTPS download is aborted after two minutes without progress; a slow
 but progressing one may run up to an hour.
 
+### Importing several OCA repositories
+
+In the dashboard, open **Extra Addons → Import OCA**. Search the OCA catalogue
+by name or description and sort by stars or name. Archived repositories are
+hidden unless **Show archived** is enabled.
+
+Like **Add Repo**, importing downloads no code by default: each branch
+downloads when an environment first uses it. To have branches ready, enter
+**Common versions**, for example `18.0, 19.0`. Each repository you select
+starts from the current Common versions, and changing the field updates every
+selected repository. Oduflow reads the branch list of each selected repository
+without downloading anything; adjust its branch checkboxes as needed. Versions
+a repository does not have are shown as unavailable: uncheck them or choose
+another version before importing.
+
+Click **Import N repositories** to start the import on the server. It adds up
+to three repositories at a time, and each repository shows its own result. You
+can close the dialog or reload the page: the import continues, and reopening the
+dialog shows its progress. A team runs one import at a time. **Retry failed**
+starts a new import of only the failed repositories, with the same branches.
+
+Imported names use an `oca-` prefix, such as `oca-server-tools`. If two OCA
+repositories would get the same name (for example `foo-bar` and `foo.bar`, or
+very long names that are shortened), the second one gets a numeric suffix, such
+as `oca-foo-bar-2`. Repositories the team already has are recognised by their
+origin in any URL form (HTTPS, SSH, with or without `.git`) and cannot be
+selected; neither can an import name that another repository already uses.
+Import makes repositories available to the team; choose them separately when
+configuring an environment.
+
+The public catalogue is cached for 15 minutes. If GitHub cannot be reached or
+limits requests, the dialog shows the error, or the last loaded catalogue with a
+notice when one is available; no GitHub token is required. Import progress is
+kept in server memory: after a server restart, repositories that were added
+appear as already added, and the rest can be imported again.
+
 ## Using Extra Addons in Environments
 
 When creating an environment, specify which extra repos to mount:
@@ -4171,6 +4751,19 @@ oduflow call create_environment feature-x "" default https://github.com/company/
 # Mount multiple extra repos
 oduflow call create_environment feature-x "" default https://github.com/company/addons.git odoo:19.0 "enterprise:19.0,custom-themes:main"
 ```
+
+In the dashboard, the branch next to each repo is filled in from the **Odoo
+image** of the environment being created (`odoo:19.0` → `19.0`), for every repo
+that really carries such a branch — the usual case for a repository branched
+per Odoo version, such as the OCA sets or enterprise. An online-release image
+(`odoo:saas~19.1`) only ever gets its own `saas-19.1` branch, never the stable
+`19.0`. A repo whose branches are not known yet shows the expected name as a
+placeholder instead, and a repo that does not have that branch is left empty.
+Anything a template, a production or you typed is never overwritten, and a
+branch you cleared stays empty. Each selected repo whose branch was filled in
+this way is marked **guessed**, and a line under the list counts them, so you
+can check them before creating the environment. The same applies to the extra
+repos in a template's **Settings**.
 
 For each development environment Oduflow automatically:
 
@@ -4288,6 +4881,11 @@ resources in dependency order. `status` emits JSON containing the current plan
 and last successful apply record. `plan`, `apply`, and `status` also accept
 `--env-file` to supply `fromEnv` values from a dotenv file; see
 [Secrets from a `.env` file](#secrets-from-a-env-file).
+
+`apply` logs its progress at the `info` level. For output that shows only the
+resulting plan plus any warnings, pass the global
+`oduflow --log-level warning stack apply oduflow.yaml`
+(see [CLI Reference](cli.md#global-options)).
 
 To reconcile before the MCP server accepts clients:
 
@@ -4731,22 +5329,30 @@ would let work in the environment.
 
 ## Templates and Odoo imports
 
+Scheduled sync uses system cron; these routes save configuration or queue requests, never spawn a worker.
+
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/templates` | List template profiles |
+| `GET` | `/api/templates` | List template profiles. A template imported from a bucket carries an `s3_source` object (`url`, `endpoint`, `region`, `access_key`, `has_secret`, `dump`, `synced_at`) — the connection needed to re-sync it, never the secret key; `null` for every other template |
+| `GET` | `/api/templates/{name}/sync` | Sync config, status, pending flag, cron-file presence and bounded log tail |
+| `POST` | `/api/templates/{name}/sync` | Save `host`, `user`, `port`, absolute `path`, five-field `schedule`, boolean `enabled`; install managed cron entries |
+| `DELETE` | `/api/templates/{name}/sync` | Remove managed cron entries, saved config, pending request and the downloaded backup copy; keep template data, status and logs |
+| `POST` | `/api/templates/{name}/sync-now` | Queue a manual sync for cron's next minute tick |
+| `POST` | `/api/environments/{branch}/template-sync` | Persist boolean `auto_refresh`; defaults to false; true authorizes recurring DB/filestore reset |
 | `GET` | `/api/templates/{name:path}/metadata` | Read the complete `metadata.json` content and its optimistic revision |
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
 | `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
-| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
+| `POST` | `/api/s3/browse` | UI-authenticated: list one level of an S3 bucket for the import dialog's object browser, or the buckets when `bucket` is empty. Body: `bucket`, `prefix`, `continuation_token`, `endpoint`, `region`, `access_key`, `secret_key`, and `template` to sign with that template's stored secret. Returns `buckets`, `folders`, `files` (newest first), `truncated`, `next_token`. Read-only, so not team-locked |
+| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token. Body: `template_name`, optional booleans `with_enterprise` / `with_themes` / `with_extra_addons` (add the matching `--with-*` flags to the returned `command`) and `without_filestore` (adds `--without-filestore`; stored with the token, so finalize is database-only), optional `addon_error_policy` (`strict`, the default, or `best_effort`) |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
 | `POST` | `/api/templates/import/dump` | Stream/chunk the compressed SQL dump |
 | `POST` | `/api/templates/import/filestore` | Upload one atomic filestore hash-directory archive |
 | `POST` | `/api/templates/import/addon` | Stream/chunk one private addon archive |
 | `POST` | `/api/templates/import/addon-remote` | Register an addon repo that the server can clone |
-| `POST` | `/api/templates/import/finalize` | Validate staged data and atomically publish/restore the template |
+| `POST` | `/api/templates/import/finalize` | Validate staged data and atomically publish/restore the template. `?without_filestore=1` (or `true`), sent by `--without-filestore`, or a token minted with `without_filestore` makes it database-only: staged filestore chunks are not promoted and an existing template keeps its filestore; other values are rejected. The result's `filestore` is `imported`, `kept` or `none`, next to `includes_filestore` |
 | `GET` | `/import-odoo.sh` | Download the token-authenticated Odoo.sh import client |
 
 The pull-import endpoint accepts HTTP and HTTPS source URLs. HTTP sends the Odoo
@@ -4796,6 +5402,9 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
+| `GET` | `/api/extra-repos/oca` | Public OCA catalogue (cached for 15 minutes) in `repos`: names, descriptions, stars, archive flags, unique import names, clone URLs, `existing_as` (the team repository with the same origin, if any) and `name_taken`; `stale` is true when an expired copy is served because GitHub is unavailable; `job` is the team's latest import (see below) |
+| `GET` | `/api/extra-repos/oca/import` | The team's latest OCA import job, or `null`: `status` (`running`/`finished`) and per-repository `items` with `branches`, `status` (`queued`, `adding`, `done`, `error`, `skipped`) and `error` |
+| `POST` | `/api/extra-repos/oca/import` | Start a server-side OCA import (202); body: `repos`, a list of `{"name": "<catalogue name>", "branches": [...]}` — `branches` are downloaded now, an empty list downloads each branch on first use. Clone URLs and import names come from the catalogue. 409 while the team's previous import is running |
 | `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
 | `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
@@ -4860,7 +5469,7 @@ and delete operations require explicit confirmation in their JSON body.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/productions` | List productions and return webhook/backup state |
+| `GET` | `/api/productions` | List productions (each with its OduMCP `mcp_status`: `ready`, `sync_failed`, `unsupported`, or empty) and return webhook/backup state and whether the team's `production_token` is set (`production_token_set`) |
 | `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image). Optional `server_mode`: `workers` (default) or `gevent`. Optional body `env_vars` (object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas) overrides the inherited/template variables; an absent key inherits them, an empty object/string means none. `HOST`, `PORT`, `USER` and `PASSWORD` are reserved |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
 | `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |
@@ -4941,6 +5550,7 @@ end to end.
 
     [`create_environment`](#create_environment)&nbsp;·
     [`delete_environment`](#delete_environment)&nbsp;·
+    [`recreate_environment`](#recreate_environment)&nbsp;·
     [`list_environments`](#list_environments)&nbsp;·
     [`get_environment_info`](#get_environment_info)&nbsp;·
     [`start_environment`](#start_environment)&nbsp;·
@@ -5187,7 +5797,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Comma- or newline-separated `KEY=VALUE` pairs injected into the container. Commas inside values are preserved unless what follows looks like another `KEY=`; put one pair per line when in doubt. Merged per key over the template's own values, with these winning. A value `secret:<name>` references a [team secret](#list_secrets).
 
 `hostname`
-:   *str · default empty* — Short Traefik hostname (e.g. `"qa"` → `qa.example.com`). Replaces the team prefix in either hostname mode.
+:   *str · default empty* — Short Traefik hostname (e.g. `"qa"` → `qa.example.com`). Replaces the team prefix in either hostname mode; a bare team domain (`example.com`) has no prefix, so the name goes under it — again `qa.example.com`.
 
 `from_production`
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.
@@ -5228,6 +5838,31 @@ Lock: environment.
 
 - A branch is merged and its environment is no longer needed.
 - You need to free an environment slot and no existing environment is worth keeping (otherwise prefer [`switch_branch`](#switch_branch)).
+- The environment itself is being replaced, not retired — then use [`recreate_environment`](#recreate_environment) instead, so its share link and MCP token survive.
+
+### `recreate_environment`
+
+Tear an environment down and provision it again from its recorded
+configuration (git branch, repo URL, image, template, extra addons, env vars,
+hostname) — a clean slate without re-entering anything.
+
+Unlike `delete_environment` + `create_environment`, the environment's identity
+survives: the dashboard **share link** already handed out stays valid, and the
+scoped `/mcp/<env>` endpoint keeps the **same Bearer token**, so connected MCP
+clients need no reconfiguration.
+
+Lock: environment.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`env_name`
+:   *str · required* — The environment to tear down and provision again.
+
+**Use it when**
+
+- A database or filestore is beyond repair and you want a fresh start from the same template/branch.
+- The environment is shared with a client or wired into MCP clients — never delete + create it by hand in that case.
 
 ### `list_environments`
 
@@ -6435,7 +7070,7 @@ filestore overlays. Fresh imports can run alongside environment operations.
 **Parameters**
 
 `source`
-:   *str · default empty* — An http(s) Odoo URL, `s3://bucket/prefix`, or an absolute local path. Omit with `refresh=True`.
+:   *str · default empty* — An http(s) Odoo URL, `s3://bucket/prefix` (raw dump + `filestore/` layout), `s3://bucket/path/backup.zip` (a single Odoo backup archive), or an absolute local path. Omit with `refresh=True`.
 
 `master_pwd`
 :   *str · default empty* — Required only for the Odoo database-manager source.
@@ -6456,7 +7091,7 @@ filestore overlays. Fresh imports can run alongside environment operations.
 :   *bool · default `False`* — With no source, restore from the template's own files and refresh metadata and overlays. Requires explicit permission.
 
 `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_region`
-:   *str · default empty* — S3 source connection settings. Credentials fall back to matching `[backup]` settings, then anonymous access. Supply access and secret keys together.
+:   *str · default empty* — S3 source connection settings. Supply access and secret keys together. `s3_secret_key` also accepts `secret:<name>` to sign with an existing team secret; a raw value is stored as the team secret `s3-template-<template>` and the template records only the reference, so a re-sync needs no key. Credentials resolve most-explicit-first: these parameters, then the secret remembered for this template, then matching `[backup]` settings, then anonymous access. The key is required again when the endpoint or access key changes.
 
 **Use it when**
 
@@ -7413,7 +8048,7 @@ Lock: production.
 :   *str · required* — Production name, e.g. `erp` (lowercase letters, digits, dashes).
 
 `repo_url`
-:   *str · default empty* — HTTPS git repository URL. Required unless `from_environment` supplies it.
+:   *str · default empty* — HTTPS (`https://github.com/owner/repo.git`) or SSH (`git@github.com:owner/repo.git`, needs the team deploy key — see [`get_ssh_public_key`](#get_ssh_public_key)). Required unless `from_environment` supplies it.
 
 `branch`
 :   *str · default empty* — Git branch to deploy (full history is kept). Required unless `from_environment` supplies it.
@@ -7446,7 +8081,7 @@ Lock: production.
 :   *str · default empty* — Dev environment to **promote**: its database and filestore are copied (Odoo briefly stopped for a consistent copy, then restarted — the environment is not reset), and empty `repo_url` / `branch` / `odoo_image` / `git_user` / `extra_addons` default to the environment's own. **No sanitization** — the data goes *into* production.
 
 `env_vars`
-:   *dict · default none* — User environment variables; values may be `secret:<name>` references. Omit to inherit the source environment's variables; pass `{}` to inherit none. Managed `HOST`/`PORT`/`USER`/`PASSWORD` cannot be overridden. References survive reconfiguration.
+:   *dict · default none* — User environment variables; values may be `secret:<name>` references. Omit to inherit the source environment's variables; pass `{}` to inherit none. Managed `HOST`/`PORT`/`USER`/`PASSWORD` cannot be overridden. `HOME`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONNOUSERSITE` and a `PYTHONPATH` that lists a `site-packages` directory are refused: they hide the installed pip packages or move data out of the mounts. References survive reconfiguration.
 
 `server_mode`
 :   *str · default `workers`* — How Odoo serves HTTP. `workers` (sync): worker processes on port 8069 serve the pages and Traefik sends only the live bus (`/websocket`, `/longpolling`) to the gevent port 8072. `gevent` (async): Traefik sends **all** traffic to the single gevent process on 8072 — suits many long-lived or I/O-bound requests, but one CPU-heavy request slows everyone. Crons run in both modes. See [Server mode](production.md#server-mode).
@@ -7512,7 +8147,9 @@ Read a production's Odoo container logs.
 
 ### `start_production`
 
-Start a stopped production.
+Start a stopped production. On a production flagged `unhealthy`, it waits for
+the health check (`[production] health_timeout`) and clears the flag once
+Odoo answers.
 
 Lock: production.
 { .odu-tool-meta }
@@ -7547,7 +8184,9 @@ Lock: production. **Takes the production offline.**
 ### `restart_production`
 
 Restart a production's Odoo container — brief downtime. A container whose
-Traefik routing is outdated is recreated instead (same downtime).
+Traefik routing is outdated is recreated instead (same downtime). On a
+production flagged `unhealthy`, it waits for the health check and clears the
+flag once Odoo answers; the reply warns when it still does not.
 
 Lock: production.
 { .odu-tool-meta }
@@ -7607,7 +8246,7 @@ Lock: production.
 :   *dict · default none* — New **full set** of extra addon repos `{repo_name: branch}`. Pass `{}` to remove all; omit to leave unchanged.
 
 `env_vars`
-:   *dict · default none* — **Full replacement** user environment variables, including `secret:<name>` references. Omit to preserve; `{}` clears them.
+:   *dict · default none* — **Full replacement** user environment variables, including `secret:<name>` references. Omit to preserve; `{}` clears them. A changed set may not contain `HOME`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONNOUSERSITE` or a `PYTHONPATH` that lists a `site-packages` directory.
 
 `server_mode`
 :   *str · default empty* — `workers` (sync: pages on 8069, bus on 8072) or `gevent` (async: everything on 8072). Re-tunes the `odoo.conf` workers and re-points Traefik. Omit to leave unchanged.
@@ -7674,9 +8313,8 @@ unless `drop_database=true`.
 Kept leftovers are tombstoned: the reaper purges them `[lifecycle]
 prod_purge_hours` after deletion (`0` = keep forever, the default), and
 `oduflow cleanup --purge-deleted-productions --force` purges them immediately.
-Re-creating a production with the same name revives the leftovers'
-tombstone-free state — the kept database itself must still be dealt with
-explicitly.
+The name stays taken while leftovers are kept: `create_production` refuses it
+until they are purged.
 
 Lock: production. Destructive.
 { .odu-tool-meta }
@@ -7714,6 +8352,11 @@ Drive it like [`pull_and_apply`](#pull_and_apply): **explicit** (pass
 are classified automatically). Note that in production a "refresh"-class change
 (XML/JS) still restarts the container, because there is no `--dev=xml` in
 production.
+
+A large upgrade can outlast the client's request timeout; the deploy still
+finishes on the server. A failed deploy records the failed step, the Odoo
+error with its traceback, and the output tail in
+[`production_deploys`](#production_deploys).
 
 Lock: production.
 { .odu-tool-meta }
@@ -7794,6 +8437,12 @@ Lock: production.
 Deploy history, newest last: commits, actions, modules, status
 (`success` / `rolled_back` / `rollback_failed` / `skipped`) and errors.
 
+A failed deploy also records `failed_step` (`dependencies` / `install` /
+`upgrade` / `health` / `exception`) and `failure_excerpt`: the Odoo error
+record with its traceback. Exit code 255 from `install`/`upgrade` means Odoo
+could not load or upgrade the registry; the excerpt says why. See
+[Diagnosing a failed deploy](production.md#diagnosing-a-failed-deploy).
+
 **Parameters**
 
 `name`
@@ -7802,9 +8451,14 @@ Deploy history, newest last: commits, actions, modules, status
 `limit`
 :   *int · default `20`* — Maximum number of records.
 
+`include_output`
+:   *bool · default `False`* — Also return `output_tail`: the last 200 lines of the failed step's output, or of the server log for a failed health check.
+
 **Use it when**
 
 - Correlating "it broke on Tuesday" with what was deployed.
+- Finding out why an `update_production` failed after the client timed out
+  before the response arrived.
 - Finding the commit to pass to [`rollback_production`](#rollback_production).
 - Auditing whether an auto-update deploy silently rolled back.
 
@@ -8039,8 +8693,19 @@ rest.
 New productions are provisioned automatically; this tool is for existing ones,
 for retrying a failed setup, and for rotating the key after `production_token`
 changes in `oduflow.toml` (change the value, restart Oduflow, then run this).
-No secret is accepted or returned. Stopped productions must be started first,
-and adding the managed addon mount recreates the container.
+No secret is accepted or returned. Stopped productions must be started first.
+
+Oduflow ships `odumcp` as a managed checkout unless the production's own
+repositories (main or extra) contain the module. Once they do, the deploy that
+brought the module in already completes the takeover (container recreated
+without the managed mount, managed checkout removed, noted in the deploy
+history); this tool does the same for a production whose takeover is still
+pending. Oduflow never touches the module again; the client's deployments own
+it from then on. Adding or removing the managed mount, or replacing/refreshing
+the checkout, recreates the container. Each result reports `addon_source`
+(`managed` or `repository`), `checkout` (`kept`, `cloned`, `replaced`,
+`refreshed`, `removed` or `repository`), `container_recreated` and, for a
+managed checkout, `connector_branch` and `connector_commit`.
 
 Lock: production (each one in turn).
 { .odu-tool-meta }
@@ -8048,13 +8713,27 @@ Lock: production (each one in turn).
 **Parameters**
 
 `name`
-:   *str · default empty* — One production, or empty for every production of the team.
+:   *str · default empty* — One production, or empty for every production of
+    the team. Required when `refresh` is true.
+
+`refresh`
+:   *bool · default false* — Re-clone the managed checkout from
+    `[production].odumcp_repo_url` at the production's Odoo version even when
+    that version is unchanged, recreate the container and upgrade the module.
+    The only way the managed module is updated; nothing refreshes it
+    automatically. Requires an explicit `name`: the call is rejected before
+    touching anything when `name` is empty, so one call never re-clones and
+    recreates every production of the team. A no-op for a module shipped in
+    the client repository (the result says so in `note`).
 
 **Use it when**
 
 - Adopting a production that predates automatic provisioning.
 - The connector reports itself unavailable after a failed setup.
+- The production moved to another Odoo version.
 - Rotating `production_token`.
+- Picking up a new connector release for a managed module (`refresh=true`).
+- The repository now ships `odumcp` and the managed copy should go.
 
 ### `production_odoo_info`
 
@@ -8260,6 +8939,18 @@ oduflow --no-telemetry stack apply oduflow.yaml
 
 `--no-telemetry` overrides `disable_telemetry` in `oduflow.toml` for the
 current process only. See [Telemetry](installation.md#telemetry).
+
+```bash
+# Log only warnings and errors (default: info); also before any subcommand
+oduflow --log-level warning stack apply oduflow.yaml
+```
+
+`--log-level` takes `debug`, `info`, `warning` or `error` and applies to the
+server too, its HTTP access log included. `warning` leaves a one-shot command
+such as `stack apply` printing just its result; at `info` the progress
+messages of long steps (image pulls, environment creation) are shown as well.
+A command that fails on invalid input prints one error line; `debug` adds the
+traceback.
 
 ## Running the Server
 
@@ -8514,12 +9205,34 @@ oduflow import-template <odoo_url> <master_pwd> --template-name myproject [--db-
 oduflow import-template s3://bucket/backups/mydb/ --template-name myproject [--overwrite] [--team 1]
 oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [--team 1]
 
+# A single Odoo backup .zip already sitting in a bucket
+oduflow import-template s3://bucket/backups/mydb-2026-10-13.zip --template-name myproject [--team 1]
+
 # Reload the template DB from files already placed in the template directory
 # (an external rsync/scp drop) and refresh its metadata
 oduflow import-template --template-name myproject --refresh [--team 1]
+
+# Run a saved, enabled SSH sync schedule (cron normally invokes this)
+oduflow sync-template myproject [--team 1]
+# Only consume a manual request queued by the dashboard
+oduflow sync-template myproject --pending [--team 1]
 ```
 
+For a private bucket, pass `--s3-access-key` with `--s3-secret-key` (plus
+`--s3-endpoint`/`--s3-region` where needed). The secret key is stored as the
+team secret `s3-template-<template>` and the template records only a
+`secret:<name>` reference, so a later `--overwrite` re-sync needs no key —
+omit `--s3-secret-key` and the stored one is reused. It is required again when
+the endpoint or access key changes. `--s3-secret-key` defaults to
+`$ODUFLOW_S3_SECRET_KEY`, which keeps the key out of your shell history; pass
+`secret:<name>` to sign with an existing team secret instead.
+
 `template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
+
+Scheduled SSH sync uses retained filestore generations and opt-in environment
+DB/filestore resets. Ordinary template refresh leaves pinned environments on
+their previous generation and lists them in its output. See [Scheduled SSH sync](templates.md#scheduled-ssh-sync-system-cron)
+for source preparation, cron installation and recovery.
 
 ## Service Commands
 
@@ -8759,9 +9472,15 @@ than branch-derived routes: configure individual `dev1`…`dev20` records or a
 wildcard record for `*.example.com`. A `*.dev.example.com` record or certificate
 does not cover `dev1.example.com`.
 
-`create_environment(hostname="qa")` requests `qa.example.com` in either mode.
-The configured team hostname must include a distinct prefix
-(`dev.example.com`, not bare `example.com`) for pooled or explicit short names.
+`create_environment(hostname="qa")` requests `qa.example.com` in either mode:
+the short name replaces the team hostname's prefix. A bare team domain such as
+`example.com` has no prefix to replace, so `qa` goes under it —
+`qa.example.com`, the same layer as the branch-derived names. "Bare" is decided
+with the Public Suffix List, not by counting labels: a registrable domain under
+a multi-label suffix (`example.co.uk`) is also kept whole, so `qa` gives
+`qa.example.co.uk` — never `qa.co.uk`. The pooled
+`slots` mode still needs a distinct prefix (`dev.example.com`, not bare
+`example.com`) to number.
 
 ## Team base domain
 
@@ -9393,10 +10112,13 @@ override — which environment it operates on.
 
 ### Per-environment Secret Key
 
-Every environment created after this feature gets its own access token, generated
-at creation time and stored on the container. Use it as a **Bearer token** or as
-an **OAuth** client credential — exactly like a team `auth_token`, but it only
-unlocks its own `/mcp/<env>` endpoint:
+Every environment gets its own access token, minted at creation time and kept
+in the team's data directory (`mcp_tokens.json`, mode 0600), keyed by the
+environment name. It survives **rename and recreate** — an MCP client
+configured once keeps working for as long as an environment of that name
+exists — and is revoked when the environment is deleted. Use it as a **Bearer
+token** or as an **OAuth** client credential — exactly like a team
+`auth_token`, but it only unlocks its own `/mcp/<env>` endpoint:
 
 ```
 Authorization: Bearer <environment-secret-key>
@@ -9434,8 +10156,12 @@ https://your-server.com/env/<env>?key=<share-secret>
 ```
 
 Opening it trades the key for a signed, HTTP-only, SameSite=Strict cookie and
-redirects to the clean `/env/<env>`, so the key does not linger in the address
-bar or browser history. The same modal regenerates or revokes the link; both
+moves on to the clean `/env/<env>`, so the key does not linger in the address
+bar or browser history. The move is a navigation started by a small landing
+page rather than an HTTP redirect: when the link is opened from another site,
+such as a webmail button, the browser treats a redirect chain as cross-site and
+withholds the Strict cookie, while a navigation started by the landing page is
+same-site. The same modal regenerates or revokes the link; both
 take effect immediately, including for sessions already opened with it, because
 the cookie carries a fingerprint of the secret it was minted from. Links have no
 expiry of their own; a session cookie lasts seven days and re-opening the link
@@ -9452,12 +10178,14 @@ actions on the environment itself (create, delete, update, recreate, switch
 branch, protect, save as template), the share routes themselves, and **Agent
 CLI**.
 
-Agent CLI is deliberately excluded: it is a terminal in the *per-team* agent
-container, whose workspace holds a checkout of every environment of the team.
-Agent Chat runs in that same container — driven over ACP at this environment's
-checkout, with this environment's scoped MCP token — so the boundary a share
-link enforces is the dashboard surface, not the confinement that the
-per-environment Bearer token gives on `/mcp/<env>`. Share with people you would
+Agent Chat runs in the *per-team* agent container, but as this environment's
+own Linux user: it reaches only this environment's checkout, attachments and
+HOME, and only this environment's scoped MCP token. Other environments'
+checkouts, conversations and tokens are closed to it (see
+[Coding Agent → Security model](agent.md#security-model)). What it still shares
+with the rest of the team is the git credential store and deploy key (below),
+the team-wide provider credentials in `[team.X.agent_env]`, and the container
+network. Agent CLI stays excluded from share links. Share with people you would
 let work in the environment, and revoke when they are done.
 
 Share secrets live in the team's data directory (`shares.json`, mode 0600), not
@@ -9626,7 +10354,8 @@ deploy key or machine-user key) and SSH repository URLs
 productions.
 
 Like the team's git credential store, the private key is also provisioned
-into the team's coding-agent container so agent-side clones work over SSH.
+into the team's coding-agent container (a copy in every environment's HOME) so
+agent-side clones work over SSH.
 Anyone who can drive that agent — including a visitor holding a scoped
 environment share link, via Agent Chat — can therefore read it. Treat the
 deploy key as a team-level credential: prefer registering it read-only and
@@ -9753,7 +10482,29 @@ The bundled `odoo.conf` template includes these security settings:
 - `max_cron_threads = 0` (disables cron in dev environments)
 
 A repository that ships its own `.oduflow/odoo.conf` replaces the template
-entirely and is responsible for these settings itself.
+entirely and is responsible for these settings itself. Either way, the
+generated conf always sets `http_interface = 0.0.0.0`: Odoo 20 otherwise
+listens only on `127.0.0.1`, which neither Traefik nor a published port can
+reach.
+
+### The master password (`admin_passwd`)
+
+Oduflow never writes `admin_passwd`, so Odoo's compiled-in default (the
+literal `admin`) is in effect. What keeps that from mattering is
+`list_db = False`: Odoo gates every database management function on it, so
+`/web/database/*` is unreachable regardless of the password.
+
+Productions make the pair explicit. `list_db = True` is refused unless the
+same override set (or the team `odoo.prod.conf`) also provides an
+`admin_passwd` of at least 12 characters that is not `admin`, and a `list_db`
+value other than `True`/`False` is refused because Odoo would read it as a
+truthy string and enable database management. See
+[odoo.conf overrides](production.md#odooconf-overrides).
+
+Development environments keep `list_db = False` from the bundled template and
+are not exposed to the public internet by default; a repository that ships its
+own `.oduflow/odoo.conf` owns that setting — if it enables `list_db`, set a
+master password there too.
 
 ---
 
@@ -10086,6 +10837,14 @@ Alternatively, set a high threshold in `oduflow.toml` to avoid overlayfs entirel
 overlay_threshold_mb = 999999
 ```
 
+## Scheduled template sync
+
+System cron runs on the Docker host and invokes the worker via `docker exec`
+in this existing container. Add a writable `/etc/cron.d:/etc/cron.d` mount and
+set `[template_sync] cron_container = "oduflow"` to the actual container name.
+See [the complete setup](templates.md#cron-when-oduflow-runs-in-docker), including
+SSH source requirements. The Oduflow web process does not launch sync workers.
+
 ---
 
 # Internals
@@ -10287,6 +11046,19 @@ resource an operation actually touches:
 | **System/cluster** | Cross-environment infrastructure operation | startup initialization, `destroy`, `restore_cluster_pitr` (excludes every production lock) |
 
 Every template operation also takes that template's own key, so a publish and an import can never interleave on the same template name; only the ones listed above add the team lock on top. `attach_filestore` stages its source (an rsync or an archive unpack) before taking the team lock, so a large transfer does not hold the team; it is also the one operation whose team acquire *waits* (up to five minutes) instead of failing immediately, because by then the transfer is already done and discarding it would be far more expensive than queueing.
+
+Thread-level locks also acquire advisory file locks under `{data_dir}/.locks`
+when running the server or direct template CLI. Shared/exclusive team gates
+exclude cron workers from UI/MCP mutations while allowing independent
+environments to progress. Kernel locks release on process exit; lock files
+are never unlinked, and a root process gives the ones it creates to the data
+directory's owner. Scheduled template sync holds its template key throughout
+transfer, then waits up to five minutes for the team gate during import and
+environment refresh. Direct template CLI commands take the same locks as their
+MCP tools: the template key, plus the team gate (waited for up to five
+minutes) only when they remount other environments. Startup overlay
+reconciliation respects the same gate; a team that is busy at startup is
+repaired in the background as soon as it is free.
 
 Operations on **different resources** run in parallel. If a lock cannot be acquired, the tool immediately returns `BusyError` (no queuing). Some tools take no `LockManager` lock at all: pure reads, the `odoo_*` tools (PostgreSQL arbitrates concurrent ORM calls), and the extra-repo tools (`extra_addons.py` serialises per repo itself).
 

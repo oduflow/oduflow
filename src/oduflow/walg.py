@@ -904,13 +904,38 @@ def pitr_restore_cluster(
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     old_dir = f".pitr-old-{stamp}"
 
-    # 1. Stop + remove the PG container (volume persists).
+    # 1. Stop + remove the PG container (volume persists). A failure here must
+    # abort BEFORE PGDATA is displaced: swallowing it and backup-fetching into a
+    # volume that a still-running postmaster holds open corrupts the restore.
+    # "Not found" is fine — a fresh install resurrecting a cluster from S3 has
+    # no container yet.
+    import docker as _docker
+
     try:
-        container = client.containers.get(settings.prod_db_container)
-        container.stop()
-        container.remove()
-    except Exception:
-        pass
+        pg_container = client.containers.get(settings.prod_db_container)
+    except _docker.errors.NotFound:
+        pg_container = None
+    if pg_container is not None:
+        try:
+            pg_container.stop()
+            pg_container.remove()
+        except Exception as exc:
+            raise PrerequisiteNotMetError(
+                "Cluster PITR aborted: could not stop/remove the production "
+                f"PostgreSQL container '{settings.prod_db_container}' ({exc}). "
+                "The data directory was left untouched."
+            ) from exc
+        # Belt and braces: confirm it is really gone before touching PGDATA.
+        try:
+            client.containers.get(settings.prod_db_container)
+        except _docker.errors.NotFound:
+            pass
+        else:
+            raise PrerequisiteNotMetError(
+                f"Cluster PITR aborted: '{settings.prod_db_container}' still "
+                "exists after stop/remove; refusing to displace PGDATA while "
+                "PostgreSQL may still hold it open."
+            )
 
     # 2. Helper container: displace PGDATA, fetch, write recovery config.
     recovery_conf = (

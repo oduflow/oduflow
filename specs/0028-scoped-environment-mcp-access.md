@@ -88,6 +88,13 @@ not merely pointed at a narrower endpoint.
   `/mcp` endpoint via the public `team_<id>` client_id and team `auth_token`
   client_secret.
 
+## Evolution
+
+- 2026-10-18 — the per-environment token moved from the `oduflow.mcp_token`
+  container label into the per-team `mcp_tokens.json` registry, keyed by
+  environment name, so it survives recreate and rename; resolution reads the
+  registries instead of scanning Docker ([[0080-stable-environment-identity-across-recreate]]).
+
 ## History
 
 - (this change) — scoped single-environment MCP access: `/mcp/<env>` endpoint,

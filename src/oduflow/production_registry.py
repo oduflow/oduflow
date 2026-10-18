@@ -141,6 +141,17 @@ def get_production(team: TeamSettings, name: str) -> dict[str, Any]:
     return prods[name]
 
 
+def _name_taken(team: TeamSettings, name: str) -> ConflictError:
+    return ConflictError(f"Production '{name}' already exists (team '{team.team_id}').")
+
+
+def ensure_name_free(team: TeamSettings, name: str) -> None:
+    """Raise ConflictError if a production named *name* is registered. Only
+    advisory: create_production below is what reserves the name."""
+    if name in list_productions(team):
+        raise _name_taken(team, name)
+
+
 def create_production(
     team: TeamSettings, name: str, record: dict[str, Any]
 ) -> dict[str, Any]:
@@ -150,9 +161,7 @@ def create_production(
     with _registry_lock(path):
         state = _load_state(path)
         if name in state["productions"]:
-            raise ConflictError(
-                f"Production '{name}' already exists (team '{team.team_id}')."
-            )
+            raise _name_taken(team, name)
         if not state["webhook_secret"]:
             state["webhook_secret"] = secrets.token_urlsafe(32)
         full = {

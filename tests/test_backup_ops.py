@@ -97,6 +97,16 @@ class TestDumpStream:
         with pytest.raises(ExternalCommandError):
             next(gen)
 
+    def test_unreadable_exit_code_is_a_failure(self):
+        # P-M12: exec_inspect returning ExitCode=None means the dump's status is
+        # unknown — `if exit_code:` treated that as success and recorded a
+        # possibly-truncated archive as a healthy snapshot.
+        container = _FakeContainer([(b"partial", None)], exit_code=None)
+        gen = backup_ops._dump_stream(container, "odoo", "db")
+        assert next(gen) == b"partial"
+        with pytest.raises(ExternalCommandError, match="could not be read"):
+            next(gen)
+
 
 class TestFilestoreRestore:
     def test_manifest_requires_explicit_revision(self):

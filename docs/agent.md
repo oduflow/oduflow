@@ -40,18 +40,30 @@ its tools appear as `development_*` in OpenCode and `mcp__development__*` in
 Claude Code and Codex. Checkouts created by earlier releases had it under
 `oduflow`; that entry is replaced before the next session.
 
+One container serves the whole team, but **every environment runs as its own
+Linux user**. Each environment's sessions, checkout, chat attachments and HOME
+(logins, conversation transcripts, settings) are private to it: an agent
+working in one environment cannot see other environments' checkouts, sessions
+or credentials. Other branches remain readable through git
+(`git fetch`, `git show origin/<branch>:<path>`).
+
 The image also includes **Agent Browser MCP** backed by Debian Chromium. It is
 wired automatically into Claude, Codex, and OpenCode with the complete Agent
-Browser tool set. Each environment gets a separate browser profile, while
-browser data persists with the team's agent HOME volume across container
+Browser tool set. Each environment gets a separate browser profile, kept
+in that environment's own HOME on the persistent agent volume across container
 recreation.
 
 Lifecycle is automatic: the container is created on startup for each enabled
 team and removed for disabled ones; `create_environment` adds the environment's
-checkout, `delete_environment` removes it. The container carries a hash of its
-injected config as a label and is **recreated automatically** when the config
-changes. The only runtime state is a durable ACP conversation-history file in
-the team's data directory; transcripts remain owned by the agent adapters.
+identity and checkout, `delete_environment` removes them, together with the
+environment's HOME and running sessions. If the agent container is stopped or
+gone at that moment, the removal is completed the next time it runs, before any
+environment (including a new one with the same name) is set up, so a later
+environment never inherits a deleted one's files. The container carries a hash
+of its injected config as a label and is **recreated automatically** when the
+config changes. The only runtime state is a durable ACP conversation-history
+file in the team's data directory; transcripts remain owned by the agent
+adapters.
 
 The coder image includes OpenSSH client tools for Git remotes authenticated
 with a team SSH deploy key. Use an SSH repository URL for deploy-key access;
@@ -66,7 +78,7 @@ enablement and credentials live in the `[team.*]` sections:
 ```toml
 # Deployment-wide (optional)
 [agent]
-image = "oduist/oduflow-coder:0.3.3"
+image = "oduist/oduflow-coder:0.4.0"
 # claude_model = ""     # optional Claude model override; empty = CLI default
 # codex_model = ""      # optional Codex model override; empty = CLI default
 # opencode_model = ""   # optional provider/model override; empty = OpenCode default
@@ -81,7 +93,7 @@ agent_default = "claude"  # "claude" | "codex" | "opencode"
 [team.1.agent_env]
 CLAUDE_CODE_OAUTH_TOKEN = ""   # Claude subscription token (`claude setup-token`); outranks the API key
 ANTHROPIC_API_KEY = ""         # Claude API key (used when no OAuth token)
-OPENAI_API_KEY = ""            # Codex API key
+OPENAI_API_KEY = ""            # Codex API key; replaces a ChatGPT sign-in
 OPENCODE_API_KEY = ""          # OpenCode Zen; other providers use their own variables
 ```
 
@@ -98,7 +110,8 @@ so Agent CLI opens directly in the REPL without asking to select a login method.
 Claude supports three alternative authentication modes. Oduflow selects exactly
 one for each team: a non-empty `CLAUDE_CODE_OAUTH_TOKEN` wins, otherwise a
 non-empty `ANTHROPIC_API_KEY` uses Console API billing, otherwise Claude uses the
-interactive `/login` stored on the team's persistent agent home volume. Known
+interactive `/login` stored in the environment's own HOME on the persistent
+agent volume. Known
 credential values are trimmed when loaded, so whitespace accidentally copied
 around a token is not sent to Anthropic. A configured environment credential
 always overrides the persisted interactive login; if Anthropic rejects it,
@@ -109,10 +122,54 @@ OpenCode is provider-neutral. Any provider environment variable can be placed
 under `[team.X.agent_env]`; `OPENCODE_API_KEY` is the standard OpenCode Zen
 credential and is also inherited from the server environment in single-team
 deployments. Alternatively, open **Agent CLI** and run `opencode auth login`;
-the resulting provider credentials live on the team's persistent HOME volume
-and survive container recreation. OpenCode's runtime self-update is disabled,
-so its executable changes only when Oduflow moves to a new immutable coder
-image.
+the resulting provider credentials live in the environment's own HOME on the
+persistent agent volume and survive container recreation. OpenCode's runtime
+self-update is disabled, so its executable changes only when Oduflow moves to a
+new immutable coder image. The same applies to Codex: Agent CLI starts it with the startup update
+check turned off.
+
+### Codex with a ChatGPT subscription
+
+Instead of `OPENAI_API_KEY`, Codex can use a ChatGPT plan (Plus, Pro, Business
+or Enterprise). Sign in once per environment (each environment keeps its own
+login):
+
+1. With Codex as the team's default agent (`agent_default = "codex"`), open
+   **More ▾ → Agent CLI** on the environment.
+2. Choose **2. Sign in with Device Code**. Option 1, **Sign in with ChatGPT**,
+   does not work here: its callback goes to `localhost` inside the agent
+   container, which your browser cannot reach.
+3. Open <https://auth.openai.com/codex/device> in any browser, sign in to
+   ChatGPT and enter the one-time code that Codex shows. The code expires after
+   15 minutes.
+4. Codex reports **Signed in to Codex**. Agent CLI and Agent Chat of that
+   environment now use the subscription.
+
+Business and Enterprise workspaces may need a workspace admin to enable
+device-code sign-in for Codex first.
+
+The sign-in is stored in the environment's own HOME on the persistent agent
+home volume and survives container recreation. A configured `OPENAI_API_KEY`
+overrides it: every environment signs in with the key
+(`codex login --with-api-key`) when the container starts and when the key
+changes. The key's sign-in stays in the HOME after the key is removed, so to
+switch to the subscription, remove the key, restart Oduflow, then run `/logout`
+in Agent CLI and sign in again. To check or reset an environment's sign-in from
+the host, run Codex as that environment's user (the container is
+`<prefix><team>-agent`; the environment's uid is in the team's
+`agent_uids.json`):
+
+```bash
+uid=20000   # from <team data_dir>/agent_uids.json
+docker exec -u $uid:$uid -e HOME=/home/agent/envs/$uid \
+    -e CODEX_HOME=/home/agent/envs/$uid/.codex oduflow-1-agent codex login status
+```
+
+Use `codex logout`, or `docker exec -it ... codex login --device-auth` to sign
+in without Agent CLI. Many concurrent sessions of one environment can fail a
+token refresh with `refresh_token_reused`; run `/logout` in Agent CLI and sign
+in again, or use an API key for a busy team. When Codex is not signed in, Agent Chat's error
+message includes these recovery steps.
 
 ### OpenAI-compatible gateway for OpenCode
 
@@ -186,6 +243,17 @@ reference.
 - **Per-team isolation.** Each team gets its own agent container, volumes, and
   network. Cross-team reach is blocked; the dashboard auth middleware resolves
   the team, so a team can only ever reach its own agent.
+- **Per-environment isolation.** Inside the team's container, each
+  environment's sessions run as that environment's own unprivileged uid (never
+  reused, even after the environment is deleted). Its checkout, attachments and
+  HOME are private to it, and so are its temporary files (a private `TMPDIR`,
+  and sessions start with umask `077`). No session can read another
+  environment's process environment (where its scoped token lives). The
+  npm-installed Claude Code is shared read-only, so no environment can alter
+  what another runs.
+  Not separated between environments: the container network (local ports,
+  browser sessions) and the team-wide provider credentials from
+  `[team.X.agent_env]`.
 - **Scoped MCP access.** The team `auth_token` never enters the agent
   container. Each session injects that **environment's** scoped per-environment
   token, which grants only the dev-loop allowlist on the one environment the
@@ -197,13 +265,13 @@ reference.
   keys in `[team.X.agent_env]` so an operator credential never leaks to
   tenants.
 - **Sandbox and approvals.** All three agents run approval-free — the security
-  boundary is the unprivileged `agent` user inside the per-team Docker
+  boundary is the environment's unprivileged uid inside the per-team Docker
   container, not per-tool prompts. Codex CLI uses
   `--dangerously-bypass-approvals-and-sandbox` and Codex ACP starts in
   `agent-full-access` (no nested Bubblewrap sandbox). Claude matches this: the
   Agent CLI console runs `claude --dangerously-skip-permissions`, and Agent
   Chat's ACP adapter (`claude-agent-acp`) starts in `bypassPermissions`, seeded
-  via the container's user-tier `~/.claude/settings.json`
+  via the environment's user-tier `~/.claude/settings.json`
   (`permissions.defaultMode`). OpenCode CLI uses `--auto`; both CLI and its
   native `opencode acp` runtime receive a high-precedence session config with
   `permission = "allow"`. So installed MCP tools run without interactive
@@ -212,6 +280,13 @@ reference.
 ## Limitations
 
 - The agent UI is hidden for live-mount (`local_path`) environments.
+- Interactive logins (Claude `/login`, `codex login`, `opencode auth login`) are
+  per environment: log in once in each environment, or set the team's
+  credentials in `[team.X.agent_env]`, which every environment uses
+  automatically.
+- On the upgrade to per-environment users, existing Claude and Codex
+  conversations move to their environment once, on the agent container's first
+  start; OpenCode conversations from before the upgrade are not carried over.
 - Environments created before per-environment tokens existed have no scoped
   token; their consoles warn and the agent works without MCP until the
   environment is updated/recreated.
@@ -224,4 +299,5 @@ The published image contains redistributable open-source software: Codex CLI,
 Codex ACP and Agent Browser are Apache-2.0, OpenCode is MIT, and Debian Chromium
 includes its upstream component license notices. Claude Code and its adapter
 are installed at first container start onto the persistent home volume —
-downloaded directly from npm by the end user's container.
+downloaded directly from npm by the end user's container — and refreshed in the
+background on every later container start.

@@ -1,6 +1,6 @@
 [project]
 name = "oduflow"
-version = "1.87.0"
+version = "1.88.0"
 description = "AI-first Odoo development and CI tool with reusable database templates, powered by MCP"
 authors = [
     { name = "Oduist" }
@@ -19,6 +19,9 @@ dependencies = [
     "PyYAML>=6.0,<7",
 
     "packaging",
+    # Bundled Public Suffix List snapshot (no network): decides whether a team
+    # hostname's parent is a registrable domain or a public suffix (naming.py).
+    "publicsuffixlist",
     "cryptography",
     "itsdangerous",
     "pyotp>=2.9,<3",
@@ -130,8 +133,8 @@ only_mutate = [
     # /etc/systemd/system and shells out to `systemctl stop/disable`.
 ]
 pytest_add_cli_args_test_selection = ["tests/"]
-# Docker-backed tests can't run against the mutant tree, and `heavyweight` is
-# already excluded by the pytest addopts.
+# Docker-backed tests can't run against the mutant tree; the pytest addopts already
+# exclude them, and the selection is repeated here to keep mutmut explicit.
 pytest_add_cli_args = ["-m", "not integration and not heavyweight"]
 # mutmut copies only *.py into mutants/; these paths carry package data and repo
 # files that tests read (bundled oduflow.toml, dashboard assets, coder Dockerfile).
@@ -141,7 +144,10 @@ also_copy = ["src/oduflow/templates", "docker"]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 norecursedirs = ["src"]
-addopts = "-m 'not heavyweight'"
+# Docker-backed tests are opt-in (`-m integration`, `-m heavyweight`): they create
+# and destroy real containers, and a bare `pytest` on a developer machine must not
+# touch the Oduflow server running there.
+addopts = "-m 'not integration and not heavyweight'"
 markers = [
     "integration: integration tests against live Docker (may be slow)",
     "heavyweight: slow tests (init/destroy/create/delete env) — run with pytest -m heavyweight",

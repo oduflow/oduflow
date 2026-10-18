@@ -48,6 +48,15 @@ class TestStore:
 
         assert entry.total_chars == cache_mod._MAX_OUTPUT_SIZE
 
+    def test_an_oversized_output_keeps_its_head_and_its_end(self):
+        # A failing Odoo run prints its fatal traceback last.
+        output = "HEAD\n" + "x" * cache_mod._MAX_OUTPUT_SIZE + "\nFATAL TRACEBACK"
+        entry = OutputCache().store(output, "t", "")
+
+        assert entry.lines[0] == "HEAD"
+        assert entry.lines[-1] == "FATAL TRACEBACK"
+        assert any("omitted" in line for line in entry.lines)
+
     def test_an_output_at_the_limit_is_kept_whole(self):
         entry = OutputCache().store("x" * cache_mod._MAX_OUTPUT_SIZE, "t", "")
 

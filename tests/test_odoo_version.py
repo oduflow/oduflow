@@ -37,6 +37,10 @@ LABEL = "oduflow.image"
         ("registry.example:5000/acme/odoo-ee:15.0-custom", 15),
         ("ghcr.io/acme/odoo/17.0-custom", 17),
         ("odoo:19.0@sha256:" + "0" * 64, 19),
+        # Neither a digest's hex nor a registry port is a version tag.
+        ("odoo@sha256:" + "9" * 64, None),
+        ("registry:5000/odoo", None),
+        ("acme/odoo:20260910", None),
         ("odoo:saas~19.1", 19),
         # No version to read: the caller must probe or assume the modern flags.
         ("oduist/customer_odoo", None),

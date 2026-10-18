@@ -31,9 +31,9 @@ Two reclamation paths consume tombstones:
   forever — same posture as `auto_delete_hours`).
 - **Immediate:** `oduflow cleanup --purge-deleted-productions --force`.
 
-Re-creating a same-named production clears the tombstone (revival), and a
-tombstone found on a *registered* production is treated as stale and removed,
-never acted on. `cleanup_orphans` now skips the whole `prod-*` workspace
+Re-creating a same-named production clears the tombstone (revival; dropped
+since, see Evolution), and a tombstone found on a *registered* production is
+treated as stale and removed, never acted on. `cleanup_orphans` now skips the whole `prod-*` workspace
 namespace, closing the live-production destruction hole.
 
 ## How it works (macro)
@@ -62,7 +62,22 @@ destruction routine.
 
 Related: [[0035-production-hosting]] (the production tier this manages).
 
+## Evolution
+
+- 2026-10-17 — **Revival dropped: a deleted name is freed by the purge.**
+  Re-creating a name over its kept workspace never worked: `git clone` hit
+  the old repository, and the rollback had already cleared the tombstone.
+  Making it work would mix the old filestore and deploy history into a new
+  production, so `create_production` now refuses a name whose database or
+  workspace is still around, and names the purge that frees it. A failed
+  create whose rollback cannot drop its new database tombstones the attempt,
+  writing the marker only after the registry record is gone, so the same
+  purge reclaims it.
+
 ## History
 
 - 2026-09-13 — Introduced (tombstones, `prod_purge_hours`, cleanup flag, prod
   namespace exclusion in `cleanup_orphans`).
+- 2026-10-17 — Revival replaced by an up-front refusal; failed creates that
+  cannot drop their database are tombstoned (`fix-prod-db-creation-failure`
+  branch).

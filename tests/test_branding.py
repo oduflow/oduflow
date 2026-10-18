@@ -271,18 +271,30 @@ def test_terminal_errors_are_rebranded(tmp_path, sign):
 
 
 @pytest.mark.parametrize(
-    "agent_type,provider_error,marker",
+    "agent_type,code,provider_error,marker",
     [
-        ("claude", "401 failed to authenticate", "AcmeFlow authentication guidance:"),
+        (
+            "claude",
+            -32603,
+            "401 failed to authenticate",
+            "AcmeFlow authentication guidance:",
+        ),
         (
             "opencode",
+            -32603,
             "provider authentication required",
             "AcmeFlow OpenCode authentication guidance:",
+        ),
+        (
+            "codex",
+            -32000,
+            "Authentication required",
+            "AcmeFlow Codex authentication guidance:",
         ),
     ],
 )
 def test_acp_auth_guidance_is_rebranded_and_appended_once(
-    tmp_path, sign, agent_type, provider_error, marker
+    tmp_path, sign, agent_type, code, provider_error, marker
 ):
     """The marker is both what the client reads and the idempotency check.
 
@@ -295,7 +307,7 @@ def test_acp_auth_guidance_is_rebranded_and_appended_once(
 
     _install(tmp_path, sign)
     branding.configure(lambda: _settings(tmp_path))
-    frame = json.dumps({"error": {"code": -32603, "message": provider_error}})
+    frame = json.dumps({"error": {"code": code, "message": provider_error}})
 
     once = web_ui._annotate_acp_auth_error(frame, agent_type, "setup_token", "1")
     twice = web_ui._annotate_acp_auth_error(once, agent_type, "setup_token", "1")

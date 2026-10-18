@@ -13,6 +13,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -20,11 +21,25 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import activity, branding, env_share, secret_store, settings
+from oduflow import (
+    activity,
+    agent_uids,
+    branding,
+    env_share,
+    env_tokens,
+    secret_store,
+    settings,
+)
 from oduflow.docker_ops import image_cleanup
-from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
+from oduflow.docker_ops.client import (
+    chown_recursive,
+    get_client,
+    get_odoo_uid_gid,
+    pull_with_progress,
+)
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
+    _CONTAINER_CONF_MODE,
     _copy_file_to_container,
     _create_pg_role,
     _db_exists,
@@ -43,8 +58,9 @@ from oduflow.docker_ops.system_ops import (
 )
 from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
-from oduflow.env_tokens import MCP_TOKEN_LABEL, generate_token, invalidate_cache
+from oduflow.env_tokens import invalidate_cache
 from oduflow.errors import (
+    BusyError,
     ConflictError,
     ExternalCommandError,
     FlowError,
@@ -62,10 +78,12 @@ from oduflow.hostname_registry import (
     reserve_environment_slot,
 )
 from oduflow.hostname_registry import rename_env as rename_hostname_env
-from oduflow.locking import env_wake_key, keyed_mutex
+from oduflow.locking import LockManager, env_wake_key, keyed_mutex
 from oduflow.naming import (
     get_agent_checkout_dir,
     get_agent_container_name,
+    get_agent_env_home_dir,
+    get_agent_env_tmp_dir,
     get_agent_home_volume_name,
     get_agent_upload_dir,
     get_agent_workspace_volume_name,
@@ -81,6 +99,7 @@ from oduflow.naming import (
     sanitize_repo_url,
     slugify_branch,
     split_team_hostname,
+    team_hostname_parent,
     validate_env_hostname,
 )
 from oduflow.port_registry import allocate_port, release_port
@@ -96,6 +115,8 @@ AGENT_HOME = "/home/agent"
 # written by earlier releases named it "oduflow"; that entry is dropped.
 AGENT_MCP_SERVER = "development"
 LEGACY_AGENT_MCP_SERVER = "oduflow"
+# Root-run identity management inside the coder image (docker/agent/).
+AGENT_ENV_USER_SCRIPT = "/usr/local/bin/env-user.sh"
 ENV_HOSTNAME_LABEL = "oduflow.hostname"
 ENV_HOSTNAME_SOURCE_LABEL = "oduflow.hostname_source"
 HOSTNAME_SOURCE_CUSTOM = "custom"
@@ -268,8 +289,7 @@ def _team_parent_domain(team: TeamSettings) -> str:
     (slots/custom-hostname legacy layout)."""
     if team.base_domain:
         return team.base_domain
-    _prefix, parent_domain = split_team_hostname(team.hostname)
-    return parent_domain
+    return team_hostname_parent(team.hostname)
 
 
 def _assert_env_hostname_available(
@@ -658,8 +678,14 @@ def _mount_filestore(
     *,
     template_name: str,
     force_overlay: bool = False,
+    generation: str = "",
+    paths_override: dict[str, str] | None = None,
 ) -> None:
-    template_filestore = team.get_template_filestore_path(template_name)
+    from oduflow.template_generations import lower_paths
+
+    template_filestore, metadata_path = lower_paths(
+        team, env_name, template_name, generation
+    )
     if not template_filestore or not os.path.isdir(template_filestore):
         if force_overlay:
             raise PrerequisiteNotMetError(
@@ -670,7 +696,7 @@ def _mount_filestore(
         )
         return
 
-    paths = get_filestore_paths(env_name, team.workspaces_dir)
+    paths = paths_override or get_filestore_paths(env_name, team.workspaces_dir)
     if force_overlay and not _is_directory_strict(paths["upper"]):
         raise PrerequisiteNotMetError(
             f"Overlay upper layer is missing: {paths['upper']}"
@@ -685,7 +711,7 @@ def _mount_filestore(
             paths["merged"],
             extra={"env_name": env_name},
         )
-        _unmount_filestore(env_name, team)
+        _unmount_filestore(env_name, team, paths_override=paths)
         _wait_unmounted(paths["merged"])
         if overlay_mount_state(paths["merged"]) != MOUNT_ABSENT:
             raise PrerequisiteNotMetError(
@@ -694,7 +720,6 @@ def _mount_filestore(
 
     # Read use_overlay flag from template metadata (avoids slow filestore scan)
     use_overlay = None
-    metadata_path = team.get_template_metadata_path(template_name)
     if os.path.isfile(metadata_path):
         try:
             with open(metadata_path) as f:
@@ -805,8 +830,10 @@ def _mount_filestore(
     logger.info("Filestore overlay mounted", extra={"env_name": env_name})
 
 
-def _unmount_filestore(env_name: str, team: TeamSettings) -> None:
-    paths = get_filestore_paths(env_name, team.workspaces_dir)
+def _unmount_filestore(
+    env_name: str, team: TeamSettings, *, paths_override: dict[str, str] | None = None
+) -> None:
+    paths = paths_override or get_filestore_paths(env_name, team.workspaces_dir)
     merged = paths["merged"]
     # Deliberately not ``isdir``/``ismount``: both report False for a stale
     # mount, because the stat they rely on fails with ENOTCONN — and that is
@@ -851,9 +878,12 @@ def _wait_unmounted(merged: str, timeout: float = 3.0) -> None:
 class RemountResult:
     """Outcome of :func:`remount_template_overlays`."""
 
-    def __init__(self, affected: list[str]) -> None:
+    def __init__(self, affected: list[str], pinned: list[str] | None = None) -> None:
         self.affected = affected
         self.failures: list[tuple[str, str]] = []
+        # Environments a scheduled sync pinned to a retained filestore
+        # generation: deliberately left on it, never remounted here.
+        self.pinned: list[str] = pinned or []
 
 
 @contextlib.contextmanager
@@ -891,14 +921,21 @@ def remount_template_overlays(
     Copy-mode environments (``use_overlay=False``) are not mounted, so they are
     skipped — updating the lower layer does not affect their independent copy.
     """
+    from oduflow.template_generations import is_pinned
+
     exclude = set(exclude_envs)
     affected: list[dict[str, Any]] = []
+    pinned: list[str] = []
 
     for env in list_environments(settings, team):
         env_name = env["env_name"]
         if env_name in exclude:
             continue
         if env.get("template_name") != template_name:
+            continue
+        if is_pinned(team, env_name):
+            logger.info("Leaving %s on its retained filestore generation", env_name)
+            pinned.append(env_name)
             continue
         merged = get_filestore_paths(env_name, team.workspaces_dir)["merged"]
         # Stale mounts are included: they need the very same stop / unmount /
@@ -929,7 +966,7 @@ def remount_template_overlays(
             }
         )
 
-    result = RemountResult([a["env_name"] for a in affected])
+    result = RemountResult([a["env_name"] for a in affected], pinned)
 
     # Stop containers and unmount overlays (keeping upper/work).
     for a in affected:
@@ -1011,185 +1048,274 @@ def reconcile_overlay_mounts(settings: Settings) -> list[dict[str, Any]]:
     """
     results: list[dict[str, Any]] = []
     client = get_client()
-
+    locks = LockManager(
+        os.path.join(settings.base_data_dir, ".locks")
+        if settings.base_data_dir
+        else None
+    )
+    busy: list[TeamSettings] = []
     for team in settings.teams.values():
         try:
-            envs = list_environments(settings, team)
-        except Exception as exc:  # noqa: BLE001 - startup must survive this
-            logger.warning(
-                "[team.%s] Could not list environments to reconcile overlays: %s",
-                team.team_id,
-                exc,
-            )
+            locks.acquire_team(team.team_id, operation="reconcile_overlays")
+        except BusyError:
+            busy.append(team)
             continue
+        try:
+            _reconcile_team_overlays(settings, team, client, results)
+        finally:
+            locks.release_team(team.team_id)
+    if busy:
+        # Another process (a scheduled template sync) holds these teams. This
+        # pass runs only at startup, so skipping them would leave their stale
+        # filestores broken until the next restart: repair once they are free.
+        logger.info(
+            "Overlay reconciliation deferred for busy teams: %s",
+            ", ".join(team.team_id for team in busy),
+        )
+        threading.Thread(
+            target=_reconcile_when_free,
+            args=(settings, busy, locks),
+            name="oduflow-overlay-reconcile",
+            daemon=True,
+        ).start()
+    return results
 
-        for env in envs:
-            env_name = env["env_name"]
-            paths = get_filestore_paths(env_name, team.workspaces_dir)
-            record: dict[str, Any] = {
-                "team_id": team.team_id,
-                "env_name": env_name,
-                "repaired": False,
-                "detail": "",
-            }
+
+# How often the deferred startup reconciliation retries a busy team.
+_RECONCILE_RETRY_POLL = 5.0
+
+
+def _reconcile_when_free(
+    settings: Settings, teams: list[TeamSettings], locks: LockManager
+) -> None:
+    client = get_client()
+    for team in teams:
+        while True:
             try:
-                mount_state = overlay_mount_state(paths["merged"])
-                has_overlay_upper = _is_directory_strict(paths["upper"])
-            except OSError as exc:
-                record["detail"] = f"mount probe failed: {exc}"
-                logger.error(
-                    "Could not inspect filestore overlay for %s: %s", env_name, exc
+                locks.acquire_team_blocking(
+                    team.team_id,
+                    3600,
+                    operation="reconcile_overlays",
+                    poll=_RECONCILE_RETRY_POLL,
                 )
-                results.append(record)
+                break
+            except BusyError:
                 continue
-            if mount_state != MOUNT_STALE and not (
-                mount_state == MOUNT_ABSENT and has_overlay_upper
-            ):
-                continue
-            if not has_overlay_upper:
-                record["detail"] = "overlay upper layer is missing"
-                logger.error(
-                    "Broken filestore overlay for %s has no upper layer at %s; "
-                    "leaving the mount alone for manual recovery",
-                    env_name,
-                    paths["upper"],
-                )
-                results.append(record)
-                continue
-
-            template_name = env.get("template_name") or ""
-            if not template_name or template_name == "none":
-                # Without a template there is no lower layer to remount against,
-                # and only an operator can decide what to restore this from.
-                record["detail"] = "no template to remount against"
-                logger.error(
-                    "Broken filestore overlay for %s has no template: %s needs "
-                    "manual recovery",
-                    env_name,
-                    paths["merged"],
-                )
-                results.append(record)
-                continue
-
-            # _mount_filestore returns quietly when the lower layer is gone, so
-            # check it here — before detaching anything. Otherwise this pass
-            # would unmount the environment and report a repair it never made.
-            template_filestore = team.get_template_filestore_path(template_name)
-            if not template_filestore or not os.path.isdir(template_filestore):
-                record["detail"] = f"template filestore missing: {template_filestore}"
-                logger.error(
-                    "Broken filestore overlay for %s: template '%s' has no "
-                    "filestore at %s; leaving the mount alone for manual recovery",
-                    env_name,
-                    template_name,
-                    template_filestore,
-                )
-                results.append(record)
-                continue
-
+        results: list[dict[str, Any]] = []
+        try:
+            _reconcile_team_overlays(settings, team, client, results)
+        except Exception:  # noqa: BLE001 - a background repair must not die loudly
             logger.warning(
-                "[team.%s] Broken filestore overlay for %s (%s); repairing",
+                "[team.%s] Deferred overlay reconciliation failed",
                 team.team_id,
-                env_name,
-                mount_state,
+                exc_info=True,
             )
-            container_name = get_resource_name(
-                env_name, "odoo", settings.prefix, team.team_id
-            )
-            image = env.get("odoo_image") or "odoo:19.0"
-            was_running = False
-            container = None
-            try:
-                container = client.containers.get(container_name)
-                was_running = container.status == "running"
-                if container.image.tags:
-                    image = container.image.tags[0]
-            except docker.errors.NotFound:
-                pass
-            except Exception as exc:  # noqa: BLE001 - fail closed per environment
-                record["detail"] = f"container lookup failed: {exc}"
-                logger.error("Could not inspect %s: %s", container_name, exc)
-                results.append(record)
-                continue
-
-            if container is not None:
-                status = container.status
-                if status == "running":
-                    try:
-                        container.stop(timeout=10)
-                        container.reload()
-                    except Exception as exc:  # noqa: BLE001 - fail closed
-                        record["detail"] = f"stop failed: {exc}"
-                        logger.error("Could not stop %s: %s", container_name, exc)
-                        results.append(record)
-                        continue
-                    if container.status == "running":
-                        record["detail"] = "stop failed: container is still running"
-                        logger.error("Container %s is still running", container_name)
-                        results.append(record)
-                        continue
-                elif status not in {"created", "exited", "dead"}:
-                    record["detail"] = f"unsafe container state: {status}"
-                    logger.error(
-                        "Will not detach overlay while %s is %s",
-                        container_name,
-                        status,
-                    )
-                    results.append(record)
-                    continue
-
-            try:
-                _unmount_filestore(env_name, team)
-                _wait_unmounted(paths["merged"])
-                if overlay_mount_state(paths["merged"]) != MOUNT_ABSENT:
-                    raise PrerequisiteNotMetError("mount did not detach")
-                _mount_filestore(
-                    client,
-                    settings,
-                    team,
-                    env_name,
-                    get_db_name(env_name, team.team_id),
-                    image,
-                    {},
-                    template_name=template_name,
-                    force_overlay=True,
-                )
-                state = overlay_mount_state(paths["merged"])
-                if state != MOUNT_ALIVE:
-                    raise PrerequisiteNotMetError(
-                        f"remount did not become live (state: {state})"
-                    )
-            except Exception as exc:  # noqa: BLE001 - never block startup
-                record["detail"] = str(exc)
-                logger.error(
-                    "Could not repair filestore overlay for %s: %s", env_name, exc
-                )
-                # Do not restart against an absent or unverified filestore.
-                results.append(record)
-                continue
-
-            if was_running and container is not None:
-                try:
-                    container.start()
-                    container.reload()
-                    if container.status != "running":
-                        raise RuntimeError(
-                            f"container status after start is {container.status}"
-                        )
-                except Exception as exc:  # noqa: BLE001 - best-effort
-                    record["detail"] = f"restart failed: {exc}"
-                    logger.error("Could not restart %s: %s", container_name, exc)
-                    results.append(record)
-                    continue
-
-            record["repaired"] = True
+        finally:
+            locks.release_team(team.team_id)
+        if results:
             logger.warning(
-                "Remounted filestore overlay for %s (upper deltas kept)",
-                env_name,
+                "[team.%s] Deferred overlay reconciliation: %d repaired, %d need attention",
+                team.team_id,
+                sum(1 for r in results if r["repaired"]),
+                sum(1 for r in results if not r["repaired"]),
+            )
+
+
+def _reconcile_team_overlays(
+    settings: Settings,
+    team: TeamSettings,
+    client: DockerClient,
+    results: list[dict[str, Any]],
+) -> None:
+    """One team's pass of :func:`reconcile_overlay_mounts`, under its team lock."""
+    from oduflow.template_generations import require_no_recovery
+
+    try:
+        envs = list_environments(settings, team)
+    except Exception as exc:  # noqa: BLE001 - startup must survive this
+        logger.warning(
+            "[team.%s] Could not list environments to reconcile overlays: %s",
+            team.team_id,
+            exc,
+        )
+        return
+
+    for env in envs:
+        env_name = env["env_name"]
+        paths = get_filestore_paths(env_name, team.workspaces_dir)
+        record: dict[str, Any] = {
+            "team_id": team.team_id,
+            "env_name": env_name,
+            "repaired": False,
+            "detail": "",
+        }
+        try:
+            require_no_recovery(team, env_name)
+            mount_state = overlay_mount_state(paths["merged"])
+            has_overlay_upper = _is_directory_strict(paths["upper"])
+        except (OSError, PrerequisiteNotMetError) as exc:
+            record["detail"] = f"mount probe failed: {exc}"
+            logger.error(
+                "Could not inspect filestore overlay for %s: %s", env_name, exc
             )
             results.append(record)
+            continue
+        if mount_state != MOUNT_STALE and not (
+            mount_state == MOUNT_ABSENT and has_overlay_upper
+        ):
+            continue
+        if not has_overlay_upper:
+            record["detail"] = "overlay upper layer is missing"
+            logger.error(
+                "Broken filestore overlay for %s has no upper layer at %s; "
+                "leaving the mount alone for manual recovery",
+                env_name,
+                paths["upper"],
+            )
+            results.append(record)
+            continue
 
-    return results
+        template_name = env.get("template_name") or ""
+        if not template_name or template_name == "none":
+            # Without a template there is no lower layer to remount against,
+            # and only an operator can decide what to restore this from.
+            record["detail"] = "no template to remount against"
+            logger.error(
+                "Broken filestore overlay for %s has no template: %s needs "
+                "manual recovery",
+                env_name,
+                paths["merged"],
+            )
+            results.append(record)
+            continue
+
+        # _mount_filestore returns quietly when the lower layer is gone, so
+        # check it here — before detaching anything. Otherwise this pass
+        # would unmount the environment and report a repair it never made.
+        from oduflow.template_generations import lower_paths
+
+        try:
+            template_filestore, _ = lower_paths(team, env_name, template_name)
+        except (OSError, PrerequisiteNotMetError) as exc:
+            record["detail"] = f"lower layer lookup failed: {exc}"
+            logger.error(
+                "Could not resolve the filestore lower layer for %s: %s",
+                env_name,
+                exc,
+            )
+            results.append(record)
+            continue
+        if not template_filestore or not os.path.isdir(template_filestore):
+            record["detail"] = f"template filestore missing: {template_filestore}"
+            logger.error(
+                "Broken filestore overlay for %s: template '%s' has no "
+                "filestore at %s; leaving the mount alone for manual recovery",
+                env_name,
+                template_name,
+                template_filestore,
+            )
+            results.append(record)
+            continue
+
+        logger.warning(
+            "[team.%s] Broken filestore overlay for %s (%s); repairing",
+            team.team_id,
+            env_name,
+            mount_state,
+        )
+        container_name = get_resource_name(
+            env_name, "odoo", settings.prefix, team.team_id
+        )
+        image = env.get("odoo_image") or "odoo:19.0"
+        was_running = False
+        container = None
+        try:
+            container = client.containers.get(container_name)
+            was_running = container.status == "running"
+            if container.image.tags:
+                image = container.image.tags[0]
+        except docker.errors.NotFound:
+            pass
+        except Exception as exc:  # noqa: BLE001 - fail closed per environment
+            record["detail"] = f"container lookup failed: {exc}"
+            logger.error("Could not inspect %s: %s", container_name, exc)
+            results.append(record)
+            continue
+
+        if container is not None:
+            status = container.status
+            if status == "running":
+                try:
+                    container.stop(timeout=10)
+                    container.reload()
+                except Exception as exc:  # noqa: BLE001 - fail closed
+                    record["detail"] = f"stop failed: {exc}"
+                    logger.error("Could not stop %s: %s", container_name, exc)
+                    results.append(record)
+                    continue
+                if container.status == "running":
+                    record["detail"] = "stop failed: container is still running"
+                    logger.error("Container %s is still running", container_name)
+                    results.append(record)
+                    continue
+            elif status not in {"created", "exited", "dead"}:
+                record["detail"] = f"unsafe container state: {status}"
+                logger.error(
+                    "Will not detach overlay while %s is %s",
+                    container_name,
+                    status,
+                )
+                results.append(record)
+                continue
+
+        try:
+            _unmount_filestore(env_name, team)
+            _wait_unmounted(paths["merged"])
+            if overlay_mount_state(paths["merged"]) != MOUNT_ABSENT:
+                raise PrerequisiteNotMetError("mount did not detach")
+            _mount_filestore(
+                client,
+                settings,
+                team,
+                env_name,
+                get_db_name(env_name, team.team_id),
+                image,
+                {},
+                template_name=template_name,
+                force_overlay=True,
+            )
+            state = overlay_mount_state(paths["merged"])
+            if state != MOUNT_ALIVE:
+                raise PrerequisiteNotMetError(
+                    f"remount did not become live (state: {state})"
+                )
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            record["detail"] = str(exc)
+            logger.error("Could not repair filestore overlay for %s: %s", env_name, exc)
+            # Do not restart against an absent or unverified filestore.
+            results.append(record)
+            continue
+
+        if was_running and container is not None:
+            try:
+                container.start()
+                container.reload()
+                if container.status != "running":
+                    raise RuntimeError(
+                        f"container status after start is {container.status}"
+                    )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                record["detail"] = f"restart failed: {exc}"
+                logger.error("Could not restart %s: %s", container_name, exc)
+                results.append(record)
+                continue
+
+        record["repaired"] = True
+        logger.warning(
+            "Remounted filestore overlay for %s (upper deltas kept)",
+            env_name,
+        )
+        results.append(record)
 
 
 def _install_apt_packages(container: Any, repo_path: str) -> str:
@@ -1859,9 +1985,18 @@ def _init_empty_database(
     odoo_env: dict[str, Any],
     odoo_volumes: dict[str, Any],
     env_name: str,
+    odoo_conf_path: str,
 ) -> str:
     """Initialize a fresh empty database with ``-i base`` in an isolated,
-    short-lived container, then remove it. Returns a setup-log line.
+    short-lived container, then remove it. Returns a setup-log line; a
+    non-zero init exit raises ExternalCommandError — the database is empty or
+    half-initialized, and serving it anyway would surface only as a readiness
+    timeout much later.
+
+    The init reads the same generated *odoo_conf_path* as the serving
+    container, not the image's stock conf: options that only take effect
+    when a database is created — demo data above all — would otherwise be
+    decided by the image, whatever the repository or team conf says.
 
     This runs *before* the long-running serving container exists, so the init
     is the only Odoo process touching the database. It avoids the registry
@@ -1877,20 +2012,29 @@ def _init_empty_database(
     except docker.errors.NotFound:
         pass
 
-    init_container = client.containers.run(
+    init_cmd = f"odoo -d {env_db} -i base --stop-after-init --no-http"
+    init_container = client.containers.create(
         image=odoo_image,
         name=init_name,
-        detach=True,
         network=get_team_network_name(team.team_id, settings.prefix),
         extra_hosts={"host.docker.internal": "host-gateway"},
         **default_env_limits(),
         environment=odoo_env,
         volumes=odoo_volumes,
-        command=f"odoo -d {env_db} -i base --stop-after-init --no-http",
+        command=init_cmd,
     )
     exit_code: int = -1
     logs = ""
     try:
+        # Copied in before start, the way the serving container gets it.
+        _copy_file_to_container(
+            init_container,
+            odoo_conf_path,
+            "/etc/odoo",
+            archive_name="odoo.conf",
+            mode=_CONTAINER_CONF_MODE,
+        )
+        init_container.start()
         result = init_container.wait(timeout=600)
         exit_code = (
             result.get("StatusCode", -1) if isinstance(result, dict) else int(result)
@@ -1909,7 +2053,7 @@ def _init_empty_database(
         logger.error(
             "Base init failed (exit %s)", exit_code, extra={"env_name": env_name}
         )
-        return f"[INIT] odoo -i base FAILED (exit {exit_code}):\n{logs[-4000:]}"
+        raise ExternalCommandError(init_cmd, exit_code, logs[-4000:])
     logger.info("Base init completed", extra={"env_name": env_name})
     return "[INIT] odoo -i base completed successfully"
 
@@ -2282,7 +2426,11 @@ def create_environment(
             hostname_prefix = ""
             used_hostnames: set[str] = set()
             if wants_hostname:
-                hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
+                if not requested_hostname:
+                    # Only an automatic slot name is built from the team
+                    # prefix; an explicit name needs none, so a bare team
+                    # hostname like example.com must not be split here.
+                    hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
                 active_envs, used_hostnames = _environment_hostname_usage(
                     client, settings, team, exclude_env=resolved_env_name
                 )
@@ -2516,8 +2664,6 @@ def _create_environment_impl(
         "oduflow.template": template_name if template_name is not None else "none",
         "oduflow.git_branch": branch,
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        # Personal token authorizing the scoped MCP endpoint /mcp/<env>.
-        MCP_TOKEN_LABEL: generate_token(),
     }
 
     if extra_addons:
@@ -2620,6 +2766,11 @@ def _create_environment_impl(
             f'CREATE DATABASE "{env_db}" TEMPLATE "{tpl_db}"{strategy} '
             f'TABLESPACE "{ts_name}";',
         )
+        # The scheduled-sync snapshot this database came from, so a later sync
+        # of the same snapshot does not reset it.
+        from oduflow.template_generations import record_provenance
+
+        record_provenance(team, env_name, template_name)
     else:
         _exec_sql(
             client,
@@ -2658,26 +2809,16 @@ def _create_environment_impl(
     for host_path, container_path in extra_mount_paths:
         odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
 
-    repo_odoo_conf = os.path.join(repo_path, ".oduflow", "odoo.conf")
-    if os.path.isfile(repo_odoo_conf):
-        base_conf_path = repo_odoo_conf
-        logger.info("Using odoo.conf from repository")
-    elif _resolve_instance_conf("odoo.conf", team.data_dir).exists():
-        base_conf_path = str(_resolve_instance_conf("odoo.conf", team.data_dir))
-    else:
-        base_conf_path = None
+    from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
 
-    odoo_conf_to_copy: str | None = None
-    if base_conf_path:
-        from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
-
-        generated_conf = os.path.join(workspace_path, "odoo.conf")
-        extra_container_paths = extra_conf_paths
-        main_addons_path = resolve_main_addons_path(repo_path)
-        generate_odoo_conf(
-            base_conf_path, generated_conf, extra_container_paths, main_addons_path
-        )
-        odoo_conf_to_copy = generated_conf
+    odoo_conf_to_copy = os.path.join(workspace_path, "odoo.conf")
+    generate_odoo_conf(
+        _dev_base_conf_path(team, repo_path),
+        odoo_conf_to_copy,
+        extra_conf_paths,
+        resolve_main_addons_path(repo_path),
+        odoo_image=odoo_image,
+    )
 
     template_upgrades: dict[str, tuple[str, str]] = {}
     template_check_error: str | None = None
@@ -2778,8 +2919,8 @@ def _create_environment_impl(
             "No template — initialising Odoo with -i base (isolated container)",
             extra={"env_name": env_name},
         )
-        setup_logs.append(
-            _init_empty_database(
+        try:
+            init_log = _init_empty_database(
                 client,
                 settings,
                 team,
@@ -2788,8 +2929,18 @@ def _create_environment_impl(
                 odoo_env,
                 odoo_volumes,
                 env_name,
+                odoo_conf_to_copy,
             )
-        )
+        except Exception:
+            # Same rollback as a containers.run failure below: the database,
+            # role, filestore, workspace and allocated port already exist.
+            logger.error(
+                "Base init failed for '%s'; rolling back partial environment",
+                env_name,
+            )
+            _rollback_partial_environment(client, settings, team, env_name)
+            raise
+        setup_logs.append(init_log)
 
     try:
         container = client.containers.run(**run_kwargs)
@@ -2870,7 +3021,20 @@ def _create_environment_impl(
     result["template_lineage"] = lineage
     result["elapsed_seconds"] = round(time.time() - start_time, 1)
     activity.touch(team, env_name)
-    # Let the new env's MCP token resolve without waiting for the scan interval.
+    # Personal token authorizing the scoped MCP endpoint /mcp/<env>. Minted on
+    # first create; a recreate under the same name finds the preserved record
+    # and keeps already-configured MCP clients working. Best-effort: an
+    # unwritable registry must not fail an environment that already works
+    # (MCP Access then reports no token).
+    try:
+        env_tokens.create_or_get(team, env_name)
+    except (OSError, ValueError) as e:
+        logger.warning(
+            "Could not store MCP token for '%s': %s",
+            env_name,
+            e,
+            extra={"env_name": env_name},
+        )
     invalidate_cache()
     return result
 
@@ -2940,6 +3104,18 @@ def _claude_auth_mode(settings: Settings, team: TeamSettings) -> str:
     return "interactive"
 
 
+def _codex_auth_mode(settings: Settings, team: TeamSettings) -> str:
+    """Return the effective Codex credential mode, without secrets.
+
+    A non-empty OPENAI_API_KEY is signed in by the agent container on every
+    start (``codex login --with-api-key``), replacing any ChatGPT sign-in made
+    from Agent CLI; otherwise Codex uses that persisted interactive sign-in.
+    """
+    if _agent_env_vars(settings, team).get("OPENAI_API_KEY"):
+        return "api_key"
+    return "interactive"
+
+
 def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> str:
     """This environment's SCOPED MCP endpoint as seen from the agent container.
 
@@ -2957,21 +3133,89 @@ def get_agent_mcp_url(settings: Settings, team: TeamSettings, env_name: str) -> 
     return f"{base}/mcp/{quote(env_name, safe='/')}"
 
 
+def agent_exec_identity(uid: int) -> tuple[str, dict[str, str]]:
+    """``docker exec`` user and environment for an environment's own uid.
+
+    Every console/chat session, checkout hook and attachment operation of an
+    environment runs as that environment's uid with its private HOME and
+    TMPDIR, so the kernel keeps environments of one team apart inside their
+    shared agent container (specs/0079-per-environment-agent-identities.md).
+    The image sets CLAUDE_CONFIG_DIR/CODEX_HOME to the shared ``agent`` HOME;
+    they are overridden here. Claude Code's self-updater is off: the shared
+    install is read-only to environments and refreshed by the container
+    entrypoint.
+    """
+    home = get_agent_env_home_dir(uid)
+    return f"{uid}:{uid}", {
+        "HOME": home,
+        "CLAUDE_CONFIG_DIR": f"{home}/.claude",
+        "CODEX_HOME": f"{home}/.codex",
+        "TMPDIR": get_agent_env_tmp_dir(uid),
+        "DISABLE_AUTOUPDATER": "1",
+    }
+
+
+def agent_session_command(cmd: list[str]) -> list[str]:
+    """Wrap a console/chat command so everything it creates is private.
+
+    ``docker exec`` has no umask option and starts with 022. Files a session
+    writes outside its own 0700 directories (``/dev/shm``, a tool that
+    hard-codes ``/tmp``) would then be readable by every other environment's
+    uid in the container.
+    """
+    return ["sh", "-c", 'umask 077; exec "$@"', "sh", *cmd]
+
+
+def agent_env_uid(
+    container: docker.models.containers.Container,
+    team: TeamSettings,
+    env_name: str,
+) -> int | None:
+    """The environment's uid if its identity and checkout are usable, else None.
+
+    A uid is returned only when that uid has an account, a HOME and a TMPDIR
+    in the (possibly recreated) container and the checkout belongs to it, so
+    an environment from before per-environment uids, a lost account or a
+    missing clone all route through :func:`ensure_agent_env_checkout`.
+    """
+    uid = agent_uids.get_uid(team, env_name)
+    if uid is None:
+        return None
+    user, env = agent_exec_identity(uid)
+    code, _ = container.exec_run(
+        [
+            "sh",
+            "-c",
+            'getent passwd "$(id -u)" >/dev/null && [ -d "$HOME" ] '
+            '&& [ -w "$TMPDIR" ] && [ -w "$1/.git" ]',
+            "sh",
+            get_agent_checkout_dir(env_name),
+        ],
+        user=user,
+        environment=env,
+    )
+    return uid if code == 0 else None
+
+
 def refresh_agent_mcp_config(
     container: docker.models.containers.Container,
     settings: Settings,
     team: TeamSettings,
     env_name: str,
+    uid: int,
 ) -> None:
-    """Refresh an existing Claude checkout's generated MCP entry and identity.
+    """Refresh an existing Claude checkout's generated MCP entries and identity.
 
     Agent workspaces persist across Oduflow/coder upgrades, so a checkout may
-    still contain the old host-gateway URL or the old ``oduflow`` server name.
-    Rewrite only the generated ``development`` entry and drop the legacy one,
-    preserving Agent Browser and any user-added servers. The token remains an
-    environment placeholder and is never written to disk. A generated
-    per-checkout commit email (``<user>@<slug>.local``) follows the brand.
+    still contain an old host-gateway URL, the old ``oduflow`` server name or
+    predate the built-in Agent Browser. Rewrite only the generated
+    ``development`` and ``agent_browser`` entries and drop the legacy one,
+    preserving any user-added servers. The token remains an environment
+    placeholder and is never written to disk. A generated per-checkout commit
+    email (``<user>@<slug>.local``) follows the brand. Runs as the
+    environment's own ``uid`` (the only one that can write its checkout).
     """
+    user, env = agent_exec_identity(uid)
     config_path = os.path.join(get_agent_checkout_dir(env_name), ".mcp.json")
     script = """\
 set -eu
@@ -2982,7 +3226,10 @@ brand_slug=$3
 tmp_path="${config_path}.tmp.$$"
 trap 'rm -f "$tmp_path"' EXIT
 jq --arg url "$mcp_url" --arg name "$4" --arg legacy "$5" \
-  '.mcpServers |= (del(.[$legacy]) | .[$name] = {type: "http", url: $url, headers: {Authorization: "Bearer ${ODUFLOW_MCP_TOKEN}"}})' \
+  '.mcpServers = ((if (.mcpServers | type) == "object" then .mcpServers else {} end)
+    | del(.[$legacy])
+    | .agent_browser = {type: "stdio", command: "agent-browser", args: ["mcp", "--tools", "all"]}
+    | .[$name] = {type: "http", url: $url, headers: {Authorization: "Bearer ${ODUFLOW_MCP_TOKEN}"}})' \
   "$config_path" > "$tmp_path"
 mv "$tmp_path" "$config_path"
 checkout=$(dirname "$config_path")
@@ -2991,7 +3238,8 @@ case "$email" in
   *@*.local) git -C "$checkout" config user.email "${email%@*}@${brand_slug}.local" ;;
 esac
 """
-    exit_code, output = container.exec_run(
+    _agent_exec(
+        container,
         [
             "sh",
             "-c",
@@ -3003,20 +3251,10 @@ esac
             AGENT_MCP_SERVER,
             LEGACY_AGENT_MCP_SERVER,
         ],
-        user=AGENT_USER,
+        f"Agent MCP config refresh for '{env_name}'",
+        user=user,
+        environment=env,
     )
-    if exit_code not in (0, None):
-        detail = (
-            output.decode("utf-8", "replace")
-            if isinstance(output, (bytes, bytearray))
-            else output
-        )
-        logger.warning(
-            "Agent MCP config refresh for '%s' exited %s: %s",
-            env_name,
-            exit_code,
-            detail,
-        )
 
 
 def _agent_container_config(
@@ -3046,6 +3284,9 @@ def _agent_container_config(
         },
         "extra_hosts": {"host.docker.internal": "host-gateway"},
         "shm_size": "1g",
+        # A real PID 1 reaps the orphans of ended sessions and of the
+        # processes env-user.sh kills when an environment is deleted.
+        "init": True,
         "restart_policy": {"Name": "unless-stopped"},
     }
 
@@ -3093,9 +3334,10 @@ def _prepare_agent_volumes(
     Older coder images mounted HOME at ``/root`` and consequently left both
     named volumes root-owned. A short-lived, networkless init container runs
     as root only to migrate that existing data and copy the host credential
-    store and team SSH deploy key; the long-lived container and every agent
-    exec run as ``agent``. Marker files avoid recursively walking large
-    checkouts after migration.
+    store and team SSH deploy key (the sources env-user.sh copies into every
+    environment's HOME); the long-lived container runs as ``agent`` and every
+    session as its environment's own uid. Marker files avoid recursively
+    walking large checkouts after migration.
     """
     volumes: dict[str, dict[str, str]] = {
         home_volume: {"bind": AGENT_HOME, "mode": "rw"},
@@ -3118,6 +3360,11 @@ if ! id agent >/dev/null 2>&1; then
     echo "build the current docker/agent image and configure [agent].image to that tag" >&2
     exit 64
 fi
+if [ ! -x /usr/local/bin/env-user.sh ]; then
+    echo "incompatible coder image: missing per-environment identities (env-user.sh)" >&2
+    echo "build the current docker/agent image and configure [agent].image to that tag" >&2
+    exit 64
+fi
 if [ ! -f /home/agent/.oduflow-owner-v2 ]; then
     chown -R agent:agent /home/agent
     touch /home/agent/.oduflow-owner-v2
@@ -3136,23 +3383,6 @@ if [ -f /run/oduflow/ssh-key ]; then
     install -d -m 700 -o agent -g agent /home/agent/.ssh
     install -m 600 -o agent -g agent \
         /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
-    # Oduflow's SSH policy lives in its own file, rewritten on every
-    # container creation so policy changes reach existing (persistent) homes;
-    # the user-editable config only carries the Include. Mirrors the
-    # server-side team_ssh_command options.
-    printf '%s\\n' 'Host *' '  IdentitiesOnly yes' '  BatchMode yes' \
-        '  StrictHostKeyChecking accept-new' > /home/agent/.ssh/oduflow_config
-    chown agent:agent /home/agent/.ssh/oduflow_config
-    chmod 600 /home/agent/.ssh/oduflow_config
-    if [ ! -f /home/agent/.ssh/config ]; then
-        printf 'Include oduflow_config\\n' > /home/agent/.ssh/config
-    elif ! grep -q 'Include oduflow_config' /home/agent/.ssh/config; then
-        { printf 'Include oduflow_config\\n'; \
-          cat /home/agent/.ssh/config; } > /home/agent/.ssh/config.tmp
-        mv /home/agent/.ssh/config.tmp /home/agent/.ssh/config
-    fi
-    chown agent:agent /home/agent/.ssh/config
-    chmod 600 /home/agent/.ssh/config
 fi
 """
     client.containers.run(
@@ -3171,16 +3401,17 @@ def _ensure_agent_container(
 ) -> None:
     """Ensure the team's coding-agent container (best-effort, opt-in).
 
-    One container serves every environment of the team. Its HOME (auth +
-    sessions) and /workspace (one checkout per environment, at
-    /workspace/<slug>) live on persistent named volumes, so a login done once
-    survives recreation and is shared by the team's environments. Per-env
-    checkouts are created by ``_agent_add_env``; the agent reaches each
-    environment only through the Oduflow MCP server (git push ->
+    One container serves every environment of the team, each environment as
+    its own uid with a private HOME (logins + sessions) and checkout
+    (/workspace/<slug>), all on persistent named volumes, so they survive
+    recreation. Identities and checkouts are created by ``_agent_add_env`` and
+    restored for every environment after a (re)creation; the agent reaches
+    each environment only through the Oduflow MCP server (git push ->
     pull_and_apply). Config (oduflow.toml) is the source of truth: an existing
     container created with a different agent config (credentials, image, port)
     is recreated automatically. Never fatal to the caller.
-    See specs/0029-agent-console-and-chat.md.
+    See specs/0029-agent-console-and-chat.md and
+    specs/0079-per-environment-agent-identities.md.
     """
     if not team.agent_enabled:
         return
@@ -3242,8 +3473,30 @@ def _ensure_agent_container(
         # Resolve the exact immutable image before touching a working
         # container. A failed pull therefore leaves the previous agent
         # available and its old config hash ensures a later restart retries.
+        # Any config drift lands here, not only a new image: a tag that is
+        # already local costs one registry round-trip, a new pinned tag a
+        # ~1 GB download that blocks server startup. Hence the reason up
+        # front, periodic progress, and the duration either way.
+        reason = (
+            "Agent container missing"
+            if existing_container is None
+            else "Agent config changed"
+        )
+        logger.info(
+            "%s; pulling agent image %s",
+            reason,
+            settings.agent_image,
+            extra={"container": container_name},
+        )
+        pull_started = time.monotonic()
         try:
-            client.images.pull(settings.agent_image)
+            pull_with_progress(client, settings.agent_image, "Agent image")
+            logger.info(
+                "Pulled agent image %s in %.1fs",
+                settings.agent_image,
+                time.monotonic() - pull_started,
+                extra={"container": container_name},
+            )
         except Exception:
             outcome = (
                 "keeping existing container"
@@ -3251,8 +3504,9 @@ def _ensure_agent_container(
                 else "agent container was not created"
             )
             logger.warning(
-                "Could not pull agent image %s; %s",
+                "Could not pull agent image %s after %.1fs; %s",
                 settings.agent_image,
+                time.monotonic() - pull_started,
                 outcome,
                 extra={"container": container_name},
                 exc_info=True,
@@ -3263,7 +3517,7 @@ def _ensure_agent_container(
             # Config changed — recreate with the already-pulled image. HOME and
             # /workspace are volumes, so auth, sessions and checkouts survive.
             logger.info(
-                "Agent config changed; recreating container",
+                "Recreating agent container",
                 extra={"container": container_name},
             )
             existing_container.remove(force=True)
@@ -3291,12 +3545,16 @@ def _ensure_agent_container(
             # feeds the config hash and may be "" while the key is usable.
             ssh_key_file if os.path.isfile(ssh_key_file) else None,
         )
-        client.containers.run(
+        container = client.containers.run(
             name=container_name,
             labels=labels,
             **container_config,
         )
         logger.info("Agent container ensured", extra={"container": container_name})
+        # Accounts live in the container layer, so a fresh container needs
+        # every environment's identity back (and re-seeds every HOME with the
+        # possibly changed config) before any session starts.
+        _agent_sync_identities(client, settings, team, container)
         # Report which Claude credential the (re)created container will use, so
         # authentication failures can be diagnosed from the logs. The secret
         # value is never logged, only the selected mode.
@@ -3310,6 +3568,101 @@ def _ensure_agent_container(
         logger.warning("Agent container ensure failed", exc_info=True)
 
 
+def _agent_exec(
+    container: docker.models.containers.Container,
+    cmd: list[str],
+    what: str,
+    **kwargs: Any,
+) -> bool:
+    """Run one agent-container exec; log a non-zero exit and report success."""
+    exit_code, output = container.exec_run(cmd, **kwargs)
+    if exit_code in (0, None):
+        return True
+    detail = (
+        output.decode("utf-8", "replace")
+        if isinstance(output, (bytes, bytearray))
+        else output
+    )
+    logger.warning("%s exited %s: %s", what, exit_code, detail)
+    return False
+
+
+def _team_env_names(
+    client: DockerClient, settings: Settings, team: TeamSettings
+) -> list[str]:
+    """Names of the team's environments, from their container labels."""
+    containers = client.containers.list(
+        all=True,
+        filters={
+            "label": [
+                f"{settings.managed_label}=true",
+                f"{settings.team_label}={team.team_id}",
+            ]
+        },
+        ignore_removed=True,
+    )
+    names = {
+        container.labels.get(settings.branch_label)
+        for container in containers
+        if container.name.startswith(settings.prefix)
+    }
+    return sorted(name for name in names if name)
+
+
+def _agent_purge_removed(
+    container: docker.models.containers.Container, team: TeamSettings
+) -> None:
+    """Finish the cleanup of deleted environments (best-effort).
+
+    A deletion while the agent container was stopped or gone, or a failed
+    ``env-user.sh remove``, leaves the retired uid's checkout, attachments and
+    HOME behind. They are removed before any environment is provisioned, so a
+    new environment that reuses the slug never inherits them. A uid stays
+    pending until its removal succeeds.
+    """
+    try:
+        for uid, slug in agent_uids.pending_removals(team).items():
+            if _agent_exec(
+                container,
+                [AGENT_ENV_USER_SCRIPT, "remove", slug, str(uid)],
+                f"Agent cleanup of deleted environment '{slug}' (uid {uid})",
+                user="root",
+            ):
+                agent_uids.forget_removed(team, uid)
+    except Exception:
+        logger.warning("Agent cleanup of deleted environments failed", exc_info=True)
+
+
+def _agent_sync_identities(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    container: docker.models.containers.Container,
+) -> None:
+    """Give every environment of the team its identity in a fresh container.
+
+    First finishes pending cleanups of deleted environments, then assigns
+    uids to environments that predate per-environment identities (the
+    one-time migration then hands their checkouts, attachments and transcripts
+    over to them) and restores the accounts of the others. Best-effort.
+    """
+    _agent_purge_removed(container, team)
+    try:
+        pairs = []
+        for env_name in _team_env_names(client, settings, team):
+            slug = slugify_branch(env_name)
+            if slug:
+                pairs.append(f"{slug}:{agent_uids.allocate_uid(team, env_name)}")
+        _agent_exec(
+            container,
+            [AGENT_ENV_USER_SCRIPT, "sync", *pairs],
+            "Agent identity sync",
+            user="root",
+        )
+    except Exception:
+        logger.warning("Agent identity sync failed", exc_info=True)
+
+
 def _agent_add_env(
     client: DockerClient,
     settings: Settings,
@@ -3319,11 +3672,12 @@ def _agent_add_env(
     branch: str,
     git_user: str,
 ) -> None:
-    """Create/refresh one environment's checkout in the team's agent container.
+    """Create/refresh one environment's identity and checkout.
 
-    Ensures the container exists, then execs clone-env.sh to clone/fetch the
-    branch into /workspace/<slug> and write that checkout's Claude .mcp.json.
-    Best-effort: never fatal to environment creation.
+    Ensures the container exists, gives the environment its own uid and
+    private HOME (env-user.sh, as root), then execs clone-env.sh AS THAT UID to
+    clone/fetch the branch into /workspace/<slug> and write that checkout's
+    Claude .mcp.json. Best-effort: never fatal to environment creation.
     """
     if not team.agent_enabled:
         return
@@ -3332,6 +3686,17 @@ def _agent_add_env(
         container = client.containers.get(
             get_agent_container_name(team.team_id, settings.prefix)
         )
+        _agent_purge_removed(container, team)
+        slug = slugify_branch(env_name)
+        uid = agent_uids.allocate_uid(team, env_name)
+        if not _agent_exec(
+            container,
+            [AGENT_ENV_USER_SCRIPT, "provision", slug, str(uid)],
+            f"Agent identity setup for '{env_name}'",
+            user="root",
+        ):
+            return
+        user, env = agent_exec_identity(uid)
         # The scoped per-env URL only; no token argument — the checkout's
         # .mcp.json holds a ${ODUFLOW_MCP_TOKEN} placeholder that each session
         # resolves from its own exec env.
@@ -3339,23 +3704,17 @@ def _agent_add_env(
             "/usr/local/bin/clone-env.sh",
             repo_url,
             branch,
-            slugify_branch(env_name),
+            slug,
             get_agent_mcp_url(settings, team, env_name),
             git_user,
         ]
-        exit_code, output = container.exec_run(cmd, user=AGENT_USER)
-        if exit_code not in (0, None):
-            detail = (
-                output.decode("utf-8", "replace")
-                if isinstance(output, (bytes, bytearray))
-                else output
-            )
-            logger.warning(
-                "Agent checkout setup for '%s' exited %s: %s",
-                env_name,
-                exit_code,
-                detail,
-            )
+        _agent_exec(
+            container,
+            cmd,
+            f"Agent checkout setup for '{env_name}'",
+            user=user,
+            environment=env,
+        )
     except Exception:
         logger.warning("Agent checkout setup failed for '%s'", env_name, exc_info=True)
 
@@ -3363,12 +3722,13 @@ def _agent_add_env(
 def ensure_agent_env_checkout(
     settings: Settings, team: TeamSettings, env_name: str
 ) -> None:
-    """Ensure an environment's checkout exists in the team's agent container.
+    """Ensure an environment's identity and checkout in the agent container.
 
-    Clones it on demand (idempotent) by reading repo/branch/git_user from the
-    environment's Odoo container labels. Used when opening a console/chat so
-    that environments created before the agent feature — or a fresh workspace
-    volume — get their ``/workspace/<slug>`` checkout without a full recreate.
+    Provisions and clones on demand (idempotent) by reading repo/branch/git_user
+    from the environment's Odoo container labels. Used when opening a
+    console/chat so that environments created before the agent feature (or
+    before per-environment identities), or a fresh workspace volume, get their
+    uid and ``/workspace/<slug>`` checkout without a full recreate.
     Best-effort.
     """
     if not team.agent_enabled:
@@ -3405,10 +3765,17 @@ def _agent_rename_env(
 
     Deliberately a move, not remove + re-clone: the checkout can hold the coding
     agent's uncommitted work, which ``_agent_remove_env`` would delete. The
-    caller follows with :func:`_agent_add_env`, which rewrites that checkout's
-    ``.mcp.json`` with the renamed environment's scoped MCP URL. Best-effort,
-    like every other agent-container side effect.
+    environment keeps its uid (and with it its HOME, logins and the ownership
+    of what is moved). The caller follows with :func:`_agent_add_env`, which
+    rewrites that checkout's ``.mcp.json`` with the renamed environment's
+    scoped MCP URL. Best-effort, like every other agent-container side effect.
     """
+    # The uid follows the environment even while the agent is disabled, so a
+    # later re-enable finds the renamed environment's data under its owner.
+    try:
+        agent_uids.rename_env(team, old_name, new_name)
+    except Exception:
+        logger.warning("Agent identity rename failed for '%s'", old_name, exc_info=True)
     if not team.agent_enabled:
         return
     # Same guard as _agent_remove_env: an empty slug would make the paths below
@@ -3430,6 +3797,8 @@ def _agent_rename_env(
     ):
         if old_dir == new_dir:
             continue
+        # Root: the parents belong to the shared agent user, the directories
+        # to the environment.
         with contextlib.suppress(Exception):
             container.exec_run(
                 [
@@ -3438,15 +3807,19 @@ def _agent_rename_env(
                     f'[ -d "{old_dir}" ] || exit 0; rm -rf -- "{new_dir}"; '
                     f'mv -- "{old_dir}" "{new_dir}"',
                 ],
-                user=AGENT_USER,
+                user="root",
             )
 
 
 def _agent_remove_env(
     client: DockerClient, settings: Settings, team: TeamSettings, env_name: str
 ) -> None:
-    """Remove one environment's checkout and Agent Chat attachments.
+    """Remove one environment's identity, checkout, attachments and HOME.
 
+    Its uid is retired first (never handed out again), then its running
+    sessions are killed and its files removed. If the agent container cannot
+    do that now (stopped, gone, or the removal fails), the uid stays pending
+    and the cleanup is retried before any environment is provisioned again.
     Best-effort; the container itself keeps running (it serves other envs).
     """
     # A name that slugifies to nothing would make the checkout dir /workspace/
@@ -3455,6 +3828,11 @@ def _agent_remove_env(
     if not slugify_branch(env_name):
         logger.warning("Agent checkout removal skipped: empty slug for '%s'", env_name)
         return
+    try:
+        uid = agent_uids.retire_uid(team, env_name)
+    except Exception:
+        logger.warning("Agent identity lookup failed for '%s'", env_name, exc_info=True)
+        uid = None
     try:
         container = client.containers.get(
             get_agent_container_name(team.team_id, settings.prefix)
@@ -3466,6 +3844,11 @@ def _agent_remove_env(
             "Agent checkout removal failed for '%s'", env_name, exc_info=True
         )
         return
+    if uid is not None:
+        _agent_purge_removed(container, team)
+        return
+    # An environment from before per-environment identities: its checkout
+    # and attachments still belong to the shared agent user.
     with contextlib.suppress(Exception):
         container.exec_run(
             [
@@ -3475,7 +3858,7 @@ def _agent_remove_env(
                 get_agent_checkout_dir(env_name),
                 get_agent_upload_dir(env_name),
             ],
-            user=AGENT_USER,
+            user="root",
         )
 
 
@@ -3558,11 +3941,14 @@ def require_environment(settings: Settings, team: TeamSettings, env_name: str) -
 
 
 def get_env_token(settings: Settings, team: TeamSettings, env_name: str) -> str | None:
-    """Return the per-environment MCP access token from the container label.
+    """Return the per-environment MCP access token.
 
-    Returns ``None`` for environments created before the feature existed (their
-    container carries no ``oduflow.mcp_token`` label and Docker labels cannot be
-    added without recreating the container).
+    The token lives in the team's registry (``mcp_tokens.json``), keyed by the
+    environment name, so it survives container recreation. A container whose
+    team registry has no record (state restored from a pre-registry backup)
+    falls back to the legacy ``oduflow.mcp_token`` label and adopts it into the
+    registry so it resolves again. Returns ``None`` for environments created
+    before tokens existed.
     """
     client = get_client()
     container_name = get_resource_name(env_name, "odoo", settings.prefix, team.team_id)
@@ -3570,7 +3956,16 @@ def get_env_token(settings: Settings, team: TeamSettings, env_name: str) -> str 
         container = client.containers.get(container_name)
     except docker.errors.NotFound:
         raise NotFoundError(f"Environment '{env_name}' does not exist.")
-    return container.labels.get(MCP_TOKEN_LABEL) or None
+    token = env_tokens.get(team, env_name)
+    if token:
+        return token
+    legacy = container.labels.get(env_tokens.MCP_TOKEN_LABEL) or None
+    if legacy:
+        try:
+            env_tokens.adopt(team, env_name, legacy)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not adopt legacy MCP token for '%s': %s", env_name, e)
+    return legacy
 
 
 def get_note(settings: Settings, team: TeamSettings, env_name: str) -> str:
@@ -3604,12 +3999,30 @@ def delete_environment(
     team: TeamSettings,
     env_name: str,
     *,
-    preserve_share: bool = False,
+    preserve_access: bool = False,
 ) -> list[str]:
+    """Tear the environment down.
+
+    ``preserve_access=True`` (the recreate paths) keeps the environment's
+    name-keyed credentials — the dashboard share secret and the scoped MCP
+    token — so links and MCP clients configured against this name keep working
+    on the replacement environment. A plain delete revokes both: a *future*
+    unrelated environment under the same name must not be reachable with
+    credentials handed out for this one.
+    """
     if is_protected(settings, team, env_name):
         raise ProtectedError(
             f"Environment '{env_name}' is protected. Unprotect it before deleting."
         )
+    from oduflow.template_generations import (
+        collect_best_effort,
+        has_pin,
+        require_no_recovery,
+    )
+
+    require_no_recovery(team, env_name)
+    retained_generation = has_pin(team, env_name)
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -3699,13 +4112,136 @@ def delete_environment(
                 if os.path.isdir(wt_path):
                     remove_worktree(team, repo_name, wt_path)
         shutil.rmtree(workspace_path)
+    if retained_generation:
+        # Its pin is gone: free the retained filestore if nothing else uses it.
+        # Callers hold the environment lock with the team (the shared team gate).
+        collect_best_effort(team)
 
     activity.remove(team, env_name)
-    if not preserve_share:
+    if not preserve_access:
         env_share.remove(team, env_name)
+        env_tokens.remove(team, env_name)
     invalidate_cache()
     logger.info("Environment deleted", extra={"env_name": env_name})
     return warnings
+
+
+def recreate_environment(
+    settings: Settings, team: TeamSettings, env_name: str
+) -> dict[str, Any]:
+    """Tear the environment down and provision it again from its recorded
+    configuration (repo, image, template, extra addons, git user, env vars,
+    live-mount path, hostname).
+
+    Unlike delete + create, the environment's *identity* is kept: the dashboard
+    share link and the scoped MCP token are preserved (``preserve_access``), so
+    a link already handed to a client and an MCP client already configured
+    against ``/mcp/<env>`` keep working on the replacement.
+
+    Shared by the dashboard Recreate action and the MCP tool; the caller holds
+    the environment lock.
+    """
+    from oduflow.docker_ops import system_ops
+    from oduflow.docker_ops.client import get_client as _get_client
+
+    client = _get_client()
+    odoo_container_name = get_resource_name(
+        env_name, "odoo", settings.prefix, team.team_id
+    )
+    try:
+        container = client.containers.get(odoo_container_name)
+        labels = container.labels
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Environment '{env_name}' not found.")
+
+    repo_url = labels.get(settings.repo_label, "")
+    odoo_image = labels.get(settings.image_label, "")
+    template_raw = labels.get("oduflow.template", "")
+    template_name = template_raw if template_raw and template_raw != "none" else None
+    extra_addons = json.loads(labels.get("oduflow.extra_addons", "{}")) or None
+    git_user = labels.get("oduflow.git_user", "")
+    env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
+    local_path = labels.get("oduflow.local_path", "")
+    # The environment name and the git branch it tracks can differ (several
+    # environments off one branch), so recreate from the recorded branch label
+    # rather than from the environment name.
+    git_branch = labels.get("oduflow.git_branch", env_name)
+    recreate_labels = dict(labels)
+    _reconcile_environment_hostname_for_update(
+        client, settings, team, env_name, recreate_labels
+    )
+    hostname = recreate_labels.get(ENV_HOSTNAME_LABEL, "")
+    hostname_source = recreate_labels.get(ENV_HOSTNAME_SOURCE_LABEL, "")
+
+    # Check disk space BEFORE deleting the old environment: refusing here loses
+    # nothing, while failing after delete_environment would destroy a working
+    # environment. Conservative on purpose — the old environment's own space is
+    # not yet freed at measurement time.
+    est_db_bytes = system_ops.estimate_new_db_bytes(
+        client, settings, team, template_name
+    )
+    system_ops.check_disk_space(
+        client,
+        settings,
+        team,
+        template_name,
+        estimated_db_bytes=est_db_bytes,
+        local_mount=bool(local_path),
+        env_name=env_name,
+    )
+
+    # Same reasoning as the disk-space check: a dangling secret reference must
+    # refuse the recreate here, while refusing loses nothing —
+    # create_environment would only re-check after delete_environment has
+    # already destroyed the working environment.
+    secret_store.resolve_env_secrets(team, env_vars)
+    # Same for a stopped database server or a template without its database.
+    _ensure_system_ready(client, settings, team, template_name, odoo_image)
+
+    # A token still living only in the legacy container label (registry record
+    # lost to a pre-registry backup restore or a failed migration adopt) dies
+    # with the container below. Adopt it into the registry first — same
+    # pattern as get_env_token — so the recreate preserves it instead of
+    # rotating exactly the credential preserve_access exists to keep.
+    legacy_token = labels.get(env_tokens.MCP_TOKEN_LABEL) or None
+    if legacy_token:
+        try:
+            env_tokens.adopt(team, env_name, legacy_token)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not adopt legacy MCP token for '%s': %s", env_name, e)
+
+    delete_environment(settings, team, env_name, preserve_access=True)
+    try:
+        return create_environment(
+            settings,
+            team,
+            git_branch,
+            repo_url,
+            odoo_image,
+            env_name=env_name,
+            template_name=template_name,
+            extra_addons=extra_addons,
+            git_user=git_user,
+            env_vars=env_vars,
+            local_path=local_path,
+            hostname=hostname,
+            hostname_source=hostname_source,
+        )
+    except BaseException:
+        # The old environment is gone and its replacement never appeared, so
+        # the preserved credentials now reference nothing. Revoke them before
+        # propagating: a future unrelated environment created under this name
+        # must not be reachable with them (delete_environment's invariant).
+        env_share.remove(team, env_name)
+        env_tokens.remove(team, env_name)
+        invalidate_cache()
+        raise
+
+
+def _template_auto_refresh(team: TeamSettings, env_name: str) -> bool:
+    from oduflow.template_sync import env_policy
+
+    return bool(env_policy(team, env_name).get("auto_refresh", False))
 
 
 def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
@@ -3753,6 +4289,7 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
                 ),
                 "db_name": get_db_name(env_name, team.team_id),
                 "protected": is_protected(settings, team, env_name),
+                "auto_refresh_template": _template_auto_refresh(team, env_name),
                 "auto_install_modules": container.labels.get(
                     "oduflow.auto_install_modules", ""
                 ),
@@ -3888,6 +4425,10 @@ def _assert_team_owns(
 def restart_environment(
     settings: Settings, env_name: str, team: TeamSettings
 ) -> dict[str, str]:
+    from oduflow.template_generations import require_no_recovery
+
+    require_no_recovery(team, env_name)
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -3988,6 +4529,10 @@ def ensure_overlay_mounted(
 def start_environment(
     settings: Settings, env_name: str, team: TeamSettings
 ) -> dict[str, Any]:
+    from oduflow.template_generations import require_no_recovery
+
+    require_no_recovery(team, env_name)
+
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
@@ -4331,6 +4876,19 @@ def _detect_local_changes(
     return None, changed
 
 
+def _dev_base_conf_path(team: TeamSettings, repo_path: str) -> str:
+    """Resolve the dev base conf: repo ``.oduflow/odoo.conf`` > team > bundled.
+
+    Always a path: :func:`_resolve_instance_conf` falls back to the bundled
+    ``odoo.conf``.
+    """
+    repo_conf = os.path.join(repo_path, ".oduflow", "odoo.conf")
+    if os.path.isfile(repo_conf):
+        logger.info("Using odoo.conf from repository")
+        return repo_conf
+    return str(_resolve_instance_conf("odoo.conf", team.data_dir))
+
+
 def _reapply_odoo_conf(
     settings: Settings,
     team: TeamSettings,
@@ -4339,10 +4897,11 @@ def _reapply_odoo_conf(
 ) -> bool:
     """Reconstruct ``/etc/odoo/odoo.conf`` inside *container*.
 
-    Resolves the base config (repo ``.oduflow/odoo.conf`` takes priority over the
-    instance-level conf), regenerates the merged conf with *container*'s current
-    extra-addons paths, and copies it into the container. Returns ``True`` if a
-    conf was applied, ``False`` if no base config exists.
+    Resolves the base config (:func:`_dev_base_conf_path`), regenerates the
+    merged conf with *container*'s current extra-addons paths, and copies it
+    into the container. Always returns ``True``, like
+    :func:`~oduflow.docker_ops.production_ops.reapply_prod_odoo_conf`: a base
+    conf always exists.
 
     The container reads ``/etc/odoo/odoo.conf`` as a *copy* made at create/update
     time — a plain restart reuses the stale copy, so this must run before a
@@ -4350,8 +4909,8 @@ def _reapply_odoo_conf(
     """
     labels = container.labels if isinstance(container.labels, dict) else {}
     if labels.get("oduflow.prod") == "true":
-        # Production uses its own conf chain (odoo.prod.conf + tuned worker
-        # overrides). Local import: production_ops composes env_ops helpers.
+        # Production uses its own conf chain (team odoo.prod.conf + tuned
+        # worker overrides). Local import: production_ops composes env_ops helpers.
         from oduflow.docker_ops.production_ops import reapply_prod_odoo_conf
 
         return reapply_prod_odoo_conf(
@@ -4361,13 +4920,6 @@ def _reapply_odoo_conf(
         env_name, team.workspaces_dir
     )
     workspace_path = get_workspace_path(env_name, team.workspaces_dir)
-    repo_odoo_conf = os.path.join(repo_path, ".oduflow", "odoo.conf")
-    if os.path.isfile(repo_odoo_conf):
-        base_conf_path = repo_odoo_conf
-    elif _resolve_instance_conf("odoo.conf", team.data_dir).exists():
-        base_conf_path = str(_resolve_instance_conf("odoo.conf", team.data_dir))
-    else:
-        return False
 
     from oduflow.extra_addons import (
         generate_odoo_conf,
@@ -4386,7 +4938,11 @@ def _reapply_odoo_conf(
     generated_conf = os.path.join(workspace_path, "odoo.conf")
     main_addons_path = resolve_main_addons_path(repo_path)
     generate_odoo_conf(
-        base_conf_path, generated_conf, extra_container_paths, main_addons_path
+        _dev_base_conf_path(team, repo_path),
+        generated_conf,
+        extra_container_paths,
+        main_addons_path,
+        odoo_image=labels.get(settings.image_label, ""),
     )
     _copy_file_to_container(container, generated_conf, "/etc/odoo")
     return True
@@ -4437,6 +4993,34 @@ def _dependency_failure_result(
     }
 
 
+def _failure_details(
+    dep_units: list[tuple[str, str]] | None,
+    dep_exit: int,
+    dep_logs: list[str],
+    failed_step: str = "",
+    failed_output: str = "",
+) -> dict[str, Any]:
+    """Diagnostic keys of an :func:`_apply_actions` result.
+
+    ``failed_step`` names the step whose code the result reports as
+    ``exit_code`` (``install`` / ``upgrade``, else ``dependencies``) and
+    ``failed_step_output`` is that step's own output, not the combined log.
+    ``dependencies_exit_code`` is reported whenever a reinstall ran, so a
+    failed module command can be told apart from one that failed because a
+    dependency did not install.
+    """
+    details: dict[str, Any] = {}
+    if dep_units:
+        details["dependencies_exit_code"] = dep_exit
+    if not failed_step and dep_exit:
+        failed_step = "dependencies"
+        failed_output = "\n".join(log for log in dep_logs if "FAILED" in log)
+    if failed_step:
+        details["failed_step"] = failed_step
+        details["failed_step_output"] = failed_output
+    return details
+
+
 def _apply_actions(
     client: DockerClient,
     settings: Settings,
@@ -4479,17 +5063,22 @@ def _apply_actions(
         dep_container = client.containers.get(odoo_container_name)
         dep_exit, _, dep_logs = _install_repo_dependencies(dep_container, dep_units)
         if dep_exit:
-            return _dependency_failure_result(
-                env_name,
-                changed_files,
-                to_install,
-                to_upgrade,
-                do_restart,
-                do_refresh,
-                config_changed,
-                dep_exit,
-                "\n".join(dep_logs),
-            )
+            return {
+                **_dependency_failure_result(
+                    env_name,
+                    changed_files,
+                    to_install,
+                    to_upgrade,
+                    do_restart,
+                    do_refresh,
+                    config_changed,
+                    dep_exit,
+                    "\n".join(dep_logs),
+                ),
+                # Diagnostic keys the production deploy record reads
+                # (failed_step / failed_step_output / dependencies_exit_code).
+                **_failure_details(dep_units, dep_exit, dep_logs),
+            }
 
     if to_install or to_upgrade:
         messages: list[str] = []
@@ -4500,9 +5089,15 @@ def _apply_actions(
         # log behind an output_id, and the live-mount snapshot is only written
         # on 0), so a later success must not overwrite an earlier failure.
         apply_exit_code = 0
+        # The command that set apply_exit_code, with its own output: a
+        # production deploy records both, since its caller may be gone (an MCP
+        # client timeout, a webhook) by the time the command fails.
+        failed_step, failed_output = "", ""
         if to_install:
             res = install_odoo_modules(settings, team, env_name, *to_install)
-            apply_exit_code = apply_exit_code or res["exit_code"]
+            if res["exit_code"] and not apply_exit_code:
+                apply_exit_code = res["exit_code"]
+                failed_step, failed_output = "install", res.get("output", "")
             if res["exit_code"]:
                 messages.append(
                     f"Module install FAILED (exit {res['exit_code']}): "
@@ -4514,7 +5109,9 @@ def _apply_actions(
                 odoo_output_parts.append(res["output"])
         if to_upgrade:
             res = upgrade_odoo_modules(settings, team, env_name, *to_upgrade)
-            apply_exit_code = apply_exit_code or res["exit_code"]
+            if res["exit_code"] and not apply_exit_code:
+                apply_exit_code = res["exit_code"]
+                failed_step, failed_output = "upgrade", res.get("output", "")
             if res["exit_code"]:
                 messages.append(
                     f"Module upgrade FAILED (exit {res['exit_code']}): "
@@ -4542,6 +5139,9 @@ def _apply_actions(
             "changed_files": changed_files,
             "message": " ".join(messages),
             "output": "\n".join(dep_logs + odoo_output_parts),
+            **_failure_details(
+                dep_units, dep_exit, dep_logs, failed_step, failed_output
+            ),
         }
 
     if do_restart or deps_changed or dep_logs:
@@ -4568,6 +5168,7 @@ def _apply_actions(
             "message": " ".join(parts),
             "output": "\n".join(dep_logs),
             "exit_code": dep_exit,
+            **_failure_details(dep_units, dep_exit, dep_logs),
         }
 
     if do_refresh:
@@ -4588,6 +5189,177 @@ def _apply_actions(
             else "No changes detected."
         ),
     }
+
+
+def _owning_module(file_path: str, unit_path: str) -> str | None:
+    """The module that owns *file_path*, or None for a file outside any module.
+
+    Stricter than ``git_analysis._get_module_name``, which falls back to the
+    top-level directory: a live ``tools/patch.py`` must not be mistaken for an
+    uninstalled module named ``tools``. Only a top-level directory that no
+    longer exists (a module this pull removed) keeps that fallback.
+    """
+    parts = file_path.split("/")
+    if len(parts) < 2:
+        return None
+    dir_parts = parts[:-1]
+    for i in range(len(dir_parts), 0, -1):
+        if os.path.isfile(os.path.join(unit_path, *dir_parts[:i], "__manifest__.py")):
+            return dir_parts[i - 1]
+    if os.path.isdir(os.path.join(unit_path, parts[0])):
+        return None
+    return parts[0]
+
+
+def _residual_action(recommendation: dict[str, Any]) -> str:
+    """What a recommendation still needs once its module operations are gone.
+
+    An ``install``/``upgrade`` action masks the lesser changes that came with
+    it: a changed ``.py`` (restart) or view XML / JS (refresh).
+    """
+    action = str(recommendation.get("action", "none"))
+    if action not in ("install", "upgrade"):
+        return action
+    details = recommendation.get("details") or {}
+    if (
+        details.get("py_changed")
+        or details.get("restart_required")
+        or details.get("deps_changed")
+    ):
+        return "restart"
+    if details.get("xml_hot") or details.get("js_changed"):
+        return "refresh"
+    return "none"
+
+
+def _narrow_auto_plan(
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    unit_recs: list[tuple[tuple[str, str | None, list[str]], dict[str, Any]]],
+    *,
+    is_production: bool,
+) -> tuple[dict[str, Any], list[str]]:
+    """Narrow an auto-classified module plan to what the database can act on.
+
+    Auto mode derives module names purely from changed file paths, but an
+    extra-addons repo bundles many modules of which only a few are installed,
+    and a routine fast-forward touches lots of them. Upgrading an uninstalled
+    module is a hard preflight error in the apply step (and installing one was
+    never asked for), so the plan is narrowed instead of failing the whole
+    apply; explicit install/upgrade requests keep the strict error.
+
+    Files of uninstalled modules are inert (Odoo never loads them), so they
+    are dropped and the rest of each unit is classified again: a JS change in
+    an installed module still refreshes, and a live ``.py`` still restarts,
+    when the merged ``upgrade`` was only for an uninstalled module. A module
+    the classifier calls new but the database already has (moved between
+    directories or repos, so git found no old manifest) is upgraded instead.
+    A production never auto-installs.
+
+    ``unit_recs`` pairs each ``(repo_path, base_ref, files)`` classification
+    unit with its :func:`~oduflow.git_analysis.recommend` result. Returns the
+    narrowed plan in the :func:`~oduflow.git_analysis.merge_recommendations`
+    shape, plus warnings naming what was skipped.
+    """
+    from oduflow.docker_ops.odoo_ops import _MODULE_NAME_RE, _get_module_states
+    from oduflow.git_analysis import merge_recommendations, recommend
+
+    new_modules = {m for _unit, rec in unit_recs for m in rec["modules_to_install"]}
+    names = set(new_modules)
+    owners: list[list[str | None]] = []
+    for (unit_path, _ref, files), rec in unit_recs:
+        unit_owners = [_owning_module(f, unit_path) for f in files]
+        owners.append(unit_owners)
+        names.update(m for m in unit_owners if m)
+        names.update(rec["modules_to_upgrade"])
+
+    # These names come from repository paths: one that is not a plain module
+    # name never reaches SQL, and the plan keeps it exactly as classified.
+    lookup = tuple(sorted(m for m in names if _MODULE_NAME_RE.match(m)))
+    states: dict[str, str] = {}
+    if lookup:
+        try:
+            states = _get_module_states(settings, team, env_name, lookup)
+        except Exception as exc:
+            # Best-effort narrowing: without the database the plan stays as
+            # classified, and the apply step's own preflight reports the failure.
+            logger.warning(
+                "Could not read module states to narrow the auto plan (%s); "
+                "applying it unfiltered",
+                exc,
+                extra={"env_name": env_name},
+            )
+            lookup = ()
+    known = set(lookup)
+
+    def installed(module: str) -> bool:
+        return states.get(module) in ("installed", "to upgrade")
+
+    def inert(module: str | None) -> bool:
+        # A dev environment still auto-installs new modules: their files stay.
+        return (
+            module is not None
+            and module in known
+            and not installed(module)
+            and (is_production or module not in new_modules)
+        )
+
+    dropped: set[str] = set()
+    recs: list[dict[str, Any]] = []
+    for ((unit_path, ref, files), rec), unit_owners in zip(unit_recs, owners):
+        unit_dropped = {m for m in unit_owners if m is not None and inert(m)}
+        if unit_dropped:
+            dropped |= unit_dropped
+            kept = [f for f, m in zip(files, unit_owners) if m not in unit_dropped]
+            rec = recommend(kept, unit_path, ref)
+        recs.append(rec)
+
+    skipped_new = dropped & new_modules
+    not_installed = dropped - new_modules
+    narrowed: list[dict[str, Any]] = []
+    for rec in recs:
+        to_install: list[str] = []
+        to_upgrade: list[str] = []
+        for module in rec["modules_to_upgrade"]:
+            if module in known and not installed(module):
+                not_installed.add(module)
+            else:
+                to_upgrade.append(module)
+        for module in rec["modules_to_install"]:
+            if installed(module):
+                to_upgrade.append(module)
+            elif is_production:
+                skipped_new.add(module)
+            else:
+                to_install.append(module)
+        if to_install or to_upgrade:
+            action = "install" if to_install else "upgrade"
+        else:
+            action = _residual_action(rec)
+        narrowed.append(
+            {
+                **rec,
+                "action": action,
+                "modules_to_install": to_install,
+                "modules_to_upgrade": to_upgrade,
+            }
+        )
+
+    warnings: list[str] = []
+    if skipped_new:
+        warnings.append(
+            "Skipped new modules (auto mode never installs modules on a "
+            f"production): {', '.join(sorted(skipped_new))}. Install explicitly "
+            "with update_production(install=...) if they are wanted."
+        )
+    if not_installed:
+        warnings.append(
+            "Skipped modules that are not installed in this database: "
+            f"{', '.join(sorted(not_installed))}. Auto mode only upgrades "
+            "installed modules; install them explicitly if they are wanted."
+        )
+    return merge_recommendations(narrowed), warnings
 
 
 def pull_environment(
@@ -4665,6 +5437,7 @@ def pull_environment(
 
     local_path = container_obj.labels.get("oduflow.local_path", "")
     is_local = bool(local_path)
+    is_production = container_obj.labels.get("oduflow.prod") == "true"
     repo_path = local_path or get_repo_path(env_name, team.workspaces_dir)
 
     if not os.path.isdir(repo_path):
@@ -4715,7 +5488,6 @@ def pull_environment(
     # per-repo dependency-descriptor check below.
     extra_dep_candidates: list[tuple[str, str, list[str]]] = []
     if extra_addons:
-        is_production = container_obj.labels.get("oduflow.prod") == "true"
         if is_production:
             # Production retains one mutable worktree per deployment. Its
             # deploy log records these HEADs and rollback resets them in place.
@@ -4788,10 +5560,15 @@ def pull_environment(
 
     # --- 2. Determine actions: explicit (agent-driven) vs auto (classify) ---
     explicit = bool(install) or bool(upgrade) or restart
+    # Per-unit results are kept: auto mode re-classifies a unit when it drops
+    # the files of modules this database never installed.
+    unit_recs = [
+        ((rp, ref, files), recommend(files, rp, ref))
+        for rp, ref, files in classify_units
+        if files
+    ]
     recommended = (
-        merge_recommendations(
-            recommend(files, rp, ref) for rp, ref, files in classify_units if files
-        )
+        merge_recommendations(rec for _unit, rec in unit_recs)
         if all_changed
         else {"action": "none", "modules_to_install": [], "modules_to_upgrade": []}
     )
@@ -4818,6 +5595,7 @@ def pull_environment(
 
     warnings: list[str] = []
     do_refresh = False
+    auto_narrowed = False
     if explicit:
         to_install = list(install or [])
         to_upgrade = list(upgrade or [])
@@ -4846,18 +5624,23 @@ def pull_environment(
                 )
                 if recovery.get("exit_code"):
                     # Recovery itself applied no modules. Retain the original
-                    # plan and guardrail warnings, rather than its empty lists.
-                    recovery = _dependency_failure_result(
-                        env_name,
-                        all_changed,
-                        to_install,
-                        to_upgrade,
-                        do_restart,
-                        do_refresh,
-                        config_changed,
-                        recovery["exit_code"],
-                        recovery["output"],
-                    )
+                    # plan and guardrail warnings, rather than its empty lists;
+                    # the dict merge keeps recovery's diagnostic keys
+                    # (failed_step etc.) while replacing the plan.
+                    recovery = {
+                        **recovery,
+                        **_dependency_failure_result(
+                            env_name,
+                            all_changed,
+                            to_install,
+                            to_upgrade,
+                            do_restart,
+                            do_refresh,
+                            config_changed,
+                            recovery["exit_code"],
+                            recovery["output"],
+                        ),
+                    }
                     recovery["warnings"] = warnings
                     return recovery
             return {
@@ -4928,6 +5711,16 @@ def pull_environment(
         to_upgrade = list(recommended.get("modules_to_upgrade", []))
         do_restart = recommended.get("action") == "restart"
         do_refresh = recommended.get("action") == "refresh"
+        if to_install or to_upgrade:
+            narrowed, narrow_warnings = _narrow_auto_plan(
+                settings, team, env_name, unit_recs, is_production=is_production
+            )
+            warnings.extend(narrow_warnings)
+            auto_narrowed = bool(narrow_warnings)
+            to_install = list(narrowed["modules_to_install"])
+            to_upgrade = list(narrowed["modules_to_upgrade"])
+            do_restart = narrowed["action"] == "restart"
+            do_refresh = narrowed["action"] == "refresh"
 
     if before_apply is not None and (
         explicit
@@ -5023,6 +5816,13 @@ def pull_environment(
         result["message"] = "Reinstalled dependencies. " + result["message"]
     if warnings:
         result["warnings"] = warnings
+    if auto_narrowed and result.get("action") == "none":
+        # The default "none" message blames Markdown files; here the pull did
+        # change code, it just belongs to modules this database never installed.
+        result["message"] = (
+            "Nothing to apply: the pulled changes only touch modules that are "
+            "not installed in this database (see warnings)."
+        )
     if is_local and int(result.get("exit_code", 0)) == 0:
         _write_local_snapshot(repo_path, env_name, team)
     return result
@@ -5466,6 +6266,7 @@ def _relocate_environment_state(
         rename_hostname_env(_hostname_registry_path(team), old_name, new_name)
     activity.rename(team, old_name, new_name)
     env_share.rename(team, old_name, new_name)
+    env_tokens.rename(team, old_name, new_name)
 
     from oduflow import agent_sessions
 
@@ -5536,6 +6337,10 @@ def update_environment(
             raise ValueError(
                 "hostname is supported only when routing.mode = 'traefik'."
             )
+
+    from oduflow.template_generations import require_no_recovery
+
+    require_no_recovery(team, env_name)
 
     client = get_client()
     odoo_container_name = get_resource_name(
@@ -5667,7 +6472,6 @@ def update_environment(
                 ) from exc
 
     if requested_hostname:
-        hostname_prefix, _parent_domain = split_team_hostname(team.hostname)
         active_envs, used_hostnames = _environment_hostname_usage(
             client, settings, team, exclude_env=env_name
         )
@@ -5678,7 +6482,7 @@ def update_environment(
             env_name,
             0,  # An update does not consume a new environment slot.
             requested_hostname=requested_hostname,
-            hostname_prefix=hostname_prefix,
+            hostname_prefix="",  # Only automatic slot names use the prefix.
             active_envs=active_envs,
             used_hostnames=used_hostnames,
         )

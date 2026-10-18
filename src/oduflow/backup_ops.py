@@ -126,7 +126,17 @@ def _dump_stream(container: Any, db_user: str, db_name: str) -> Iterator[bytes]:
         if stdout:
             yield stdout
     exit_code = api.exec_inspect(exec_id).get("ExitCode")
-    if exit_code:
+    if exit_code != 0:
+        # None (exec status could not be read) must fail too: `if exit_code:`
+        # treated it as success, recording a possibly-truncated archive as a
+        # healthy snapshot — the exact outcome this inspection exists to prevent.
+        if exit_code is None:
+            raise ExternalCommandError(
+                "pg_dump",
+                -1,
+                f"pg_dump of {db_name}: exec status could not be read "
+                "(ExitCode=None); the dump may be truncated",
+            )
         raise ExternalCommandError(
             "pg_dump", exit_code, f"pg_dump of {db_name} exited with code {exit_code}"
         )
@@ -698,9 +708,7 @@ def restore_production(
     # serving before is expected to be serving after.
     healthy = True
     if was_running:
-        healthy = production_ops.wait_production_healthy(
-            client, settings, team, name, timeout=180
-        )
+        healthy = production_ops.wait_production_healthy(client, settings, team, name)
         production_registry.update_production(team, name, {"unhealthy": not healthy})
     production_registry.set_nested(
         team, name, "backup", {"last_restore_id": snapshot_id}
@@ -898,9 +906,7 @@ def restore_production_from_environment(
     # serving before is expected to be serving after.
     healthy = True
     if was_running:
-        healthy = production_ops.wait_production_healthy(
-            client, settings, team, name, timeout=180
-        )
+        healthy = production_ops.wait_production_healthy(client, settings, team, name)
         production_registry.update_production(team, name, {"unhealthy": not healthy})
 
     if str(source_env.get("template", "")).startswith(PRODUCTION_TEMPLATE_PREFIX):

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -248,22 +249,62 @@ class TestCreateService:
         stopped = MagicMock()
         stopped.status = "exited"
         mock_docker_client.containers.get.return_value = stopped
-        service_ops._remove_stale_service_container(mock_docker_client, "c")
+        service_ops._remove_stale_service_container(
+            mock_docker_client, "c", "oduflow.managed"
+        )
         stopped.remove.assert_not_called()
 
         foreign = MagicMock()
         foreign.status = "created"
         foreign.labels = {}
         mock_docker_client.containers.get.return_value = foreign
-        service_ops._remove_stale_service_container(mock_docker_client, "c")
+        service_ops._remove_stale_service_container(
+            mock_docker_client, "c", "oduflow.managed"
+        )
         foreign.remove.assert_not_called()
 
         created = MagicMock()
         created.status = "created"
         created.labels = {"oduflow.managed": "true"}
         mock_docker_client.containers.get.return_value = created
-        service_ops._remove_stale_service_container(mock_docker_client, "c")
+        service_ops._remove_stale_service_container(
+            mock_docker_client, "c", "oduflow.managed"
+        )
         created.remove.assert_called_once_with(force=True)
+
+    def test_service_labels_follow_settings(self, mock_docker_client):
+        """Services carry the configured managed/team labels, not literals.
+
+        Every service listing filters on ``settings.managed_label`` and
+        ``settings.team_label``; the integration fixtures rely on a per-run
+        label to keep test services away from a developer's own server.
+        """
+        settings = dataclasses.replace(
+            TEST_SETTINGS,
+            managed_label="oduflowtest-x.managed",
+            team_label="oduflowtest-x.team",
+        )
+        stale = MagicMock()
+        stale.status = "created"
+        stale.labels = {"oduflowtest-x.managed": "true"}
+        mock_docker_client.containers.get.side_effect = [
+            docker.errors.NotFound("nf"),
+            stale,
+        ]
+        mock_docker_client.containers.run.side_effect = docker.errors.APIError(
+            "start failed"
+        )
+
+        with pytest.raises(FlowError):
+            service_ops.create_service(settings, TEST_TEAM, "redis", "redis:7", 6379)
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        assert labels["oduflowtest-x.managed"] == "true"
+        assert labels["oduflowtest-x.team"] == "1"
+        assert "oduflow.managed" not in labels
+        assert "oduflow.team" not in labels
+        # The failed start's leftover is recognized by the same label.
+        stale.remove.assert_called_once_with(force=True)
 
     def test_start_failure_scrubs_container_ids(self, mock_docker_client):
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")

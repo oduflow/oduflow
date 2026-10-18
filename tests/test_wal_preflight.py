@@ -312,7 +312,9 @@ def test_only_running_productions_may_skip_the_verification_segment(
 
     client = MagicMock()
     with (
-        patch("oduflow.production_registry.get_production"),
+        # A real (dict) record: a bare MagicMock reads as unhealthy=truthy and
+        # sends restart_production into its recovery health wait.
+        patch("oduflow.production_registry.get_production", return_value={}),
         patch.object(production_ops, "get_client", return_value=client),
         patch.object(production_ops, "ensure_prod_infra") as ensure,
         patch.object(production_ops, "_require_container"),

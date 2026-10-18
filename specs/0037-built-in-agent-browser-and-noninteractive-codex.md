@@ -42,8 +42,11 @@ blocks; Oduflow does not weaken that outer profile to make a nested sandbox run.
   `agent-browser` package, and installs Debian's Chromium package for both
   amd64 and arm64. `AGENT_BROWSER_EXECUTABLE_PATH` selects that system browser.
 - The Codex HOME config declares `agent_browser`; per-checkout Claude `.mcp.json`
-  declares the same stdio server. Codex ACP session-open frames receive it
-  alongside the scoped Oduflow HTTP server.
+  declares the same stdio server. Codex ACP session-open frames carry only the
+  scoped Oduflow HTTP server: Codex already has `agent_browser` from its HOME
+  config, and codex-acp rejects a client server whose name the config defines.
+  OpenCode, which has no such config entry, receives `agent_browser` in its
+  session-open frames.
 - `AGENT_BROWSER_SESSION` equals the checkout basename on every CLI/ACP exec.
   Agent Browser state remains on the persistent HOME volume, but profiles do
   not collide across environments.
@@ -69,6 +72,13 @@ blocks; Oduflow does not weaken that outer profile to make a nested sandbox run.
 
 ## History
 
+- 2026-10-16 — Codex ACP sessions no longer receive `agent_browser` in
+  session-open frames: codex-acp 2.2.2 skipped the duplicate of the HOME-config
+  entry and reported it as a failed tool call in every new Agent Chat. The
+  config entry forwards `AGENT_BROWSER_SESSION`, so per-environment profiles
+  are unchanged. The image now pins Codex to the version codex-acp itself
+  depends on (the adapter runs that package, not the `codex` on PATH), so
+  Agent CLI and Agent Chat run one Codex.
 - 2026-07-24 — extended the same browser and container-boundary trust model to
   OpenCode: Agent CLI uses auto approval, native ACP uses `permission = allow`,
   and both receive the environment-specific Agent Browser profile.

@@ -133,22 +133,30 @@ would let work in the environment.
 
 ## Templates and Odoo imports
 
+Scheduled sync uses system cron; these routes save configuration or queue requests, never spawn a worker.
+
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/templates` | List template profiles |
+| `GET` | `/api/templates` | List template profiles. A template imported from a bucket carries an `s3_source` object (`url`, `endpoint`, `region`, `access_key`, `has_secret`, `dump`, `synced_at`) — the connection needed to re-sync it, never the secret key; `null` for every other template |
+| `GET` | `/api/templates/{name}/sync` | Sync config, status, pending flag, cron-file presence and bounded log tail |
+| `POST` | `/api/templates/{name}/sync` | Save `host`, `user`, `port`, absolute `path`, five-field `schedule`, boolean `enabled`; install managed cron entries |
+| `DELETE` | `/api/templates/{name}/sync` | Remove managed cron entries, saved config, pending request and the downloaded backup copy; keep template data, status and logs |
+| `POST` | `/api/templates/{name}/sync-now` | Queue a manual sync for cron's next minute tick |
+| `POST` | `/api/environments/{branch}/template-sync` | Persist boolean `auto_refresh`; defaults to false; true authorizes recurring DB/filestore reset |
 | `GET` | `/api/templates/{name:path}/metadata` | Read the complete `metadata.json` content and its optimistic revision |
 | `PUT` | `/api/templates/{name:path}/metadata` | Validate and atomically replace `metadata.json`; body: `content`, `revision` |
 | `POST` | `/api/templates/{name}/delete` | Delete a template |
 | `POST` | `/api/templates/{name}/rename` | Rename it; body: `new_name` |
 | `POST` | `/api/templates/import-from-odoo` | UI-authenticated: import a template. Body: `source` (http(s) Odoo URL — then `master_pwd` required — or `s3://bucket/prefix` or a local path; `odoo_url` accepted as a legacy alias), `template_name`, optional `db_name`, booleans `without_filestore` / `overwrite` / `refresh`, optional `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_region` |
-| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token |
+| `POST` | `/api/s3/browse` | UI-authenticated: list one level of an S3 bucket for the import dialog's object browser, or the buckets when `bucket` is empty. Body: `bucket`, `prefix`, `continuation_token`, `endpoint`, `region`, `access_key`, `secret_key`, and `template` to sign with that template's stored secret. Returns `buckets`, `folders`, `files` (newest first), `truncated`, `next_token`. Read-only, so not team-locked |
+| `POST` | `/api/templates/import-token` | UI-authenticated: mint a 15-minute Odoo.sh import token. Body: `template_name`, optional booleans `with_enterprise` / `with_themes` / `with_extra_addons` (add the matching `--with-*` flags to the returned `command`) and `without_filestore` (adds `--without-filestore`; stored with the token, so finalize is database-only), optional `addon_error_policy` (`strict`, the default, or `best_effort`) |
 | `GET` | `/api/templates/import/status` | Import-token authenticated: report resumable upload progress |
 | `POST` | `/api/templates/import/manifest` | Upload template metadata |
 | `POST` | `/api/templates/import/dump` | Stream/chunk the compressed SQL dump |
 | `POST` | `/api/templates/import/filestore` | Upload one atomic filestore hash-directory archive |
 | `POST` | `/api/templates/import/addon` | Stream/chunk one private addon archive |
 | `POST` | `/api/templates/import/addon-remote` | Register an addon repo that the server can clone |
-| `POST` | `/api/templates/import/finalize` | Validate staged data and atomically publish/restore the template |
+| `POST` | `/api/templates/import/finalize` | Validate staged data and atomically publish/restore the template. `?without_filestore=1` (or `true`), sent by `--without-filestore`, or a token minted with `without_filestore` makes it database-only: staged filestore chunks are not promoted and an existing template keeps its filestore; other values are rejected. The result's `filestore` is `imported`, `kept` or `none`, next to `includes_filestore` |
 | `GET` | `/import-odoo.sh` | Download the token-authenticated Odoo.sh import client |
 
 The pull-import endpoint accepts HTTP and HTTPS source URLs. HTTP sends the Odoo
@@ -198,6 +206,9 @@ supported because the cluster is not published on a host port.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/extra-repos` | List extra-addon repositories |
+| `GET` | `/api/extra-repos/oca` | Public OCA catalogue (cached for 15 minutes) in `repos`: names, descriptions, stars, archive flags, unique import names, clone URLs, `existing_as` (the team repository with the same origin, if any) and `name_taken`; `stale` is true when an expired copy is served because GitHub is unavailable; `job` is the team's latest import (see below) |
+| `GET` | `/api/extra-repos/oca/import` | The team's latest OCA import job, or `null`: `status` (`running`/`finished`) and per-repository `items` with `branches`, `status` (`queued`, `adding`, `done`, `error`, `skipped`) and `error` |
+| `POST` | `/api/extra-repos/oca/import` | Start a server-side OCA import (202); body: `repos`, a list of `{"name": "<catalogue name>", "branches": [...]}` — `branches` are downloaded now, an empty list downloads each branch on first use. Clone URLs and import names come from the catalogue. 409 while the team's previous import is running |
 | `POST` | `/api/extra-repos/add` | Add one; body: `name`, `repo_url`, optional `git_user`, optional `branches` (list of names to download now; empty = download each branch on first use) |
 | `POST` | `/api/extra-repos/ls-remote` | List a remote's branches before adding; body: `repo_url`, optional `git_user` |
 | `POST` | `/api/extra-repos/{name}/pull` | Fetch remote changes |
@@ -262,7 +273,7 @@ and delete operations require explicit confirmation in their JSON body.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/productions` | List productions and return webhook/backup state |
+| `GET` | `/api/productions` | List productions (each with its OduMCP `mcp_status`: `ready`, `sync_failed`, `unsupported`, or empty) and return webhook/backup state and whether the team's `production_token` is set (`production_token_set`) |
 | `POST` | `/api/productions/create` | Create a production from repository/image/domain settings, optionally seeded from a template, or promote a dev environment via body `from_environment` (inherits its repo/branch/image). Optional `server_mode`: `workers` (default) or `gevent`. Optional body `env_vars` (object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas) overrides the inherited/template variables; an absent key inherits them, an empty object/string means none. `HOST`, `PORT`, `USER` and `PASSWORD` are reserved |
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
 | `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request |

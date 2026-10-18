@@ -11,7 +11,9 @@ from typing import Any, BinaryIO
 from urllib.parse import quote
 
 import docker
+from oduflow import agent_uids
 from oduflow.docker_ops.client import get_client
+from oduflow.docker_ops.env_ops import agent_exec_identity
 from oduflow.errors import FlowError, NotFoundError
 from oduflow.naming import (
     get_agent_container_name,
@@ -24,7 +26,6 @@ from oduflow.settings import Settings, TeamSettings
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_ENV_BYTES = 100 * 1024 * 1024
 MAX_FILES_PER_PROMPT = 5
-AGENT_USER = "agent"
 
 _UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _MIME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.+-]*/[a-zA-Z0-9][a-zA-Z0-9.+-]*$")
@@ -70,7 +71,15 @@ def _decode_output(output: Any) -> str:
     return str(output or "")
 
 
-def _agent_container(settings: Settings, team: TeamSettings, env_name: str) -> Any:
+def _agent_container(
+    settings: Settings, team: TeamSettings, env_name: str
+) -> tuple[Any, int]:
+    """The team's agent container and the environment's own uid.
+
+    Attachments belong to the environment's uid (see
+    specs/0079-per-environment-agent-identities.md), so every operation on
+    them runs as that uid and no other environment's session can read them.
+    """
     if not team.agent_enabled:
         raise AttachmentError("The coding agent is disabled for this team.", 403)
     if not slugify_branch(env_name):
@@ -93,11 +102,23 @@ def _agent_container(settings: Settings, team: TeamSettings, env_name: str) -> A
         raise AttachmentError("The coding-agent container was not found.", 503) from exc
     if container.status != "running":
         raise AttachmentError("The coding-agent container is not running.", 503)
-    return container
+    uid = agent_uids.get_uid(team, env_name)
+    if uid is None:
+        raise AttachmentError(
+            "The coding agent is not set up for this environment yet; "
+            "open Agent Chat first.",
+            409,
+        )
+    return container, uid
 
 
-def _directory_size(container: Any, path: str) -> int:
-    code, output = container.exec_run(["du", "-sb", path], user=AGENT_USER)
+def _exec_as_env(container: Any, cmd: list[str], uid: int) -> Any:
+    user, env = agent_exec_identity(uid)
+    return container.exec_run(cmd, user=user, environment=env)
+
+
+def _directory_size(container: Any, path: str, uid: int) -> int:
+    code, output = _exec_as_env(container, ["du", "-sb", path], uid)
     if code not in (0, None):
         return 0
     try:
@@ -107,26 +128,27 @@ def _directory_size(container: Any, path: str) -> int:
 
 
 def _attachment_archive(
-    upload_id: str, storage_name: str, source: BinaryIO, size: int
+    upload_id: str, storage_name: str, source: BinaryIO, size: int, uid: int
 ) -> bytes:
+    # Docker extracts with the header ownership: the environment's uid.
     archive = io.BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as tar:
         directory = tarfile.TarInfo(upload_id)
         directory.type = tarfile.DIRTYPE
         directory.mode = 0o700
-        directory.uid = 1000
-        directory.gid = 1000
-        directory.uname = AGENT_USER
-        directory.gname = AGENT_USER
+        directory.uid = uid
+        directory.gid = uid
+        directory.uname = f"env{uid}"
+        directory.gname = f"env{uid}"
         tar.addfile(directory)
 
         item = tarfile.TarInfo(f"{upload_id}/{storage_name}")
         item.size = size
         item.mode = 0o600
-        item.uid = 1000
-        item.gid = 1000
-        item.uname = AGENT_USER
-        item.gname = AGENT_USER
+        item.uid = uid
+        item.gid = uid
+        item.uname = f"env{uid}"
+        item.gname = f"env{uid}"
         source.seek(0)
         tar.addfile(item, source)
     return archive.getvalue()
@@ -149,13 +171,13 @@ def store_attachment(
         )
     display_name, storage_name = normalize_filename(filename)
     mime_type = normalize_mime_type(mime_type)
-    container = _agent_container(settings, team, env_name)
+    container, uid = _agent_container(settings, team, env_name)
     upload_root = get_agent_upload_dir(env_name)
 
-    code, _output = container.exec_run(["mkdir", "-p", upload_root], user=AGENT_USER)
+    code, _output = _exec_as_env(container, ["mkdir", "-p", upload_root], uid)
     if code not in (0, None):
         raise AttachmentError("Could not prepare attachment storage.", 500)
-    if _directory_size(container, upload_root) + size > MAX_ENV_BYTES:
+    if _directory_size(container, upload_root, uid) + size > MAX_ENV_BYTES:
         raise AttachmentError(
             "Attachment storage for this environment is full "
             f"({MAX_ENV_BYTES // (1024 * 1024)} MiB limit).",
@@ -163,7 +185,7 @@ def store_attachment(
         )
 
     upload_id = secrets.token_hex(16)
-    archive = _attachment_archive(upload_id, storage_name, source, size)
+    archive = _attachment_archive(upload_id, storage_name, source, size, uid)
     if not container.put_archive(upload_root, archive):
         raise AttachmentError("Could not copy the attachment to the agent.", 500)
 
@@ -184,8 +206,8 @@ def delete_attachment(
     """Delete one unsent attachment directory from the agent workspace."""
     if not _UPLOAD_ID_RE.fullmatch(upload_id):
         raise AttachmentError("Invalid attachment id.")
-    container = _agent_container(settings, team, env_name)
+    container, uid = _agent_container(settings, team, env_name)
     path = f"{get_agent_upload_dir(env_name)}/{upload_id}"
-    code, _output = container.exec_run(["rm", "-rf", "--", path], user=AGENT_USER)
+    code, _output = _exec_as_env(container, ["rm", "-rf", "--", path], uid)
     if code not in (0, None):
         raise AttachmentError("Could not remove the attachment.", 500)

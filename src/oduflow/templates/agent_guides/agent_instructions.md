@@ -92,6 +92,14 @@ data. Environments auto-stop when idle and container-level tools wake them
 automatically; a wake-up `Note:` is informational. Use `protect_environment`
 only when an environment must survive the configured idle lifecycle.
 
+When a rebuild genuinely is needed (database or filestore beyond repair, fresh
+start from the same template), call `recreate_environment` — never
+`delete_environment` + `create_environment`. It replays the recorded
+configuration and keeps the environment's identity: the dashboard share link
+the operator may have handed out stays valid, and the scoped `/mcp/<env>`
+endpoint keeps the same token. Reserve `delete_environment` for retiring an
+environment nobody needs anymore; it revokes both credentials.
+
 ## Choose the apply action
 
 When you authored the change, tell `pull_and_apply` what it requires. Leave

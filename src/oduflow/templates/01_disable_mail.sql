@@ -1,5 +1,14 @@
--- Disable incoming mail servers (fetchmail)
-UPDATE fetchmail_server SET active = false WHERE active = true;
-
--- Disable outgoing mail servers
-UPDATE ir_mail_server SET active = false WHERE active = true;
+-- Team sanitize script (example; every statement below is commented out).
+--
+-- Each .sql and .py file in this folder runs, in alphabetical order, against
+-- every environment database created from a template. On Odoo 16+ that happens
+-- after Odoo's own neutralization, which already deactivates outgoing and
+-- incoming mail servers, crons and payment providers. Use this folder for what
+-- neutralization does not cover, such as anonymizing customer data.
+--
+-- A file runs as one transaction: if any statement fails (for example, on a
+-- table whose module is not installed), the whole file is rolled back.
+--
+-- Examples:
+-- UPDATE ir_mail_server SET active = false WHERE active = true;
+-- UPDATE fetchmail_server SET active = false WHERE active = true;

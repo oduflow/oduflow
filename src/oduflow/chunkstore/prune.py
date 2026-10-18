@@ -156,10 +156,25 @@ def _collect(
                 )
                 dated.append((revision, _parse_iso(meta["created_at"])))
             except Exception:
-                # Unreadable revision: keep it (never delete blindly).
-                kept_refs.update(
-                    _revision_chunk_hashes(storage, config, snapshot_id, revision)
-                )
+                # Unreadable revision metadata: keep it (never delete blindly).
+                # The revision stays out of `dated`, so it can never land in
+                # prune_targets. Protecting its chunk refs requires reading the
+                # same object again — tolerate that failing too: re-raising
+                # from this fallback meant ONE corrupt revision file wedged
+                # every future prune and retention never ran again. The
+                # two-step fossil scheme still gives shared chunks a grace
+                # window if the read failure was transient.
+                try:
+                    kept_refs.update(
+                        _revision_chunk_hashes(storage, config, snapshot_id, revision)
+                    )
+                except Exception:
+                    logger.warning(
+                        "Unreadable revision %s/%s: keeping it and continuing "
+                        "the prune without its chunk references",
+                        snapshot_id,
+                        revision,
+                    )
         if keep_revisions is not None:
             # Caller-driven retention (Oduflow keeps filestore revisions in
             # lockstep with snapshot manifests).

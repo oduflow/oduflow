@@ -15,6 +15,18 @@ oduflow --no-telemetry stack apply oduflow.yaml
 `--no-telemetry` overrides `disable_telemetry` in `oduflow.toml` for the
 current process only. See [Telemetry](installation.md#telemetry).
 
+```bash
+# Log only warnings and errors (default: info); also before any subcommand
+oduflow --log-level warning stack apply oduflow.yaml
+```
+
+`--log-level` takes `debug`, `info`, `warning` or `error` and applies to the
+server too, its HTTP access log included. `warning` leaves a one-shot command
+such as `stack apply` printing just its result; at `info` the progress
+messages of long steps (image pulls, environment creation) are shown as well.
+A command that fails on invalid input prints one error line; `debug` adds the
+traceback.
+
 ## Running the Server
 
 ```bash
@@ -268,12 +280,34 @@ oduflow import-template <odoo_url> <master_pwd> --template-name myproject [--db-
 oduflow import-template s3://bucket/backups/mydb/ --template-name myproject [--overwrite] [--team 1]
 oduflow import-template /backups/mydb/ --template-name myproject [--overwrite] [--team 1]
 
+# A single Odoo backup .zip already sitting in a bucket
+oduflow import-template s3://bucket/backups/mydb-2026-10-13.zip --template-name myproject [--team 1]
+
 # Reload the template DB from files already placed in the template directory
 # (an external rsync/scp drop) and refresh its metadata
 oduflow import-template --template-name myproject --refresh [--team 1]
+
+# Run a saved, enabled SSH sync schedule (cron normally invokes this)
+oduflow sync-template myproject [--team 1]
+# Only consume a manual request queued by the dashboard
+oduflow sync-template myproject --pending [--team 1]
 ```
 
+For a private bucket, pass `--s3-access-key` with `--s3-secret-key` (plus
+`--s3-endpoint`/`--s3-region` where needed). The secret key is stored as the
+team secret `s3-template-<template>` and the template records only a
+`secret:<name>` reference, so a later `--overwrite` re-sync needs no key —
+omit `--s3-secret-key` and the stored one is reused. It is required again when
+the endpoint or access key changes. `--s3-secret-key` defaults to
+`$ODUFLOW_S3_SECRET_KEY`, which keeps the key out of your shell history; pass
+`secret:<name>` to sign with an existing team secret instead.
+
 `template-from-env`, `refresh-template`, `attach-filestore`, and `import-template` with `--overwrite`/`--refresh` are **non-destructive** for live overlay environments: each is unmounted and remounted against the new template filestore while keeping its `upper` changes. Use `--reset-env-changes` (on `template-from-env`/`refresh-template`/`attach-filestore`) to reset environments to the clean baseline instead. Without `--overwrite`, `import-template` creates a new template and refuses an existing template name.
+
+Scheduled SSH sync uses retained filestore generations and opt-in environment
+DB/filestore resets. Ordinary template refresh leaves pinned environments on
+their previous generation and lists them in its output. See [Scheduled SSH sync](templates.md#scheduled-ssh-sync-system-cron)
+for source preparation, cron installation and recovery.
 
 ## Service Commands
 

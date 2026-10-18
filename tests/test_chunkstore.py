@@ -681,6 +681,91 @@ class TestPruneKeepRevisions:
             dst = tmp_path / f"erp-dst{rev}"
             chunkstore.restore(storage, "erp", rev, str(dst))
 
+    def test_vanished_file_is_skipped_not_fatal(
+        self, small_config_storage, tmp_path, monkeypatch
+    ):
+        """P-M15: a file deleted between the scan's lstat and the read used to
+        abort the whole snapshot of a live filestore."""
+        import builtins
+
+        storage = small_config_storage
+        src = tmp_path / "src"
+        _make_tree(str(src), {"a.bin": b"keep me" * 100, "gone.bin": b"racy" * 100})
+
+        real_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if str(path).endswith("gone.bin"):
+                raise FileNotFoundError(path)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+        result = chunkstore.backup(str(src), storage, "erp")
+        monkeypatch.undo()
+
+        dst = tmp_path / "dst"
+        chunkstore.restore(storage, "erp", result.revision, str(dst))
+        assert _read_tree(str(dst)) == {"a.bin": b"keep me" * 100}
+
+    def test_file_grown_mid_backup_still_restores(
+        self, small_config_storage, tmp_path, monkeypatch
+    ):
+        """P-M15: entry["size"] came from the scan's lstat, so a file that grew
+        between scan and read produced a revision whose restore always failed
+        the size check. The actually-chunked byte count must be recorded."""
+        import builtins
+
+        storage = small_config_storage
+        src = tmp_path / "src"
+        base = b"x" * 5000
+        _make_tree(str(src), {"grow.bin": base})
+
+        real_open = builtins.open
+        grown = []
+
+        def fake_open(path, *args, **kwargs):
+            if str(path).endswith("grow.bin") and "b" in str(args[:1]) and not grown:
+                grown.append(True)
+                with real_open(path, "ab") as f:
+                    f.write(b"EXTRA")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+        result = chunkstore.backup(str(src), storage, "erp")
+        monkeypatch.undo()
+
+        dst = tmp_path / "dst"
+        chunkstore.restore(storage, "erp", result.revision, str(dst))
+        assert _read_tree(str(dst)) == {"grow.bin": base + b"EXTRA"}
+
+    def test_corrupt_revision_does_not_wedge_prune(
+        self, small_config_storage, tmp_path
+    ):
+        """A corrupt revision file must be kept and skipped — the old fallback
+        re-read the same broken object inside its own `except`, so one bad
+        revision made every future prune raise and retention never ran again."""
+        rng = random.Random(23)
+        storage = small_config_storage
+        src = tmp_path / "src"
+        _make_tree(str(src), {"a.bin": rng.randbytes(20_000)})
+        for _ in range(3):
+            with open(src / "a.bin", "wb") as f:
+                f.write(rng.randbytes(20_000))
+            chunkstore.backup(str(src), storage, "erp")
+        assert list_revisions(storage, "erp") == [1, 2, 3]
+
+        # Corrupt revision 2's metadata on storage.
+        storage.put("snapshots/erp/2", b"\x00garbage not json")
+
+        # Prune must complete: rev 1 is pruned, the corrupt rev 2 is kept
+        # (never delete blindly), rev 3 stays as the latest baseline.
+        chunkstore.prune(storage, keep_revisions={"erp": set()})
+        assert list_revisions(storage, "erp") == [2, 3]
+
+        # The healthy latest revision still restores.
+        dst = tmp_path / "dst"
+        chunkstore.restore(storage, "erp", 3, str(dst))
+
     def test_prune_requires_a_policy(self, small_config_storage):
         with pytest.raises(ValueError, match="keep"):
             chunkstore.prune(small_config_storage)
@@ -697,6 +782,7 @@ class TestCountingStorage:
         storage = self._counting(tmp_path)
 
         storage.put("k", b"v")
+        storage.put_if_absent("k3", b"v")
         storage.exists("k")
         storage.get("k")
         storage.list("")
@@ -707,6 +793,7 @@ class TestCountingStorage:
             "exists": 1,
             "get": 1,
             "put": 1,
+            "put_if_absent": 1,
             "list": 1,
             "rename": 1,
             "delete": 1,
@@ -1505,3 +1592,40 @@ class TestPruneCounters:
     def test_prune_without_a_policy_is_refused(self, small_config_storage):
         with pytest.raises(ValueError, match="keep or keep_revisions"):
             chunkstore.prune(small_config_storage)
+
+
+class TestEnsureConfigRace:
+    """P-M16: ensure_config used exists-then-put; two concurrent first backups
+    on a fresh store minted different seed/hash/id keys and the loser's
+    revision was permanently unrestorable. Creation is now first-writer-wins
+    and the loser adopts the winner's config."""
+
+    def test_local_put_if_absent_is_create_only(self, tmp_path):
+        storage = LocalStorage(str(tmp_path))
+        assert storage.put_if_absent("k", b"winner") is True
+        assert storage.put_if_absent("k", b"loser") is False
+        assert storage.get("k") == b"winner"
+
+    def test_loser_adopts_the_winners_config(self, tmp_path):
+        storage = LocalStorage(str(tmp_path))
+        winner = ensure_config(storage)
+
+        class RacingStorage:
+            """exists() lies 'no' — the exact TOCTOU window the fix closes."""
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def exists(self, key):
+                return False
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        loser = ensure_config(RacingStorage(storage))
+
+        # The loser did NOT overwrite the winner's keys — it adopted them, so
+        # revisions written by either caller restore with the same config.
+        assert loser.seed == winner.seed
+        assert loser.hash_key == winner.hash_key
+        assert loser.id_key == winner.id_key

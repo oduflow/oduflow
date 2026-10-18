@@ -71,38 +71,47 @@ class StoreConfig:
         ).hexdigest()
 
 
+def _parse_config(raw: dict[str, object]) -> StoreConfig:
+    return StoreConfig(
+        seed=bytes.fromhex(str(raw["seed"])),
+        hash_key=bytes.fromhex(str(raw["hash_key"])),
+        id_key=bytes.fromhex(str(raw["id_key"])),
+        min_size=int(str(raw["min_size"])),
+        avg_size=int(str(raw["avg_size"])),
+        max_size=int(str(raw["max_size"])),
+    )
+
+
 def ensure_config(storage: Storage) -> StoreConfig:
-    """Load the storage config, creating it (random keys) on first use."""
+    """Load the storage config, creating it (random keys) on first use.
+
+    Creation is a conditional write: the config holds the store's chunker seed
+    and hash/id keys, so two concurrent first-ever backups racing an
+    exists-then-put would each mint different keys and the loser's revision
+    would be permanently unrestorable. First writer wins; the loser adopts the
+    winner's config.
+    """
     if storage.exists(CONFIG_KEY):
-        raw = json.loads(storage.get(CONFIG_KEY).decode("utf-8"))
-        return StoreConfig(
-            seed=bytes.fromhex(raw["seed"]),
-            hash_key=bytes.fromhex(raw["hash_key"]),
-            id_key=bytes.fromhex(raw["id_key"]),
-            min_size=int(raw["min_size"]),
-            avg_size=int(raw["avg_size"]),
-            max_size=int(raw["max_size"]),
-        )
+        return _parse_config(json.loads(storage.get(CONFIG_KEY).decode("utf-8")))
     config = StoreConfig(
         seed=secrets.token_bytes(32),
         hash_key=secrets.token_bytes(32),
         id_key=secrets.token_bytes(32),
     )
-    storage.put(
-        CONFIG_KEY,
-        json.dumps(
-            {
-                "version": VERSION,
-                "seed": config.seed.hex(),
-                "hash_key": config.hash_key.hex(),
-                "id_key": config.id_key.hex(),
-                "min_size": config.min_size,
-                "avg_size": config.avg_size,
-                "max_size": config.max_size,
-            },
-            indent=2,
-        ).encode("utf-8"),
-    )
+    payload = json.dumps(
+        {
+            "version": VERSION,
+            "seed": config.seed.hex(),
+            "hash_key": config.hash_key.hex(),
+            "id_key": config.id_key.hex(),
+            "min_size": config.min_size,
+            "avg_size": config.avg_size,
+            "max_size": config.max_size,
+        },
+        indent=2,
+    ).encode("utf-8")
+    if not storage.put_if_absent(CONFIG_KEY, payload):
+        return _parse_config(json.loads(storage.get(CONFIG_KEY).decode("utf-8")))
     return config
 
 

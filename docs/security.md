@@ -156,10 +156,13 @@ override — which environment it operates on.
 
 ### Per-environment Secret Key
 
-Every environment created after this feature gets its own access token, generated
-at creation time and stored on the container. Use it as a **Bearer token** or as
-an **OAuth** client credential — exactly like a team `auth_token`, but it only
-unlocks its own `/mcp/<env>` endpoint:
+Every environment gets its own access token, minted at creation time and kept
+in the team's data directory (`mcp_tokens.json`, mode 0600), keyed by the
+environment name. It survives **rename and recreate** — an MCP client
+configured once keeps working for as long as an environment of that name
+exists — and is revoked when the environment is deleted. Use it as a **Bearer
+token** or as an **OAuth** client credential — exactly like a team
+`auth_token`, but it only unlocks its own `/mcp/<env>` endpoint:
 
 ```
 Authorization: Bearer <environment-secret-key>
@@ -197,8 +200,12 @@ https://your-server.com/env/<env>?key=<share-secret>
 ```
 
 Opening it trades the key for a signed, HTTP-only, SameSite=Strict cookie and
-redirects to the clean `/env/<env>`, so the key does not linger in the address
-bar or browser history. The same modal regenerates or revokes the link; both
+moves on to the clean `/env/<env>`, so the key does not linger in the address
+bar or browser history. The move is a navigation started by a small landing
+page rather than an HTTP redirect: when the link is opened from another site,
+such as a webmail button, the browser treats a redirect chain as cross-site and
+withholds the Strict cookie, while a navigation started by the landing page is
+same-site. The same modal regenerates or revokes the link; both
 take effect immediately, including for sessions already opened with it, because
 the cookie carries a fingerprint of the secret it was minted from. Links have no
 expiry of their own; a session cookie lasts seven days and re-opening the link
@@ -215,12 +222,14 @@ actions on the environment itself (create, delete, update, recreate, switch
 branch, protect, save as template), the share routes themselves, and **Agent
 CLI**.
 
-Agent CLI is deliberately excluded: it is a terminal in the *per-team* agent
-container, whose workspace holds a checkout of every environment of the team.
-Agent Chat runs in that same container — driven over ACP at this environment's
-checkout, with this environment's scoped MCP token — so the boundary a share
-link enforces is the dashboard surface, not the confinement that the
-per-environment Bearer token gives on `/mcp/<env>`. Share with people you would
+Agent Chat runs in the *per-team* agent container, but as this environment's
+own Linux user: it reaches only this environment's checkout, attachments and
+HOME, and only this environment's scoped MCP token. Other environments'
+checkouts, conversations and tokens are closed to it (see
+[Coding Agent → Security model](agent.md#security-model)). What it still shares
+with the rest of the team is the git credential store and deploy key (below),
+the team-wide provider credentials in `[team.X.agent_env]`, and the container
+network. Agent CLI stays excluded from share links. Share with people you would
 let work in the environment, and revoke when they are done.
 
 Share secrets live in the team's data directory (`shares.json`, mode 0600), not
@@ -389,7 +398,8 @@ deploy key or machine-user key) and SSH repository URLs
 productions.
 
 Like the team's git credential store, the private key is also provisioned
-into the team's coding-agent container so agent-side clones work over SSH.
+into the team's coding-agent container (a copy in every environment's HOME) so
+agent-side clones work over SSH.
 Anyone who can drive that agent — including a visitor holding a scoped
 environment share link, via Agent Chat — can therefore read it. Treat the
 deploy key as a team-level credential: prefer registering it read-only and
@@ -516,4 +526,26 @@ The bundled `odoo.conf` template includes these security settings:
 - `max_cron_threads = 0` (disables cron in dev environments)
 
 A repository that ships its own `.oduflow/odoo.conf` replaces the template
-entirely and is responsible for these settings itself.
+entirely and is responsible for these settings itself. Either way, the
+generated conf always sets `http_interface = 0.0.0.0`: Odoo 20 otherwise
+listens only on `127.0.0.1`, which neither Traefik nor a published port can
+reach.
+
+### The master password (`admin_passwd`)
+
+Oduflow never writes `admin_passwd`, so Odoo's compiled-in default (the
+literal `admin`) is in effect. What keeps that from mattering is
+`list_db = False`: Odoo gates every database management function on it, so
+`/web/database/*` is unreachable regardless of the password.
+
+Productions make the pair explicit. `list_db = True` is refused unless the
+same override set (or the team `odoo.prod.conf`) also provides an
+`admin_passwd` of at least 12 characters that is not `admin`, and a `list_db`
+value other than `True`/`False` is refused because Odoo would read it as a
+truthy string and enable database management. See
+[odoo.conf overrides](production.md#odooconf-overrides).
+
+Development environments keep `list_db = False` from the bundled template and
+are not exposed to the public internet by default; a repository that ships its
+own `.oduflow/odoo.conf` owns that setting — if it enables `list_db`, set a
+master password there too.

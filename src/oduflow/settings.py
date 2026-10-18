@@ -19,9 +19,12 @@ logger = logging.getLogger("oduflow")
 
 TRACE: bool = False
 
-DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.3.3"
+DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.4.0"
 DEFAULT_POSTGRES_IMAGE = "postgres:16"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
+# Retired keys already reported: settings are re-parsed for every console
+# validation and live apply, and one warning per process is enough.
+_warned_retired_keys: set[str] = set()
 
 # Active MCP transport for the running server ("stdio" | "http").
 # Set in server.main() before the server starts. Mostly informational;
@@ -384,6 +387,13 @@ class Settings:
     # Storage
     base_data_dir: str = ""
     overlay_threshold_mb: int = 50
+    # System cron owns synchronization processes. In Docker mount this host
+    # directory and set cron_container to the existing Oduflow container name.
+    template_cron_dir: str = "/etc/cron.d"
+    # Empty: the user running Oduflow natively (the only one allowed), or root
+    # as the host user that runs `docker exec` (template_sync._cron_user).
+    template_cron_user: str = ""
+    template_cron_container: str = ""
 
     # Coding agent — deployment-wide bits only; enabling the agent and its
     # credentials are per team (TeamSettings.agent_*). When enabled for a team,
@@ -428,11 +438,14 @@ class Settings:
     # provisioned lazily (first production or existing container).
     prod_enabled: bool = False
     prod_odumcp_repo_url: str = "https://github.com/oduflow/oduflow-client-addons.git"
-    prod_odumcp_ref: str = "19.0"
     prod_db_container: str = "oduflow-prod-db"
     prod_db_volume: str = "oduflow-prod-db-data"
     prod_walg_version: str = ""  # empty = version pinned in walg.py
     prod_workers_cap: int = 8  # upper bound for auto-tuned Odoo workers
+    # Seconds a production gets to become healthy after a deploy, rollback,
+    # reconfigure, restore, Stack apply or recovery start/restart. Workers-mode productions with many modules
+    # can take several minutes to start serving.
+    prod_health_timeout: int = 180
     # [production.wal]: cluster-wide disk protection, independent of backups.
     wal_upload_timeout: int = 120
     wal_warn_after: int = 120
@@ -856,6 +869,8 @@ class Settings:
 
         if self.prod_workers_cap < 1:
             raise ValueError("[production] workers_cap must be >= 1")
+        if self.prod_health_timeout < 1:
+            raise ValueError("[production] health_timeout must be >= 1")
 
         if self.backup is not None:
             b = self.backup
@@ -901,6 +916,7 @@ class Settings:
             "agent",
             "production",
             "backup",
+            "template_sync",
             "team",
             "route",
         ):
@@ -923,6 +939,13 @@ class Settings:
                 "[production].postgres_image is no longer supported. "
                 "Remove it from oduflow.toml and set [database].image instead; "
                 "both development and production use that image."
+            )
+        if "odumcp_ref" in production and "odumcp_ref" not in _warned_retired_keys:
+            _warned_retired_keys.add("odumcp_ref")
+            logger.warning(
+                "[production].odumcp_ref is ignored: the OduMCP addon branch "
+                "follows each production's Odoo version (e.g. 18.0). Remove it "
+                "from oduflow.toml."
             )
         wal = production.get("wal", {})
         if not isinstance(wal, dict):
@@ -1134,6 +1157,13 @@ class Settings:
             postgres_image_explicit="image" in database,
             base_data_dir=base_data_dir,
             overlay_threshold_mb=int(storage.get("overlay_threshold_mb", 50)),
+            template_cron_dir=str(
+                raw.get("template_sync", {}).get("cron_dir", "/etc/cron.d")
+            ),
+            template_cron_user=str(raw.get("template_sync", {}).get("cron_user", "")),
+            template_cron_container=str(
+                raw.get("template_sync", {}).get("cron_container", "")
+            ),
             agent_image=_normalize_agent_image(agent.get("image")),
             agent_claude_model=str(agent.get("claude_model", "")).strip(),
             agent_codex_model=str(agent.get("codex_model", "")).strip(),
@@ -1149,9 +1179,9 @@ class Settings:
                     "https://github.com/oduflow/oduflow-client-addons.git",
                 )
             ),
-            prod_odumcp_ref=str(production.get("odumcp_ref", "19.0")),
             prod_walg_version=str(production.get("walg_version", "")).strip(),
             prod_workers_cap=int(production.get("workers_cap", 8)),
+            prod_health_timeout=int(production.get("health_timeout", 180)),
             wal_upload_timeout=int(wal_values["wal_upload_timeout"]),
             wal_warn_after=int(wal_values["wal_warn_after"]),
             wal_stall_after=int(wal_values["wal_stall_after"]),

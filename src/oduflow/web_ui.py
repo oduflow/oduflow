@@ -51,6 +51,7 @@ from oduflow import (
     import_tokens,
     production_registry,
     secret_store,
+    template_import,
     ui_scope,
     ui_totp,
     updates,
@@ -682,6 +683,11 @@ def _acp_adapter_cmd(agent_type: str) -> list[str]:
 
 _CLAUDE_AUTH_GUIDANCE_MARKER = "Oduflow authentication guidance:"
 _OPENCODE_AUTH_GUIDANCE_MARKER = "Oduflow OpenCode authentication guidance:"
+_CODEX_AUTH_GUIDANCE_MARKER = "Oduflow Codex authentication guidance:"
+# ACP's ``auth_required`` error code. codex-acp answers session/new with it
+# when Codex has no sign-in, and session/prompt when the provider rejects the
+# credential (HTTP 401); quota and rate-limit failures use other codes.
+_ACP_AUTH_REQUIRED_CODE = -32000
 
 
 def _annotate_acp_auth_error(
@@ -695,11 +701,14 @@ def _annotate_acp_auth_error(
     failures must remain untouched: silently trying a different credential
     could switch accounts or billing modes.
 
+    ``auth_mode`` is the agent's effective credential mode
+    (``env_ops._claude_auth_mode`` or ``env_ops._codex_auth_mode``).
+
     The guidance and the marker that makes this idempotent are rebranded
     together: the marker is what the next frame is checked against, so a brand
     in one but not the other would append the guidance again on every frame.
     """
-    if agent_type not in {"claude", "opencode"}:
+    if agent_type not in {"claude", "codex", "opencode"}:
         return frame
     try:
         message = json.loads(frame)
@@ -727,6 +736,40 @@ def _annotate_acp_auth_error(
             "then restart Oduflow."
         )
         error["message"] = f"{error_message}\n\n{guidance_marker} {guidance}"
+        return json.dumps(message, separators=(",", ":"), ensure_ascii=False)
+
+    if agent_type == "codex":
+        if error.get("code") != _ACP_AUTH_REQUIRED_CODE or not lowered.startswith(
+            "authentication required"
+        ):
+            return frame
+        guidance_marker = brand.rebrand(_CODEX_AUTH_GUIDANCE_MARKER)
+        if guidance_marker in error_message:
+            return frame
+        if auth_mode == "api_key":
+            guidance = (
+                "Codex is using OPENAI_API_KEY: the agent container signs in "
+                "with it on every start, replacing any ChatGPT sign-in. Update "
+                "or remove that key in "
+                f"[team.{team_id}.agent_env] (or the single-team server "
+                "environment), then restart Oduflow. If the key is valid, the "
+                "agent container's log shows whether that start-up sign-in "
+                "failed."
+            )
+        else:
+            guidance = (
+                "Codex is not signed in, or its sign-in has expired. Open Agent "
+                'CLI for this environment, choose "Sign in with Device Code" '
+                '(the "Sign in with ChatGPT" browser callback cannot reach the '
+                "container), then reopen Agent Chat. If Codex opens without "
+                "offering a sign-in (for example, still signed in with a removed "
+                "OPENAI_API_KEY), run /logout there and reopen Agent CLI. "
+                f"Alternatively set OPENAI_API_KEY in [team.{team_id}.agent_env] "
+                "(or the single-team server environment) and restart Oduflow."
+            )
+        error["message"] = (
+            f"{error_message}\n\n{guidance_marker} {brand.rebrand(guidance)}"
+        )
         return json.dumps(message, separators=(",", ":"), ensure_ascii=False)
 
     specific_markers = (
@@ -775,13 +818,20 @@ def _codex_cli_cmd(mcp_url: str, model: str = "") -> list[str]:
     """Build the hosted Codex CLI command.
 
     Docker is the security boundary for hosted agents: the container is
-    per-team and runs as the unprivileged ``agent`` user. Disabling Codex's
-    nested Linux sandbox avoids requiring user namespaces (bubblewrap), which
-    Docker's default seccomp profile intentionally blocks.
+    per-team and each session runs as its environment's own unprivileged uid.
+    Disabling Codex's nested Linux sandbox avoids requiring user namespaces
+    (bubblewrap), which Docker's default seccomp profile intentionally blocks.
+
+    The startup update check is off, like OpenCode's self-update: an
+    in-container ``npm install -g`` would not survive container recreation, and
+    the immutable coder image pins the agent versions. Only the TUI checks;
+    the ACP adapter (Agent Chat) has no update prompt.
     """
     cmd = [
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        "check_for_update_on_startup=false",
         "-c",
         f'mcp_servers.{env_ops.AGENT_MCP_SERVER}.url="{mcp_url}"',
         "-c",
@@ -795,8 +845,8 @@ def _codex_cli_cmd(mcp_url: str, model: str = "") -> list[str]:
 def _opencode_cli_cmd(model: str = "") -> list[str]:
     """Build the hosted OpenCode TUI command.
 
-    Docker and the unprivileged ``agent`` user are the security boundary, so
-    permission requests are auto-approved inside the container.
+    Docker and the environment's unprivileged uid are the security boundary,
+    so permission requests are auto-approved inside the container.
     """
     cmd = ["opencode", "--auto"]
     if model:
@@ -918,16 +968,26 @@ def _confirm_before_start(cmd: list[str], warning: str) -> list[str]:
 
 
 def _wire_client_acp_mcp(
-    frame: str, mcp_url: str, mcp_token: str, browser_session: str
+    frame: str,
+    mcp_url: str,
+    mcp_token: str,
+    browser_session: str | None,
 ) -> str:
     """Inject built-in MCP servers into client-configurable ACP sessions.
 
     The browser intentionally knows neither URL nor token. The WebSocket relay
     augments only ``session/new``/``session/load``/``session/resume`` frames on
-    their way to Codex/OpenCode, using ACP's client-provided MCP contract. Agent
-    Browser is a local credentialless stdio server. Oduflow is added only when a
-    scoped token exists; that credential lives only in this exec's environment
-    and stdio and is never returned to the browser or disk.
+    their way to Codex/OpenCode, using ACP's client-provided MCP contract.
+    Client-supplied entries under the built-in names are always dropped. Oduflow
+    is added only when a scoped token exists; that credential lives only in this
+    exec's environment and stdio and is never returned to the browser or disk.
+
+    Agent Browser, a local credentialless stdio server, is added only when a
+    ``browser_session`` profile name is given (OpenCode). Codex passes None and
+    must not receive it: the coder image's Codex config already defines
+    ``agent_browser`` (forwarding ``AGENT_BROWSER_SESSION`` from the exec
+    environment), and codex-acp reports a same-named client server as a failed
+    startup in every new chat.
     """
     try:
         message = json.loads(frame)
@@ -955,20 +1015,21 @@ def _wire_client_acp_mcp(
             env_ops.LEGACY_AGENT_MCP_SERVER,
         }
     ]
-    servers.append(
-        {
-            "name": "agent_browser",
-            "command": "agent-browser",
-            "args": ["mcp", "--tools", "all"],
-            "env": [
-                {"name": "AGENT_BROWSER_SESSION", "value": browser_session},
-                {
-                    "name": "AGENT_BROWSER_EXECUTABLE_PATH",
-                    "value": "/usr/bin/chromium",
-                },
-            ],
-        }
-    )
+    if browser_session is not None:
+        servers.append(
+            {
+                "name": "agent_browser",
+                "command": "agent-browser",
+                "args": ["mcp", "--tools", "all"],
+                "env": [
+                    {"name": "AGENT_BROWSER_SESSION", "value": browser_session},
+                    {
+                        "name": "AGENT_BROWSER_EXECUTABLE_PATH",
+                        "value": "/usr/bin/chromium",
+                    },
+                ],
+            }
+        )
     if mcp_token:
         servers.append(
             {
@@ -1092,6 +1153,18 @@ def _build_routes(
                 "__TEAM_BASE_DOMAIN__",
                 html.escape(team.base_domain if team else "", quote=True),
             )
+            # Production creation refuses without the team's production_token;
+            # say so before the form is filled. Ships with the page because the
+            # create-production modal also opens from environment cards.
+            .replace(
+                "__PROD_TOKEN_NOTICE_HIDDEN__",
+                ""
+                if settings.prod_enabled
+                and not scoped_env
+                and team is not None
+                and not team.production_token
+                else "hidden",
+            )
             # Only a browser already signed in to the Server settings console
             # gets the link; team members never learn the console exists.
             .replace(
@@ -1101,7 +1174,10 @@ def _build_routes(
 
     def dashboard(request: Request) -> HTMLResponse:
         settings = get_settings()
-        team = getattr(request.state, "team", None)
+        # Same resolution as the API: the open (auth-disabled) server sets no
+        # request.state.team, and the team-scoped page data (base domain,
+        # production-token notice) must not silently fall away there.
+        team = _get_ui_team(request)
         page = _render_dashboard(
             settings, team=team, admin=admin_ui.has_admin_session(request, settings)
         )
@@ -1123,6 +1199,17 @@ def _build_routes(
             if team is not None and env_share.verify(team, env_name, key):
                 return team
         return None
+
+    def _share_landing_page(target: str) -> str:
+        url = html.escape(target, quote=True)
+        return (
+            '<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta http-equiv="refresh" content="0;url={url}">'
+            "<title>Opening environment</title></head>"
+            f'<body><p><a href="{url}">Open the environment</a></p>'
+            f"<script>location.replace({json.dumps(target)});</script>"
+            "</body></html>"
+        )
 
     def _share_link_error(message: str, status_code: int) -> Response:
         return Response(message, status_code=status_code, media_type="text/plain")
@@ -1156,7 +1243,14 @@ def _build_routes(
             # Land on the clean URL so the key leaves the address bar, browser
             # history, and any Referer sent by the page's own requests.
             target = ui_scope.PAGE_PREFIX + quote(env_name, safe="/")
-            response: Response = RedirectResponse(target, status_code=303)
+            # Not an HTTP redirect: a link opened from another site (a webmail
+            # button) keeps that site as the initiator across redirects, so the
+            # browser withholds the SameSite=Strict cookie on the landing
+            # request. A navigation started by this page is same-site.
+            response: Response = HTMLResponse(
+                _share_landing_page(target),
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
             response.set_cookie(
                 ui_scope.SHARE_COOKIE,
                 _make_share_token(settings, team, env_name, key),
@@ -1776,92 +1870,9 @@ def _build_routes(
         except BusyError as e:
             return _error_response(e)
         try:
-            import docker as _docker
-            from oduflow.docker_ops.client import get_client as _get_client
-            from oduflow.naming import get_resource_name
-
             settings = get_settings()
             activity.touch(team, branch)
-            client = _get_client()
-            odoo_container_name = get_resource_name(
-                branch, "odoo", settings.prefix, team.team_id
-            )
-            try:
-                container = client.containers.get(odoo_container_name)
-                labels = container.labels
-            except _docker.errors.NotFound:
-                return _error_response(
-                    NotFoundError(f"Environment '{branch}' not found.")
-                )
-
-            repo_url = labels.get(settings.repo_label, "")
-            odoo_image = labels.get(settings.image_label, "")
-            template_raw = labels.get("oduflow.template", "")
-            template_name = (
-                template_raw if template_raw and template_raw != "none" else None
-            )
-            extra_addons_raw = labels.get("oduflow.extra_addons", "{}")
-            extra_addons = json.loads(extra_addons_raw) or None
-            git_user = labels.get("oduflow.git_user", "")
-            env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
-            local_path = labels.get("oduflow.local_path", "")
-            # The environment name and the git branch it tracks can differ
-            # (several environments off one branch), so recreate from the
-            # recorded branch label rather than from the environment name.
-            git_branch = labels.get("oduflow.git_branch", branch)
-            recreate_labels = dict(labels)
-            env_ops._reconcile_environment_hostname_for_update(
-                client, settings, team, branch, recreate_labels
-            )
-            hostname = recreate_labels.get(env_ops.ENV_HOSTNAME_LABEL, "")
-            hostname_source = recreate_labels.get(env_ops.ENV_HOSTNAME_SOURCE_LABEL, "")
-
-            # Check disk space BEFORE deleting the old environment: refusing
-            # here loses nothing, while failing after delete_environment would
-            # destroy a working environment. Conservative on purpose — the old
-            # environment's own space is not yet freed at measurement time.
-            from oduflow.docker_ops import system_ops
-
-            est_db_bytes = system_ops.estimate_new_db_bytes(
-                client, settings, team, template_name
-            )
-            system_ops.check_disk_space(
-                client,
-                settings,
-                team,
-                template_name,
-                estimated_db_bytes=est_db_bytes,
-                local_mount=bool(local_path),
-                env_name=branch,
-            )
-
-            # Same reasoning as the disk-space check: a dangling secret
-            # reference must refuse the recreate here, while refusing loses
-            # nothing — create_environment would only re-check after
-            # delete_environment has already destroyed the working environment.
-            secret_store.resolve_env_secrets(team, env_vars)
-            # Same for a stopped database server or a template without its
-            # database: create_environment would refuse only after the delete.
-            env_ops._ensure_system_ready(
-                client, settings, team, template_name, odoo_image
-            )
-
-            env_ops.delete_environment(settings, team, branch, preserve_share=True)
-            result = env_ops.create_environment(
-                settings,
-                team,
-                git_branch,
-                repo_url,
-                odoo_image,
-                env_name=branch,
-                template_name=template_name,
-                extra_addons=extra_addons,
-                git_user=git_user,
-                env_vars=env_vars,
-                local_path=local_path,
-                hostname=hostname,
-                hostname_source=hostname_source,
-            )
+            result = env_ops.recreate_environment(settings, team, branch)
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -1948,6 +1959,7 @@ def _build_routes(
                         "template_db": result.get("template_db"),
                         "affected_envs": result.get("affected_envs", []),
                         "remount_failures": result.get("remount_failures", []),
+                        "pinned_envs": result.get("pinned_envs", []),
                     },
                 }
             )
@@ -2389,6 +2401,70 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    async def api_template_sync(request: Request) -> JSONResponse:
+        from oduflow import template_sync
+
+        team = _get_ui_team(request)
+        settings = get_settings()
+        name = request.path_params["name"]
+        try:
+            validate_template_name(name)
+            if not os.path.isdir(team.get_template_dir(name)):
+                raise NotFoundError(f"Template '{name}' not found")
+            if request.method == "GET":
+                return JSONResponse(
+                    {"ok": True, **template_sync.inspect_job(settings, team, name)}
+                )
+            with locks.env_lock(
+                template_lock_key(team.team_id, name),
+                operation="configure_template_sync",
+            ):
+                if request.method == "DELETE":
+                    template_sync.remove_config(settings, team, name)
+                elif request.url.path.endswith("/sync-now"):
+                    template_sync.request_run(team, name)
+                else:
+                    body = await request.json()
+                    if not isinstance(body, dict):
+                        raise ValueError("JSON body must be an object")
+                    template_sync.save_config(settings, team, name, body)
+            return JSONResponse({"ok": True})
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except FlowError as exc:
+            return _error_response(exc)
+
+    async def api_env_template_sync(request: Request) -> JSONResponse:
+        from oduflow import template_sync
+
+        team = _get_ui_team(request)
+        name = request.path_params["branch"]
+        try:
+            _validate_dev_env_name(name)
+            body = await request.json()
+            if not isinstance(body, dict) or type(body.get("auto_refresh")) is not bool:
+                raise ValueError("auto_refresh must be a boolean")
+            with locks.env_lock(
+                name, team.team_id, operation="set_template_auto_refresh"
+            ):
+                env_ops.require_environment(get_settings(), team, name)
+                env = next(
+                    (
+                        e
+                        for e in env_ops.list_environments(get_settings(), team)
+                        if e["env_name"] == name
+                    ),
+                    {},
+                )
+                if env.get("template_name") in (None, "", "none"):
+                    raise PrerequisiteNotMetError("Environment has no source template")
+                template_sync.set_env_policy(team, name, body["auto_refresh"])
+            return JSONResponse({"ok": True})
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except FlowError as exc:
+            return _error_response(exc)
+
     async def api_import_template_from_odoo(request: Request) -> JSONResponse:
         team = _get_ui_team(request)
         try:
@@ -2480,6 +2556,7 @@ def _build_routes(
                 "restore_seconds": result.get("restore_seconds"),
                 "affected_envs": result.get("affected_envs", []),
                 "remount_failures": result.get("remount_failures", []),
+                "pinned_envs": result.get("pinned_envs", []),
             }
             if "dump_reloaded" in result:  # s3 / local-path / refresh engine
                 payload.update(
@@ -2555,6 +2632,50 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("Unexpected error in api_template_rename")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_s3_browse(request: Request) -> JSONResponse:
+        """One level of an S3 bucket for the import dialog's object browser.
+
+        Read-only and not template-locked: it creates nothing and an operator
+        typically browses while an unrelated import runs. ``template`` signs
+        with that template's stored secret, so re-pointing an existing S3
+        template never sends its secret back to the browser.
+        """
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body"}, status_code=400
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "JSON body must be an object"}, status_code=400
+            )
+        try:
+            result = await _offload(
+                template_import.browse_source,
+                get_settings(),
+                team,
+                bucket=str(body.get("bucket") or "").strip(),
+                prefix=str(body.get("prefix") or ""),
+                continuation_token=str(body.get("continuation_token") or ""),
+                endpoint=str(body.get("endpoint") or "").strip(),
+                region=str(body.get("region") or "").strip(),
+                access_key=str(body.get("access_key") or ""),
+                secret_key=str(body.get("secret_key") or ""),
+                template_name=str(body.get("template") or "").strip(),
+            )
+            return JSONResponse({"ok": True, **result})
+        except ValueError as e:  # invalid bucket, endpoint or template name
+            return _error_text_response(e)
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_s3_browse")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -2659,10 +2780,15 @@ def _build_routes(
         Before promotion, live template files are deliberately ignored so an
         overwrite cannot fake progress from old data. A ``.promoted`` marker
         explicitly switches missing artifacts to the live copy, allowing a
-        failed final restore to retry without re-uploading moved files.
+        failed final restore to retry without re-uploading moved files. The
+        live filestore counts only under ``.filestore-promoted``: a
+        database-only finalize promotes the dump but keeps an older filestore.
         """
         staging = team.get_import_staging_dir(template_name)  # validates name
         promoted = os.path.isfile(os.path.join(staging, ".promoted"))
+        filestore_promoted = os.path.isfile(
+            os.path.join(staging, ".filestore-promoted")
+        )
         live_dir = team.get_template_dir(template_name)
         staged_meta = os.path.join(staging, "metadata.json")
         staged_dump = os.path.join(staging, "dump.sql.gz")
@@ -2685,7 +2811,7 @@ def _build_routes(
             staged_fs_dir
             if os.path.isdir(staged_fs_dir)
             else team.get_template_filestore_path(template_name)
-            if promoted
+            if filestore_promoted
             else staged_fs_dir
         )
         chunks: list[str] = []
@@ -2760,8 +2886,12 @@ def _build_routes(
         Optional booleans ``with_enterprise`` / ``with_themes`` /
         ``with_extra_addons`` append the matching ``--with-*`` flags to the
         returned command so the checkboxes in the import dialog drive what the
-        Odoo.sh client downloads. ``addon_error_policy`` is stored with the
-        token and controls strict versus best-effort addon wiring at finalize.
+        Odoo.sh client downloads; ``without_filestore`` appends
+        ``--without-filestore`` for a database-only import.
+        ``addon_error_policy`` and ``without_filestore`` are stored with the
+        token: the first controls strict versus best-effort addon wiring at
+        finalize, the second keeps finalize database-only whatever the client
+        sends.
         """
         team = _get_ui_team(request)
         with_flags: list[str] = []
@@ -2783,6 +2913,9 @@ def _build_routes(
                 with_flags.append("--with-themes")
             if data.get("with_extra_addons"):
                 with_flags.append("--with-extra-addons")
+            without_filestore = bool(data.get("without_filestore"))
+            if without_filestore:
+                with_flags.append("--without-filestore")
             addon_error_policy = str(
                 data.get("addon_error_policy")
                 or import_tokens.ADDON_ERROR_POLICY_STRICT
@@ -2791,6 +2924,7 @@ def _build_routes(
                 team,
                 template_name,
                 addon_error_policy=addon_error_policy,
+                without_filestore=without_filestore,
             )
         except ValueError as e:
             return _error_text_response(e)
@@ -3234,6 +3368,20 @@ def _build_routes(
         except FlowError as e:
             return _error_response(e)
         template_name = str(record["template_name"])
+        # Database-only when the token was minted so or the client ran with
+        # --without-filestore: either way staged chunks are not promoted, so a
+        # disagreement can only leave the live filestore in place, never
+        # replace it with a partial one.
+        flag = request.query_params.get("without_filestore", "0").strip().lower()
+        if flag in {"1", "true", "yes", "on"}:
+            without_filestore = True
+        elif flag in {"0", "false", "no", "off", ""}:
+            without_filestore = bool(record.get("without_filestore"))
+        else:
+            return JSONResponse(
+                {"ok": False, "error": "without_filestore must be 1 or 0."},
+                status_code=400,
+            )
         try:
             progress = _import_progress(team, template_name)
         except ValueError as e:  # invalid template name
@@ -3265,6 +3413,7 @@ def _build_routes(
                         record.get("addon_error_policy")
                         or import_tokens.ADDON_ERROR_POLICY_STRICT
                     ),
+                    without_filestore=without_filestore,
                 )
                 import_tokens.invalidate(team, str(record["token"]))
             return JSONResponse({"ok": True, "result": result})
@@ -4364,6 +4513,71 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("Unexpected error in api_extra_repos")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_oca_catalog(request: Request) -> JSONResponse:
+        from oduflow import oca_import
+        from oduflow.extra_addons import list_extra_repos
+        from oduflow.oca_catalog import annotate_existing, list_oca_repositories
+
+        team = _get_ui_team(request)
+        # Snapshot the job first: a clone finishing during this request then
+        # either is still "running" here (the page keeps polling) or is already
+        # visible in the repository list read below.
+        job = oca_import.get_job(team)
+        try:
+            catalogue, existing = await asyncio.gather(
+                _offload(list_oca_repositories), _offload(list_extra_repos, team)
+            )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "repos": annotate_existing(catalogue["repos"], existing),
+                    "stale": catalogue["stale"],
+                    "job": job,
+                }
+            )
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_oca_catalog")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    async def api_oca_import_status(request: Request) -> JSONResponse:
+        from oduflow import oca_import
+
+        return JSONResponse(
+            {"ok": True, "job": oca_import.get_job(_get_ui_team(request))}
+        )
+
+    async def api_oca_import_start(request: Request) -> JSONResponse:
+        """Start a server-side batch clone; the dashboard polls its status."""
+        from oduflow import oca_import
+
+        team = _get_ui_team(request)
+        try:
+            body = await request.json()
+            job = await _offload(
+                oca_import.start_import,
+                team,
+                body.get("repos") if isinstance(body, dict) else None,
+                lambda e: (
+                    _public_flow_error(e, context="OCA import")
+                    if isinstance(e, FlowError)
+                    else _public_error_text(e)
+                ),
+            )
+            return JSONResponse({"ok": True, "job": job}, status_code=202)
+        except FlowError as e:
+            return _error_response(e)
+        except ValueError as e:
+            return _error_text_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_oca_import_start")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -5594,30 +5808,24 @@ def _build_routes(
                 await websocket.close(code=1011)
                 return
 
-            # The console attaches at the environment's checkout. If it is
-            # missing (an installation upgraded to the agent feature, or a
-            # setup that failed at creation) heal it on demand by cloning from
-            # the Odoo container labels.
+            # The console attaches at the environment's checkout, as the
+            # environment's own uid. If either is missing (an installation
+            # upgraded to the agent feature or to per-environment identities,
+            # or a setup that failed at creation) heal it on demand from the
+            # Odoo container labels.
             checkout = get_agent_checkout_dir(branch)
 
-            def _checkout_missing() -> bool:
-                code, _ = container.exec_run(
-                    ["test", "-d", checkout], user=env_ops.AGENT_USER
-                )
-                return bool(code != 0)
+            def _ready_uid() -> int | None:
+                return env_ops.agent_env_uid(container, team, branch)
 
-            missing = await asyncio.get_event_loop().run_in_executor(
-                None, _checkout_missing
-            )
-            if missing:
+            uid = await asyncio.get_event_loop().run_in_executor(None, _ready_uid)
+            if uid is None:
                 await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: env_ops.ensure_agent_env_checkout(settings, team, branch),
                 )
-                missing = await asyncio.get_event_loop().run_in_executor(
-                    None, _checkout_missing
-                )
-            if missing:
+                uid = await asyncio.get_event_loop().run_in_executor(None, _ready_uid)
+            if uid is None:
                 await websocket.send_text(
                     "\x1b[31mError: no checkout at "
                     + checkout
@@ -5628,13 +5836,14 @@ def _build_routes(
                 await websocket.close(code=1011)
                 return
 
+            env_uid = uid
             # Persistent checkouts may carry an MCP URL generated by an older
             # Oduflow version. Refresh only that generated entry before Claude
             # reads .mcp.json; no git fetch/reset and no token is written.
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: env_ops.refresh_agent_mcp_config(
-                    container, settings, team, branch
+                    container, settings, team, branch, env_uid
                 ),
             )
 
@@ -5655,11 +5864,16 @@ def _build_routes(
                     "(created before MCP Access?) — the agent cannot drive it "
                     "over MCP. Update or recreate the environment.\x1b[0m\r\n"
                 )
-            exec_env = {
-                "ODUFLOW_MCP_URL": mcp_url,
-                "ODUFLOW_MCP_TOKEN": mcp_token or "",
-                "AGENT_BROWSER_SESSION": os.path.basename(checkout),
-            }
+            # The environment's own uid and HOME: no other environment's
+            # session can read this exec's env (the token) or its files.
+            exec_user, exec_env = env_ops.agent_exec_identity(env_uid)
+            exec_env.update(
+                {
+                    "ODUFLOW_MCP_URL": mcp_url,
+                    "ODUFLOW_MCP_TOKEN": mcp_token or "",
+                    "AGENT_BROWSER_SESSION": os.path.basename(checkout),
+                }
+            )
 
             if agent_type == "codex":
                 # Codex has no project-scoped config; wire the Oduflow MCP
@@ -5681,25 +5895,26 @@ def _build_routes(
                 if provider_warning:
                     cmd = _confirm_before_start(cmd, provider_warning)
             else:
-                # Approval-free like Codex: Docker + the unprivileged `agent`
-                # user are the security boundary, so the console skips per-tool
-                # prompts. Safe under the non-root agent user (the CLI's own root
-                # guard on this flag does not trip). Agent Chat gets the same via
-                # the seeded user-tier settings.json (permissions.defaultMode).
+                # Approval-free like Codex: Docker + the environment's
+                # unprivileged uid are the security boundary, so the console
+                # skips per-tool prompts. Safe under a non-root uid (the CLI's
+                # own root guard on this flag does not trip). Agent Chat gets
+                # the same via the seeded user-tier settings.json
+                # (permissions.defaultMode).
                 cmd = ["claude", "--dangerously-skip-permissions"]
                 if settings.agent_claude_model:
                     cmd += ["--model", settings.agent_claude_model]
 
             exec_id = client.api.exec_create(
                 container.id,
-                cmd,
+                env_ops.agent_session_command(cmd),
                 stdin=True,
                 tty=True,
                 stdout=True,
                 stderr=True,
                 workdir=checkout,
                 environment=exec_env,
-                user=env_ops.AGENT_USER,
+                user=exec_user,
             )["Id"]
             sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
             raw_sock = sock._sock
@@ -5867,7 +6082,12 @@ def _build_routes(
             agent_type = agent_config.resolve_agent_type(
                 websocket.query_params.get("type"), team
             )
-            claude_auth_mode = env_ops._claude_auth_mode(settings, team)
+            # Only Claude and Codex guidance depends on the credential mode.
+            auth_mode_of = {
+                "claude": env_ops._claude_auth_mode,
+                "codex": env_ops._codex_auth_mode,
+            }.get(agent_type)
+            auth_mode = auth_mode_of(settings, team) if auth_mode_of else ""
 
             container_name = get_agent_container_name(team.team_id, settings.prefix)
             try:
@@ -5884,24 +6104,17 @@ def _build_routes(
 
             checkout = get_agent_checkout_dir(branch)
 
-            def _checkout_missing() -> bool:
-                code, _ = container.exec_run(
-                    ["test", "-d", checkout], user=env_ops.AGENT_USER
-                )
-                return bool(code != 0)
+            def _ready_uid() -> int | None:
+                return env_ops.agent_env_uid(container, team, branch)
 
-            missing = await asyncio.get_event_loop().run_in_executor(
-                None, _checkout_missing
-            )
-            if missing:
+            uid = await asyncio.get_event_loop().run_in_executor(None, _ready_uid)
+            if uid is None:
                 await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: env_ops.ensure_agent_env_checkout(settings, team, branch),
                 )
-                missing = await asyncio.get_event_loop().run_in_executor(
-                    None, _checkout_missing
-                )
-            if missing:
+                uid = await asyncio.get_event_loop().run_in_executor(None, _ready_uid)
+            if uid is None:
                 await _err(
                     f"no checkout at {checkout} — could not build it "
                     "automatically (live-mount environments have no repo to "
@@ -5909,13 +6122,14 @@ def _build_routes(
                 )
                 return
 
+            env_uid = uid
             # Keep Claude ACP's project-scoped .mcp.json current for persistent
             # checkouts. Codex/OpenCode receive the same URL through session
             # wiring.
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: env_ops.refresh_agent_mcp_config(
-                    container, settings, team, branch
+                    container, settings, team, branch, env_uid
                 ),
             )
 
@@ -5937,15 +6151,18 @@ def _build_routes(
                     "Update or recreate the environment."
                 )
             mcp_url = env_ops.get_agent_mcp_url(settings, team, branch)
-            exec_env = {
-                "ODUFLOW_MCP_URL": mcp_url,
-                "ODUFLOW_MCP_TOKEN": mcp_token or "",
-                "AGENT_BROWSER_SESSION": os.path.basename(checkout),
-            }
+            exec_user, exec_env = env_ops.agent_exec_identity(env_uid)
+            exec_env.update(
+                {
+                    "ODUFLOW_MCP_URL": mcp_url,
+                    "ODUFLOW_MCP_TOKEN": mcp_token or "",
+                    "AGENT_BROWSER_SESSION": os.path.basename(checkout),
+                }
+            )
             if agent_type == "codex":
                 # codex-acp maps this official mode to approval_policy=never
-                # and dangerFullAccess. Docker + the unprivileged agent user
-                # remain the outer security boundary for browser chat.
+                # and dangerFullAccess. Docker + the environment's unprivileged
+                # uid remain the outer security boundary for browser chat.
                 exec_env["INITIAL_AGENT_MODE"] = "agent-full-access"
             elif agent_type == "opencode":
                 # MCP servers arrive through the ACP session-open frame below,
@@ -5962,14 +6179,14 @@ def _build_routes(
 
             exec_id = client.api.exec_create(
                 container.id,
-                _acp_adapter_cmd(agent_type),
+                env_ops.agent_session_command(_acp_adapter_cmd(agent_type)),
                 stdin=True,
                 tty=False,
                 stdout=True,
                 stderr=True,
                 workdir=checkout,
                 environment=exec_env,
-                user=env_ops.AGENT_USER,
+                user=exec_user,
             )["Id"]
             sock = client.api.exec_start(exec_id, detach=False, tty=False, socket=True)
             raw_sock = sock._sock
@@ -6011,7 +6228,7 @@ def _build_routes(
                                 frame = _annotate_acp_auth_error(
                                     frame,
                                     agent_type,
-                                    claude_auth_mode,
+                                    auth_mode,
                                     team.team_id,
                                 )
                                 await websocket.send_text(frame)
@@ -6027,11 +6244,15 @@ def _build_routes(
                         if not text:
                             continue
                         if agent_type in {"codex", "opencode"}:
+                            # Codex gets Agent Browser from its config.toml;
+                            # a second copy here is reported as a failure.
                             text = _wire_client_acp_mcp(
                                 text,
                                 mcp_url,
                                 mcp_token or "",
-                                os.path.basename(checkout),
+                                os.path.basename(checkout)
+                                if agent_type == "opencode"
+                                else None,
                             )
                         frame = text if text.endswith("\n") else text + "\n"
                         await loop.run_in_executor(
@@ -6108,6 +6329,7 @@ def _build_routes(
                     "ok": True,
                     "productions": prods,
                     "base_domain": team.base_domain,
+                    "production_token_set": bool(team.production_token),
                     "backup_configured": settings.backup is not None,
                     "webhook": {
                         "path": "/api/webhooks/github",
@@ -6562,6 +6784,7 @@ def _build_routes(
                         "template_db": result.get("template_db"),
                         "affected_envs": result.get("affected_envs", []),
                         "remount_failures": result.get("remount_failures", []),
+                        "pinned_envs": result.get("pinned_envs", []),
                     },
                 }
             )
@@ -6606,6 +6829,17 @@ def _build_routes(
             name = request.path_params["name"]
             production_registry.get_production(team, name)
             deploys = production_ops.read_deploys(team, name, limit=20)
+            # The dashboard renders only the summary fields; keep the bulky
+            # diagnostics (16 KB output_tail + 8 KB failure_excerpt per failed
+            # deploy) out of every poll of this panel.
+            deploys = [
+                {
+                    key: value
+                    for key, value in deploy.items()
+                    if key not in ("output_tail", "failure_excerpt")
+                }
+                for deploy in deploys
+            ]
             return JSONResponse({"ok": True, "deploys": deploys})
         except FlowError as e:
             return _error_response(e)
@@ -6964,6 +7198,17 @@ def _build_routes(
         Route("/api/license/checkout", api_license_checkout, methods=["POST"]),
         Route("/api/feedback/link", api_feedback_link, methods=["POST"]),
         Route("/api/templates", api_templates, methods=["GET"]),
+        Route(
+            "/api/templates/{name}/sync",
+            api_template_sync,
+            methods=["GET", "POST", "DELETE"],
+        ),
+        Route("/api/templates/{name}/sync-now", api_template_sync, methods=["POST"]),
+        Route(
+            "/api/environments/{branch:path}/template-sync",
+            api_env_template_sync,
+            methods=["POST"],
+        ),
         Route("/import-odoo.sh", import_odoo_script, methods=["GET"]),
         Route("/api/templates/import-token", api_import_token, methods=["POST"]),
         Route(
@@ -6996,6 +7241,7 @@ def _build_routes(
         ),
         Route("/api/templates/{name}/delete", api_template_delete, methods=["POST"]),
         Route("/api/templates/{name}/rename", api_template_rename, methods=["POST"]),
+        Route("/api/s3/browse", api_s3_browse, methods=["POST"]),
         Route("/api/environments", api_list, methods=["GET"]),
         Route("/api/environments/create", api_create, methods=["POST"]),
         *production_routes,
@@ -7165,6 +7411,9 @@ def _build_routes(
         Route("/api/volumes/create", api_volume_create, methods=["POST"]),
         Route("/api/volumes/{name}/delete", api_volume_delete, methods=["POST"]),
         Route("/api/extra-repos", api_extra_repos, methods=["GET"]),
+        Route("/api/extra-repos/oca", api_oca_catalog, methods=["GET"]),
+        Route("/api/extra-repos/oca/import", api_oca_import_status, methods=["GET"]),
+        Route("/api/extra-repos/oca/import", api_oca_import_start, methods=["POST"]),
         Route("/api/extra-repos/add", api_extra_repo_add, methods=["POST"]),
         Route("/api/extra-repos/ls-remote", api_extra_repo_ls_remote, methods=["POST"]),
         Route("/api/extra-repos/{name}/pull", api_extra_repo_pull, methods=["POST"]),
@@ -7236,6 +7485,8 @@ def mount_web_ui(
     sub_app: ASGIApp = Router(routes=routes)
 
     settings = get_settings()
+    if settings.base_data_dir:
+        locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")
     has_ui_passwords = any(t.ui_password for t in settings.teams.values())
     if has_ui_passwords:
         sub_app = UIAuthMiddleware(sub_app, get_settings)

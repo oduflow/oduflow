@@ -164,6 +164,48 @@ class TestMountFilestoreClearsStale:
         assert order == ["unmount", "copytree"]
         assert merged in volumes
 
+    def test_stale_staged_mount_detaches_the_staged_path(
+        self, tmp_path, stale, monkeypatch
+    ):
+        template_fs = tmp_path / "template" / "filestore"
+        template_fs.mkdir(parents=True)
+        metadata = tmp_path / "template" / "metadata.json"
+        metadata.write_text(json.dumps({"use_overlay": False}))
+
+        team = _team(str(tmp_path / "workspaces"))
+        team.get_template_filestore_path.return_value = str(template_fs)
+        team.get_template_metadata_path.return_value = str(metadata)
+        staged = get_filestore_paths("env1", str(tmp_path / "stage"))
+        stale.add(staged["merged"])
+
+        detached = []
+        monkeypatch.setattr(
+            env_ops,
+            "_unmount_filestore",
+            lambda *a, **k: detached.append(k.get("paths_override")),
+        )
+        monkeypatch.setattr(
+            env_ops, "_wait_unmounted", lambda *a, **k: stale.discard(staged["merged"])
+        )
+        monkeypatch.setattr(env_ops, "get_odoo_uid_gid", lambda *a, **k: "101:101")
+        monkeypatch.setattr(env_ops, "chown_recursive", lambda *a, **k: None)
+        monkeypatch.setattr(env_ops.shutil, "copytree", lambda *a, **k: None)
+
+        env_ops._mount_filestore(
+            MagicMock(),
+            Settings(base_data_dir=str(tmp_path)),
+            team,
+            "env1",
+            "db1",
+            "odoo:19.0",
+            {},
+            template_name="tpl",
+            paths_override=staged,
+        )
+
+        # Detaching the default paths would yank the live environment's mount.
+        assert detached == [staged]
+
     def test_forced_recovery_ignores_copy_metadata(self, tmp_path, stale, monkeypatch):
         template_fs = tmp_path / "template" / "filestore"
         template_fs.mkdir(parents=True)
@@ -502,6 +544,61 @@ class TestReconcileOverlayMounts:
 
         assert result[0]["repaired"] is True
         assert mounted == [("c", "tpl")]
+
+    def test_unreadable_pin_is_reported_without_stopping_the_pass(
+        self, wired, stale, monkeypatch
+    ):
+        from oduflow.naming import get_workspace_path
+
+        settings, mounted = wired.settings, wired.mounted
+        team = settings.teams["1"]
+        self._envs(
+            monkeypatch,
+            {"env_name": "broken", "template_name": "tpl", "odoo_image": ""},
+            {"env_name": "fine", "template_name": "tpl", "odoo_image": ""},
+        )
+        for name in ("broken", "fine"):
+            stale.add(get_filestore_paths(name, team.workspaces_dir)["merged"])
+        workspace = get_workspace_path("broken", team.workspaces_dir)
+        os.makedirs(workspace, exist_ok=True)
+        pin = os.path.join(workspace, ".template-generation.json")
+        with open(pin, "w") as f:
+            f.write("{not json")
+
+        result = env_ops.reconcile_overlay_mounts(settings)
+
+        assert [r["env_name"] for r in result] == ["broken", "fine"]
+        assert result[0]["repaired"] is False
+        assert "lower layer lookup failed" in result[0]["detail"]
+        assert result[1]["repaired"] is True
+        assert mounted == [("fine", "tpl")]
+
+    def test_busy_team_is_repaired_once_it_is_free(self, wired, stale, monkeypatch):
+        import threading
+
+        from oduflow.locking import LockManager
+
+        settings, mounted = wired.settings, wired.mounted
+        team = settings.teams["1"]
+        self._envs(
+            monkeypatch, {"env_name": "late", "template_name": "tpl", "odoo_image": ""}
+        )
+        stale.add(get_filestore_paths("late", team.workspaces_dir)["merged"])
+        monkeypatch.setattr(env_ops, "_RECONCILE_RETRY_POLL", 0.01)
+        # A scheduled template sync in another process holds the team.
+        sync_worker = LockManager(os.path.join(settings.base_data_dir, ".locks"))
+        sync_worker.acquire_team("1")
+        try:
+            assert env_ops.reconcile_overlay_mounts(settings) == []
+            assert mounted == []
+        finally:
+            sync_worker.release_team("1")
+        retry = next(
+            t for t in threading.enumerate() if t.name == "oduflow-overlay-reconcile"
+        )
+        retry.join(timeout=10)
+        assert not retry.is_alive()
+        assert mounted == [("late", "tpl")]
 
     def test_missing_template_filestore_is_not_touched(self, wired, stale, monkeypatch):
         settings, mounted = wired.settings, wired.mounted

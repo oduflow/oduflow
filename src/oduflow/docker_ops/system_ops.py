@@ -100,6 +100,11 @@ def _file_size_mb(path: str) -> float:
         return 0.0
 
 
+def _filestore_present(path: str) -> bool:
+    """Whether a template filestore holds files (``includes_filestore``)."""
+    return os.path.isdir(path) and bool(os.listdir(path))
+
+
 def _update_template_sizes(
     team: TeamSettings,
     settings: Settings,
@@ -943,9 +948,13 @@ def check_db_quota(
 # target filesystem would be left without breathing room. Deliberately
 # constants, not TOML options — the reserve exists so PostgreSQL never hits
 # 0 bytes free (at which point even deleting environments fails).
-_DISK_MIN_FREE_GB = 5.0  # absolute floor that must remain free
+_DISK_MIN_FREE_GB = 5.0  # production floor; comfort target on dev-only hosts
 _DISK_MIN_FREE_PERCENT = 5.0  # relative floor for small disks
 _DISK_RESERVE_CAP_GB = 10.0  # cap on the percent leg (large/dev-machine disks)
+_DISK_RECOVERY_FLOOR_BYTES = 1024**3  # minimum reserve on dev-only devices
+_DISK_DEV_RESERVE_PERCENT = 1.0  # dev-only devices: relative reserve leg
+_DISK_DEV_RESERVE_CAP_GB = 2.0  # cap on the dev reserve (large dev disks)
+_PGDATA_WAL_BUDGET_BYTES = 1024**3  # WAL + catalogs written during a clone
 _DISK_ESTIMATE_MARGIN = 1.2  # safety multiplier on the write estimate
 _CLONE_BUDGET_BYTES = 512 * 1024**2  # remote git checkout allowance
 _OVERLAY_HEADROOM_BYTES = 512 * 1024**2  # upper/work layer of an overlay
@@ -1031,6 +1040,43 @@ def _reserve_bytes(total: int) -> int:
     return int(max(_DISK_MIN_FREE_GB * 1024**3, percent_leg))
 
 
+def _headroom_bytes(total: int, reserve: int, *, prod_shared: bool) -> int:
+    """Bytes that must remain free after the estimated write.
+
+    Devices holding production data keep the full reserve. Dev-only devices
+    relax it to max(1 GiB, min(1% of total, 2 GiB)) — derived from the disk
+    size, never from current free space, so repeated creations face the same
+    threshold instead of ratcheting the remaining space toward zero.
+    """
+    if prod_shared:
+        return reserve
+    percent_leg = min(
+        total * _DISK_DEV_RESERVE_PERCENT / 100, _DISK_DEV_RESERVE_CAP_GB * 1024**3
+    )
+    return min(reserve, int(max(_DISK_RECOVERY_FLOOR_BYTES, percent_leg)))
+
+
+def _prod_shared_devices(client: DockerClient, settings: Settings) -> set[int] | None:
+    """``st_dev`` values of devices holding production data.
+
+    Empty set when production is disabled. ``None`` when production is enabled
+    but the device cannot be determined (volume missing or mountpoint not
+    visible, e.g. Docker Desktop): callers must then assume every checked
+    filesystem may be shared with production.
+    """
+    if not settings.prod_enabled:
+        return set()
+    try:
+        volume = client.volumes.get(settings.prod_db_volume)
+        attrs = volume.attrs if isinstance(volume.attrs, dict) else {}
+        mountpoint = attrs.get("Mountpoint", "")
+        if isinstance(mountpoint, str) and mountpoint and os.path.isdir(mountpoint):
+            return {os.stat(mountpoint).st_dev}
+    except Exception:
+        logger.warning("Could not locate production DB volume device", exc_info=True)
+    return None
+
+
 def _pgdata_usage_via_df(
     client: DockerClient, settings: Settings
 ) -> tuple[int, int] | None:
@@ -1069,12 +1115,16 @@ def check_disk_space(
     """Refuse environment creation when a target filesystem lacks room.
 
     Estimates the bytes each target directory will receive (database
-    tablespace, workspace filestore + checkout), groups targets that share a
-    device via ``st_dev``, and requires ``free - estimate*margin`` to stay
-    above ``max(5 GiB, min(5%, 10 GiB))`` on every device. The PGDATA volume (WAL +
-    catalogs live there, not in the tablespace) is held to the same floor.
-    Like ``check_db_quota``, only new creation is gated — delete/cleanup paths
-    stay available so a full disk can always be recovered.
+    tablespace, workspace filestore + checkout, a WAL/catalog budget for the
+    PGDATA volume), groups targets that share a device via ``st_dev``, and
+    requires ``free - estimate*margin`` to stay at or above
+    ``max(5 GiB, min(5% of total, 10 GiB))`` on devices that hold production
+    data (the production DB volume's device; every device when it cannot be
+    determined). Dev-only devices relax this to
+    ``max(1 GiB, min(1% of total, 2 GiB))`` — a function of the disk size, not
+    of current free space. Like ``check_db_quota``, only new creation is
+    gated — delete/cleanup paths stay available so a full disk can always be
+    recovered.
     """
     fs_bytes = (
         _estimate_template_filestore_bytes(settings, team, template_name)
@@ -1105,9 +1155,11 @@ def check_disk_space(
     except Exception:
         logger.warning("Could not inspect shared DB volume", exc_info=True)
     if mountpoint and os.path.isdir(mountpoint):
-        targets.append(("PostgreSQL data (WAL)", mountpoint, 0))
+        targets.append(("PostgreSQL data (WAL)", mountpoint, _PGDATA_WAL_BUDGET_BYTES))
     else:
         pgdata_df = _pgdata_usage_via_df(client, settings)
+
+    prod_devices = _prod_shared_devices(client, settings)
 
     groups: dict[int, dict[str, Any]] = {}
     for label, path, nbytes in targets:
@@ -1126,7 +1178,7 @@ def check_disk_space(
 
     problems: list[str] = []
     checked: list[dict[str, Any]] = []
-    for group in groups.values():
+    for dev, group in groups.items():
         try:
             usage = shutil.disk_usage(group["anchor"])
         except OSError:
@@ -1134,6 +1186,11 @@ def check_disk_space(
             continue
         required = int(group["bytes"] * _DISK_ESTIMATE_MARGIN)
         reserve = _reserve_bytes(usage.total)
+        headroom = _headroom_bytes(
+            usage.total,
+            reserve,
+            prod_shared=prod_devices is None or dev in prod_devices,
+        )
         checked.append(
             {
                 "anchor": group["anchor"],
@@ -1141,32 +1198,39 @@ def check_disk_space(
                 "free_gb": round(usage.free / 1024**3, 1),
                 "required_gb": round(required / 1024**3, 1),
                 "reserve_gb": round(reserve / 1024**3, 1),
+                "headroom_gb": round(headroom / 1024**3, 1),
             }
         )
-        if usage.free - required < reserve:
+        if usage.free - required < headroom:
             problems.append(
                 f"{' + '.join(group['labels'])} on '{group['anchor']}': "
                 f"{usage.free / 1024**3:.1f} GiB free, creation needs "
-                f"~{required / 1024**3:.1f} GiB and {reserve / 1024**3:.1f} GiB "
+                f"~{required / 1024**3:.1f} GiB and {headroom / 1024**3:.1f} GiB "
                 "must stay free"
             )
     if pgdata_df is not None:
         total, free = pgdata_df
+        required = int(_PGDATA_WAL_BUDGET_BYTES * _DISK_ESTIMATE_MARGIN)
         reserve = _reserve_bytes(total)
+        # The in-container device cannot be compared against the production
+        # volume's st_dev, so fall back to the host-wide production flag.
+        headroom = _headroom_bytes(total, reserve, prod_shared=settings.prod_enabled)
         checked.append(
             {
                 "anchor": "PGDATA (in-container)",
                 "components": ["PostgreSQL data (WAL)"],
                 "free_gb": round(free / 1024**3, 1),
-                "required_gb": 0.0,
+                "required_gb": round(required / 1024**3, 1),
                 "reserve_gb": round(reserve / 1024**3, 1),
+                "headroom_gb": round(headroom / 1024**3, 1),
             }
         )
-        if free < reserve:
+        if free - required < headroom:
             problems.append(
                 f"PostgreSQL data volume '{settings.shared_db_volume}': "
-                f"{free / 1024**3:.1f} GiB free, {reserve / 1024**3:.1f} GiB "
-                "must stay free"
+                f"{free / 1024**3:.1f} GiB free, creation needs "
+                f"~{required / 1024**3:.1f} GiB of WAL and "
+                f"{headroom / 1024**3:.1f} GiB must stay free"
             )
 
     logger.info(
@@ -1448,20 +1512,41 @@ def _is_text_dump(path: str) -> bool:
         return False
 
 
+# The odoo.conf inside a container: Odoo reads it as a non-root user, so it
+# cannot inherit the owner-only mode an owner-only host copy carries.
+_CONTAINER_CONF_MODE = 0o644
+
+
 def _copy_file_to_container(
     container: docker.models.containers.Container,
     src_path: str,
     dest_dir: str,
     *,
     archive_name: str | None = None,
+    mode: int | None = None,
 ) -> None:
+    """Copy one host file into a container directory.
+
+    The archive carries the host file's mode unless ``mode`` overrides it —
+    needed when the host copy is deliberately stricter than what the process
+    inside the container (a non-root user) must still be able to read.
+    """
     import tempfile
+
+    def _set_mode(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        if mode is not None:
+            info.mode = mode
+        return info
 
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         tmp_path = tmp.name
     try:
         with tarfile.open(tmp_path, mode="w") as tar:
-            tar.add(src_path, arcname=archive_name or os.path.basename(src_path))
+            tar.add(
+                src_path,
+                arcname=archive_name or os.path.basename(src_path),
+                filter=_set_mode,
+            )
         with open(tmp_path, "rb") as f:
             container.put_archive(dest_dir, f)
     finally:
@@ -2869,6 +2954,8 @@ def init_template(
     modules: str = "base",
     force: bool = False,
 ) -> dict[str, str]:
+    from oduflow.odoo_version import major_from_image_reference
+
     template_sql_path = team.get_template_sql_path(template_name)
     template_filestore_path = team.get_template_filestore_path(template_name)
 
@@ -2960,7 +3047,19 @@ def init_template(
             "PASSWORD": settings.db_password,
         },
         volumes=volumes,
-        command=f"odoo -d {build_db} -i {modules} --stop-after-init --without-demo=all",
+        # Odoo 19 made --without-demo a boolean; "=all" (the pre-19 module
+        # list) still disables demo there but logs a deprecation warning,
+        # while bare/boolean forms don't exist before 19. The flag stays
+        # explicit on 19+ too, so the instance odoo.conf cannot turn demo
+        # data on in a template.
+        command=(
+            f"odoo -d {build_db} -i {modules} --stop-after-init "
+            + (
+                "--without-demo=True"
+                if (major_from_image_reference(odoo_image) or 0) >= 19
+                else "--without-demo=all"
+            )
+        ),
         labels={settings.managed_label: "true"},
     )
 
@@ -3393,7 +3492,17 @@ def _finalize_template_metadata(
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     """Decide the overlay mode from the new baseline's size and persist metadata."""
+    from oduflow import template_import
     from oduflow.docker_ops import env_ops
+
+    # Publishing from an environment or a production rebuilds metadata from that
+    # source, so an S3 lineage does not survive it — the data no longer comes
+    # from the bucket. Release the secret Oduflow stored for it rather than
+    # leaving it in the team's secret store with nothing referencing it.
+    if "source_secret_key" not in metadata:
+        template_import.delete_managed_secret(
+            team, template_import._load_carried_metadata(team, template_name)
+        )
 
     template_filestore_path = team.get_template_filestore_path(template_name)
     fs_size = (
@@ -3436,6 +3545,7 @@ def publish_env_as_template(
     reset_env_changes: bool = False,
     overwrite: bool = False,
 ) -> dict[str, object]:
+    from oduflow import template_generations
     from oduflow.docker_ops import env_ops
     from oduflow.naming import get_db_name, get_filestore_paths, get_resource_name
 
@@ -3569,6 +3679,9 @@ def publish_env_as_template(
                 # Remount the source overlay against the new lower (always
                 # reset) + restart.
                 if source_is_overlay:
+                    # Its merged view is now the template's filestore, so a
+                    # retained generation a sync pinned it to no longer applies.
+                    template_generations.unpin(team, env_name)
                     for key in ("upper", "work"):
                         d = env_paths[key]
                         if os.path.isdir(d):
@@ -3595,6 +3708,9 @@ def publish_env_as_template(
             # next to the environment's filestore.
             if snapshot_dir and os.path.isdir(snapshot_dir):
                 shutil.rmtree(snapshot_dir, ignore_errors=True)
+        if source_is_overlay:
+            # The generation the source was pinned to may be unreferenced now.
+            template_generations.collect_best_effort(team)
 
         # Save template metadata from source environment. `source_container` is
         # the team-scoped container name computed above — a hand-built
@@ -3618,6 +3734,7 @@ def publish_env_as_template(
         "template_db": tpl_db,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "reset_env_changes": reset_env_changes,
     }
 
@@ -3780,6 +3897,7 @@ def publish_production_as_template(
         "template_db": tpl_db,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "reset_env_changes": reset_env_changes,
     }
 
@@ -3823,6 +3941,7 @@ def refresh_template(
         "template_db": tpl_db,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "reset_env_changes": reset_env_changes,
     }
 
@@ -3953,6 +4072,7 @@ def attach_filestore(
             "use_overlay": metadata.get("use_overlay"),
             "affected_envs": remount.affected,
             "remount_failures": remount.failures,
+            "pinned_envs": remount.pinned,
             "reset_env_changes": reset_env_changes,
         }
     finally:
@@ -4156,7 +4276,6 @@ def import_template(
     ``overwrite`` (s3/local) incrementally re-syncs an existing template.
     """
     import urllib.request
-    import zipfile
 
     from oduflow import template_import
     from oduflow.url_safety import assert_allowed_url
@@ -4181,7 +4300,14 @@ def import_template(
             "or a local path) unless refresh=true."
         )
     if source.startswith("s3://"):
-        return template_import.import_from_s3_prefix(
+        # A key naming an archive is one object to unpack; anything else is a
+        # prefix holding the raw layout.
+        s3_import = (
+            template_import.import_from_s3_archive
+            if template_import.is_archive_key(source)
+            else template_import.import_from_s3_prefix
+        )
+        return s3_import(
             settings,
             team,
             url=source,
@@ -4300,6 +4426,7 @@ def import_template(
     manifest = {}
     affected_envs: list[str] = []
     remount_failures: list[tuple[str, str]] = []
+    pinned_envs: list[str] = []
     try:
         try:
             with urllib.request.urlopen(req, timeout=600) as resp:
@@ -4347,60 +4474,11 @@ def import_template(
                 shutil.copy2(tmp_backup, template_sql_path)
                 logger.info("Saved DB-only dump to %s", template_sql_path)
             else:
-                with zipfile.ZipFile(tmp_backup, "r") as zf:
-                    # Extract manifest.json
-                    if "manifest.json" in zf.namelist():
-                        with zf.open("manifest.json") as mf:
-                            manifest = json.load(mf)
-
-                    # Extract dump.sql
-                    with (
-                        zf.open("dump.sql") as src,
-                        open(template_sql_path, "wb") as dst,
-                    ):
-                        shutil.copyfileobj(src, dst)
-                    logger.info("Extracted dump.sql to %s", template_sql_path)
-
-                    # Extract filestore
-                    if os.path.exists(template_filestore_path):
-                        shutil.rmtree(template_filestore_path)
-                    os.makedirs(template_filestore_path, exist_ok=True)
-
-                    fs_prefix = "filestore/"
-                    for member in zf.namelist():
-                        if not member.startswith(fs_prefix):
-                            continue
-                        rel = member[len(fs_prefix) :]
-                        if not rel:
-                            continue
-                        # Skip checklist/ symlink-like entries
-                        if rel.startswith("checklist/"):
-                            continue
-                        target = os.path.join(template_filestore_path, rel)
-                        # Reject any member that escapes the filestore dir (zip-slip).
-                        if not _is_within_directory(template_filestore_path, target):
-                            logger.warning(
-                                "Skipping unsafe archive member outside filestore: %s",
-                                member,
-                            )
-                            continue
-                        if member.endswith("/"):
-                            os.makedirs(target, exist_ok=True)
-                        else:
-                            os.makedirs(os.path.dirname(target), exist_ok=True)
-                            with zf.open(member) as src, open(target, "wb") as dst:
-                                shutil.copyfileobj(src, dst)
-
-                    fs_count = sum(
-                        1
-                        for f in pathlib.Path(template_filestore_path).rglob("*")
-                        if f.is_file()
-                    )
-                    logger.info(
-                        "Extracted filestore to %s (%d files)",
-                        template_filestore_path,
-                        fs_count,
-                    )
+                # Same unpacking (and the same zip-slip guard) as an archive
+                # imported from a bucket — one definition for both doors.
+                manifest = template_import.extract_odoo_backup_zip(
+                    tmp_backup, template_sql_path, template_filestore_path
+                )
 
             # chown the new lower layer so the odoo user can read it through the
             # overlay once it is remounted.
@@ -4421,6 +4499,7 @@ def import_template(
                     logger.warning("Could not chown template filestore: %s", exc)
         affected_envs = remount.affected
         remount_failures = remount.failures
+        pinned_envs = remount.pinned
     finally:
         if os.path.exists(tmp_backup):
             os.remove(tmp_backup)
@@ -4430,6 +4509,9 @@ def import_template(
     odoo_image = f"odoo:{major_version}" if major_version else ""
 
     # 5. Save metadata.json
+    includes_filestore = _filestore_present(
+        team.get_template_filestore_path(template_name)
+    )
     metadata = {
         "odoo_image": odoo_image,
         "repo_url": "",
@@ -4438,7 +4520,7 @@ def import_template(
         "odoo_version": manifest.get("version", ""),
         "pg_version": manifest.get("pg_version", ""),
         "modules": manifest.get("modules", {}),
-        "includes_filestore": not without_filestore,
+        "includes_filestore": includes_filestore,
         # No source_commit: an imported database has no branch of ours behind
         # it, so the lineage check has nothing to compare against and is skipped.
         "snapshot_at": _utc_now_iso(),
@@ -4479,9 +4561,10 @@ def import_template(
         "template_db": result["template_db"],
         "restore_seconds": result.get("restore_seconds", 0),
         "zip_size_mb": round(backup_size_mb, 1),
-        "includes_filestore": not without_filestore,
+        "includes_filestore": includes_filestore,
         "affected_envs": affected_envs,
         "remount_failures": remount_failures,
+        "pinned_envs": pinned_envs,
     }
 
 
@@ -4738,6 +4821,7 @@ def finalize_imported_template(
     staging_dir: str,
     *,
     addon_error_policy: str = "strict",
+    without_filestore: bool = False,
 ) -> dict[str, object]:
     """Promote a fully-staged push import into the live template and load it.
 
@@ -4748,11 +4832,20 @@ def finalize_imported_template(
     filestore/dump/metadata into the template directory, chown the filestore
     for the odoo user, then refresh sizes and restore the dump into the
     template DB. The staging directory is removed on success.
+
+    ``without_filestore`` is the database-only import: a staged filestore/
+    (chunks left by an earlier, interrupted full upload) is not promoted, and
+    the live filestore stays as it is — like the other database-only imports.
+    The result's ``filestore`` says which happened: ``imported``, ``kept`` (an
+    existing template's filestore) or ``none``.
     """
     from oduflow.docker_ops import env_ops
 
     os.makedirs(staging_dir, exist_ok=True)
     promoted_marker = os.path.join(staging_dir, ".promoted")
+    # Only when the live filestore is this import's: a database-only finalize
+    # keeps an older one, which a retry must not count as uploaded chunks.
+    filestore_marker = os.path.join(staging_dir, ".filestore-promoted")
     staged_meta = os.path.join(staging_dir, "metadata.json")
     staged_dump = os.path.join(staging_dir, "dump.sql.gz")
     staged_fs = os.path.join(staging_dir, "filestore")
@@ -4785,12 +4878,18 @@ def finalize_imported_template(
         os.makedirs(tpl_dir, exist_ok=True)
 
         # Swap filestore (the overlay lower layer) while envs are unmounted.
-        if os.path.isdir(staged_fs):
+        filestore_created = False
+        if not without_filestore and os.path.isdir(staged_fs):
+            # Before the swap, like .promoted: until the rename the upload
+            # status still reads the staged filestore/, which it prefers.
+            open(filestore_marker, "a").close()
             if os.path.exists(template_filestore_path):
                 shutil.rmtree(template_filestore_path)
             os.rename(staged_fs, template_filestore_path)
         elif not os.path.isdir(template_filestore_path):
             os.makedirs(template_filestore_path, exist_ok=True)
+            filestore_created = True
+        filestore_imported = os.path.isfile(filestore_marker)
 
         # Swap dump: drop stale dumps under other names so
         # get_template_sql_path resolves to the new gzip'd SQL dump.
@@ -4808,7 +4907,9 @@ def finalize_imported_template(
         if os.path.isfile(staged_meta):
             os.replace(staged_meta, live_meta)
 
-        if major_version:
+        # A kept filestore was chowned when it was imported; walking it all
+        # again would only stretch the team-locked window, overlays unmounted.
+        if major_version and (filestore_imported or filestore_created):
             try:
                 uid_gid = get_odoo_uid_gid(client, f"odoo:{major_version}")
                 uid_str, gid_str = uid_gid.split(":")
@@ -4823,7 +4924,17 @@ def finalize_imported_template(
             except Exception as exc:  # noqa: BLE001 - chown is best-effort
                 logger.warning("Could not chown template filestore: %s", exc)
 
-    _update_template_sizes(team, settings, template_name)
+    includes_filestore = _filestore_present(template_filestore_path)
+    if filestore_imported:
+        filestore = "imported"
+    elif includes_filestore:
+        filestore = "kept"
+    else:
+        filestore = "none"
+    with open(live_meta) as f:
+        metadata = json.load(f)
+    metadata["includes_filestore"] = includes_filestore
+    _update_template_sizes(team, settings, template_name, metadata)
     result = reload_template(settings, team, template_name=template_name)
 
     # Turn any uploaded/announced addons (Enterprise, Themes, extra repos) into
@@ -4859,8 +4970,11 @@ def finalize_imported_template(
         "template_name": template_name,
         "template_db": result["template_db"],
         "restore_seconds": result.get("restore_seconds", 0),
+        "includes_filestore": includes_filestore,
+        "filestore": filestore,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "extra_addons": wired,
         "addon_warnings": addon_warnings,
     }
@@ -5079,6 +5193,11 @@ def cleanup_orphans(
 def delete_template(
     settings: Settings, team: TeamSettings, template_name: str
 ) -> dict[str, str]:
+    from oduflow import template_generations
+    from oduflow.template_sync import remove_job, require_unconfigured
+
+    require_unconfigured(team, template_name)
+
     client = get_client()
 
     # Refuse if any environment was created from this template: its filestore is
@@ -5127,8 +5246,19 @@ def delete_template(
         logger.info("Dropped template DB %s", tpl_db)
 
     if dir_exists:
+        # Read before the directory goes: the S3 secret Oduflow stored for this
+        # template is referenced from its metadata and goes with it.
+        from oduflow import template_import
+
+        carried = template_import._load_carried_metadata(team, template_name)
         shutil.rmtree(template_dir_path)
         logger.info("Removed template directory %s", template_dir_path)
+        template_import.delete_managed_secret(team, carried)
+
+    # Its sync inbox (a full copy once the template is gone) and logs, and any
+    # retained generation nothing references any more.
+    remove_job(team, template_name)
+    template_generations.collect_best_effort(team)
 
     return {"status": "dropped", "template_name": template_name, "template_db": tpl_db}
 
@@ -5159,6 +5289,10 @@ def rename_template(
         raise NotFoundError(f"Template '{template_name}' not found.")
     if os.path.isdir(new_dir):
         raise ConflictError(f"Template '{new_name}' already exists.")
+
+    from oduflow.template_sync import require_unconfigured
+
+    require_unconfigured(team, template_name)
 
     client = get_client()
     old_db = get_template_db_name(template_name, team.team_id)
@@ -5351,6 +5485,8 @@ def _template_env_vars(metadata: dict[str, Any], template_name: str) -> dict[str
 
 
 def list_templates(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
+    from oduflow import template_import
+
     client = get_client()
     templates = team.list_templates()
     result = []
@@ -5404,6 +5540,9 @@ def list_templates(settings: Settings, team: TeamSettings) -> list[dict[str, Any
                 "source_branch": metadata.get("source_branch", ""),
                 "source_commit": metadata.get("source_commit", ""),
                 "snapshot_at": metadata.get("snapshot_at", ""),
+                # Set only for a template imported from a bucket: the
+                # connection to re-sync it, without the secret key.
+                "s3_source": template_import.public_source_view(metadata),
             }
         )
     return result

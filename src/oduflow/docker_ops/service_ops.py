@@ -446,9 +446,12 @@ def create_service(
 
         team_network = ensure_team_network(client, settings, team)
 
+    # The managed/team labels come from Settings, as every service listing
+    # filters on them: a literal would hide the service from its own server and
+    # show it to another one that keeps the defaults.
     labels = {
-        "oduflow.managed": "true",
-        "oduflow.team": team.team_id,
+        settings.managed_label: "true",
+        settings.team_label: team.team_id,
         "oduflow.service": name,
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -615,7 +618,9 @@ def create_service(
             # The SDK creates the container before starting it, so a failed
             # start leaves a `created` container holding the name. Drop it,
             # otherwise the retry this error recommends hits a name conflict.
-            _remove_stale_service_container(client, container_name)
+            _remove_stale_service_container(
+                client, container_name, settings.managed_label
+            )
             _raise_service_start_error(
                 name, port, exc, retry_with="create_service again"
             )
@@ -653,7 +658,9 @@ def create_service(
     }
 
 
-def _remove_stale_service_container(client: Any, container_name: str) -> None:
+def _remove_stale_service_container(
+    client: Any, container_name: str, managed_label: str
+) -> None:
     """Best-effort removal of a service container that never started.
 
     Only an Oduflow-managed ``created`` container is touched: that is what the
@@ -665,7 +672,7 @@ def _remove_stale_service_container(client: Any, container_name: str) -> None:
         stale = client.containers.get(container_name)
         if stale.status != "created":
             return
-        if (stale.labels or {}).get("oduflow.managed") != "true":
+        if (stale.labels or {}).get(managed_label) != "true":
             return
         stale.remove(force=True)
     except docker.errors.NotFound:

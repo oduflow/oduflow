@@ -65,7 +65,10 @@ environment's per-env token ([[0028-scoped-environment-mcp-access]]) plus its
 no secret), Codex CLI through per-session `-c mcp_servers.*` overrides, and
 Codex ACP through the adapter's client-provided HTTP MCP session contract. A
 leaked session credential grants only the ADR-0028 dev-loop allowlist on the
-one environment the session already controls.
+one environment the session already controls. (This held only once each
+environment's sessions ran as their own uid: while every session shared the
+`agent` uid, one could read another's token from `/proc/<pid>/environ`. See
+[[0079-per-environment-agent-identities]].)
 
 **Configuration lives in `oduflow.toml`, not in the dashboard.** Per team:
 `agent_enabled` (default **false**), `agent_default` (claude | codex | opencode)
@@ -179,6 +182,10 @@ Without the section the generated config is unchanged.
 
 ## History
 
+- 2026-10-17 — each environment's sessions, checkout, attachments and HOME
+  moved to the environment's own uid inside the team container; interactive
+  logins became per environment and neighbouring checkouts are no longer
+  visible. See [[0079-per-environment-agent-identities]].
 - 2026-10-10 — added an optional custom OpenAI-compatible (Chat Completions)
   OpenCode provider, `[agent.opencode_provider]`, applied to Agent CLI and
   Agent Chat, with variable-name-only credentials and startup/console

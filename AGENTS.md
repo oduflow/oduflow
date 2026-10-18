@@ -49,11 +49,8 @@ ruff format src/oduflow tests
 # Type check
 mypy src/oduflow
 
-# Tests (default: excludes heavyweight)
+# Tests (default: unit tests only, no Docker; integration and heavyweight are opt-in)
 pytest
-
-# Run only unit tests (no Docker required)
-pytest -m "not integration and not heavyweight"
 
 # Run integration tests (requires Docker)
 pytest -m integration
@@ -126,7 +123,9 @@ MCP Clients (Cursor, Claude, etc.)
 ## Testing
 
 - Test markers: `integration` (needs Docker), `heavyweight` (slow full cycles)
-- Default `addopts` in `pyproject.toml` excludes heavyweight tests
+- Default `addopts` in `pyproject.toml` excludes integration and heavyweight tests; select them
+  explicitly with `-m integration` / `-m heavyweight`. They create and destroy real Docker
+  resources, so do not run them on a machine whose live Oduflow server must stay untouched
 - Mocking pattern: patch `oduflow.docker_ops.*` functions, not Docker SDK directly
 - `conftest.py` at root ignores `src/**` for collection (tests live in `tests/`)
 - When you launch Oduflow itself for testing (starting the server, `stack apply`), always pass the global `--no-telemetry` flag before any subcommand — e.g. `oduflow --no-telemetry --transport http` — so test runs are not counted in usage telemetry
@@ -259,10 +258,11 @@ Registry: hub.docker.com, repository: `oduist/oduflow`
 
 The per-team coding-agent image (the "coder", built from `docker/agent/`) is
 published **separately** to `oduist/oduflow-coder`; the dashboard's Agent Chat
-and Agent CLI run it. **Licensing:** the image bakes in only Apache-2.0
-components (OpenAI Codex CLI + the Codex ACP adapter). Claude Code and its ACP
-adapter are proprietary-adjacent (Anthropic Commercial Terms), so they are NOT
-redistributed — `entrypoint.sh` npm-installs them at first container start onto
+and Agent CLI run it. **Licensing:** the image bakes in only permissively
+licensed, redistributable open-source components (Apache-2.0: OpenAI Codex CLI,
+the Codex ACP adapter, Agent Browser; MIT: OpenCode, the GitHub CLI). Claude
+Code and its ACP adapter are proprietary-adjacent (Anthropic Commercial
+Terms), so they are NOT redistributed — `entrypoint.sh` npm-installs them at first container start onto
 the persistent home volume. Keep it that way when editing the Dockerfile.
 
 **Publication is automatic and merge-gated — never publish from a feature

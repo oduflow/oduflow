@@ -2,8 +2,12 @@ import hashlib
 import os
 import re
 import shlex
-from typing import Any
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
+
+if TYPE_CHECKING:
+    from publicsuffixlist import PublicSuffixList
 
 # A template name becomes both a filesystem path (templates/<name>, where "/"
 # denotes a sub-directory) and, with "/" replaced by "-", part of a PostgreSQL
@@ -342,6 +346,27 @@ def get_agent_upload_dir(env_name: str) -> str:
     return f"/workspace/.oduflow-uploads/{slugify_branch(env_name)}"
 
 
+def get_agent_env_home_dir(uid: int) -> str:
+    """HOME of an environment's own uid inside the team's agent container.
+
+    Lives on the persistent home volume, keyed by uid rather than slug so a
+    renamed environment keeps its logins and transcripts. Created (0700) by
+    the coder image's ``env-user.sh``. See
+    specs/0079-per-environment-agent-identities.md.
+    """
+    return f"/home/agent/envs/{uid}"
+
+
+def get_agent_env_tmp_dir(uid: int) -> str:
+    """Private TMPDIR of an environment's own uid in the team's agent container.
+
+    ``/tmp/user`` is root-owned 0711 in the coder image, so no environment can
+    pre-create another's directory; ``env-user.sh`` creates this one (0700)
+    in the container layer, where it is wiped on every recreation.
+    """
+    return f"/tmp/user/{uid}"
+
+
 def get_workspace_path(env_name: str, workspaces_dir: str) -> str:
     return os.path.join(workspaces_dir, env_name.replace("/", "-"))
 
@@ -376,6 +401,35 @@ def split_team_hostname(hostname: str) -> tuple[str, str]:
     return prefix, parent_domain
 
 
+@lru_cache(maxsize=1)
+def _public_suffix_list() -> "PublicSuffixList":
+    """Lazy singleton: parsing the bundled Public Suffix List snapshot is too
+    slow for import time (naming is imported by every CLI entry point)."""
+    from publicsuffixlist import PublicSuffixList
+
+    return PublicSuffixList()
+
+
+def team_hostname_parent(hostname: str) -> str:
+    """The domain explicit short environment hostnames are placed under.
+
+    A short name replaces the team hostname's prefix: ``qa`` on team
+    ``dev.example.com`` becomes ``qa.example.com``. A team hostname with no
+    prefix to spare — a bare registrable domain — is kept whole, so ``qa``
+    on team ``example.com`` becomes ``qa.example.com`` and not ``qa.com``.
+    Registrability is decided with the Public Suffix List, not label
+    counting: stripping the first label of ``example.co.uk`` or
+    ``team.blogspot.com`` would leave a public suffix (``co.uk``,
+    ``blogspot.com``) — a domain the team cannot own and Traefik/ACME must
+    never route or request certificates under.
+    """
+    value = validate_domain(hostname)
+    _prefix, _separator, parent_domain = value.partition(".")
+    if _public_suffix_list().privatesuffix(parent_domain):
+        return parent_domain
+    return value
+
+
 def get_env_hostname(
     env_name: str, hostname: str, route_hostname: str = "", base_domain: str = ""
 ) -> str:
@@ -386,8 +440,7 @@ def get_env_hostname(
         return f"{short_hostname}.{base_domain}"
     if not route_hostname:
         return f"{short_hostname}.{hostname}"
-    _prefix, parent_domain = split_team_hostname(hostname)
-    return f"{short_hostname}.{parent_domain}"
+    return f"{short_hostname}.{team_hostname_parent(hostname)}"
 
 
 def validate_env_hostname(hostname: str) -> str:

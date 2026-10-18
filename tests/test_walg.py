@@ -358,3 +358,31 @@ class TestSelectPitrBaseBackup:
                 walg._select_pitr_base_backup(
                     MagicMock(), MagicMock(), "2026-08-28 14:00:00+00"
                 )
+
+
+class TestPitrStopGuard:
+    def test_stop_failure_aborts_before_pgdata_is_touched(self, tmp_path):
+        """P-M13: a failed stop/remove of the production PG container was
+        swallowed (`except Exception: pass`), after which PITR displaced PGDATA
+        and backup-fetched into a volume a still-running postmaster may hold
+        open. It must abort before any destructive step instead."""
+        settings = Settings(
+            base_data_dir=str(tmp_path),
+            backup=BackupSettings(bucket="b", access_key="k", secret_key="s"),
+        )
+        client = MagicMock()
+        pg = MagicMock()
+        pg.stop.side_effect = RuntimeError("cannot stop")
+        client.containers.get.return_value = pg
+
+        with (
+            patch("oduflow.docker_ops.client.get_client", return_value=client),
+            patch.object(walg, "ensure_walg"),
+            patch.object(walg, "write_walg_config"),
+            patch.object(walg, "apply_walg_config_ownership"),
+        ):
+            with pytest.raises(PrerequisiteNotMetError, match="left untouched"):
+                walg.pitr_restore_cluster(settings)
+
+        # The helper container that displaces PGDATA was never started.
+        client.containers.run.assert_not_called()

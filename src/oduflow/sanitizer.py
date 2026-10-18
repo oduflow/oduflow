@@ -2,6 +2,7 @@ import glob as glob_mod
 import logging
 import os
 import re
+from typing import Any
 
 import docker
 from docker import DockerClient
@@ -34,6 +35,8 @@ def _run_scripts_from_dir(
     team: TeamSettings,
     env_db: str,
     env_name: str,
+    *,
+    runner: Any = None,
 ) -> list[str]:
     """Run .sql and .py sanitization scripts from a directory.
 
@@ -112,7 +115,9 @@ def _run_scripts_from_dir(
         env_name, "odoo", settings.prefix, team.team_id
     )
     try:
-        container = client.containers.get(odoo_container_name)
+        container = (
+            runner if runner is not None else client.containers.get(odoo_container_name)
+        )
     except _docker.errors.NotFound:
         logs.append(
             f"[SANITIZE:{label}] WARNING: container not found, skipping .py scripts"
@@ -162,6 +167,9 @@ def neutralize_environment(
     settings: Settings,
     team: TeamSettings,
     env_name: str,
+    *,
+    runner: Any = None,
+    database: str | None = None,
 ) -> list[str]:
     """Neutralize the environment database using Odoo's native mechanism.
 
@@ -190,14 +198,16 @@ def neutralize_environment(
     """
     import docker as _docker
 
-    env_db = get_db_name(env_name, team.team_id)
+    env_db = database or get_db_name(env_name, team.team_id)
     logs: list[str] = []
 
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
     )
     try:
-        container = client.containers.get(odoo_container_name)
+        container = (
+            runner if runner is not None else client.containers.get(odoo_container_name)
+        )
     except _docker.errors.NotFound:
         logger.warning("[NEUTRALIZE] container not found, skipping")
         logs.append("[NEUTRALIZE] WARNING: container not found, skipping")
@@ -247,6 +257,9 @@ def sanitize_environment(
     settings: Settings,
     team: TeamSettings,
     env_name: str,
+    *,
+    runner: Any = None,
+    database: str | None = None,
 ) -> list[str]:
     """Sanitize environment database after provisioning.
 
@@ -261,14 +274,21 @@ def sanitize_environment(
 
     Returns a list of human-readable log lines describing what was done.
     """
-    env_db = get_db_name(env_name, team.team_id)
+    env_db = database or get_db_name(env_name, team.team_id)
     logs: list[str] = []
 
     # --- Team-level sanitization ---
     system_dir = os.path.join(team.data_dir, "odoo_sanitize")
     logs.extend(
         _run_scripts_from_dir(
-            system_dir, "system", client, settings, team, env_db, env_name
+            system_dir,
+            "system",
+            client,
+            settings,
+            team,
+            env_db,
+            env_name,
+            **({"runner": runner} if runner is not None else {}),
         )
     )
 
@@ -294,12 +314,15 @@ def sanitize_environment(
     # at the canonical path.
     legacy_repo_dir = os.path.join(repo_path, ".odoo_sanitize")
     if os.path.isdir(legacy_repo_dir):
-        warning = (
-            "[SANITIZE:repo] WARNING: Project sanitize scripts moved to "
+        # NOTICE, not WARNING: the scripts below still run. Callers treat a
+        # WARNING line as a failed step (template_generations refuses to promote
+        # sanitized data on one).
+        notice = (
+            "[SANITIZE:repo] NOTICE: Project sanitize scripts moved to "
             ".oduflow/odoo_sanitize; move scripts from .odoo_sanitize there."
         )
-        logger.warning(warning)
-        logs.append(warning)
+        logger.warning(notice)
+        logs.append(notice)
         logs.extend(
             _run_scripts_from_dir(
                 legacy_repo_dir,
@@ -309,13 +332,21 @@ def sanitize_environment(
                 team,
                 env_db,
                 env_name,
+                **({"runner": runner} if runner is not None else {}),
             )
         )
 
     repo_dir = os.path.join(repo_path, ".oduflow", "odoo_sanitize")
     logs.extend(
         _run_scripts_from_dir(
-            repo_dir, "repo", client, settings, team, env_db, env_name
+            repo_dir,
+            "repo",
+            client,
+            settings,
+            team,
+            env_db,
+            env_name,
+            **({"runner": runner} if runner is not None else {}),
         )
     )
 

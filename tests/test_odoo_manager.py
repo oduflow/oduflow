@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import logging
 import os
 import re
 import tarfile
@@ -11,7 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 import docker
-from oduflow import po_tools
+from oduflow import agent_uids, po_tools
 from oduflow.docker_ops import env_ops, odoo_ops, system_ops
 from oduflow.errors import (
     ConflictError,
@@ -393,6 +394,9 @@ class TestCreateEnvironment:
         mock_odoo.exec_run.return_value = (0, b"OK")
         mock_odoo.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.run.return_value = mock_odoo
+        mock_docker_client.containers.create.return_value.wait.return_value = {
+            "StatusCode": 0
+        }
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
         result = env_ops.create_environment(
@@ -409,10 +413,15 @@ class TestCreateEnvironment:
         assert mock_sql.call_count == 2
         mock_creds.assert_called_once()
         mock_role.assert_called_once()
-        # Greenfield: isolated init container + serving container = 2 run calls.
-        assert mock_docker_client.containers.run.call_count == 2
-        for run_call in mock_docker_client.containers.run.call_args_list:
-            assert run_call.kwargs["extra_hosts"] == {
+        # Greenfield: an isolated init container (created, so it can receive
+        # the generated conf before starting) + the serving container.
+        mock_docker_client.containers.create.assert_called_once()
+        assert mock_docker_client.containers.run.call_count == 1
+        for call in (
+            mock_docker_client.containers.create.call_args,
+            mock_docker_client.containers.run.call_args,
+        ):
+            assert call.kwargs["extra_hosts"] == {
                 "host.docker.internal": "host-gateway"
             }
         mock_alloc.assert_called_once()
@@ -491,8 +500,6 @@ class TestCreateEnvironment:
     def _template_create_patches(configure, exec_sql=None):
         """Patches that carry a template create_environment up to the setup
         step, which *configure* replaces."""
-        instance_conf = MagicMock()
-        instance_conf.exists.return_value = False
         return [
             patch("oduflow.docker_ops.env_ops._db_exists", return_value=True),
             patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
@@ -520,9 +527,11 @@ class TestCreateEnvironment:
                 "oduflow.docker_ops.env_ops.get_odoo_uid_gid",
                 return_value="100:101",
             ),
+            patch("oduflow.extra_addons.generate_odoo_conf"),
+            # What the bundled conf generates for a repo without addons/.
             patch(
-                "oduflow.docker_ops.env_ops._resolve_instance_conf",
-                return_value=instance_conf,
+                "oduflow.module_versions.addons_path_from_conf",
+                return_value=["/mnt/extra-addons"],
             ),
             configure,
         ]
@@ -752,6 +761,11 @@ class TestCreateEnvironment:
         mock_odoo.exec_run.return_value = (0, b"OK")
         mock_odoo.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.run.return_value = mock_odoo
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 0}
+        events = MagicMock()
+        events.attach_mock(mock_copy_conf, "copy")
+        events.attach_mock(init_container.start, "start")
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
         result = env_ops.create_environment(
@@ -770,16 +784,89 @@ class TestCreateEnvironment:
         assert "TEMPLATE" not in create_db_call[0][2]
         # Should NOT mount filestore
         mock_mount.assert_not_called()
-        # Greenfield init runs `-i base` in a SEPARATE isolated container
-        # (the FIRST containers.run), before the serving container — so the
-        # serving PID1 never races it. containers.run is called twice.
-        assert mock_docker_client.containers.run.call_count == 2
-        init_run = mock_docker_client.containers.run.call_args_list[0]
+        # Greenfield init runs `-i base` in a SEPARATE isolated container,
+        # before the serving container — so the serving PID1 never races it.
+        init_run = mock_docker_client.containers.create.call_args
         assert "-i base" in init_run.kwargs["command"]
         assert "--stop-after-init" in init_run.kwargs["command"]
         assert init_run.kwargs["extra_hosts"] == {
             "host.docker.internal": "host-gateway"
         }
+        # The init reads the generated conf (repo .oduflow/odoo.conf, demo
+        # data settings included), copied in before the container starts.
+        conf = "/tmp/flow-test/workspaces/feature-no-tpl/odoo.conf"
+        assert events.mock_calls[:2] == [
+            mock_call.copy(
+                init_container, conf, "/etc/odoo", archive_name="odoo.conf", mode=0o644
+            ),
+            mock_call.start(),
+        ]
+        assert mock_docker_client.containers.run.call_count == 1
+
+    @patch("oduflow.docker_ops.env_ops._rollback_partial_environment")
+    @patch(
+        "oduflow.extra_addons.generate_odoo_conf",
+        return_value="/tmp/flow-test/workspaces/feature-no-tpl/odoo.conf",
+    )
+    @patch("oduflow.docker_ops.env_ops._copy_file_to_container")
+    @patch("oduflow.docker_ops.env_ops._create_pg_role")
+    @patch(
+        "oduflow.docker_ops.env_ops.create_credentials",
+        return_value={"pg_user": "u_1_feature-no-tpl", "pg_password": "test-pw"},
+    )
+    @patch("oduflow.docker_ops.env_ops._ensure_system_ready")
+    @patch("oduflow.docker_ops.env_ops.get_odoo_uid_gid", return_value="100:101")
+    @patch("oduflow.docker_ops.env_ops._exec_sql")
+    @patch("oduflow.docker_ops.env_ops._db_exists", return_value=False)
+    @patch("oduflow.docker_ops.env_ops._mount_filestore")
+    @patch("oduflow.docker_ops.env_ops._get_used_ports", return_value=set())
+    @patch("oduflow.docker_ops.env_ops.allocate_port", return_value=50001)
+    @patch("oduflow.docker_ops.env_ops.subprocess.run")
+    @patch("oduflow.docker_ops.env_ops.os.chmod")
+    @patch("oduflow.docker_ops.env_ops.os.makedirs")
+    @patch("oduflow.docker_ops.env_ops.os.path.exists", return_value=False)
+    def test_create_no_template_failed_init_rolls_back(
+        self,
+        mock_exists,
+        mock_makedirs,
+        mock_chmod,
+        mock_run,
+        mock_alloc,
+        mock_used,
+        mock_mount,
+        mock_db_exists,
+        mock_sql,
+        mock_uid_gid,
+        mock_ready,
+        mock_creds,
+        mock_role,
+        mock_copy_conf,
+        mock_gen_conf,
+        mock_rollback,
+        mock_docker_client,
+    ):
+        # A non-zero `-i base` exit (e.g. a bad repo .oduflow/odoo.conf) leaves
+        # an empty/partial database: creation must fail and roll back, not
+        # start the serving container and report the environment created.
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 2}
+        init_container.logs.return_value = b"odoo: unrecognized option"
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(ExternalCommandError, match="-i base"):
+            env_ops.create_environment(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "feature/no-tpl",
+                "https://github.com/org/repo.git",
+                "odoo:15.0",
+                template_name=None,
+            )
+
+        # The DB, role, port and workspace already exist at this point.
+        mock_rollback.assert_called_once()
+        # The serving container must never start on the broken database.
+        mock_docker_client.containers.run.assert_not_called()
 
     @patch(
         "oduflow.extra_addons.generate_odoo_conf",
@@ -826,6 +913,8 @@ class TestCreateEnvironment:
         mock_odoo.exec_run.return_value = (0, b"OK")
         mock_odoo.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.run.return_value = mock_odoo
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
         local_dir = str(tmp_path)
@@ -1653,6 +1742,234 @@ class TestPullEnvironmentLocalAndSharedExtraCheckouts:
         mock_write.assert_called_once()
 
 
+class TestAutoPlanNarrowing:
+    """Auto mode only acts on modules the database can act on (issue: extra
+    repos bundle hundreds of modules; a fast-forward must not fail the deploy
+    over the uninstalled ones)."""
+
+    @staticmethod
+    def _tree(root, files):
+        """Lay out *files* under *root*; ``<mod>/__manifest__.py`` marks a module."""
+        for rel in files:
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}" if path.name == "__manifest__.py" else "")
+
+    def _pull_auto(self, mock_docker_client, tmp_path, tree, changed, states):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team"))
+        settings = Settings(teams={"1": team})
+        repo = tmp_path / "team" / "workspaces" / "env" / "repo"
+        repo.mkdir(parents=True)
+        self._tree(repo, tree)
+        container = MagicMock()
+        container.labels = {"oduflow.git_branch": "main"}
+        mock_docker_client.containers.get.return_value = container
+        with (
+            # No base ref: the real path-only classifier runs, git-free.
+            patch("oduflow.git_ops.pull_repo", return_value=("", changed)),
+            patch(
+                "oduflow.docker_ops.odoo_ops._get_module_states",
+                return_value=states,
+            ) as module_states,
+            patch(
+                "oduflow.docker_ops.env_ops._apply_actions",
+                return_value={"action": "none", "changed_files": changed},
+            ) as apply,
+        ):
+            result = env_ops.pull_environment(settings, team, "env")
+        return result, apply.call_args.kwargs, module_states
+
+    def test_uninstalled_modules_are_skipped_not_failed(
+        self, mock_docker_client, tmp_path
+    ):
+        manifests = ["moda/__manifest__.py", "modb/__manifest__.py"]
+        result, applied, _states = self._pull_auto(
+            mock_docker_client,
+            tmp_path,
+            manifests,
+            manifests,
+            {"moda": "installed", "modb": "uninstalled"},
+        )
+        assert applied["to_upgrade"] == ["moda"]
+        assert any("modb" in w for w in result["warnings"])
+
+    def test_changes_only_in_uninstalled_modules_are_inert(
+        self, mock_docker_client, tmp_path
+    ):
+        changed = ["modb/__manifest__.py", "modb/models/b.py"]
+        result, applied, _states = self._pull_auto(
+            mock_docker_client, tmp_path, changed, changed, {"modb": "uninstalled"}
+        )
+        # Odoo never loads an uninstalled module's code: nothing to upgrade,
+        # nothing to restart or refresh for.
+        assert applied["to_upgrade"] == []
+        assert applied["do_restart"] is False
+        assert applied["do_refresh"] is False
+        assert "not installed" in result["message"]
+
+    def test_live_python_still_restarts_when_all_upgrades_are_skipped(
+        self, mock_docker_client, tmp_path
+    ):
+        # modb's manifest bump is the only upgrade and modb is uninstalled,
+        # but moda (installed) changed a .py — the running server must restart
+        # even though the merged action ("upgrade") masked it.
+        changed = ["moda/models/a.py", "modb/__manifest__.py"]
+        _result, applied, _states = self._pull_auto(
+            mock_docker_client,
+            tmp_path,
+            ["moda/__manifest__.py", *changed],
+            changed,
+            {"moda": "installed", "modb": "uninstalled"},
+        )
+        assert applied["to_upgrade"] == []
+        assert applied["do_restart"] is True
+
+    def test_views_and_js_in_installed_module_still_refresh(
+        self, mock_docker_client, tmp_path
+    ):
+        changed = [
+            "moda/views/a.xml",
+            "moda/static/src/a.js",
+            "modb/__manifest__.py",
+        ]
+        _result, applied, _states = self._pull_auto(
+            mock_docker_client,
+            tmp_path,
+            ["moda/__manifest__.py", *changed],
+            changed,
+            {"moda": "installed", "modb": "uninstalled"},
+        )
+        assert applied["to_upgrade"] == []
+        assert applied["do_refresh"] is True
+        assert applied["do_restart"] is False
+
+    def test_python_outside_any_module_restarts(self, mock_docker_client, tmp_path):
+        # tools/ has no manifest: its .py is live code (e.g. loaded through a
+        # server-wide module), not an uninstalled module named "tools".
+        changed = ["tools/patches/monkey.py", "modb/__manifest__.py"]
+        _result, applied, module_states = self._pull_auto(
+            mock_docker_client, tmp_path, changed, changed, {"modb": "uninstalled"}
+        )
+        assert applied["to_upgrade"] == []
+        assert applied["do_restart"] is True
+        assert module_states.call_args.args[3] == ("modb",)
+
+    def test_skipped_pseudo_module_keeps_its_python_restart(
+        self, mock_docker_client, tmp_path
+    ):
+        # The path-only fallback calls tools/data.csv an upgrade of "tools";
+        # skipping that pseudo-module must not swallow the live .py beside it.
+        changed = ["tools/data.csv", "tools/patch.py"]
+        result, applied, _states = self._pull_auto(
+            mock_docker_client, tmp_path, changed, changed, {}
+        )
+        assert applied["to_upgrade"] == []
+        assert applied["do_restart"] is True
+        assert any("tools" in w for w in result["warnings"])
+
+    def test_unsafe_module_names_never_reach_sql(self, mock_docker_client, tmp_path):
+        evil = "x'); DROP TABLE res_users; --"
+        changed = [f"{evil}/__manifest__.py", "modb/__manifest__.py"]
+        _result, _applied, module_states = self._pull_auto(
+            mock_docker_client, tmp_path, changed, changed, {"modb": "installed"}
+        )
+        assert module_states.call_args.args[3] == ("modb",)
+
+    def _unit(self, tmp_path, files, rec):
+        self._tree(tmp_path, files)
+        return [((str(tmp_path), "old", files), rec)]
+
+    @staticmethod
+    def _rec(action, install=(), upgrade=()):
+        return {
+            "action": action,
+            "modules_to_install": list(install),
+            "modules_to_upgrade": list(upgrade),
+            "details": {},
+        }
+
+    @pytest.mark.parametrize("is_production", [True, False])
+    def test_installed_module_classified_as_new_is_upgraded(
+        self, tmp_path, is_production
+    ):
+        # Moved between directories/repos: git finds no old manifest and the
+        # classifier says "install", but the database already has it.
+        unit_recs = self._unit(
+            tmp_path, ["foo/__manifest__.py"], self._rec("install", install=["foo"])
+        )
+        with patch(
+            "oduflow.docker_ops.odoo_ops._get_module_states",
+            return_value={"foo": "installed"},
+        ):
+            plan, warnings = env_ops._narrow_auto_plan(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "prod-erp",
+                unit_recs,
+                is_production=is_production,
+            )
+        assert plan["action"] == "upgrade"
+        assert plan["modules_to_install"] == []
+        assert plan["modules_to_upgrade"] == ["foo"]
+        assert warnings == []
+
+    def test_production_never_auto_installs(self, tmp_path):
+        unit_recs = self._unit(
+            tmp_path,
+            ["brand_new_mod/__manifest__.py"],
+            self._rec("install", install=["brand_new_mod"]),
+        )
+        with patch("oduflow.docker_ops.odoo_ops._get_module_states", return_value={}):
+            plan, warnings = env_ops._narrow_auto_plan(
+                TEST_SETTINGS, TEST_TEAM, "prod-erp", unit_recs, is_production=True
+            )
+        assert plan["action"] == "none"
+        assert plan["modules_to_install"] == []
+        assert any("brand_new_mod" in w for w in warnings)
+        assert any("install=" in w for w in warnings)
+
+    def test_dev_environment_still_auto_installs_new_modules(self, tmp_path):
+        unit_recs = self._unit(
+            tmp_path,
+            ["brand_new_mod/__manifest__.py"],
+            self._rec("install", install=["brand_new_mod"]),
+        )
+        with patch("oduflow.docker_ops.odoo_ops._get_module_states", return_value={}):
+            plan, warnings = env_ops._narrow_auto_plan(
+                TEST_SETTINGS, TEST_TEAM, "env", unit_recs, is_production=False
+            )
+        assert plan["action"] == "install"
+        assert plan["modules_to_install"] == ["brand_new_mod"]
+        assert warnings == []
+
+    def test_unreadable_module_states_keep_the_plan_unfiltered(self, tmp_path):
+        unit_recs = self._unit(
+            tmp_path,
+            ["moda/__manifest__.py", "moda/models/a.py"],
+            self._rec("upgrade", upgrade=["moda"]),
+        )
+        with patch(
+            "oduflow.docker_ops.odoo_ops._get_module_states",
+            side_effect=RuntimeError("db down"),
+        ):
+            plan, warnings = env_ops._narrow_auto_plan(
+                TEST_SETTINGS, TEST_TEAM, "env", unit_recs, is_production=False
+            )
+        assert plan["action"] == "upgrade"
+        assert plan["modules_to_upgrade"] == ["moda"]
+        assert warnings == []
+
+    def test_module_state_lookup_rejects_unsafe_names(self):
+        from oduflow.docker_ops import odoo_ops
+
+        with patch.object(odoo_ops, "_execute_db_query") as query:
+            with pytest.raises(ValueError):
+                odoo_ops._get_module_states(
+                    TEST_SETTINGS, TEST_TEAM, "env", ("a'); DROP TABLE x; --",)
+                )
+        query.assert_not_called()
+
+
 class TestCreateEnvironmentEnvVars:
     @patch(
         "oduflow.extra_addons.generate_odoo_conf",
@@ -1699,6 +2016,8 @@ class TestCreateEnvironmentEnvVars:
         mock_odoo = MagicMock()
         mock_odoo.exec_run.return_value = (0, b"OK")
         mock_docker_client.containers.run.return_value = mock_odoo
+        init_container = mock_docker_client.containers.create.return_value
+        init_container.wait.return_value = {"StatusCode": 0}
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
         env_ops.create_environment(
@@ -1748,7 +2067,7 @@ class TestUpdateEnvironment:
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
     )
     @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
     @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
     @patch("oduflow.docker_ops.env_ops._create_pg_role")
@@ -1762,14 +2081,13 @@ class TestUpdateEnvironment:
         mock_role,
         mock_isdir,
         mock_isfile,
-        mock_resolve_conf,
+        mock_reapply_conf,
         mock_apt,
         mock_pip,
         mock_docker_client,
     ):
         import json
 
-        mock_resolve_conf.return_value.exists.return_value = False
         container = self._make_container()
         mock_docker_client.containers.get.return_value = container
         new_image = MagicMock()
@@ -1805,7 +2123,7 @@ class TestUpdateEnvironment:
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
     )
     @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
     @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
     @patch("oduflow.docker_ops.env_ops._create_pg_role")
@@ -1823,12 +2141,11 @@ class TestUpdateEnvironment:
         mock_role,
         mock_isdir,
         mock_isfile,
-        mock_resolve_conf,
+        mock_reapply_conf,
         mock_apt,
         mock_pip,
         mock_docker_client,
     ):
-        mock_resolve_conf.return_value.exists.return_value = False
         container = self._make_container()
         container.attrs["HostConfig"]["Binds"] = [
             "/tmp/flow-test/workspaces/main/repo:/mnt/extra-addons:rw",
@@ -1901,9 +2218,8 @@ class TestUpdateEnvironment:
                 "oduflow.docker_ops.env_ops._install_pip_requirements",
                 return_value=(False, ""),
             ),
-            patch("oduflow.docker_ops.env_ops._resolve_instance_conf") as conf,
+            patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True),
         ):
-            conf.return_value.exists.return_value = False
             env_ops.update_environment(
                 TEST_SETTINGS, TEST_TEAM, "main", pull_image=False, rename_to="main"
             )
@@ -1930,20 +2246,21 @@ class TestUpdateEnvironment:
                 "oduflow.docker_ops.env_ops._install_pip_requirements",
                 return_value=(False, ""),
             ),
-            patch("oduflow.docker_ops.env_ops._resolve_instance_conf") as conf,
+            patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True),
         ):
-            conf.return_value.exists.return_value = False
             return env_ops.update_environment(
                 TEST_SETTINGS, TEST_TEAM, "main", pull_image=False, **kwargs
             )
 
+    # A bare team domain has no prefix to replace: qa nests under it.
+    @pytest.mark.parametrize("team_hostname", ["dev.example.com", "example.com"])
     @pytest.mark.parametrize("old_hostname", ["", "dev1", "previous"])
     def test_update_hostname_routes_and_registry(
-        self, mock_docker_client, tmp_path, old_hostname
+        self, mock_docker_client, tmp_path, old_hostname, team_hostname
     ):
         from oduflow.hostname_registry import allocate_hostname, get_hostname
 
-        team = dataclasses.replace(TEST_TEAM, hostname="dev.example.com")
+        team = dataclasses.replace(TEST_TEAM, hostname=team_hostname)
         settings = dataclasses.replace(
             TEST_SETTINGS, routing_mode="traefik", teams={"1": team}
         )
@@ -2171,9 +2488,8 @@ class TestUpdateEnvironment:
                 "oduflow.docker_ops.env_ops._install_pip_requirements",
                 return_value=(False, ""),
             ),
-            patch("oduflow.docker_ops.env_ops._resolve_instance_conf") as conf,
+            patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True),
         ):
-            conf.return_value.exists.return_value = False
             result = env_ops.update_environment(
                 TEST_SETTINGS, team, "main", pull_image=False
             )
@@ -2204,7 +2520,7 @@ class TestUpdateEnvironment:
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
     )
     @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
     @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
     @patch("oduflow.docker_ops.env_ops._create_pg_role")
@@ -2218,12 +2534,11 @@ class TestUpdateEnvironment:
         mock_role,
         mock_isdir,
         mock_isfile,
-        mock_resolve_conf,
+        mock_reapply_conf,
         mock_apt,
         mock_pip,
         mock_docker_client,
     ):
-        mock_resolve_conf.return_value.exists.return_value = False
         container = self._make_container()
         # A previous digest-pinned recreation can leave the container without
         # image tags and with Config.Image set to the digest. The persisted
@@ -4114,6 +4429,9 @@ class TestApplyActionsExitCode:
 
         assert result["exit_code"] == 1
         assert "install traceback" in result["output"]
+        # The step behind exit_code, with its own output, not the upgrade's.
+        assert result["failed_step"] == "install"
+        assert result["failed_step_output"] == "install traceback"
 
     @patch(
         "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
@@ -4124,7 +4442,11 @@ class TestApplyActionsExitCode:
         return_value={"exit_code": 0, "output": "installed"},
     )
     def test_failed_upgrade_is_reported(self, mock_install, mock_up):
-        assert self._apply()["exit_code"] == 2
+        result = self._apply()
+
+        assert result["exit_code"] == 2
+        assert result["failed_step"] == "upgrade"
+        assert result["failed_step_output"] == "upgrade traceback"
 
     @patch(
         "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
@@ -4135,7 +4457,11 @@ class TestApplyActionsExitCode:
         return_value={"exit_code": 0, "output": "installed"},
     )
     def test_all_successful_reports_zero(self, mock_install, mock_up):
-        assert self._apply()["exit_code"] == 0
+        result = self._apply()
+
+        assert result["exit_code"] == 0
+        assert "failed_step" not in result
+        assert "dependencies_exit_code" not in result
 
 
 class TestApplyActionsDeps:
@@ -4246,7 +4572,108 @@ class TestApplyActionsDeps:
         assert result["action"] == "error"
         assert "FAILED" in result["output"]
         assert result["exit_code"] == 1
+        assert result["failed_step"] == "dependencies"
+        assert result["dependencies_exit_code"] == 1
+        assert "boom" in result["failed_step_output"]
         container.restart.assert_not_called()
+
+    @patch(
+        "oduflow.docker_ops.odoo_ops.upgrade_odoo_modules",
+        return_value={"exit_code": 255, "output": "ModuleNotFoundError: boto3"},
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        side_effect=[
+            (True, "[PIP] Requirements installed successfully:\nfine"),
+            (True, "[PIP] Requirements installed successfully:\nalso fine"),
+        ],
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_upgrade_failure_keeps_the_dependency_code_visible(
+        self, mock_apt, mock_pip, mock_upgrade
+    ):
+        # The upgrade's code is the apply's status; the reinstall that ran
+        # before it stays visible next to it, so a failed module command can
+        # be told apart from one that failed because a dependency did not
+        # install.
+        client, _ = self._client_with_container()
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=[],
+            to_upgrade=["sale"],
+            do_restart=False,
+            changed_files=["requirements.txt", "sale/models/sale.py"],
+            dep_units=[("/repo", "/mnt/extra-addons"), ("/x", "/mnt/extra-addons-x")],
+        )
+        assert result["exit_code"] == 255
+        assert result["failed_step"] == "upgrade"
+        assert result["failed_step_output"] == "ModuleNotFoundError: boto3"
+        assert result["dependencies_exit_code"] == 0
+        assert "Module upgrade FAILED (exit 255): sale." in result["message"]
+
+    @patch("oduflow.docker_ops.odoo_ops.upgrade_odoo_modules")
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        return_value=(False, "[PIP] install FAILED (exit 1):\nno boto3 for you"),
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_dependency_failure_stops_module_actions(
+        self, mock_apt, mock_pip, mock_upgrade
+    ):
+        # A failed reinstall stops the apply before any module command: the
+        # pending plan is returned for a retry instead of running an upgrade
+        # against a container that is missing its dependencies.
+        client, container = self._client_with_container()
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=[],
+            to_upgrade=["sale"],
+            do_restart=False,
+            changed_files=["requirements.txt", "sale/models/sale.py"],
+            dep_units=[("/repo", "/mnt/extra-addons")],
+        )
+        mock_upgrade.assert_not_called()
+        container.restart.assert_not_called()
+        assert result["action"] == "error"
+        assert result["exit_code"] == 1
+        assert result["failed_step"] == "dependencies"
+        assert result["pending_actions"]["upgrade"] == ["sale"]
+
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        side_effect=[
+            (True, "[PIP] Requirements installed successfully:\nfine"),
+            (False, "[PIP] install FAILED (exit 1):\nERROR: No matching dist"),
+        ],
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_dependency_failure_output_is_the_failed_install_only(
+        self, mock_apt, mock_pip
+    ):
+        client, _ = self._client_with_container()
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=[],
+            to_upgrade=[],
+            do_restart=False,
+            changed_files=["requirements.txt"],
+            dep_units=[("/repo", "/mnt/extra-addons"), ("/x", "/mnt/extra-addons-x")],
+        )
+        assert result["failed_step"] == "dependencies"
+        assert "No matching dist" in result["failed_step_output"]
+        assert "fine" not in result["failed_step_output"]
 
     @patch("oduflow.docker_ops.env_ops._install_pip_requirements")
     @patch("oduflow.docker_ops.env_ops._install_apt_packages")
@@ -4307,33 +4734,74 @@ class TestReapplyOdooConf:
         assert extra_arg == ["/mnt/extra-addons-enterprise"]
 
     @patch("oduflow.docker_ops.env_ops._copy_file_to_container")
-    @patch("oduflow.docker_ops.env_ops._resolve_instance_conf")
-    @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
-    def test_returns_false_when_no_base_conf(
-        self, mock_isfile, mock_resolve, mock_copy
-    ):
-        inst = MagicMock()
-        inst.exists.return_value = False
-        mock_resolve.return_value = inst
-        container = MagicMock()
-        container.labels = {}
-        applied = env_ops._reapply_odoo_conf(
-            TEST_SETTINGS, TEST_TEAM, "feature/x", container
+    def test_pins_listen_interface_over_repo_conf(self, mock_copy, tmp_path):
+        # Odoo 20 binds 127.0.0.1 when http_interface is unset; a loopback
+        # value from the repo conf is just as unreachable for Traefik.
+        repo = tmp_path / "repo"
+        (repo / ".oduflow").mkdir(parents=True)
+        (repo / ".oduflow" / "odoo.conf").write_text(
+            "[options]\naddons_path = /mnt/extra-addons\nhttp_interface = 127.0.0.1\n"
         )
-        assert applied is False
-        mock_copy.assert_not_called()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        container = MagicMock()
+        container.labels = {"oduflow.local_path": str(repo)}
+        with patch(
+            "oduflow.docker_ops.env_ops.get_workspace_path",
+            return_value=str(workspace),
+        ):
+            assert env_ops._reapply_odoo_conf(
+                TEST_SETTINGS, TEST_TEAM, "feature/x", container
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.read(workspace / "odoo.conf")
+        assert cp.get("options", "http_interface") == "0.0.0.0"
+        mock_copy.assert_called_once()
+
+    @patch("oduflow.docker_ops.env_ops._copy_file_to_container")
+    def test_falls_back_to_the_bundled_conf(self, mock_copy, tmp_path):
+        # Neither a repo nor a team conf: the bundled odoo.conf is the base,
+        # so a conf (with the pinned interface) is always applied.
+        team = dataclasses.replace(TEST_TEAM, data_dir=str(tmp_path / "team"))
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        container = MagicMock()
+        container.labels = {"oduflow.local_path": str(tmp_path / "repo")}
+        with patch(
+            "oduflow.docker_ops.env_ops.get_workspace_path",
+            return_value=str(workspace),
+        ):
+            assert env_ops._reapply_odoo_conf(
+                TEST_SETTINGS, team, "feature/x", container
+            )
+        import configparser
+
+        cp = configparser.RawConfigParser()
+        cp.read(workspace / "odoo.conf")
+        assert cp.get("options", "max_cron_threads") == "0"
+        assert cp.get("options", "http_interface") == "0.0.0.0"
+        mock_copy.assert_called_once()
 
 
 class TestAgentContainer:
     """The agent is a SINGLE per-team container with persistent HOME/workspace
     volumes; per-env checkouts are added/removed via `docker exec`. It is
     opt-in per team (a hosting feature) and configured statically in
-    oduflow.toml. See specs/0029-agent-console-and-chat.md."""
+    oduflow.toml. Every environment runs as its own uid inside it. See
+    specs/0029-agent-console-and-chat.md and
+    specs/0079-per-environment-agent-identities.md."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_data_dir(self, tmp_path):
+        # The per-environment uid registry lives in the team data dir.
+        self._data_dir = str(tmp_path)
 
     def _team(self, **kw):
         base = dict(
             team_id="1",
-            data_dir="/tmp/flow-test",
+            data_dir=self._data_dir,
             auth_token="tok",
             agent_enabled=True,
         )
@@ -4373,17 +4841,69 @@ class TestAgentContainer:
     def test_refresh_agent_mcp_config_uses_current_public_url(self):
         team = self._team(hostname="mirageflow.ca")
         settings = self._settings(team=team, routing_mode="traefik")
+        uid = agent_uids.allocate_uid(team, "feature/x")
         container = MagicMock()
         container.exec_run.return_value = (0, b"")
 
-        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x")
+        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x", uid)
 
         cmd = container.exec_run.call_args.args[0]
         assert cmd[:2] == ["sh", "-c"]
         assert cmd[4] == "/workspace/feature-x/.mcp.json"
         assert cmd[5] == "https://mirageflow.ca/mcp/feature/x"
         assert "ODUFLOW_MCP_TOKEN" in cmd[2]
-        assert container.exec_run.call_args.kwargs["user"] == "agent"
+        assert "agent_browser" in cmd[2]
+        # Only the environment's own uid can write its checkout.
+        kwargs = container.exec_run.call_args.kwargs
+        assert kwargs["user"] == f"{uid}:{uid}"
+        assert kwargs["environment"]["HOME"] == f"/home/agent/envs/{uid}"
+
+    def test_exec_identity_is_the_environments_own_uid_home_and_tmpdir(self):
+        user, env = env_ops.agent_exec_identity(20001)
+
+        assert user == "20001:20001"
+        assert env == {
+            "HOME": "/home/agent/envs/20001",
+            "CLAUDE_CONFIG_DIR": "/home/agent/envs/20001/.claude",
+            "CODEX_HOME": "/home/agent/envs/20001/.codex",
+            "TMPDIR": "/tmp/user/20001",
+            "DISABLE_AUTOUPDATER": "1",
+        }
+
+    def test_session_command_runs_with_a_private_umask(self):
+        assert env_ops.agent_session_command(["claude", "--model", "x y"]) == [
+            "sh",
+            "-c",
+            'umask 077; exec "$@"',
+            "sh",
+            "claude",
+            "--model",
+            "x y",
+        ]
+
+    def test_env_uid_checks_account_home_tmpdir_and_checkout_as_the_env(self):
+        team = self._team()
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        # No uid yet (an environment from before per-environment identities).
+        assert env_ops.agent_env_uid(container, team, "feature/x") is None
+        container.exec_run.assert_not_called()
+
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        assert env_ops.agent_env_uid(container, team, "feature/x") == uid
+        cmd = container.exec_run.call_args.args[0]
+        assert cmd[-1] == "/workspace/feature-x"
+        assert "getent passwd" in cmd[2]
+        assert '[ -w "$TMPDIR" ]' in cmd[2]
+        assert container.exec_run.call_args.kwargs["user"] == f"{uid}:{uid}"
+        assert (
+            container.exec_run.call_args.kwargs["environment"]["TMPDIR"]
+            == f"/tmp/user/{uid}"
+        )
+
+        container.exec_run.return_value = (1, b"")
+        assert env_ops.agent_env_uid(container, team, "feature/x") is None
 
     def test_refresh_agent_mcp_config_renames_server_and_follows_brand(self, tmp_path):
         import json
@@ -4396,7 +4916,7 @@ class TestAgentContainer:
         settings = self._settings(team=team, routing_mode="traefik")
         container = MagicMock()
         container.exec_run.return_value = (0, b"")
-        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x")
+        env_ops.refresh_agent_mcp_config(container, settings, team, "feature/x", 20000)
         cmd = container.exec_run.call_args.args[0]
         assert cmd[6:] == ["oduflow", "development", "oduflow"]
 
@@ -4421,7 +4941,8 @@ class TestAgentContainer:
         subprocess.run(script_args, check=True)
 
         servers = json.loads(config.read_text())["mcpServers"]
-        assert set(servers) == {"custom", "development"}
+        # The legacy entry is dropped; Agent Browser is (re)added alongside.
+        assert set(servers) == {"agent_browser", "custom", "development"}
         assert servers["development"]["url"] == "https://mirageflow.ca/mcp/feature/x"
         email = subprocess.run(
             ["git", "-C", str(checkout), "config", "user.email"],
@@ -4507,6 +5028,28 @@ class TestAgentContainer:
         assert env_ops._agent_env_vars(settings, team1) == {}
         assert env_ops._claude_auth_mode(settings, team1) == "interactive"
 
+    def test_codex_auth_mode(self, monkeypatch):
+        for key in env_ops._AGENT_PROVIDER_CREDENTIALS:
+            monkeypatch.delenv(key, raising=False)
+
+        team = self._team()
+        assert env_ops._codex_auth_mode(self._settings(team=team), team) == (
+            "interactive"
+        )
+
+        keyed = self._team(agent_env={"OPENAI_API_KEY": "  sk-oai  "})
+        assert env_ops._codex_auth_mode(self._settings(team=keyed), keyed) == (
+            "api_key"
+        )
+
+        # A blank team value masks a server key, as for the container env.
+        monkeypatch.setenv("OPENAI_API_KEY", "server-key")
+        assert env_ops._codex_auth_mode(self._settings(team=team), team) == "api_key"
+        blank = self._team(agent_env={"OPENAI_API_KEY": "  "})
+        assert env_ops._codex_auth_mode(self._settings(team=blank), blank) == (
+            "interactive"
+        )
+
     @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=True)
     def test_ensure_creates_single_container_with_volumes(
         self, mock_isfile, monkeypatch, mock_docker_client
@@ -4520,6 +5063,8 @@ class TestAgentContainer:
 
         team = self._team()
         s = self._settings(team=team)
+        created_container = mock_docker_client.containers.run.return_value
+        created_container.exec_run.return_value = (0, b"")
         env_ops._ensure_agent_container(mock_docker_client, s, team)
 
         # Both persistent volumes created.
@@ -4555,6 +5100,18 @@ class TestAgentContainer:
         assert s.branch_label not in kwargs["labels"]
         assert kwargs["extra_hosts"] == {"host.docker.internal": "host-gateway"}
         assert kwargs["shm_size"] == "1g"
+        # A real PID 1 reaps ended sessions and killed environments' processes.
+        assert kwargs["init"] is True
+        # Accounts live in the container layer: a fresh container gets every
+        # environment's identity back before any session starts (as root).
+        created_container.exec_run.assert_called_once()
+        assert created_container.exec_run.call_args.args[0][:2] == [
+            "/usr/local/bin/env-user.sh",
+            "sync",
+        ]
+        assert created_container.exec_run.call_args.kwargs["user"] == "root"
+        # An image without per-environment identities is refused up front.
+        assert "env-user.sh" in init_kwargs["command"][2]
         vols = kwargs["volumes"]
         assert vols["oduflow-1-agent-home"]["bind"] == "/home/agent"
         assert vols["oduflow-1-agent-workspace"]["bind"] == "/workspace"
@@ -4663,7 +5220,7 @@ class TestAgentContainer:
         assert any(v["bind"] == "/run/oduflow/git-credentials" for v in vols.values())
 
     def test_ensure_recreates_when_pinned_image_changes(
-        self, monkeypatch, mock_docker_client
+        self, monkeypatch, mock_docker_client, caplog
     ):
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -4676,17 +5233,45 @@ class TestAgentContainer:
         existing = self._existing_container(old_settings, team, monkeypatch)
         mock_docker_client.volumes.get.return_value = MagicMock()
         mock_docker_client.containers.get.return_value = existing
+        mock_docker_client.api.pull.return_value = [
+            {"status": "Pulling from oduist/oduflow-coder", "id": "0.3.4"}
+        ]
 
-        env_ops._ensure_agent_container(mock_docker_client, new_settings, team)
+        with caplog.at_level(logging.INFO, logger="oduflow"):
+            env_ops._ensure_agent_container(mock_docker_client, new_settings, team)
 
-        mock_docker_client.images.pull.assert_called_once_with(DEFAULT_AGENT_IMAGE)
+        mock_docker_client.api.pull.assert_called_once_with(
+            DEFAULT_AGENT_IMAGE, stream=True, decode=True
+        )
+        # The pull can block startup for a long time: the reason, the daemon's
+        # progress and the duration are all logged.
+        messages = [record.getMessage() for record in caplog.records]
+        assert (
+            f"Agent config changed; pulling agent image {DEFAULT_AGENT_IMAGE}"
+            in messages
+        )
+        assert "Agent image: Pulling from oduist/oduflow-coder 0.3.4" in messages
+        assert any(
+            m.startswith(f"Pulled agent image {DEFAULT_AGENT_IMAGE} in ")
+            for m in messages
+        )
         existing.remove.assert_called_once_with(force=True)
         assert mock_docker_client.containers.run.call_args.kwargs["image"] == (
             DEFAULT_AGENT_IMAGE
         )
 
+    @pytest.mark.parametrize(
+        "pull",
+        [
+            # The request itself fails (registry unreachable, unknown tag).
+            {"side_effect": RuntimeError("registry down")},
+            # The daemon reports a failure mid-stream instead of raising.
+            {"return_value": [{"error": "unexpected EOF"}]},
+        ],
+        ids=["request-error", "stream-error"],
+    )
     def test_failed_image_pull_preserves_existing_container(
-        self, monkeypatch, mock_docker_client
+        self, monkeypatch, mock_docker_client, caplog, pull
     ):
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -4698,12 +5283,21 @@ class TestAgentContainer:
         existing.labels = {"oduflow.agent_config_hash": "stale"}
         mock_docker_client.volumes.get.return_value = MagicMock()
         mock_docker_client.containers.get.return_value = existing
-        mock_docker_client.images.pull.side_effect = RuntimeError("registry down")
+        mock_docker_client.api.pull.configure_mock(**pull)
 
-        env_ops._ensure_agent_container(mock_docker_client, settings, team)
+        with caplog.at_level(logging.WARNING, logger="oduflow"):
+            env_ops._ensure_agent_container(mock_docker_client, settings, team)
 
         existing.remove.assert_not_called()
         mock_docker_client.containers.run.assert_not_called()
+        assert any(
+            re.fullmatch(
+                rf"Could not pull agent image {re.escape(DEFAULT_AGENT_IMAGE)} "
+                r"after \d+\.\ds; keeping existing container",
+                record.getMessage(),
+            )
+            for record in caplog.records
+        )
 
     def test_api_key_when_no_subscription(self, monkeypatch, mock_docker_client):
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -4767,10 +5361,65 @@ class TestAgentContainer:
         assert env["OPENAI_API_KEY"] == "from-config"  # config wins
         assert env["MY_FLAG"] == "1"
 
-    def test_add_env_execs_clone_script(self, monkeypatch, mock_docker_client):
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    def _no_provider_keys(self, monkeypatch):
+        for key in env_ops._AGENT_PROVIDER_CREDENTIALS:
+            monkeypatch.delenv(key, raising=False)
+
+    def test_sync_gives_every_existing_environment_an_identity(
+        self, mock_docker_client
+    ):
+        # Environments that predate per-environment identities get a uid on
+        # the next container (re)creation; known ones keep theirs. Deletions
+        # the container could not carry out are finished first.
+        team = self._team()
+        s = self._settings(team=team)
+        known = agent_uids.allocate_uid(team, "main")
+        deleted = agent_uids.allocate_uid(team, "gone")
+        agent_uids.retire_uid(team, "gone")
+
+        def _labelled(name, env_name):
+            c = MagicMock()
+            c.name = name
+            c.labels = {s.branch_label: env_name} if env_name else {}
+            return c
+
+        mock_docker_client.containers.list.return_value = [
+            _labelled("oduflow-1-main-odoo", "main"),
+            _labelled("oduflow-1-main-db", "main"),
+            _labelled("oduflow-1-feature-x-odoo", "feature/x"),
+            _labelled("oduflow-1-agent", None),
+            _labelled("unrelated", "other"),
+        ]
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        env_ops._agent_sync_identities(mock_docker_client, s, team, container)
+
+        new = agent_uids.get_uid(team, "feature/x")
+        assert new is not None and new not in (known, deleted)
+        assert agent_uids.get_uid(team, "other") is None
+        remove, sync = container.exec_run.call_args_list
+        assert remove.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "remove",
+            "gone",
+            str(deleted),
+        ]
+        assert sync.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "sync",
+            f"feature-x:{new}",
+            f"main:{known}",
+        ]
+        assert all(
+            c.kwargs["user"] == "root" for c in container.exec_run.call_args_list
+        )
+        assert agent_uids.pending_removals(team) == {}
+
+    def test_add_env_provisions_identity_then_clones_as_the_env(
+        self, monkeypatch, mock_docker_client
+    ):
+        self._no_provider_keys(monkeypatch)
         team = self._team()
         s = self._settings(team=team)
         container = self._existing_container(s, team, monkeypatch)
@@ -4788,8 +5437,17 @@ class TestAgentContainer:
             "alice",
         )
 
-        container.exec_run.assert_called_once()
-        cmd = container.exec_run.call_args.args[0]
+        uid = agent_uids.get_uid(team, "feature/x")
+        assert uid is not None
+        provision, clone = container.exec_run.call_args_list
+        assert provision.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "provision",
+            "feature-x",
+            str(uid),
+        ]
+        assert provision.kwargs["user"] == "root"
+        cmd = clone.args[0]
         assert cmd[0] == "/usr/local/bin/clone-env.sh"
         assert cmd[1] == "https://x/r.git"
         assert cmd[2] == "feature/x"
@@ -4798,7 +5456,64 @@ class TestAgentContainer:
         assert cmd[4] == "http://host.docker.internal:8000/mcp/feature/x"
         assert cmd[5] == "alice"
         assert "tok" not in cmd
-        assert container.exec_run.call_args.kwargs["user"] == "agent"
+        # The checkout belongs to the environment's own uid, cloned with the
+        # git credentials seeded into its own HOME.
+        assert clone.kwargs["user"] == f"{uid}:{uid}"
+        assert clone.kwargs["environment"]["HOME"] == f"/home/agent/envs/{uid}"
+
+    def test_add_env_finishes_pending_removals_before_provisioning(
+        self, monkeypatch, mock_docker_client
+    ):
+        # A new environment that reuses a deleted one's slug must never meet
+        # the old checkout: the deferred cleanup runs before provisioning.
+        self._no_provider_keys(monkeypatch)
+        team = self._team()
+        s = self._settings(team=team)
+        old = agent_uids.allocate_uid(team, "feature/x")
+        agent_uids.retire_uid(team, "feature/x")
+        container = self._existing_container(s, team, monkeypatch)
+        container.exec_run.return_value = (0, b"")
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = container
+
+        env_ops._agent_add_env(
+            mock_docker_client, s, team, "feature/x", "https://x/r.git", "x", ""
+        )
+
+        new = agent_uids.get_uid(team, "feature/x")
+        cmds = [c.args[0] for c in container.exec_run.call_args_list]
+        assert cmds[0] == [
+            "/usr/local/bin/env-user.sh",
+            "remove",
+            "feature-x",
+            str(old),
+        ]
+        assert cmds[1] == [
+            "/usr/local/bin/env-user.sh",
+            "provision",
+            "feature-x",
+            str(new),
+        ]
+        assert new != old
+        assert agent_uids.pending_removals(team) == {}
+
+    def test_add_env_does_not_clone_when_provisioning_fails(
+        self, monkeypatch, mock_docker_client
+    ):
+        self._no_provider_keys(monkeypatch)
+        team = self._team()
+        s = self._settings(team=team)
+        container = self._existing_container(s, team, monkeypatch)
+        container.exec_run.return_value = (1, b"useradd failed")
+        mock_docker_client.volumes.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = container
+
+        env_ops._agent_add_env(
+            mock_docker_client, s, team, "main", "https://x/r.git", "main", ""
+        )
+
+        container.exec_run.assert_called_once()
+        assert container.exec_run.call_args.args[0][1] == "provision"
 
     def test_add_env_skipped_when_disabled(self, mock_docker_client):
         team = self._team(agent_enabled=False)
@@ -4812,15 +5527,14 @@ class TestAgentContainer:
             "alice",
         )
         mock_docker_client.containers.get.assert_not_called()
+        assert agent_uids.get_uid(team, "feature/x") is None
 
     def test_ensure_env_checkout_clones_from_labels(
         self, monkeypatch, mock_docker_client
     ):
         # Opening a console for a pre-existing env reads repo/branch/user from the
         # Odoo container labels and clones on demand.
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        self._no_provider_keys(monkeypatch)
         team = self._team()
         s = self._settings(team=team)
         odoo = MagicMock()
@@ -4840,7 +5554,7 @@ class TestAgentContainer:
 
         env_ops.ensure_agent_env_checkout(s, team, "prod")
 
-        agent.exec_run.assert_called_once()
+        uid = agent_uids.get_uid(team, "prod")
         cmd = agent.exec_run.call_args.args[0]
         assert cmd[0] == "/usr/local/bin/clone-env.sh"
         assert cmd[1] == "https://x/r.git"
@@ -4848,16 +5562,14 @@ class TestAgentContainer:
         assert cmd[3] == "prod"  # slug from env name -> checkout dir
         assert cmd[4] == "http://host.docker.internal:8000/mcp/prod"
         assert cmd[5] == "alice"
-        assert agent.exec_run.call_args.kwargs["user"] == "agent"
+        assert agent.exec_run.call_args.kwargs["user"] == f"{uid}:{uid}"
 
     def test_ensure_env_checkout_skips_repo_for_live_mount(
         self, monkeypatch, mock_docker_client
     ):
         # A live-mount env has no repo to clone; the hook passes an empty URL
         # (clone-env.sh then skips) instead of cloning a stale repo label.
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        self._no_provider_keys(monkeypatch)
         team = self._team()
         s = self._settings(team=team)
         odoo = MagicMock()
@@ -4891,7 +5603,67 @@ class TestAgentContainer:
 
         agent.exec_run.assert_not_called()
 
-    def test_remove_env_removes_checkout_and_chat_attachments(self, mock_docker_client):
+    def test_remove_env_drops_identity_and_retires_uid(self, mock_docker_client):
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        agent = MagicMock()
+        agent.exec_run.return_value = (0, b"")
+        mock_docker_client.containers.get.return_value = agent
+
+        env_ops._agent_remove_env(
+            mock_docker_client, self._settings(team=team), team, "feature/x"
+        )
+
+        # Kills its sessions and deletes checkout, attachments and HOME.
+        assert agent.exec_run.call_args.args[0] == [
+            "/usr/local/bin/env-user.sh",
+            "remove",
+            "feature-x",
+            str(uid),
+        ]
+        assert agent.exec_run.call_args.kwargs["user"] == "root"
+        assert agent_uids.get_uid(team, "feature/x") is None
+        assert agent_uids.pending_removals(team) == {}
+        # Never handed out again, not even to an environment of the same name.
+        assert agent_uids.allocate_uid(team, "feature/x") > uid
+
+    def test_remove_env_keeps_cleanup_pending_when_it_cannot_run(
+        self, mock_docker_client
+    ):
+        # Container gone (agent disabled, or stopped and removed): the files
+        # stay on the volumes, so the uid waits for a later cleanup.
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        env_ops._agent_remove_env(
+            mock_docker_client, self._settings(team=team), team, "feature/x"
+        )
+
+        assert agent_uids.get_uid(team, "feature/x") is None
+        assert agent_uids.pending_removals(team) == {uid: "feature-x"}
+
+    def test_remove_env_keeps_cleanup_pending_when_it_fails(self, mock_docker_client):
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "feature/x")
+        agent = MagicMock()
+        agent.exec_run.return_value = (1, b"files of environment remain")
+        mock_docker_client.containers.get.return_value = agent
+
+        env_ops._agent_remove_env(
+            mock_docker_client, self._settings(team=team), team, "feature/x"
+        )
+
+        assert agent_uids.pending_removals(team) == {uid: "feature-x"}
+
+        # A stopped container makes the exec raise; still pending, no crash.
+        agent.exec_run.side_effect = docker.errors.APIError("not running")
+        env_ops._agent_purge_removed(agent, team)
+        assert agent_uids.pending_removals(team) == {uid: "feature-x"}
+
+    def test_remove_env_without_identity_removes_checkout_and_chat_attachments(
+        self, mock_docker_client
+    ):
         team = self._team()
         agent = MagicMock()
         mock_docker_client.containers.get.return_value = agent
@@ -4907,6 +5679,39 @@ class TestAgentContainer:
             "/workspace/feature-x",
             "/workspace/.oduflow-uploads/feature-x",
         ]
+        assert agent.exec_run.call_args.kwargs["user"] == "root"
+
+    def test_rename_env_keeps_the_uid_even_without_a_container(
+        self, mock_docker_client
+    ):
+        team = self._team()
+        uid = agent_uids.allocate_uid(team, "old")
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        env_ops._agent_rename_env(
+            mock_docker_client, self._settings(team=team), team, "old", "new"
+        )
+
+        assert agent_uids.get_uid(team, "new") == uid
+        assert agent_uids.get_uid(team, "old") is None
+
+    def test_rename_env_moves_checkout_and_attachments_as_root(
+        self, mock_docker_client
+    ):
+        team = self._team()
+        agent = MagicMock()
+        mock_docker_client.containers.get.return_value = agent
+
+        env_ops._agent_rename_env(
+            mock_docker_client, self._settings(team=team), team, "old", "new"
+        )
+
+        moves = [c.args[0][2] for c in agent.exec_run.call_args_list]
+        assert 'mv -- "/workspace/old" "/workspace/new"' in moves[0]
+        assert (
+            'mv -- "/workspace/.oduflow-uploads/old" "/workspace/.oduflow-uploads/new"'
+        ) in moves[1]
+        assert all(c.kwargs["user"] == "root" for c in agent.exec_run.call_args_list)
 
 
 class TestFinalizeShellScript:

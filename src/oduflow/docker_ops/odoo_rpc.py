@@ -46,8 +46,10 @@ from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
-# Loopback inside the Odoo container. Odoo binds 0.0.0.0:8069 by default and
-# Oduflow never sets http_interface, so this is reachable in every environment.
+# Loopback inside the Odoo container. Every conf Oduflow generates pins
+# http_interface = 0.0.0.0 (Odoo 20 alone would bind only 127.0.0.1), and
+# loopback is reachable under either binding, so this works in every
+# environment.
 ODOO_ORIGIN = "http://127.0.0.1:8069"
 # Cookie name Odoo has used for the session id since well before 15.0. Also the
 # load-bearing assumption of connect_as_user (spec 0031).

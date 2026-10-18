@@ -271,14 +271,18 @@ def _run_basebackup_job(
         if prev_attempt is None or prev_attempt < fire
         else int(base.get("slot_attempts", 0) or 0)
     )
-    base["last_attempt_at"] = now.isoformat()
-    base["slot_attempts"] = attempts + 1
-    _save_cluster_state(settings, state)
+    # Acquire BEFORE recording the attempt: lock contention is not a failed
+    # try — the slot must stay due on the next tick (mirroring the snapshot
+    # job). Recording first let three contended ticks burn the whole retry
+    # budget and silently skip the day's base backup.
     try:
         locks.acquire_env("prod:__cluster__", operation="scheduled base backup")
     except BusyError:
         return
     try:
+        base["last_attempt_at"] = now.isoformat()
+        base["slot_attempts"] = attempts + 1
+        _save_cluster_state(settings, state)
         client = get_client()
         walg.backup_push(client, settings)
         if settings.backup is not None:
@@ -311,10 +315,8 @@ def _run_prune_job(
         if prev_attempt is None or prev_attempt < fire
         else int(prune_state.get("slot_attempts", 0) or 0)
     )
-    prune_state["last_attempt_at"] = now.isoformat()
-    prune_state["slot_attempts"] = attempts + 1
-    _save_cluster_state(settings, state)
     ok = True
+    attempted = False
     for team in settings.teams.values():
         backups_key = prod_backups_lock_key(team.team_id)
         try:
@@ -322,6 +324,7 @@ def _run_prune_job(
         except BusyError:
             ok = False
             continue
+        attempted = True
         try:
             result = backup_ops.prune_backups(settings, team)
             _append_log(
@@ -347,6 +350,14 @@ def _run_prune_job(
             )
         finally:
             locks.release_env(backups_key)
+    if not attempted:
+        # Every team's backups lock was busy: pure contention, not a failed
+        # try. Leave the slot state untouched so the prune is still due on the
+        # next tick instead of burning the retry budget (which silently lost
+        # the whole week's retention after three contended ticks).
+        return
+    prune_state["last_attempt_at"] = now.isoformat()
+    prune_state["slot_attempts"] = attempts + 1
     if ok:
         prune_state["last_success_at"] = now.isoformat()
         prune_state["slot_attempts"] = 0

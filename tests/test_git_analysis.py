@@ -204,10 +204,26 @@ class TestClassifyChanges:
             assert "sale" in result["modules_to_upgrade"]
             assert result["details"]["deps_changed"] == ["requirements.txt"]
 
-    def test_security_xml(self):
+    def test_security_csv_triggers_upgrade(self):
+        """P-H17: Odoo loads CSV data files (above all ir.model.access.csv)
+        only on install/upgrade. Classifying a changed ACL as "refresh"
+        silently deployed the environment with stale access rules."""
         files = ["sale/security/ir.model.access.csv"]
         result = classify_changes(files, "/tmp")
-        # csv is not xml, should be refresh
+        assert result["action"] == "upgrade"
+        assert "sale" in result["modules_to_upgrade"]
+        assert result["details"]["csv_data"] == files
+
+    def test_data_csv_triggers_upgrade(self):
+        files = ["sale/data/sale.stage.csv"]
+        result = classify_changes(files, "/tmp")
+        assert result["action"] == "upgrade"
+        assert "sale" in result["modules_to_upgrade"]
+
+    def test_csv_outside_a_module_stays_refresh(self):
+        # A repo-root CSV has no owning module -> nothing to upgrade.
+        files = ["export.csv"]
+        result = classify_changes(files, "/tmp")
         assert result["action"] == "refresh"
 
     def test_security_xml_file(self):
@@ -747,6 +763,14 @@ class TestShallowClassify:
         assert result["action"] == "upgrade"
         assert result["modules_to_upgrade"] == ["sale"]
         assert result["details"]["i18n_changed"] == ["sale/i18n/ru.po"]
+
+    def test_security_csv_triggers_upgrade(self):
+        # P-H17: same rule as classify_changes — CSV data files load only on
+        # install/upgrade, so a changed ACL must never stay on "refresh".
+        result = shallow_classify(["sale/security/ir.model.access.csv"], "/tmp")
+        assert result["action"] == "upgrade"
+        assert result["modules_to_upgrade"] == ["sale"]
+        assert result["details"]["csv_data"] == ["sale/security/ir.model.access.csv"]
 
     def test_pot_only_stays_refresh(self):
         files = ["sale/views/sale_order.xml", "sale/i18n/sale.pot"]

@@ -80,6 +80,44 @@ class S3Storage:
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
 
+    def put_if_absent(self, key: str, data: bytes) -> bool:
+        """Create-only PutObject (``If-None-Match: *``); False if *key* exists.
+
+        AWS S3 (and recent MinIO/R2) honour the conditional write. Backends or
+        SDKs without it fall back to exists()+put — the racy pre-conditional
+        behaviour, kept so a conservative store cannot break backups outright.
+        """
+        from botocore.exceptions import ParamValidationError
+
+        try:
+            self.client.put_object(
+                Bucket=self.bucket, Key=self._key(key), Body=data, IfNoneMatch="*"
+            )
+            return True
+        except ParamValidationError:
+            pass  # SDK too old to know the parameter — fall back below.
+        except self.client.exceptions.ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if code == "PreconditionFailed" or status == 412:
+                return False
+            # A concurrent conditional write on the same key: someone else is
+            # creating it right now — treat as "already exists" and re-read.
+            if code == "ConditionalRequestConflict" or status == 409:
+                return False
+            if code not in ("NotImplemented", "InvalidArgument", "InvalidRequest"):
+                raise
+            logger.warning(
+                "S3 backend does not support conditional writes (%s); "
+                "falling back to exists()+put for %s",
+                code,
+                key,
+            )
+        if self.exists(key):
+            return False
+        self.put(key, data)
+        return True
+
     def list(self, prefix: str) -> list[str]:
         full_prefix = self._key(prefix)
         keys: list[str] = []

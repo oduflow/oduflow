@@ -96,6 +96,20 @@ class TestSettings:
         with pytest.raises(ValueError, match="hostname must be set explicitly"):
             s.validate()
 
+    def test_retired_odumcp_ref_is_ignored_with_a_warning(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        toml = tmp_path / "oduflow.toml"
+        toml.write_text('[production]\nodumcp_ref = "19.0"\n[team.1]\n')
+        monkeypatch.setattr("oduflow.settings._warned_retired_keys", set())
+        s = Settings.from_toml(str(toml))
+        assert not hasattr(s, "prod_odumcp_ref")
+        assert "[production].odumcp_ref is ignored" in caplog.text
+        # Console validations re-parse the file; the warning is logged once.
+        caplog.clear()
+        Settings.from_toml(str(toml))
+        assert "odumcp_ref" not in caplog.text
+
     def test_routing_hostname_ignored_in_traefik_mode(self, tmp_path):
         # In traefik mode the shared default is NOT inherited; a team without
         # its own hostname is left empty so validate() flags the misconfig
@@ -800,7 +814,7 @@ class TestQuotas:
 class TestAgentSettings:
     def test_global_defaults(self):
         s = Settings()
-        assert s.agent_image == "oduist/oduflow-coder:0.3.3"
+        assert s.agent_image == "oduist/oduflow-coder:0.4.0"
         assert s.agent_claude_model == ""
         assert s.agent_codex_model == ""
         assert s.agent_opencode_model == ""

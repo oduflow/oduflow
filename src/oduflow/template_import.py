@@ -34,16 +34,21 @@ environments keep their upper-layer deltas.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import gzip
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
+from oduflow import secret_store
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -53,6 +58,7 @@ from oduflow.errors import (
 from oduflow.fsutil import atomic_write_private_json
 from oduflow.naming import get_template_db_name, validate_template_name
 from oduflow.settings import Settings, TeamSettings
+from oduflow.template_generations import TEMPLATE_SNAPSHOT_KEY
 
 logger = logging.getLogger("oduflow")
 
@@ -96,6 +102,183 @@ def parse_s3_url(url: str) -> tuple[str, str]:
             f"Invalid S3 URL '{url}': expected s3://bucket/prefix."
         )
     return bucket, prefix.strip("/")
+
+
+# --- Remembered source credentials -------------------------------------------
+#
+# A private bucket has to be re-read on every ``overwrite`` re-sync, so asking
+# for the secret key again each time would make the cron-able path impossible
+# to automate without putting the key in a crontab. The key is therefore kept
+# in the team secret store and the template metadata records only a
+# ``secret:<name>`` reference, so no listing, metadata editor or MCP tool can
+# echo it back. A secret Oduflow created on the operator's behalf is marked
+# managed and its lifetime follows the template's.
+
+_MANAGED_SECRET_PREFIX = "s3-template-"
+
+
+def managed_secret_name(template_name: str) -> str:
+    """The team-secret name Oduflow uses for a template's S3 secret key."""
+    base = re.sub(r"[^a-z0-9_.-]", "-", template_name.lower().replace("/", "."))
+    room = 64 - len(_MANAGED_SECRET_PREFIX)
+    if base == template_name and len(base) <= room:
+        return _MANAGED_SECRET_PREFIX + base
+    # Lowercasing and truncation both collide; a digest keeps names apart.
+    digest = hashlib.sha256(template_name.encode()).hexdigest()[:8]
+    return f"{_MANAGED_SECRET_PREFIX}{base[: room - 9]}-{digest}"
+
+
+def _resolve_secret_value(team: TeamSettings, ref: str) -> str:
+    """The stored value behind a ``secret:<name>`` reference."""
+    resolved = secret_store.resolve_env_secrets(team, {"S3_SECRET_KEY": ref}) or {}
+    return resolved["S3_SECRET_KEY"]
+
+
+@dataclass
+class SourceCredentials:
+    """Keys ready to sign with, plus what metadata should record about them."""
+
+    access_key: str = ""
+    # Resolved in memory for this operation only; never persisted as-is.
+    secret_key: str = ""
+    # What metadata records: a ``secret:<name>`` reference, or "" (none).
+    secret_ref: str = ""
+    # Whether Oduflow created that secret and therefore owns its lifetime.
+    secret_managed: bool = False
+    # A newly entered raw secret to write into the store; "" = nothing new.
+    store_value: str = ""
+
+
+def resolve_source_credentials(
+    team: TeamSettings,
+    template_name: str,
+    *,
+    endpoint: str = "",
+    access_key: str = "",
+    secret_key: str = "",
+    carried: dict[str, Any] | None = None,
+) -> SourceCredentials:
+    """Work out which keys sign this import, and what to remember about them.
+
+    Most explicit wins, as everywhere else in this module: keys passed now; a
+    ``secret:<name>`` reference the operator chose; the secret remembered for
+    this template. An empty secret key reuses the remembered one **only while
+    the endpoint and access key are unchanged**, so a stored secret is never
+    sent to sign requests for a different endpoint or key pair. With no key
+    material at all the caller falls through to the ``[backup]`` credentials or
+    anonymous access, exactly as before this was remembered.
+    """
+    carried = carried or {}
+    access_key = (access_key or "").strip()
+    secret_key = (secret_key or "").strip()
+    stored_ref = str(carried.get("source_secret_key") or "")
+    stored_access_key = str(carried.get("source_access_key") or "")
+
+    if secret_store.is_secret_ref(secret_key):
+        return SourceCredentials(
+            access_key=access_key or stored_access_key,
+            secret_key=_resolve_secret_value(team, secret_key),
+            secret_ref=secret_key,
+        )
+    if secret_key:
+        # Keep writing into the secret this template already owns, so rotating
+        # the key does not leave the previous managed secret behind.
+        if carried.get("source_secret_managed") and secret_store.is_secret_ref(
+            stored_ref
+        ):
+            ref = stored_ref
+        else:
+            ref = secret_store.SECRET_REF_PREFIX + managed_secret_name(template_name)
+        return SourceCredentials(
+            access_key=access_key,
+            secret_key=secret_key,
+            secret_ref=ref,
+            secret_managed=True,
+            store_value=secret_key,
+        )
+    if not stored_ref:
+        return SourceCredentials(access_key=access_key)
+    if (access_key or stored_access_key) == stored_access_key and str(
+        carried.get("source_endpoint") or ""
+    ) == endpoint:
+        return SourceCredentials(
+            access_key=stored_access_key,
+            secret_key=_resolve_secret_value(team, stored_ref),
+            secret_ref=stored_ref,
+            secret_managed=bool(carried.get("source_secret_managed")),
+        )
+    raise PrerequisiteNotMetError(
+        "Re-enter s3_secret_key when changing the endpoint or access key: the "
+        f"secret stored for template '{template_name}' signs only "
+        f"{stored_access_key or 'anonymous'} access to its recorded endpoint."
+    )
+
+
+def credential_metadata(creds: SourceCredentials) -> dict[str, Any]:
+    """The credential fields an import records in template metadata."""
+    return {
+        "source_access_key": creds.access_key,
+        "source_secret_key": creds.secret_ref,
+        "source_secret_managed": creds.secret_managed,
+    }
+
+
+def store_source_secret(team: TeamSettings, creds: SourceCredentials) -> None:
+    """Persist a newly entered secret key under its managed name."""
+    if creds.store_value:
+        secret_store.set_secret(
+            team,
+            secret_store.secret_ref_name(creds.secret_ref),
+            creds.store_value,
+        )
+
+
+def delete_managed_secret(team: TeamSettings, metadata: object) -> None:
+    """Best-effort removal of the secret Oduflow created for a template."""
+    if not isinstance(metadata, dict) or not metadata.get("source_secret_managed"):
+        return
+    ref = str(metadata.get("source_secret_key") or "")
+    if not secret_store.is_secret_ref(ref):
+        return
+    with contextlib.suppress(Exception):
+        secret_store.delete_secret(team, secret_store.secret_ref_name(ref))
+        logger.info("Deleted managed S3 secret %s", ref)
+
+
+def public_source_view(metadata: object) -> dict[str, Any] | None:
+    """What a listing may show of a remembered S3 source — never the secret.
+
+    ``None`` for anything that did not come from a bucket, so a caller can use
+    it directly as "is this template re-syncable from S3".
+    """
+    if not isinstance(metadata, dict):
+        return None
+    url = str(metadata.get("source_url") or "")
+    if not url.startswith("s3://"):
+        return None
+    return {
+        "url": url,
+        "endpoint": str(metadata.get("source_endpoint") or ""),
+        "region": str(metadata.get("source_region") or ""),
+        "access_key": str(metadata.get("source_access_key") or ""),
+        # Enough for the UI to say "no key needed"; the value stays put.
+        "has_secret": bool(metadata.get("source_secret_key")),
+        "dump": str(metadata.get("source_db") or ""),
+        "synced_at": str(metadata.get("snapshot_at") or ""),
+    }
+
+
+def release_replaced_secret(
+    team: TeamSettings, creds: SourceCredentials, previous: dict[str, Any] | None
+) -> None:
+    """Drop the managed secret a completed import no longer references.
+
+    Called only after the new metadata is on disk: until then the template
+    still points at the old reference, and removing it early would leave a
+    dangling one behind if the import failed.
+    """
+    if previous and str(previous.get("source_secret_key") or "") != creds.secret_ref:
+        delete_managed_secret(team, previous)
 
 
 def _make_source_client(
@@ -156,6 +339,152 @@ def _make_source_client(
     if endpoint:
         kwargs["endpoint_url"] = endpoint
     return boto3.client("s3", config=Config(**config_kwargs), **kwargs)
+
+
+# --- Bucket browser ----------------------------------------------------------
+#
+# Typing an object key blind is the one step of an S3 import that cannot be
+# verified before it runs, and a mistyped prefix fails only after the listing
+# comes back empty. The dashboard therefore walks the bucket one level at a
+# time, which needs a listing that is cheap, bounded and says nothing about
+# credentials.
+
+# Loose on purpose: S3-compatible stores accept more than AWS's 3-63 lowercase
+# rule, but nothing that could turn into a path or a URL component.
+_BUCKET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+_MAX_BROWSE_KEYS = 1000
+
+
+def validate_bucket(bucket: str) -> str:
+    bucket = (bucket or "").strip()
+    if not _BUCKET_RE.fullmatch(bucket):
+        raise ValueError(f"Invalid S3 bucket name '{bucket}'.")
+    return bucket
+
+
+@contextlib.contextmanager
+def _s3_errors(action: str) -> Iterator[None]:
+    """Translate boto errors into FlowErrors with a message fit for the UI.
+
+    S3 error messages name the failing condition (bad key id, missing bucket,
+    signature mismatch) and never echo credentials, so they are passed
+    through: without them the operator cannot tell a typo from a permissions
+    problem.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        yield
+    except ClientError as exc:
+        error = exc.response.get("Error", {}) or {}
+        code = str(error.get("Code") or "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        message = str(error.get("Message") or "")
+        if code in ("NoSuchBucket", "NoSuchKey", "NotFound", "404") or status == 404:
+            raise NotFoundError(f"{action}: not found ({code or status}).") from exc
+        raise PrerequisiteNotMetError(
+            f"{action} failed: {message or code or status}."
+        ) from exc
+    except BotoCoreError as exc:
+        raise PrerequisiteNotMetError(f"{action} failed: {exc}") from exc
+
+
+def _iso(value: Any) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+
+
+def browse_source(
+    settings: Settings,
+    team: TeamSettings,
+    *,
+    bucket: str = "",
+    prefix: str = "",
+    continuation_token: str = "",
+    endpoint: str = "",
+    region: str = "",
+    access_key: str = "",
+    secret_key: str = "",
+    template_name: str = "",
+) -> dict[str, Any]:
+    """List one level of a bucket, or the buckets when *bucket* is empty.
+
+    With ``template_name`` the secret remembered for that template signs the
+    request when no new one is given — under the same endpoint/access-key rule
+    as an import — so pointing an existing S3 template at a different object
+    never sends its secret back to the browser.
+    """
+    carried: dict[str, Any] = {}
+    if template_name:
+        validate_template_name(template_name)
+        carried = _load_carried_metadata(team, template_name)
+    creds = resolve_source_credentials(
+        team,
+        template_name or "browse",
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        carried=carried,
+    )
+    client = _make_source_client(
+        settings,
+        bucket,
+        endpoint=endpoint,
+        access_key=creds.access_key,
+        secret_key=creds.secret_key,
+        region=region,
+    )
+    if not bucket:
+        with _s3_errors("Listing buckets"):
+            resp = client.list_buckets()
+        return {
+            "bucket": "",
+            "prefix": "",
+            "buckets": [
+                str(b["Name"]) for b in resp.get("Buckets", []) if b.get("Name")
+            ],
+            "folders": [],
+            "files": [],
+            "truncated": False,
+            "next_token": "",
+        }
+
+    bucket = validate_bucket(bucket)
+    prefix = (prefix or "").strip().lstrip("/")
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    kwargs: dict[str, Any] = {
+        "Bucket": bucket,
+        "Prefix": prefix,
+        "Delimiter": "/",
+        "MaxKeys": _MAX_BROWSE_KEYS,
+    }
+    if continuation_token:
+        kwargs["ContinuationToken"] = continuation_token
+    with _s3_errors(f"Listing s3://{bucket}/{prefix}"):
+        resp = client.list_objects_v2(**kwargs)
+    files = [
+        {
+            "key": str(obj["Key"]),
+            "size": int(obj.get("Size") or 0),
+            "last_modified": _iso(obj.get("LastModified")),
+            "etag": str(obj.get("ETag") or "").strip('"'),
+        }
+        for obj in resp.get("Contents", [])
+        # A zero-byte "folder marker" object named after the prefix itself.
+        if obj.get("Key") and obj["Key"] != prefix
+    ]
+    files.sort(key=lambda f: str(f["last_modified"]), reverse=True)
+    return {
+        "bucket": bucket,
+        "prefix": prefix,
+        "buckets": [],
+        "folders": [
+            str(p["Prefix"]) for p in resp.get("CommonPrefixes", []) if p.get("Prefix")
+        ],
+        "files": files,
+        "truncated": bool(resp.get("IsTruncated")),
+        "next_token": str(resp.get("NextContinuationToken") or ""),
+    }
 
 
 def _list_s3_source(client: Any, bucket: str, prefix: str) -> _SourceListing:
@@ -431,9 +760,14 @@ def _load_carried_metadata(team: TeamSettings, template_name: str) -> dict[str, 
     try:
         with open(path) as f:
             loaded: dict[str, Any] = json.load(f)
-            return loaded
     except (OSError, ValueError):
         return {}
+    if not isinstance(loaded, dict):
+        return {}
+    # New data is no longer the scheduled-sync snapshot the template held; the
+    # sync worker records its snapshot again once its own import succeeds.
+    loaded.pop(TEMPLATE_SNAPSHOT_KEY, None)
+    return loaded
 
 
 def _check_fresh_conflicts(
@@ -523,7 +857,8 @@ def _promote_and_reload(
     """Swap the staged tree into the live template under the remount guard,
     reload the template DB when the dump changed, and finalize metadata.
 
-    Returns ``restore_seconds``, ``affected_envs``, ``remount_failures`` and
+    Returns ``restore_seconds``, ``affected_envs``, ``remount_failures``,
+    ``pinned_envs`` and
     the persisted metadata.
     """
     from oduflow.docker_ops import env_ops, system_ops
@@ -587,9 +922,7 @@ def _promote_and_reload(
         if metadata.get("odoo_image") and syncing_filestore:
             _chown_filestore(client, str(metadata["odoo_image"]), live_fs)
 
-    metadata["includes_filestore"] = os.path.isdir(live_fs) and bool(
-        os.listdir(live_fs)
-    )
+    metadata["includes_filestore"] = system_ops._filestore_present(live_fs)
     metadata = system_ops._update_template_sizes(
         team, settings, template_name, metadata
     )
@@ -601,6 +934,7 @@ def _promote_and_reload(
         "metadata": metadata,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
         "status": "synced" if overwrite else "imported",
     }
 
@@ -667,6 +1001,99 @@ def _check_free_disk(staging: str, needed_bytes: int) -> None:
         )
 
 
+# --- Odoo backup archives ----------------------------------------------------
+#
+# The raw layout above is the efficient way to move a large database, and
+# remains the recommended one. But an operator who already holds an Odoo
+# backup .zip — written by Odoo's own database manager, or pulled off Odoo.sh —
+# paid its packaging cost long before Oduflow was asked to read it, and asking
+# them to unpack and re-upload it as a raw layout buys nothing. So a single
+# .zip object is accepted as a source shape too, with its costs stated: the
+# whole archive is re-fetched whenever it changes, and its filestore replaces
+# the template's wholesale rather than syncing file by file.
+
+_ZIP_DUMP_NAME = "dump.sql"
+_ZIP_CHECKLIST_PREFIX = "checklist/"
+
+
+def is_archive_key(key: str) -> bool:
+    """Whether an S3 key names a backup archive rather than a source prefix."""
+    return key.lower().endswith(".zip")
+
+
+def zip_uncompressed_bytes(path: str) -> int:
+    import zipfile
+
+    with zipfile.ZipFile(path, "r") as zf:
+        return sum(info.file_size for info in zf.infolist())
+
+
+def extract_odoo_backup_zip(
+    zip_path: str, dump_dest: str, filestore_dest: str, *, with_filestore: bool = True
+) -> dict[str, Any]:
+    """Unpack an Odoo database-manager backup ``.zip``; return its manifest.
+
+    Writes ``dump.sql`` to ``dump_dest`` and replaces ``filestore_dest`` with
+    the archive's ``filestore/`` tree. Members that would escape that
+    directory (zip-slip) and the ``checklist/`` symlink-like entries are
+    skipped. Shared by the pull-from-Odoo and the S3 archive imports, so the
+    guard has one definition.
+
+    ``with_filestore=False`` reads only the dump: a database-only import
+    should not spend the disk and the minutes unpacking attachments it is
+    about to throw away.
+    """
+    import zipfile
+
+    manifest: dict[str, Any] = {}
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = zf.namelist()
+        if _ZIP_DUMP_NAME not in names:
+            raise PrerequisiteNotMetError(
+                "The archive is not an Odoo backup: no dump.sql at its top level."
+            )
+        if "manifest.json" in names:
+            with zf.open("manifest.json") as mf:
+                loaded = json.load(mf)
+            if isinstance(loaded, dict):
+                manifest = loaded
+
+        os.makedirs(os.path.dirname(dump_dest) or ".", exist_ok=True)
+        with zf.open(_ZIP_DUMP_NAME) as src, open(dump_dest, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        logger.info("Extracted dump.sql to %s", dump_dest)
+
+        if not with_filestore:
+            return manifest
+
+        if os.path.exists(filestore_dest):
+            shutil.rmtree(filestore_dest)
+        os.makedirs(filestore_dest, exist_ok=True)
+
+        files = 0
+        for member in names:
+            if not member.startswith(_FILESTORE_PREFIX):
+                continue
+            rel = member[len(_FILESTORE_PREFIX) :]
+            if not rel or rel.startswith(_ZIP_CHECKLIST_PREFIX):
+                continue
+            target = _safe_join(filestore_dest, rel.rstrip("/"))
+            if target is None:
+                logger.warning(
+                    "Skipping unsafe archive member outside filestore: %s", member
+                )
+                continue
+            if member.endswith("/"):
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            files += 1
+    logger.info("Extracted filestore to %s (%d files)", filestore_dest, files)
+    return manifest
+
+
 def _source_metadata(
     carried: dict[str, Any],
     *,
@@ -719,19 +1146,30 @@ def import_from_s3_prefix(
     else:
         _check_overwrite_quota(settings, team, template_name, client)
 
+    carried = _load_carried_metadata(team, template_name) if overwrite else {}
+    creds = resolve_source_credentials(
+        team,
+        template_name,
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        carried=carried,
+    )
+    # Remembered like the keys: a re-sync of a region-pinned bucket must not
+    # need the region typed again (a dashboard Sync has nowhere to ask).
+    region = region or str(carried.get("source_region") or "")
     s3 = _make_source_client(
         settings,
         bucket,
         endpoint=endpoint,
-        access_key=access_key,
-        secret_key=secret_key,
+        access_key=creds.access_key,
+        secret_key=creds.secret_key,
         region=region,
     )
     listing = _list_s3_source(s3, bucket, prefix)
     dump = listing.dump
     remote_fs = {} if without_filestore else listing.filestore
 
-    carried = _load_carried_metadata(team, template_name) if overwrite else {}
     staging = team.get_import_staging_dir(template_name)
     staging_fs = os.path.normpath(os.path.join(staging, "filestore"))
     os.makedirs(staging, exist_ok=True)
@@ -784,19 +1222,30 @@ def import_from_s3_prefix(
         _record_staged_dump(staging, dump, source_url + "|" + endpoint)
     metadata = _source_metadata(carried, source_url=source_url, dump=dump)
     metadata["source_endpoint"] = endpoint
-    final = _promote_and_reload(
-        settings,
-        team,
-        template_name,
-        client=client,
-        staging=staging,
-        staging_fs=staging_fs,
-        syncing_filestore=not without_filestore,
-        reload_db=reload_db,
-        dump_name=_canonical_dump_name(dump.name),
-        metadata=metadata,
-        overwrite=overwrite,
-    )
+    metadata["source_region"] = region
+    metadata.update(credential_metadata(creds))
+    store_source_secret(team, creds)
+    try:
+        final = _promote_and_reload(
+            settings,
+            team,
+            template_name,
+            client=client,
+            staging=staging,
+            staging_fs=staging_fs,
+            syncing_filestore=not without_filestore,
+            reload_db=reload_db,
+            dump_name=_canonical_dump_name(dump.name),
+            metadata=metadata,
+            overwrite=overwrite,
+        )
+    except BaseException:
+        # A failed fresh import leaves no template behind to own the secret it
+        # just stored. A re-sync keeps its own: the template still needs it.
+        if creds.store_value and not overwrite:
+            delete_managed_secret(team, credential_metadata(creds))
+        raise
+    release_replaced_secret(team, creds, carried)
     return _import_result(
         final,
         template_name=template_name,
@@ -807,6 +1256,158 @@ def import_from_s3_prefix(
         fetch_bytes=fetch_bytes,
         reload_db=reload_db,
     )
+
+
+def import_from_s3_archive(
+    settings: Settings,
+    team: TeamSettings,
+    *,
+    url: str,
+    template_name: str,
+    overwrite: bool = False,
+    without_filestore: bool = False,
+    endpoint: str = "",
+    access_key: str = "",
+    secret_key: str = "",
+    region: str = "",
+) -> dict[str, object]:
+    """Import (or re-sync) a template from a single Odoo backup ``.zip``.
+
+    A zip is opaque until it is on disk, so none of the prefix layout's
+    incremental machinery applies: the object is fetched whole, unpacked into
+    staging and promoted by the same swap. What does carry over is the ETag
+    skip — an archive unchanged since the last sync costs one HEAD.
+    """
+    from oduflow.docker_ops.client import get_client
+
+    validate_template_name(template_name)
+    bucket, key = parse_s3_url(url)
+    source_url = f"s3://{bucket}/{key}"
+
+    client = get_client()
+    if not overwrite:
+        _check_fresh_conflicts(settings, team, template_name, client)
+    else:
+        _check_overwrite_quota(settings, team, template_name, client)
+
+    carried = _load_carried_metadata(team, template_name) if overwrite else {}
+    creds = resolve_source_credentials(
+        team,
+        template_name,
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        carried=carried,
+    )
+    region = region or str(carried.get("source_region") or "")
+    s3 = _make_source_client(
+        settings,
+        bucket,
+        endpoint=endpoint,
+        access_key=creds.access_key,
+        secret_key=creds.secret_key,
+        region=region,
+    )
+    with _s3_errors(f"Reading {source_url}"):
+        head = s3.head_object(Bucket=bucket, Key=key)
+    dump = _SourceDump(
+        name=_ZIP_DUMP_NAME,
+        key=key,
+        size=int(head.get("ContentLength") or 0),
+        token=str(head.get("ETag") or "").strip('"'),
+        last_modified=_iso(head.get("LastModified")),
+    )
+
+    if overwrite and _dump_unchanged(
+        settings, team, template_name, dump, carried, client, source_url, endpoint
+    ):
+        logger.info("%s unchanged since the last sync; nothing to do", source_url)
+        return {
+            "status": "unchanged",
+            "template_name": template_name,
+            "source_url": source_url,
+            "source_db": dump.name,
+            "odoo_image": carried.get("odoo_image", ""),
+            "odoo_version": carried.get("odoo_version", ""),
+            "template_db": get_template_db_name(template_name, team.team_id),
+            "restore_seconds": 0,
+            "dump_reloaded": False,
+            "includes_filestore": carried.get("includes_filestore", False),
+            "downloaded_files": 0,
+            "downloaded_mb": 0.0,
+            "reused_files": 0,
+            "removed_files": 0,
+            "affected_envs": [],
+            "remount_failures": [],
+            "pinned_envs": [],
+        }
+
+    staging = team.get_import_staging_dir(template_name)
+    staging_fs = os.path.normpath(os.path.join(staging, "filestore"))
+    os.makedirs(staging, exist_ok=True)
+    # The archive and everything it unpacks to live side by side until the
+    # promote, so both have to fit.
+    _check_free_disk(staging, dump.size * 2)
+
+    archive = os.path.join(staging, "archive.zip")
+    logger.info("Downloading %s (%d bytes)...", source_url, dump.size)
+    try:
+        _download_one(s3, bucket, key, archive)
+        unpacked = zip_uncompressed_bytes(archive)
+        _check_free_disk(staging, unpacked)
+        staged_dump = os.path.join(staging, _ZIP_DUMP_NAME)
+        extract_odoo_backup_zip(
+            archive, staged_dump, staging_fs, with_filestore=not without_filestore
+        )
+        os.remove(archive)
+
+        metadata = _source_metadata(carried, source_url=source_url, dump=dump)
+        metadata["source_endpoint"] = endpoint
+        metadata["source_region"] = region
+        metadata.update(credential_metadata(creds))
+        store_source_secret(team, creds)
+        final = _promote_and_reload(
+            settings,
+            team,
+            template_name,
+            client=client,
+            staging=staging,
+            staging_fs=staging_fs,
+            syncing_filestore=not without_filestore,
+            reload_db=True,
+            dump_name=_ZIP_DUMP_NAME,
+            metadata=metadata,
+            overwrite=overwrite,
+        )
+    except BaseException:
+        if creds.store_value and not overwrite:
+            delete_managed_secret(team, credential_metadata(creds))
+        # Nothing here is resumable, so a failed attempt leaves no staging
+        # behind to be mistaken for progress on the next run.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    release_replaced_secret(team, creds, carried)
+
+    result_metadata = final["metadata"]
+    return {
+        "status": final["status"],
+        "template_name": template_name,
+        "source_url": source_url,
+        "source_db": dump.name,
+        "odoo_image": result_metadata.get("odoo_image", ""),
+        "odoo_version": result_metadata.get("odoo_version", ""),
+        "template_db": final["template_db"],
+        "restore_seconds": final["restore_seconds"],
+        "dump_reloaded": True,
+        "includes_filestore": result_metadata["includes_filestore"],
+        "downloaded_files": 1,
+        "downloaded_mb": round(dump.size / 1024**2, 1),
+        "reused_files": 0,
+        "removed_files": 0,
+        "affected_envs": final["affected_envs"],
+        "remount_failures": final["remount_failures"],
+        "pinned_envs": final["pinned_envs"],
+    }
 
 
 def import_from_local_path(
@@ -974,9 +1575,7 @@ def refresh_from_own_files(
         metadata["odoo_image"] = f"odoo:{major}"
         if os.path.isdir(live_fs):
             _chown_filestore(client, str(metadata["odoo_image"]), live_fs)
-    metadata["includes_filestore"] = os.path.isdir(live_fs) and bool(
-        os.listdir(live_fs)
-    )
+    metadata["includes_filestore"] = system_ops._filestore_present(live_fs)
     metadata = system_ops._update_template_sizes(
         team, settings, template_name, metadata
     )
@@ -998,6 +1597,7 @@ def refresh_from_own_files(
         "removed_files": 0,
         "affected_envs": remount.affected,
         "remount_failures": remount.failures,
+        "pinned_envs": remount.pinned,
     }
 
 
@@ -1030,4 +1630,5 @@ def _import_result(
         "removed_files": plan.removed,
         "affected_envs": final["affected_envs"],
         "remount_failures": final["remount_failures"],
+        "pinned_envs": final["pinned_envs"],
     }

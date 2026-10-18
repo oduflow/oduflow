@@ -347,6 +347,81 @@ def test_unrecognized_auth_failures_are_unchanged(frame, agent_type):
     assert _annotate_acp_auth_error(frame, agent_type, "setup_token", "1") == frame
 
 
+# The exact frame codex-acp 2.2.2 sends for session/new without a Codex
+# sign-in, and for session/prompt when OpenAI rejects the credential.
+_CODEX_AUTH_REQUIRED = {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "error": {"code": -32000, "message": "Authentication required"},
+}
+
+
+def test_codex_auth_error_without_a_key_points_to_device_code_sign_in():
+    annotated = json.loads(
+        _annotate_acp_auth_error(
+            json.dumps(_CODEX_AUTH_REQUIRED), "codex", "interactive", "9"
+        )
+    )
+
+    assert annotated["id"] == 2
+    assert annotated["error"]["code"] == -32000
+    message = annotated["error"]["message"]
+    assert message.startswith("Authentication required\n\n")
+    assert "Oduflow Codex authentication guidance:" in message
+    assert '"Sign in with Device Code"' in message
+    assert "/logout" in message
+    assert "OPENAI_API_KEY in [team.9.agent_env]" in message
+
+
+def test_codex_auth_error_with_a_key_says_the_key_is_in_use():
+    message = json.loads(
+        _annotate_acp_auth_error(
+            json.dumps(_CODEX_AUTH_REQUIRED), "codex", "api_key", "9"
+        )
+    )["error"]["message"]
+
+    assert "Codex is using OPENAI_API_KEY" in message
+    assert "[team.9.agent_env]" in message
+    # A valid key whose start-up `codex login` failed is not the key's fault.
+    assert "agent container's log" in message
+    assert "Device Code" not in message
+
+
+def test_codex_sign_in_failure_variant_is_recognized():
+    frame = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "error": {
+                "code": -32000,
+                "message": "Authentication required: Sign-in did not complete",
+                "data": {"methodId": "chat-gpt"},
+            },
+        }
+    )
+
+    annotated = json.loads(_annotate_acp_auth_error(frame, "codex", "interactive", "1"))
+
+    assert annotated["error"]["data"] == {"methodId": "chat-gpt"}
+    assert "Oduflow Codex authentication guidance:" in annotated["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Usage and rate limits are not credential problems.
+        {"code": -32603, "message": "You've hit your usage limit. Try again later."},
+        {"code": -32000, "message": "Rate limit reached"},
+        # The right message under another code is not ACP's auth_required.
+        {"code": -32603, "message": "Authentication required"},
+    ],
+)
+def test_codex_non_auth_errors_are_unchanged(error):
+    frame = json.dumps({"jsonrpc": "2.0", "id": 1, "error": error})
+
+    assert _annotate_acp_auth_error(frame, "codex", "interactive", "1") == frame
+
+
 def test_auth_guidance_is_not_appended_twice():
     frame = json.dumps(
         {
@@ -368,3 +443,8 @@ def test_auth_guidance_is_not_appended_twice():
     )
     once = _annotate_acp_auth_error(opencode, "opencode", "interactive", "1")
     assert _annotate_acp_auth_error(once, "opencode", "interactive", "1") == once
+
+    codex = json.dumps(_CODEX_AUTH_REQUIRED)
+    once = _annotate_acp_auth_error(codex, "codex", "interactive", "1")
+    assert once != codex
+    assert _annotate_acp_auth_error(once, "codex", "interactive", "1") == once

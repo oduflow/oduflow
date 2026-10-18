@@ -73,6 +73,12 @@ overlay_threshold_mb = 50         # filestore size limit for overlay vs copy
 # ── Lifecycle ─────────────────────────────────────────
 # Automatic management of idle/stopped environments (0 disables either behavior).
 # Protected environments are always exempt.
+# Optional SSH template schedules are executed by host cron (not the server).
+# [template_sync]
+# cron_dir = "/etc/cron.d"     # root-owned managed files; host cron must be running
+# cron_user = ""             # empty: the Oduflow user natively; root for `docker exec`
+# cron_container = ""         # Docker: actual Oduflow container name; mount host cron_dir
+
 [lifecycle]
 auto_stop_hours = 48              # stop idle environments after N hours (non-destructive)
 auto_delete_hours = 0             # delete stopped environments after N hours (DESTRUCTIVE; opt-in)
@@ -88,7 +94,7 @@ prod_purge_hours = 0              # purge DB/files kept by a production deletion
 # deployment-wide bits; changes apply on server restart (the agent container
 # is recreated automatically when its config changed).
 # [agent]
-# image = "oduist/oduflow-coder:0.3.3"
+# image = "oduist/oduflow-coder:0.4.0"
 # claude_model = ""                # optional model override; empty = CLI default
 # codex_model = ""                 # optional model override; empty = CLI default
 # opencode_model = ""              # optional provider/model; empty = OpenCode default

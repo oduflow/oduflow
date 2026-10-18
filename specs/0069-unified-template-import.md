@@ -1,9 +1,9 @@
 # 0069 — Unified template import (S3 prefix, local path, in-place refresh)
 
-**Status:** Adopted (v2 — unified)
+**Status:** Adopted (v3 — remembered credentials, bucket browser, archive source)
 **Type:** Architecture — new capability + consolidation
 **First introduced:** branch `slim-stingray` (2026-09-19)
-**Key code today:** `template_import.py` (source clients, listing, diff/plan, parallel fetch, staged promote, refresh); `docker_ops/system_ops.py` (`import_template` dispatcher, HTTP db-manager path); `server.py` (`import_template` tool + `import-template` CLI); `web_ui.py` (`/api/templates/import-from-odoo` passthrough)
+**Key code today:** `template_import.py` (source clients, credential resolution, bucket browser, listing, diff/plan, parallel fetch, archive unpacking, staged promote, refresh); `docker_ops/system_ops.py` (`import_template` dispatcher, HTTP db-manager path); `server.py` (`import_template` tool + `import-template` CLI); `web_ui.py` (`/api/templates/import-from-odoo`, `/api/s3/browse`); `templates/dashboard.html` (Import from S3 dialog, Sync action)
 
 ## Context
 
@@ -89,9 +89,59 @@ exists to remove); a separate tool per source (two doors for one act); keeping
   quota gate for an existing database; creating a missing database still checks quota; the tool
   docstring demands explicit user permission before using either.
 
+## Evolution
+
+### v3 — the source is remembered, and browsable (2026-10-15)
+
+v2 made the import cheap to repeat but left three things to the operator every
+time. Each is a different kind of friction, and only the third touches the
+decision above.
+
+**The secret key had to be re-supplied on every re-sync.** Credentials were
+resolved per call and never kept, so the one workflow the incremental re-sync
+exists for — a nightly "pull last night's backup into dev" — could only be
+automated by putting an S3 secret in a crontab. The key now lives in the team
+secret store ([[0058-team-secrets]]) and the template records only a
+`secret:<name>` reference; resolution gains one step between the explicit
+parameters and the `[backup]` fallback. A remembered secret is reused *only*
+while the endpoint and access key are unchanged, so it can never be sent to
+sign a different target; a secret Oduflow created is marked managed and dies
+with the template. The region joined it for the same reason.
+
+**The prefix had to be typed from memory.** It is the one import step that
+nothing verifies before the run — a mistyped prefix fails only once the
+listing comes back empty — and the dashboard could not reach S3 at all: the
+import dialog offered only the HTTP database-manager path. A read-only
+`/api/s3/browse` now lists one level of a bucket and the dialog walks it,
+marking the level that holds a dump the engine would actually pick up. It
+takes no team lock (it creates nothing), passes the same SSRF gate as an
+import, and signs with a template's stored secret rather than handing it back
+to the browser.
+
+**A `.zip` in a bucket was unusable.** v2 rejected ZIP archives, and that
+reasoning stands *for producing one*: packing a multi-hundred-GB filestore
+costs hours and double disk on the source, which is exactly what the raw
+layout exists to avoid. But it does not apply to an archive that **already
+exists** — written by Odoo's own database manager, or downloaded from Odoo.sh.
+There the packaging cost was paid long before Oduflow was asked to read it,
+and refusing the file only forces the operator to unpack and re-upload it to
+satisfy a rule meant to protect them. A single `.zip` object is therefore
+accepted as a fourth source shape, dispatched on the key, with its costs
+stated rather than hidden: it is fetched whole on every change, its filestore
+replaces the template's wholesale, and nothing about it resumes. The raw
+layout remains what the docs recommend for a large source. The unpacking (and
+its zip-slip guard) is now shared with the pull-from-Odoo import, which had
+carried its own copy.
+
+What did **not** change is the door itself: no new tool, no new CLI command,
+no second import endpoint. All of this is reached through `import_template`
+and the shape of `source`, which is the invariant v2 was really defending.
+
 ## History
 
 - 2026-09-19 — v1: S3-prefix source added to `import_template_from_odoo`
   (branch `slim-stingray`).
 - 2026-09-19 — v2: unified into `import_template` (local path + refresh
   sources); `reload-template` and `sync.py` removed (same branch).
+- 2026-10-15 — v3: S3 secret remembered as a managed team secret, `/api/s3/browse` bucket browser with the dashboard Import from S3 / Sync
+  dialog, and a single `.zip` object accepted as a source shape.

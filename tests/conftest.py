@@ -19,6 +19,10 @@ _TEST_PREFIX = "oduflowtest-"
 _TEST_NETWORK = "oduflowtest-net"
 _TEST_DB_CONTAINER = "oduflowtest-db"
 _TEST_DB_VOLUME = "oduflowtest-db-data"
+_TEST_TRAEFIK_CONTAINER = "oduflowtest-traefik"
+_TEST_TRAEFIK_ACME_VOLUME = "oduflowtest-traefik-acme"
+_TEST_PROD_DB_CONTAINER = "oduflowtest-prod-db"
+_TEST_PROD_DB_VOLUME = "oduflowtest-prod-db-data"
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +36,26 @@ def _server_lock_per_test(monkeypatch):
         os.close(instance_lock._fd)
 
 
+@pytest.fixture(autouse=True)
+def _no_label_scan(monkeypatch):
+    """resolve_token's legacy-label fallback scans Docker on a registry miss;
+    unit tests must stay Docker-free (and deterministic on a machine running a
+    live server). Tests of the fallback itself re-patch _scan_labels."""
+    from oduflow import env_tokens
+
+    monkeypatch.setattr(env_tokens, "_scan_labels", lambda settings: {})
+
+
 def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
+    """Settings whose Docker resources cannot reach a developer's own server.
+
+    init_system/destroy_system act on every name below and sweep containers
+    and networks by ``managed_label`` (destroy removes the Traefik and
+    production PostgreSQL containers and volumes; init stops every running
+    production container while production hosting is disabled). Each one
+    carries the per-run suffix; test_conftest_isolation.py fails when a new
+    resource-name setting is added without one.
+    """
     suffix = hashlib.sha1(tmp_dir.encode("utf-8")).hexdigest()[:10]
     team = TeamSettings(
         team_id="1",
@@ -49,6 +72,14 @@ def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
         shared_network=f"{_TEST_NETWORK}-{suffix}",
         shared_db_container=f"{_TEST_DB_CONTAINER}-{suffix}",
         shared_db_volume=f"{_TEST_DB_VOLUME}-{suffix}",
+        traefik_container=f"{_TEST_TRAEFIK_CONTAINER}-{suffix}",
+        traefik_acme_volume=f"{_TEST_TRAEFIK_ACME_VOLUME}-{suffix}",
+        prod_db_container=f"{_TEST_PROD_DB_CONTAINER}-{suffix}",
+        prod_db_volume=f"{_TEST_PROD_DB_VOLUME}-{suffix}",
+        managed_label=f"{_TEST_PREFIX}{suffix}.managed",
+        # Generated sync cron jobs `docker exec` into this container: never the
+        # developer's own Oduflow.
+        template_cron_container=f"{_TEST_PREFIX}{suffix}-cron",
         base_data_dir=tmp_dir,
         teams={"1": team},
     )

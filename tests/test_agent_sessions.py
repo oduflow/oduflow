@@ -185,6 +185,9 @@ def test_codex_cli_cmd_uses_docker_as_the_sandbox():
     assert _codex_cli_cmd("http://scoped/mcp/env", "gpt-test") == [
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
+        # An in-container self-update would not survive recreation.
+        "-c",
+        "check_for_update_on_startup=false",
         "-c",
         'mcp_servers.development.url="http://scoped/mcp/env"',
         "-c",
@@ -435,6 +438,57 @@ def test_wire_client_acp_mcp_handles_load_but_not_other_frames():
     assert (
         _wire_client_acp_mcp("not-json", "http://scoped", "token", "env") == "not-json"
     )
+
+
+def test_wire_client_acp_mcp_without_browser_for_codex():
+    """Codex declares agent_browser in its own config.toml.
+
+    codex-acp skips a client server with the same name and reports it as a
+    failed startup in every new chat, so Codex must not receive one. A
+    client-supplied copy is still dropped; the scoped Oduflow server is not.
+    """
+    frame = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/new",
+            "params": {
+                "cwd": "/workspace/x",
+                "mcpServers": [
+                    {"name": "custom", "command": "custom-mcp", "args": [], "env": []},
+                    {"name": "agent_browser", "command": "agent-browser"},
+                ],
+            },
+        }
+    )
+    wired = json.loads(
+        _wire_client_acp_mcp(
+            frame,
+            "http://scoped/mcp/env",
+            "scoped-token",
+            None,
+        )
+    )
+    assert wired["params"]["mcpServers"] == [
+        {"name": "custom", "command": "custom-mcp", "args": [], "env": []},
+        {
+            "type": "http",
+            "name": "development",
+            "url": "http://scoped/mcp/env",
+            "headers": [{"name": "Authorization", "value": "Bearer scoped-token"}],
+        },
+    ]
+
+    load = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "session/load",
+            "params": {"sessionId": "sid", "cwd": "/workspace", "mcpServers": []},
+        }
+    )
+    no_token = json.loads(_wire_client_acp_mcp(load, "http://scoped", "", None))
+    assert no_token["params"]["mcpServers"] == []
 
 
 def test_delete_environment_clears_chat_sessions(tmp_path, monkeypatch):

@@ -23,6 +23,11 @@ and last successful apply record. `plan`, `apply`, and `status` also accept
 `--env-file` to supply `fromEnv` values from a dotenv file; see
 [Secrets from a `.env` file](#secrets-from-a-env-file).
 
+`apply` logs its progress at the `info` level. For output that shows only the
+resulting plan plus any warnings, pass the global
+`oduflow --log-level warning stack apply oduflow.yaml`
+(see [CLI Reference](cli.md#global-options)).
+
 To reconcile before the MCP server accepts clients:
 
 ```bash

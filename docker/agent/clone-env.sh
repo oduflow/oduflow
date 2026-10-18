@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Create/refresh one environment's working checkout inside the team's agent
-# container. Invoked from the env_ops create hook via `docker exec`. Idempotent.
+# container. Invoked from the env_ops create hook via `docker exec` AS THE
+# ENVIRONMENT'S OWN UID, with HOME set to that environment's HOME (git
+# credentials are wired there by seed-home.sh). /workspace/<SLUG> already
+# exists, empty and owned by that uid (env-user.sh). Idempotent.
 #
 # Usage: clone-env.sh REPO_URL BRANCH SLUG [MCP_URL] [GIT_USER]
 #   REPO_URL    origin repo URL (no embedded creds; git creds are wired globally)
@@ -16,8 +19,11 @@
 # scoped token (see web_ui.ws_agent_console / ws_agent_acp).
 #
 # Full clone (not --depth 1): the agent commits and pushes. The checkout lives on
-# the persistent workspace volume, so it survives container recreation and every
-# other environment's checkout is visible under /workspace for cross-branch reads.
+# the persistent workspace volume, so it survives container recreation. Other
+# environments' checkouts are deliberately NOT reachable (each is private to
+# its own uid); other branches are read through git (`git fetch`,
+# `git show origin/<branch>:<path>`). See
+# specs/0079-per-environment-agent-identities.md.
 
 set -euo pipefail
 
@@ -60,8 +66,7 @@ else
     fi
 fi
 
-# Per-checkout commit author (the container's global identity is a shared default;
-# a single container serves many environments/users).
+# Per-checkout commit author (the HOME's global identity is the team default).
 if [ -n "$GIT_USER" ]; then
     git -C "$DEST" config user.name "$GIT_USER"
     git -C "$DEST" config user.email "${GIT_USER}@${ODUFLOW_BRAND_SLUG:-oduflow}.local"

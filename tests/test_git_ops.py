@@ -503,3 +503,55 @@ class TestParseManifest:
 
         with pytest.raises(ValueError):
             git_ops.parse_manifest(str(path))
+
+
+class TestCurrentBranch:
+    def _init_repo(self, path, branch="production"):
+        path.mkdir(parents=True, exist_ok=True)
+        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+        subprocess.run(
+            ["git", "init", "-q", "-b", branch, str(path)], check=True, env=env
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(path),
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            check=True,
+            env=env,
+        )
+        return path
+
+    def test_reports_the_checked_out_branch(self, tmp_path):
+        repo = self._init_repo(tmp_path / "repo", branch="hotfix")
+        assert git_ops.current_branch(str(repo)) == "hotfix"
+
+    def test_a_detached_head_reports_the_literal_head(self, tmp_path):
+        repo = self._init_repo(tmp_path / "repo")
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True
+        )
+        assert git_ops.current_branch(str(repo)) == "HEAD"
+
+    def test_a_plain_directory_is_unknown(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert git_ops.current_branch(str(plain)) == ""
+
+    def test_a_directory_nested_inside_a_repo_is_unknown(self, tmp_path):
+        # Git discovers repositories upward; a plain subdirectory must not
+        # report the enclosing repository's branch as its own.
+        repo = self._init_repo(tmp_path / "repo", branch="main-line")
+        nested = repo / "workspaces" / "checkout"
+        nested.mkdir(parents=True)
+        assert git_ops.current_branch(str(nested)) == ""

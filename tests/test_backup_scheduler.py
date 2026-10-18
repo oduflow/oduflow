@@ -205,6 +205,46 @@ class TestSlotAttemptsReset:
         assert backup["slot_attempts"] == 2  # kept and incremented
 
 
+class TestBusyLockKeepsSlotDue:
+    """P-M6: lock contention is not a failed try. Recording the attempt before
+    acquiring the lock let three contended ticks burn the whole retry budget
+    and silently skip the day's base backup / the week's prune."""
+
+    def test_basebackup_busy_lock_does_not_spend_attempts(self, settings):
+        locks = LockManager()
+        locks.acquire_env("prod:__cluster__", operation="restore_cluster_pitr")
+        with patch("oduflow.walg.backup_push") as push:
+            sched._run_basebackup_job(settings, locks, _dt(10, 8), _dt(10, 3, 30))
+        push.assert_not_called()
+        # No attempt recorded: the slot is still due on the next tick.
+        assert sched._load_cluster_state(settings).get("basebackup", {}) == {}
+
+    def test_prune_busy_locks_do_not_spend_attempts(self, settings, team):
+        from oduflow.locking import prod_backups_lock_key
+
+        locks = LockManager()
+        locks.acquire_env(
+            prod_backups_lock_key(team.team_id), operation="snapshot_production"
+        )
+        with patch("oduflow.backup_ops.prune_backups") as prune:
+            sched._run_prune_job(settings, locks, _dt(10, 8), _dt(10, 4, 30))
+        prune.assert_not_called()
+        assert sched._load_cluster_state(settings).get("prune", {}) == {}
+
+    def test_basebackup_attempt_recorded_once_lock_acquired(self, settings):
+        # Real work that fails still consumes an attempt (unchanged behaviour).
+        with (
+            patch("oduflow.docker_ops.client.get_client"),
+            patch("oduflow.walg.backup_push", side_effect=Exception("boom")),
+        ):
+            sched._run_basebackup_job(
+                settings, LockManager(), _dt(10, 8), _dt(10, 3, 30)
+            )
+        base = sched._load_cluster_state(settings)["basebackup"]
+        assert base["slot_attempts"] == 1
+        assert "boom" in base["last_error"]
+
+
 class TestRequestBaseBackup:
     def test_next_tick_takes_a_base_backup(self, settings):
         # A recreated production cluster: the last success predates its archive.

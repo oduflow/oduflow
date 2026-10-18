@@ -59,9 +59,15 @@ than branch-derived routes: configure individual `dev1`…`dev20` records or a
 wildcard record for `*.example.com`. A `*.dev.example.com` record or certificate
 does not cover `dev1.example.com`.
 
-`create_environment(hostname="qa")` requests `qa.example.com` in either mode.
-The configured team hostname must include a distinct prefix
-(`dev.example.com`, not bare `example.com`) for pooled or explicit short names.
+`create_environment(hostname="qa")` requests `qa.example.com` in either mode:
+the short name replaces the team hostname's prefix. A bare team domain such as
+`example.com` has no prefix to replace, so `qa` goes under it —
+`qa.example.com`, the same layer as the branch-derived names. "Bare" is decided
+with the Public Suffix List, not by counting labels: a registrable domain under
+a multi-label suffix (`example.co.uk`) is also kept whole, so `qa` gives
+`qa.example.co.uk` — never `qa.co.uk`. The pooled
+`slots` mode still needs a distinct prefix (`dev.example.com`, not bare
+`example.com`) to number.
 
 ## Team base domain
 

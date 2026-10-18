@@ -198,6 +198,19 @@ resource an operation actually touches:
 
 Every template operation also takes that template's own key, so a publish and an import can never interleave on the same template name; only the ones listed above add the team lock on top. `attach_filestore` stages its source (an rsync or an archive unpack) before taking the team lock, so a large transfer does not hold the team; it is also the one operation whose team acquire *waits* (up to five minutes) instead of failing immediately, because by then the transfer is already done and discarding it would be far more expensive than queueing.
 
+Thread-level locks also acquire advisory file locks under `{data_dir}/.locks`
+when running the server or direct template CLI. Shared/exclusive team gates
+exclude cron workers from UI/MCP mutations while allowing independent
+environments to progress. Kernel locks release on process exit; lock files
+are never unlinked, and a root process gives the ones it creates to the data
+directory's owner. Scheduled template sync holds its template key throughout
+transfer, then waits up to five minutes for the team gate during import and
+environment refresh. Direct template CLI commands take the same locks as their
+MCP tools: the template key, plus the team gate (waited for up to five
+minutes) only when they remount other environments. Startup overlay
+reconciliation respects the same gate; a team that is busy at startup is
+repaired in the background as soon as it is free.
+
 Operations on **different resources** run in parallel. If a lock cannot be acquired, the tool immediately returns `BusyError` (no queuing). Some tools take no `LockManager` lock at all: pure reads, the `odoo_*` tools (PostgreSQL arbitrates concurrent ORM calls), and the extra-repo tools (`extra_addons.py` serialises per repo itself).
 
 ## Error Handling

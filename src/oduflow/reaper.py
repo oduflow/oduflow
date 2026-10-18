@@ -217,8 +217,7 @@ def start_reaper(
         logger.warning(
             "prod_purge_hours=%d is ENABLED: the database and workspace kept "
             "by a production deletion will be PERMANENTLY PURGED %dh after "
-            "the deletion unless the production is re-created. Set "
-            "[lifecycle] prod_purge_hours = 0 to disable.",
+            "the deletion. Set [lifecycle] prod_purge_hours = 0 to disable.",
             settings.prod_purge_hours,
             settings.prod_purge_hours,
         )

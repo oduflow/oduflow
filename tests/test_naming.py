@@ -58,6 +58,33 @@ class TestEnvironmentHostname:
             == "dev3.demo.example.com"
         )
 
+    @pytest.mark.parametrize("team_hostname", ["example.com", "Example.COM."])
+    def test_explicit_hostname_nests_under_bare_team_domain(self, team_hostname):
+        # No prefix to replace: "qa" must not become qa.com.
+        assert get_env_hostname("feature-a", team_hostname, "qa") == "qa.example.com"
+
+    @pytest.mark.parametrize(
+        ("team_hostname", "expected"),
+        [
+            # A bare registrable domain under a multi-label public suffix:
+            # stripping the first label would leave co.uk, a domain the team
+            # cannot own (and ACME must never request certificates under).
+            ("example.co.uk", "qa.example.co.uk"),
+            ("dev.example.co.uk", "qa.example.co.uk"),
+            # blogspot.com is a PSL private-section suffix: the team owns only
+            # its subdomain, so the hostname is kept whole.
+            ("team.blogspot.com", "qa.team.blogspot.com"),
+        ],
+    )
+    def test_explicit_hostname_respects_public_suffixes(self, team_hostname, expected):
+        assert get_env_hostname("feature-a", team_hostname, "qa") == expected
+
+    def test_explicit_hostname_rejects_malformed_team_hostname(self):
+        # A malformed team hostname must fail fast, not become part of a
+        # Traefik Host() rule as an invalid FQDN.
+        with pytest.raises(ValueError, match="Invalid domain"):
+            get_env_hostname("feature-a", "dev..example.com", "qa")
+
     def test_team_hostname_splits_first_label(self):
         assert split_team_hostname("odoo.dev.example.com") == (
             "odoo",

@@ -88,7 +88,7 @@ precursors).
 | [0067](0067-dashboard-totp.md) | 2026-09-19 | Local dashboard TOTP, session-only UI authentication, CLI enrollment and recovery |
 | [0068](0068-production-mcp-credentials.md) | 2026-09-19 | Separate production MCP credentials, direct OduMCP access and automatic addon provisioning |
 
-| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite |
+| [0069](0069-unified-template-import.md) | 2026-09-19 | Unified template import: Odoo, S3, local path and refresh with incremental overwrite; remembered S3 credentials, bucket browser and `.zip` source (v3) |
 
 | [0070](0070-annual-commercial-licenses.md) | 2026-09-23 | Annual commercial license terms, informational expiry, and manual Paddle renewal |
 | [0071](0071-manual-license-periods.md) | 2026-09-23 | Agreed legacy migration, manual periods and optional Paddle subscriptions |
@@ -99,6 +99,9 @@ precursors).
 | [0076](0076-postgresql-upgrade-on-demand.md) | 2026-10-09 | PostgreSQL major upgrade on operator request, carrying service and production databases |
 | [0077](0077-server-settings-console.md) | 2026-10-08 | Server settings console: oduflow.toml edited, validated and applied from the browser at /admin |
 | [0078](0078-custom-white-label-license.md) | 2026-10-07 | Custom license: operator brand instead of Oduflow in the dashboard and MCP, domain-bound key, 30-day grace |
+| [0079](0079-per-environment-agent-identities.md) | 2026-10-17 | Per-environment uids inside the team agent container: private sessions, checkouts, attachments and HOMEs |
+| [0080](0080-stable-environment-identity-across-recreate.md) | 2026-10-18 | Stable environment identity across recreate: MCP token registry + `recreate_environment` tool |
+| [0081](0081-cron-owned-template-sync.md) | 2026-10-07 | Host-cron SSH template sync, retained filestores and opt-in environment data refresh |
 
 ## Design docs
 

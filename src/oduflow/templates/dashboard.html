@@ -350,6 +350,17 @@
     margin-bottom: 12px;
     font-size: var(--text-sm);
   }
+  /* A setup prerequisite that blocks production creation: the amber attention
+     channel of a set note, so it reads before the form is filled. */
+  .prod-notice {
+    font-size: var(--text-sm);
+    color: var(--text);
+    background: color-mix(in oklab, var(--yellow) 8%, transparent);
+    border: 1px solid color-mix(in oklab, var(--yellow) 25%, transparent);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    margin-bottom: 12px;
+  }
   .prod-mono { font-family: var(--font-mono); color: var(--text-dim); }
   .prod-domain { font-size: var(--text-sm); text-decoration: none; }
   .prod-domain:hover { text-decoration: underline; color: var(--accent); }
@@ -637,8 +648,57 @@
   }
   .modal-sm { max-width: 460px; }
   .modal-md { max-width: 520px; }
+  #oca-import-modal .modal { max-height: 92vh; }
+  .oca-toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+  .oca-toolbar .form-group { flex: 1 1 180px; margin-bottom: 8px; }
+  #oca-repos { overflow-y: auto; max-height: 45vh; border-block: 1px solid var(--border); margin-top: 12px; }
+  .oca-row { padding: 12px 4px; border-bottom: 1px solid var(--border); }
+  .oca-heading { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .oca-heading .check-item { flex: 1; font-family: var(--font-mono); }
+  .oca-description { color: var(--text-dim); font-size: var(--text-xs); margin: 4px 0; overflow-wrap: anywhere; }
+  .oca-status { font-size: var(--text-xs); overflow-wrap: anywhere; }
+  .oca-status.error { color: var(--red); }
+  .oca-branches { display: flex; gap: 4px 16px; flex-wrap: wrap; max-height: 130px; overflow-y: auto; margin-top: 8px; }
+  .oca-branches .check-item { font-family: var(--font-mono); }
+  .oca-footer { padding: 12px 20px 16px; border-top: 1px solid var(--border); }
+  .oca-footer .form-actions { margin-top: 10px; flex-wrap: wrap; }
   .modal-routes { max-width: 680px; max-height: 90vh; }
   #template-settings-modal .modal { width: min(760px, calc(100vw - 32px)); max-height: 90vh; }
+  /* Import / sync a template from S3: connection fold-out + object browser. */
+  #s3-template-modal .modal { width: min(760px, calc(100vw - 32px)); max-height: 90vh; }
+  .s3-conn { margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
+  .s3-conn summary { cursor: pointer; font-size: var(--text-xs); font-weight: 600; color: var(--text-dim); border-radius: var(--radius-sm); }
+  .s3-conn summary:hover { color: var(--text); }
+  .s3-conn summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+  .s3-conn[open] summary { margin-bottom: 10px; }
+  .s3-conn-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; }
+  .s3-inline { display: flex; gap: 8px; align-items: center; }
+  .s3-inline input { flex: 1; min-width: 0; }
+  .s3-browser { margin: -4px 0 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+  .s3-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-dim); }
+  .s3-crumbs button { background: none; border: none; padding: 2px 4px; border-radius: var(--radius-sm); font: inherit; color: var(--accent); cursor: pointer; }
+  .s3-crumbs button:hover { text-decoration: underline; }
+  .s3-crumbs button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+  .s3-crumbs [aria-current] { color: var(--text); padding: 2px 4px; }
+  .s3-list { max-height: 280px; overflow-y: auto; }
+  .s3-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 14px; align-items: center; width: 100%; padding: 5px 10px; background: none; border: none; border-bottom: 1px solid var(--border); text-align: left; color: var(--text); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .s3-row:last-child { border-bottom: none; }
+  .s3-row-nav { cursor: pointer; }
+  .s3-row-nav:hover { background: var(--subtle); }
+  .s3-row-nav:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+  .s3-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s3-row-meta { color: var(--text-dim); white-space: nowrap; }
+  .s3-row-flag { font-family: var(--font-sans); font-weight: 600; color: var(--accent); min-width: 5em; text-align: right; }
+  .s3-more { display: block; margin: 6px auto; }
+  .s3-browser > .hint { margin: 0; padding: 4px 10px 6px; }
+  .s3-browser > .hint:empty { display: none; }
+  .s3-use { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-top: 1px solid var(--border); }
+  .s3-use .hint { margin: 0; flex: 1; }
+  @media (max-width: 640px) {
+    .s3-conn-grid { grid-template-columns: 1fr; }
+    .s3-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .s3-row .s3-row-date { display: none; }
+  }
   #template-metadata-editor {
     min-height: 48vh;
     resize: vertical;
@@ -1291,6 +1351,22 @@
   /* The flex rules above would otherwise override the UA's
      [hidden] { display: none } for rows the name filter hides. */
   .form-group .check-item[hidden] { display: none; }
+  /* A branch read off the Odoo image is marked in its own row, not only
+     counted under the list: the value alone looks exactly like a saved one.
+     Only ticked rows carry the mark, since only they are mounted. */
+  .form-group .check-item:has(> input[type="checkbox"]:checked):has(> .branch-input[data-autofilled])::after {
+    content: "guessed";
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--text-dim) 24%, transparent);
+    background: color-mix(in oklab, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
   /* The name filter and default-branch picker share the Select all / Clear
      row and stay at the compact size of its buttons. */
   .form-group .check-list-actions input.extra-filter,
@@ -1485,6 +1561,10 @@
   <div class="tab-toolbar">
     <button class="btn-create" onclick="openCreateProductionModal()">+ Create Production</button>
   </div>
+  <div id="prod-token-notice" class="prod-notice" role="note" __PROD_TOKEN_NOTICE_HIDDEN__>
+    <span class="note-label">Setup</span>Creating a production requires this team's Production MCP token (<code>production_token</code>), which is not set. An administrator sets it in Server settings → Teams → Production MCP token, then restarts the server.
+    <a href="/admin" __ADMIN_LINK_HIDDEN__>Open Server settings</a>
+  </div>
   <div id="prod-webhook-box" class="prod-webhook" style="display:none">
     <span>GitHub webhook: <code id="prod-webhook-url" class="prod-mono"></code></span>
     <button class="btn" onclick="copyToClipboard(document.getElementById('prod-webhook-url').textContent, 'Webhook URL copied')">Copy URL</button>
@@ -1497,6 +1577,7 @@
 <div id="tab-templates" class="tab-content">
   <div class="tab-toolbar">
     <button class="btn" onclick="openImportFromOdooModal()">Import from Odoo</button>
+    <button class="btn" onclick="openImportFromS3Modal()">Import from S3</button>
     <button class="btn-create" onclick="openImportOdooModal()">Import from Odoo.sh</button>
   </div>
   <div id="tpl-list"></div>
@@ -1536,6 +1617,7 @@
   <div class="tab-toolbar">
     <button class="btn btn-sync" title="Fetch the latest changes for every repository with a remote" onclick="doPullAllExtraRepos(this)">Update all</button>
     <button class="btn-create" onclick="openAddExtraRepoModal()">+ Add Repo</button>
+    <button class="btn" onclick="openOcaImportModal()">Import OCA</button>
   </div>
   <div id="extra-repos-list"></div>
 </div>
@@ -1627,7 +1709,9 @@
       </div>
       <div class="form-group">
         <label for="cr-image">Odoo image</label>
-        <input type="text" id="cr-image" placeholder="e.g. odoo:19.0">
+        <input type="text" id="cr-image" placeholder="e.g. odoo:19.0"
+               oninput="scheduleExtraBranchAutofill('cr-extra')"
+               onchange="autofillExtraBranches('cr-extra')">
       </div>
       <div class="form-group" id="cr-template-group">
         <label for="cr-template">Template</label>
@@ -1647,9 +1731,10 @@
                   aria-label="Fill a branch into every repo that has it"
                   onchange="applyDefaultExtraBranch('cr-extra')"></select>
         </div>
-        <div id="cr-extra-addons-checkboxes" class="check-list" onchange="updateExtraRepoStatus('cr-extra')"></div>
+        <div id="cr-extra-addons-checkboxes" class="check-list" onchange="updateExtraRepoStatus('cr-extra')"
+             oninput="markExtraBranchEdited(event)"></div>
         <div class="hint" id="cr-extra-status" hidden></div>
-        <div class="hint">Select repos to mount in this environment; picking a branch fills it into every repo that has it.</div>
+        <div class="hint">Select repos to mount in this environment. Branches are filled in from the Odoo image wherever a repo carries one; picking a branch fills it into every repo that has it.</div>
       </div>
       <div class="form-group">
         <label for="cr-auto-install">Auto-install modules</label>
@@ -2091,6 +2176,106 @@
     </div>
   </div>
 </div>
+<div class="modal-overlay" id="s3-template-modal" onclick="closeS3TemplateModal(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="s3-tpl-title">
+    <div class="modal-header">
+      <h2 id="s3-tpl-title">Import from S3</h2>
+      <button class="modal-close" aria-label="Close S3 template dialog" onclick="closeS3TemplateModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="s3-tpl-error" role="alert"></div>
+      <p class="modal-note" id="s3-tpl-note"></p>
+      <details class="s3-conn" id="s3-tpl-conn">
+        <summary>Connection</summary>
+        <div class="s3-conn-grid">
+          <div class="form-group">
+            <label for="s3-tpl-endpoint">Endpoint <span class="label-hint">— empty for AWS S3</span></label>
+            <input class="mono-input" type="url" id="s3-tpl-endpoint" placeholder="https://minio.example.com" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="s3-tpl-region">Region <span class="label-hint">— optional</span></label>
+            <input class="mono-input" type="text" id="s3-tpl-region" placeholder="eu-central-1" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="s3-tpl-access-key">Access key ID <span class="label-hint">— empty for a public bucket</span></label>
+            <input class="mono-input" type="text" id="s3-tpl-access-key" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label for="s3-tpl-secret-key">Secret key</label>
+            <input class="mono-input" type="password" id="s3-tpl-secret-key" autocomplete="off">
+            <div class="hint" id="s3-tpl-secret-hint"></div>
+          </div>
+        </div>
+      </details>
+      <div class="form-group">
+        <label for="s3-tpl-bucket">Bucket</label>
+        <div class="s3-inline">
+          <input class="mono-input" type="text" id="s3-tpl-bucket" placeholder="Leave empty and browse to list buckets" autocomplete="off" spellcheck="false" onkeydown="if (event.key === 'Enter') { event.preventDefault(); s3BrowseFromBucket(); }">
+          <button class="btn" id="s3-tpl-browse-btn" onclick="s3BrowseFromBucket()">Browse</button>
+        </div>
+      </div>
+      <div class="s3-browser" id="s3-tpl-browser" hidden>
+        <nav class="s3-crumbs" id="s3-tpl-crumbs" aria-label="S3 location"></nav>
+        <div class="s3-list" id="s3-tpl-list"></div>
+        <div class="hint" id="s3-tpl-browse-status" role="status" aria-live="polite"></div>
+        <div class="s3-use" id="s3-tpl-use">
+          <div class="hint" id="s3-tpl-use-hint"></div>
+          <button class="btn btn-sm" id="s3-tpl-use-btn" onclick="s3UseCurrentFolder()">Use this folder</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="s3-tpl-prefix">Source</label>
+        <input class="mono-input" type="text" id="s3-tpl-prefix" placeholder="backups/mydb/" autocomplete="off" spellcheck="false">
+        <div class="hint">A folder holding one <code>dump.pgdump</code>, <code>dump.sql</code> or <code>dump.sql.gz</code> (hand-made <code>db.dump</code> also works) plus an optional <code>filestore/</code> tree — the efficient shape for a large database. A single Odoo backup <code>.zip</code> also works if that is what you already have. Browse to it above, or type the key.</div>
+      </div>
+      <div class="form-group" id="s3-tpl-name-group">
+        <label for="s3-tpl-name">Template name</label>
+        <input class="mono-input" type="text" id="s3-tpl-name" placeholder="e.g. production-copy" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <div class="check-row">
+          <input type="checkbox" id="s3-tpl-without-filestore">
+          <label for="s3-tpl-without-filestore">Database only <span class="label-hint">— skip the filestore/ tree</span></label>
+        </div>
+      </div>
+      <div class="hint" id="s3-tpl-progress" role="status" aria-live="polite" style="display:none">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="s3-tpl-progress-text">Downloading and restoring the template…</span> <span id="s3-tpl-elapsed" aria-hidden="true"></span>
+      </div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeS3TemplateModal()">Cancel</button>
+        <button class="btn-create" id="s3-tpl-submit" onclick="submitS3Template()">Import</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="template-sync-modal" onclick="closeTemplateSync(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="template-sync-title">Template sync</h2>
+      <button class="modal-close" aria-label="Close template sync" onclick="closeTemplateSync()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-error" id="template-sync-error"></div>
+      <p>Pull a completed backup using the team SSH key (Credentials tab). The source directory must contain a dump, filestore/ and a READY snapshot ID. Register the server's verified host key before the first run.</p>
+      <div class="form-group"><label for="template-sync-host">SSH host</label><input id="template-sync-host" autocomplete="off" placeholder="backup.example.com"></div>
+      <div class="form-group"><label for="template-sync-user">SSH user</label><input id="template-sync-user" autocomplete="off" placeholder="backup"></div>
+      <div class="form-group"><label for="template-sync-port">SSH port</label><input id="template-sync-port" type="number" min="1" max="65535" value="22"></div>
+      <div class="form-group"><label for="template-sync-path">Backup directory</label><input id="template-sync-path" placeholder="/srv/backups/odoo/completed"></div>
+      <div class="form-group"><label for="template-sync-schedule">Cron schedule (host timezone)</label><input id="template-sync-schedule" value="0 3 * * *" placeholder="0 3 * * *"></div>
+      <div class="check-row"><input id="template-sync-enabled" type="checkbox"><label for="template-sync-enabled">Enable scheduled sync</label></div>
+      <p>Each sync replaces the template. Environments with “Auto-refresh data” enabled have their database and filestore reset. Protected environments are skipped.</p>
+      <p class="modal-note" id="template-sync-state" role="status"></p>
+      <button class="btn btn-sm" onclick="loadTemplateSync(false)">Refresh status / log</button>
+      <pre id="template-sync-log" style="max-height:320px;overflow:auto;white-space:pre-wrap;font-family:var(--font-mono);font-size:var(--text-xs);"></pre>
+      <div class="form-actions">
+        <button class="btn" onclick="templateSyncAction('DELETE')">Remove configuration</button>
+        <button class="btn" onclick="templateSyncAction('queue')">Sync now</button>
+        <button class="btn-create" onclick="templateSyncAction('POST')">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="import-from-odoo-modal" onclick="closeImportFromOdooModal(event)">
   <div class="modal">
     <div class="modal-header">
@@ -2146,7 +2331,14 @@
         <div class="form-group">
           <label for="import-tpl-name">Template name</label>
           <input type="text" id="import-tpl-name" placeholder="e.g. acme-prod">
-          <div class="hint">Restores an Odoo.sh daily backup (database + filestore) into a new template of this name.</div>
+          <div class="hint">Restores an Odoo.sh daily backup (database + filestore, or the database alone) into a template of this name; an existing template is replaced.</div>
+        </div>
+        <div class="form-group">
+          <div class="check-row">
+            <input type="checkbox" id="import-without-filestore">
+            <label for="import-without-filestore">Database only <span class="label-hint">— skip the filestore upload</span></label>
+          </div>
+          <div class="hint">An existing template keeps its current filestore, which may not match the new database.</div>
         </div>
         <div class="form-group">
           <div class="hint" style="margin-top:0;">Enterprise and Themes are proprietary Odoo code. Before downloading them, review your rights and obligations<!--IF-STOCK-->: <a href="https://oduflow.dev/odoo-sh-import-notes" target="_blank" rel="noopener">oduflow.dev/odoo-sh-import-notes</a> (opens in a new tab)<!--/IF-STOCK--> under your Odoo subscription.</div>
@@ -2204,7 +2396,9 @@
       <div id="template-settings-form" style="display:none;">
         <div class="form-group">
           <label for="tset-image">Odoo image</label>
-          <input type="text" id="tset-image" placeholder="e.g. odoo:19.0">
+          <input type="text" id="tset-image" placeholder="e.g. odoo:19.0"
+                 oninput="scheduleExtraBranchAutofill('tset-extra')"
+                 onchange="autofillExtraBranches('tset-extra')">
         </div>
         <div class="form-group">
           <label for="tset-repo">Repository URL</label>
@@ -2234,9 +2428,10 @@
                     aria-label="Fill a branch into every repo that has it"
                     onchange="applyDefaultExtraBranch('tset-extra')"></select>
           </div>
-          <div id="tset-extra-addons" class="check-list" onchange="updateExtraRepoStatus('tset-extra')"></div>
+          <div id="tset-extra-addons" class="check-list" onchange="updateExtraRepoStatus('tset-extra')"
+               oninput="markExtraBranchEdited(event)"></div>
           <div class="hint" id="tset-extra-status" hidden></div>
-          <div class="hint">Checked repos are mounted into environments created from this template. Each one needs a branch; picking a branch fills it into every repo that has it.</div>
+          <div class="hint">Checked repos are mounted into environments created from this template. Each one needs a branch: branches are filled in from the Odoo image wherever a repo carries one, and picking a branch fills it into every repo that has it.</div>
         </div>
         <div class="form-group">
           <label for="tset-auto-install">Auto-install modules</label>
@@ -2668,6 +2863,51 @@
     </div>
   </div>
 </div><!--/IF-STOCK-->
+<div class="modal-overlay" id="oca-import-modal" onclick="closeOcaImportModal(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="oca-title">
+    <div class="modal-header">
+      <h2 id="oca-title">Import OCA repositories</h2>
+      <button class="modal-close" aria-label="Close OCA import" onclick="closeOcaImportModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="oca-toolbar">
+        <div class="form-group">
+          <label for="oca-search">Search repositories</label>
+          <input id="oca-search" type="search" placeholder="Name or description" oninput="renderOcaRepos()">
+        </div>
+        <div class="form-group">
+          <label for="oca-sort">Sort by</label>
+          <select id="oca-sort" onchange="renderOcaRepos()">
+            <option value="stars">Stars (most first)</option>
+            <option value="name">Name (A–Z)</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="oca-versions">Common versions</label>
+        <input id="oca-versions" placeholder="e.g. 18.0, 19.0" onchange="applyOcaVersions()">
+        <div class="hint">Comma-separated branches to download right away, applied when you select a repository and to selected repositories when changed. Leave empty to download nothing now: each branch downloads when an environment first uses it.</div>
+      </div>
+      <div class="oca-toolbar">
+        <label class="check-item"><input id="oca-selected-only" type="checkbox" onchange="renderOcaRepos()">Selected only</label>
+        <label class="check-item"><input id="oca-archived" type="checkbox" onchange="renderOcaRepos()">Show archived</label>
+        <button class="btn" id="oca-reload" onclick="loadOcaCatalog()">Reload catalogue</button>
+      </div>
+      <div id="oca-error" class="form-error" role="alert"></div>
+      <div id="oca-stale" class="hint" role="status" hidden>GitHub is unavailable right now. Showing the last loaded catalogue.</div>
+      <div id="oca-repos" aria-label="OCA repositories"></div>
+    </div>
+    <div class="oca-footer">
+      <div id="oca-summary" role="status" aria-live="polite"></div>
+      <div class="hint">The server adds up to 3 repositories at once. You can close this dialog or reload the page; the import continues.</div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeOcaImportModal()">Close</button>
+        <button class="btn" id="oca-retry" onclick="startOcaImport(true)" hidden>Retry failed</button>
+        <button class="btn-create" id="oca-submit" onclick="startOcaImport(false)" disabled>Import repositories</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="add-extra-repo-modal" onclick="closeAddExtraRepoModal(event)">
   <div class="modal modal-md">
     <div class="modal-header">
@@ -3576,6 +3816,8 @@ function renderEnvironments(envs, force) {
               (SCOPED_ENV ? '' :
                 '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
                   (env.note ? 'Edit note' : 'Add note') + '</button>' +
+                (env.template_name && env.template_name !== 'none'
+                  ? '<button role="menuitem" onclick="toggleTemplateAutoRefresh(\'' + escAttr(env.branch) + '\')">Auto-refresh data: ' + (env.auto_refresh_template ? 'On' : 'Off') + '</button>' : '') +
                 '<button role="menuitem" title="' + (env.protected ? 'Allow Stop, Update, Recreate and Delete again' : 'Disable Stop, Update, Recreate and Delete') + '" onclick="doProtect(\'' + escAttr(env.branch) + '\',' + (env.protected ? 'true' : 'false') + ')" ' + dis + '>' +
                   (env.protected ? 'Unprotect' : 'Protect') + '</button>' +
                 (env.local_path
@@ -5108,7 +5350,7 @@ async function submitImportFromOdoo() {
     if (r.ok && data.ok) {
       var result = data.result || {};
       closeImportFromOdooModal();
-      showToast('Imported template "' + templateName + '" from ' + (result.source_url || odooUrl));
+      showToast('Imported template "' + templateName + '" from ' + (result.source_url || odooUrl) + pinnedEnvsNote(result));
       await loadTemplates();
       var failures = result.remount_failures || [];
       if (failures.length) {
@@ -5135,6 +5377,283 @@ async function submitImportFromOdoo() {
   }
 }
 
+// --- Import / sync a template from S3 ----------------------------------------
+// Typing an object prefix blind is the one import step nothing can verify
+// before it runs, so the dialog walks the bucket a level at a time via
+// POST /api/s3/browse. Listings are paged: "Load more" appends to what is on
+// screen rather than replacing it.
+var _s3Mode = 'import';   // 'import' | 'sync'
+var _s3Template = '';     // the template being re-synced, in sync mode
+var _s3Browse = null;     // last listing from /api/s3/browse
+
+// The dump names the import engine accepts at a source root, newest-first
+// precedence mirrored from template_import._SOURCE_DUMP_NAMES.
+var S3_DUMP_NAMES = ['dump.pgdump', 'dump.sql', 'dump.pgdump.gz', 'dump.sql.gz', 'db.dump', 'db.dump.gz'];
+
+function _s3El(id) { return document.getElementById('s3-tpl-' + id); }
+
+function _s3SetError(message) {
+  var el = _s3El('error');
+  el.textContent = message || '';
+  el.style.display = message ? 'block' : 'none';
+}
+
+function _openS3TemplateModal(mode, tpl) {
+  var isSync = mode === 'sync';
+  var s3 = (tpl && tpl.s3_source) || {};
+  _s3Mode = mode;
+  _s3Template = isSync ? tpl.template_name : '';
+  _s3Browse = null;
+  _s3El('title').textContent = isSync ? 'Sync template from S3' : 'Import from S3';
+  _s3El('note').textContent = isSync
+    ? 'Re-fetch the source of template "' + _s3Template + '". Only changed filestore files are downloaded, and an unchanged database dump skips the restore entirely.'
+    : 'Sync a raw backup out of an S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, …) into a new template. The source is remembered, so it can be re-synced later.';
+  _s3El('endpoint').value = s3.endpoint || '';
+  _s3El('region').value = s3.region || '';
+  _s3El('access-key').value = s3.access_key || '';
+  _s3El('secret-key').value = '';
+  _s3El('secret-hint').textContent = s3.has_secret
+    ? 'Stored for this template — leave empty to reuse it. Required again if you change the endpoint or access key.'
+    : 'Stored as the team secret "s3-template-<template>"; the template keeps only a reference. Leave both keys empty for a public bucket.';
+  // A sync starts from the remembered source; everything else starts blank.
+  var url = String(s3.url || '');
+  var rest = url.indexOf('s3://') === 0 ? url.slice(5) : '';
+  var slash = rest.indexOf('/');
+  _s3El('bucket').value = slash === -1 ? rest : rest.slice(0, slash);
+  _s3El('prefix').value = slash === -1 ? '' : rest.slice(slash + 1);
+  _s3El('name').value = _s3Template;
+  _s3El('name-group').hidden = isSync;
+  _s3El('without-filestore').checked = false;
+  _s3El('conn').open = !isSync && !s3.url;
+  _s3El('browser').hidden = true;
+  _s3El('progress').style.display = 'none';
+  _s3El('elapsed').textContent = '';
+  _s3El('submit').disabled = false;
+  _s3El('submit').textContent = isSync ? 'Sync' : 'Import';
+  _s3SetError('');
+  showModal('s3-template-modal');
+  (isSync ? _s3El('bucket') : _s3El('endpoint')).focus();
+}
+
+function openImportFromS3Modal() { _openS3TemplateModal('import', null); }
+
+function openS3SyncModal(name) {
+  var tpl = cachedTemplates.find(function(t) { return t.template_name === name; });
+  if (!tpl || !tpl.s3_source) {
+    showToast('Template "' + name + '" has no S3 source.', true);
+    return;
+  }
+  _openS3TemplateModal('sync', tpl);
+}
+
+function closeS3TemplateModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  _s3El('secret-key').value = '';
+  hideModal('s3-template-modal');
+}
+
+function s3BrowseFromBucket() { return s3Browse(_s3El('prefix').value.trim()); }
+
+async function s3Browse(prefix, append) {
+  var btn = _s3El('browse-btn');
+  var status = _s3El('browse-status');
+  btn.disabled = true;
+  status.textContent = 'Loading…';
+  _s3El('browser').hidden = false;
+  try {
+    var r = await fetch('/api/s3/browse', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        bucket: _s3El('bucket').value.trim(),
+        prefix: prefix || '',
+        continuation_token: append && _s3Browse ? _s3Browse.next_token : '',
+        endpoint: _s3El('endpoint').value.trim(),
+        region: _s3El('region').value.trim(),
+        access_key: _s3El('access-key').value.trim(),
+        secret_key: _s3El('secret-key').value,
+        template: _s3Template
+      })
+    });
+    var data = await readResult(r);
+    if (!r.ok || !data.ok) {
+      status.textContent = '';
+      _s3SetError(data.error || 'Could not list the bucket.');
+      return;
+    }
+    _s3SetError('');
+    if (append && _s3Browse) {
+      data.folders = (_s3Browse.folders || []).concat(data.folders || []);
+      data.files = (_s3Browse.files || []).concat(data.files || []);
+    }
+    _s3Browse = data;
+    _renderS3Browser();
+  } catch (e) {
+    status.textContent = '';
+    _s3SetError('Connection error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _s3Crumbs() {
+  var bucket = _s3Browse.bucket;
+  if (!bucket) return '<span aria-current="page">Buckets</span>';
+  var parts = (_s3Browse.prefix || '').split('/').filter(function(p) { return p; });
+  var crumbs = ['<button type="button" onclick="s3Browse(\'\')">' + esc(bucket) + '</button>'];
+  var acc = '';
+  parts.forEach(function(part, i) {
+    acc += part + '/';
+    crumbs.push('<span aria-hidden="true">/</span>');
+    crumbs.push(i === parts.length - 1
+      ? '<span aria-current="page">' + esc(part) + '</span>'
+      : '<button type="button" onclick="s3Browse(\'' + escAttr(acc) + '\')">' + esc(part) + '</button>');
+  });
+  return crumbs.join('');
+}
+
+function _renderS3Browser() {
+  var rows = [];
+  var listingBuckets = !_s3Browse.bucket;
+  _s3El('crumbs').innerHTML = _s3Crumbs();
+  (_s3Browse.buckets || []).forEach(function(b) {
+    rows.push('<button type="button" class="s3-row s3-row-nav" onclick="_s3El(\'bucket\').value = \'' + escAttr(b) + '\'; s3Browse(\'\')">' +
+      '<span class="s3-row-name">' + esc(b) + '</span>' +
+      '<span class="s3-row-flag">bucket</span></button>');
+  });
+  (_s3Browse.folders || []).forEach(function(f) {
+    var name = f.slice((_s3Browse.prefix || '').length).replace(/\/$/, '');
+    rows.push('<button type="button" class="s3-row s3-row-nav" onclick="s3Browse(\'' + escAttr(f) + '\')">' +
+      '<span class="s3-row-name">' + esc(name) + '/</span>' +
+      '<span class="s3-row-flag">folder</span></button>');
+  });
+  (_s3Browse.files || []).forEach(function(file) {
+    var name = file.key.slice((_s3Browse.prefix || '').length);
+    var isDump = S3_DUMP_NAMES.indexOf(name) !== -1;
+    // An Odoo backup .zip is a source on its own, so it is pickable. A dump
+    // inside a raw layout is not: the folder around it is what gets imported.
+    var isArchive = /\.zip$/i.test(name);
+    var cells =
+      '<span class="s3-row-name">' + esc(name) + '</span>' +
+      '<span class="s3-row-meta">' + esc(fmtBytes(file.size)) + '</span>' +
+      '<span class="s3-row-meta s3-row-date">' + esc((file.last_modified || '').slice(0, 10)) + '</span>' +
+      '<span class="s3-row-flag">' + (isArchive ? 'archive' : (isDump ? 'dump' : '')) + '</span>';
+    rows.push(isArchive
+      ? '<button type="button" class="s3-row s3-row-nav" onclick="s3UseObject(\'' + escAttr(file.key) + '\')">' + cells + '</button>'
+      : '<div class="s3-row">' + cells + '</div>');
+  });
+  if (_s3Browse.truncated && _s3Browse.next_token) {
+    rows.push('<button type="button" class="btn btn-sm s3-more" onclick="s3Browse(\'' + escAttr(_s3Browse.prefix || '') + '\', true)">Load more</button>');
+  }
+  _s3El('list').innerHTML = rows.join('') ||
+    '<div class="s3-row"><span class="s3-row-meta">Empty.</span></div>';
+  // "Use this folder" is only meaningful once the listing shows a dump the
+  // import engine would actually pick up at this level.
+  var dump = (_s3Browse.files || []).map(function(f) {
+    return f.key.slice((_s3Browse.prefix || '').length);
+  }).find(function(name) { return S3_DUMP_NAMES.indexOf(name) !== -1; });
+  _s3El('use').hidden = listingBuckets;
+  _s3El('use-btn').disabled = !dump;
+  _s3El('use-hint').textContent = listingBuckets
+    ? ''
+    : (dump ? 'Contains ' + dump + '.' : 'No database dump here — open a subfolder, or pick a .zip archive.');
+  _s3El('browse-status').textContent = _s3Browse.truncated
+    ? 'Showing the first page of this folder.'
+    : '';
+}
+
+function _s3Pick(source, suggestedName) {
+  _s3El('bucket').value = _s3Browse.bucket;
+  _s3El('prefix').value = source;
+  _s3El('browser').hidden = true;
+  if (!_s3El('name').value.trim() && _s3Mode === 'import') {
+    _s3El('name').value = suggestedName;
+  }
+  (_s3Mode === 'sync' ? _s3El('submit') : _s3El('name')).focus();
+}
+
+function s3UseCurrentFolder() {
+  // A sensible default name: the folder the dump sits in.
+  var parts = (_s3Browse.prefix || '').split('/').filter(function(p) { return p; });
+  _s3Pick(_s3Browse.prefix || '', parts.length ? parts[parts.length - 1] : _s3Browse.bucket);
+}
+
+function s3UseObject(key) {
+  _s3Pick(key, key.split('/').pop().replace(/\.zip$/i, ''));
+}
+
+async function submitS3Template() {
+  var isSync = _s3Mode === 'sync';
+  var bucket = _s3El('bucket').value.trim();
+  // The field reads as a folder ("odoo/acme/"); the URL the server records is
+  // normalized, so send the same form it will store.
+  var prefix = _s3El('prefix').value.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  var templateName = isSync ? _s3Template : _s3El('name').value.trim();
+  if (!bucket) return _s3SetError('Bucket is required.');
+  if (!templateName) return _s3SetError('Template name is required.');
+  _s3SetError('');
+
+  var btn = _s3El('submit');
+  var progress = _s3El('progress');
+  var elapsed = _s3El('elapsed');
+  var started = Date.now();
+  btn.disabled = true;
+  btn.textContent = isSync ? 'Syncing…' : 'Importing…';
+  _s3El('progress-text').textContent = isSync
+    ? 'Syncing the template from S3…'
+    : 'Downloading and restoring the template…';
+  progress.style.display = 'block';
+  var updateProgress = function() { elapsed.textContent = _fmtElapsed(Date.now() - started); };
+  updateProgress();
+  var progressTimer = setInterval(updateProgress, 1000);
+  var source = 's3://' + bucket + (prefix ? '/' + prefix : '');
+  try {
+    var r = await fetch(API_TEMPLATES + '/import-from-odoo', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        source: source,
+        template_name: templateName,
+        overwrite: isSync,
+        without_filestore: _s3El('without-filestore').checked,
+        s3_endpoint: _s3El('endpoint').value.trim(),
+        s3_region: _s3El('region').value.trim(),
+        s3_access_key: _s3El('access-key').value.trim(),
+        s3_secret_key: _s3El('secret-key').value
+      })
+    });
+    var data = await readResult(r);
+    if (r.ok && data.ok) {
+      var result = data.result || {};
+      closeS3TemplateModal();
+      showToast((isSync ? 'Synced template "' : 'Imported template "') + templateName +
+        '" from ' + (result.source_url || source) +
+        (result.dump_reloaded === false ? ' (dump unchanged, database kept)' : '') +
+        pinnedEnvsNote(result));
+      await loadTemplates();
+      var failures = result.remount_failures || [];
+      if (failures.length) {
+        showToast('Template updated, but ' + failures.length + ' environment filestore remount' +
+          (failures.length === 1 ? ' failed.' : 's failed.'), true);
+      }
+    } else if (isAmbiguousGatewayStatus(r.status)) {
+      closeS3TemplateModal();
+      showToast('The proxy stopped waiting, but the S3 sync of "' + templateName +
+        '" may still be running. Refresh in a moment.');
+      await loadTemplates();
+    } else {
+      _s3SetError(data.error || 'Import failed');
+    }
+  } catch (e) {
+    _s3SetError('Connection error: ' + e.message);
+  } finally {
+    clearInterval(progressTimer);
+    progress.style.display = 'none';
+    btn.disabled = false;
+    btn.textContent = isSync ? 'Sync' : 'Import';
+  }
+}
+
 function openImportOdooModal() {
   document.getElementById('import-tpl-name').value = '';
   var errEl = document.getElementById('import-odoo-error');
@@ -5150,6 +5669,7 @@ function openImportOdooModal() {
     cb.checked = false;
     cb.disabled = true;
   });
+  document.getElementById('import-without-filestore').checked = false;
   document.getElementById('import-ack').checked = false;
   document.getElementById('import-addons-options').hidden = true;
   showModal('import-odoo-modal');
@@ -5210,6 +5730,7 @@ async function submitImportOdoo() {
         with_enterprise: document.getElementById('import-with-enterprise').checked,
         with_themes: document.getElementById('import-with-themes').checked,
         with_extra_addons: document.getElementById('import-with-extra').checked,
+        without_filestore: document.getElementById('import-without-filestore').checked,
         addon_error_policy: document.getElementById('import-best-effort').checked ? 'best_effort' : 'strict'
       })
     });
@@ -5240,6 +5761,8 @@ var _templateSettingsLoadToken = 0;
 // into this object so keys the form does not know about survive a round-trip.
 var _templateSettingsMeta = {};
 var _templateSettingsRawMode = false;
+// The extra repo branch fields' guess/edit marks while raw JSON is shown.
+var _templateSettingsBranchMarks = null;
 
 var TSET_ENV_HINT = 'One KEY=VALUE per line. Injected into environments created from this template; values given at creation time override them per key.';
 
@@ -5290,8 +5813,12 @@ function _tsetBranchOptions(branches) {
 // extra addon repos as a plain checkbox list, so one set of helpers drives
 // either of them, addressed by the id prefix shared by all of its controls.
 var EXTRA_REPO_PICKERS = {
-  'cr-extra': {list: 'cr-extra-addons-checkboxes', checkbox: '.cr-extra-cb'},
-  'tset-extra': {list: 'tset-extra-addons', checkbox: '.tset-extra-cb'}
+  'cr-extra': {
+    list: 'cr-extra-addons-checkboxes', checkbox: '.cr-extra-cb', image: 'cr-image'
+  },
+  'tset-extra': {
+    list: 'tset-extra-addons', checkbox: '.tset-extra-cb', image: 'tset-image'
+  }
 };
 
 function _extraRepoRows(prefix) {
@@ -5322,6 +5849,13 @@ function extraRepoBranchNames(r) {
   return _tsetBranchOptions(extraRepoBranchChoices(r));
 }
 
+// Registered extra repos by name, for rows that only know their repo's name.
+function _extraReposByName() {
+  var repos = Object.create(null);
+  (cachedExtraRepos || []).forEach(function(r) { repos[r.name] = r; });
+  return repos;
+}
+
 // A hidden row is still submitted and still mounted, so a selection the filter
 // hides has to be stated as a count: otherwise Clear looks like it emptied a
 // list that in fact still carries repos.
@@ -5339,6 +5873,19 @@ function updateExtraRepoStatus(prefix) {
   if (hiddenChecked) {
     parts.push(hiddenChecked + (hiddenChecked === 1 ? ' selected repo is' : ' selected repos are') +
       ' hidden by the filter and still mounted; Select all and Clear only touch visible rows.');
+  }
+  // A guessed branch looks exactly like a saved one, so say how many of the
+  // repos to be mounted got one: they are read off the Odoo image, not off the
+  // repo's history. Unticked rows are guessed too, ready for a tick, but are
+  // nobody's concern until they are ticked.
+  var guessed = rows.filter(function(row) {
+    var cb = row.querySelector('input[type="checkbox"]');
+    var input = row.querySelector('.branch-input');
+    return cb && cb.checked && input && input.hasAttribute('data-autofilled');
+  }).length;
+  if (guessed) {
+    parts.push(guessed + (guessed === 1 ? ' selected repo got its' : ' selected repos got their') +
+      ' branch from the Odoo image (marked guessed); correct any that are wrong.');
   }
   var status = document.getElementById(prefix + '-status');
   status.textContent = parts.join(' ');
@@ -5390,13 +5937,169 @@ function applyDefaultExtraBranch(prefix) {
   var branch = picker.value;
   picker.value = '';
   if (!branch) return;
-  var repos = Object.create(null);
-  (cachedExtraRepos || []).forEach(function(r) { repos[r.name] = r; });
+  var repos = _extraReposByName();
   _extraRepoRows(prefix).forEach(function(row) {
     var repo = repos[row.querySelector('input[type="checkbox"]').value];
     if (repo && extraRepoBranchNames(repo).indexOf(branch) !== -1) {
-      row.querySelector('.branch-input').value = branch;
+      var input = row.querySelector('.branch-input');
+      input.value = branch;
+      // Picked on purpose, so a later image edit must not revise it.
+      input.removeAttribute('data-autofilled');
     }
+  });
+  updateExtraRepoStatus(prefix);
+}
+
+// Mirrors major_from_image_reference() in odoo_version.py: the Odoo series a
+// Docker image reference carries, or null when the reference is no evidence of
+// one. Deliberately conservative, for the same reason as the server-side
+// original — a number that is not an Odoo series (acme/odoo-stack:2.0) must not
+// become a branch guess. tests/test_web_ui_static.py checks the two agree.
+var ODOO_MAJOR_MIN = 6;
+var ODOO_MAJOR_MAX = 30;
+
+function _plausibleOdooMajor(digits) {
+  var major = parseInt(digits, 10);
+  return (major >= ODOO_MAJOR_MIN && major <= ODOO_MAJOR_MAX) ? major : null;
+}
+
+// Repository path without the registry host, so that a vendor's own registry
+// (odoo-registry.example/postgres) does not make every image it serves look
+// like an Odoo image.
+function _imagePath(reference) {
+  var segments = reference.split('/');
+  var host = segments[0];
+  if (segments.length > 1 &&
+      (host.indexOf('.') !== -1 || host.indexOf(':') !== -1 || host === 'localhost')) {
+    return segments.slice(1).join('/');
+  }
+  return reference;
+}
+
+function odooMajorFromImage(image) {
+  if (!image) return null;
+  var reference = String(image).split('@')[0];
+  var leaf = reference.split('/').pop();
+  var hasTag = leaf.indexOf(':') !== -1;
+  var tag = hasTag ? leaf.slice(leaf.lastIndexOf(':') + 1) : '';
+  var repository = hasTag ? reference.slice(0, reference.lastIndexOf(':')) : reference;
+  var path = _imagePath(repository);
+  var tagMatch = /(?:^|[/_-])odoo(?:$|[/_-])/i.test(path)
+    ? /^(?:saas[-~])?(\d+)(?:\.\d+)?(?:$|[-_])/.exec(tag)
+    : null;
+  var tagMajor = tagMatch ? _plausibleOdooMajor(tagMatch[1]) : null;
+  // Versioned repository names (acme/odoo-15) are read independently, with the
+  // tag detached, so acme/odoo-15:latest still yields 15.
+  var repoMatch = /odoo[-_:/]?(\d+)(?:\.\d+)?(?:$|[-_])/i.exec(path);
+  var repoMajor = repoMatch ? _plausibleOdooMajor(repoMatch[1]) : null;
+  // Either number could be a custom build version; when they disagree the
+  // reference says nothing reliable at all.
+  if (tagMajor !== null && repoMajor !== null && tagMajor !== repoMajor) return null;
+  return tagMajor !== null ? tagMajor : repoMajor;
+}
+
+// Branch names the Odoo series in an image is published under, most specific
+// first: Odoo itself and the OCA both branch per version ("19.0"), and a few
+// repos drop the minor. An online release (saas~19.1) is a series of its own,
+// saas-19.1, that the stable 19.0 must not stand in for; its minor is read off
+// the tag here because odooMajorFromImage() keeps to the major, as the server
+// does.
+function odooBranchCandidates(image) {
+  var major = odooMajorFromImage(image);
+  if (major === null) return [];
+  var leaf = String(image).split('@')[0].split('/').pop();
+  var tag = leaf.indexOf(':') !== -1 ? leaf.slice(leaf.lastIndexOf(':') + 1) : '';
+  if (!/^saas[-~]/.test(tag)) return [major + '.0', String(major)];
+  var saas = /^saas[-~](\d+)\.(\d+)(?:$|[-_])/.exec(tag);
+  return saas && parseInt(saas[1], 10) === major ? ['saas-' + major + '.' + saas[2]] : [];
+}
+
+// Whether the branches a repo carries are known at all: one registered before
+// the remote list was stored, and never refreshed since, has neither list.
+function extraRepoBranchesKnown(r) {
+  return !!(r && (r.available_known || (r.branches || []).length));
+}
+
+// Fills the branch matching the Odoo image into every row, so a list of
+// per-version repos (an OCA set, enterprise) does not have to be typed out by
+// hand. Only ever writes a branch the repo really carries, and only into rows
+// it filled itself: a branch from a template, from a production or from the
+// user's own keyboard always wins (a field the user emptied stays empty), and
+// a changed image revises nothing but the previous guesses.
+function autofillExtraBranches(prefix) {
+  var imageField = document.getElementById(EXTRA_REPO_PICKERS[prefix].image);
+  var candidates = odooBranchCandidates(imageField ? imageField.value.trim() : '');
+  var repos = _extraReposByName();
+  _extraRepoRows(prefix).forEach(function(row) {
+    var input = row.querySelector('.branch-input');
+    if (!input || input.hasAttribute('data-edited') ||
+        (input.value && !input.hasAttribute('data-autofilled'))) return;
+    var repo = repos[row.querySelector('input[type="checkbox"]').value];
+    var names = repo ? extraRepoBranchNames(repo) : [];
+    var guess = candidates.filter(function(b) { return names.indexOf(b) !== -1; })[0] || '';
+    // A repo whose branches are unknown gets nothing filled in, but the guess
+    // is still worth showing: the user can see which branch is expected and
+    // type it, instead of working the version out from the image by hand.
+    var expected = (!guess && candidates.length && !extraRepoBranchesKnown(repo))
+      ? candidates[0] : '';
+    input.value = guess;
+    input.placeholder = expected || 'branch';
+    if (guess) input.setAttribute('data-autofilled', '');
+    else input.removeAttribute('data-autofilled');
+  });
+  updateExtraRepoStatus(prefix);
+}
+
+// The image field revises the guesses as it is typed into, but only once the
+// typing pauses: a half-typed reference (odoo:1) reads as no version at all
+// and would clear every guess for a keystroke. Leaving the field runs the
+// autofill at once (onchange), so a submit never sees the previous image's.
+var _extraAutofillTimers = Object.create(null);
+
+function scheduleExtraBranchAutofill(prefix) {
+  clearTimeout(_extraAutofillTimers[prefix]);
+  _extraAutofillTimers[prefix] = setTimeout(function() {
+    autofillExtraBranches(prefix);
+  }, 300);
+}
+
+// A branch the user types, or empties, stops being a guess for good, so
+// later image edits leave the field alone. Delegated, because the rows are
+// rebuilt on every render.
+function markExtraBranchEdited(event) {
+  var input = event.target;
+  if (input && input.classList && input.classList.contains('branch-input')) {
+    input.removeAttribute('data-autofilled');
+    input.setAttribute('data-edited', '');
+  }
+}
+
+// Which branch fields hold a guess or a deliberate edit, by repo, so that a
+// list rebuilt from the same values (the raw JSON round trip) can tell them
+// apart from saved values again.
+function _extraBranchMarks(prefix) {
+  var marks = Object.create(null);
+  _extraRepoRows(prefix).forEach(function(row) {
+    var input = row.querySelector('.branch-input');
+    if (!input) return;
+    marks[row.querySelector('input[type="checkbox"]').value] = {
+      value: input.value,
+      autofilled: input.hasAttribute('data-autofilled'),
+      edited: input.hasAttribute('data-edited')
+    };
+  });
+  return marks;
+}
+
+// Puts the marks back on the fields that still hold the value they had; one
+// changed in the meantime (in the JSON) is a saved value now.
+function _restoreExtraBranchMarks(prefix, marks) {
+  _extraRepoRows(prefix).forEach(function(row) {
+    var input = row.querySelector('.branch-input');
+    var mark = input && marks[row.querySelector('input[type="checkbox"]').value];
+    if (!mark || mark.value !== input.value) return;
+    if (mark.autofilled) input.setAttribute('data-autofilled', '');
+    if (mark.edited) input.setAttribute('data-edited', '');
   });
 }
 
@@ -5421,7 +6124,7 @@ function _tsetExtraRow(name, repoUrl, branches, extras, idx, missing) {
   '</label>';
 }
 
-function _tsetRenderExtraAddons(extras) {
+function _tsetRenderExtraAddons(extras, branchMarks) {
   var container = document.getElementById('tset-extra-addons');
   var repos = cachedExtraRepos || [];
   var known = Object.create(null);
@@ -5435,8 +6138,12 @@ function _tsetRenderExtraAddons(extras) {
   container.innerHTML = rows.length
     ? rows.join('')
     : '<span class="hint" style="margin-top:0;">No extra repos available</span>';
+  // Before the autofill, which would otherwise take a field the user emptied
+  // for one it may fill.
+  if (branchMarks) _restoreExtraBranchMarks('tset-extra', branchMarks);
   setExtraRepoActionsEnabled('tset-extra', rows.length > 0);
   initExtraRepoTools('tset-extra');
+  autofillExtraBranches('tset-extra');
 }
 
 function _tsetRenderCredentials(current) {
@@ -5472,7 +6179,7 @@ function _tsetRenderFacts(meta) {
   document.getElementById('tset-facts-group').style.display = rows.length ? '' : 'none';
 }
 
-function _tsetFillForm(meta) {
+function _tsetFillForm(meta, branchMarks) {
   document.getElementById('tset-image').value = meta.odoo_image || '';
   document.getElementById('tset-repo').value = meta.repo_url || '';
   document.getElementById('tset-local-path').value = meta.local_path || '';
@@ -5492,7 +6199,7 @@ function _tsetFillForm(meta) {
   document.getElementById('tset-overlay').value =
     overlay === true ? 'overlay' : (overlay === false ? 'copy' : 'auto');
   _tsetRenderCredentials(meta.git_user || '');
-  _tsetRenderExtraAddons(_tsetNormalizeExtras(meta.extra_addons));
+  _tsetRenderExtraAddons(_tsetNormalizeExtras(meta.extra_addons), branchMarks);
   _tsetRenderFacts(meta);
 }
 
@@ -5551,6 +6258,9 @@ function toggleTemplateSettingsMode() {
   if (!_templateSettingsRawMode) {
     var collected = _tsetCollectForm();
     if (!collected) return;
+    // The JSON holds a guessed branch as a plain value; the form it comes
+    // back to must still mark it as a guess.
+    _templateSettingsBranchMarks = _extraBranchMarks('tset-extra');
     editor.value = JSON.stringify(collected, null, 2) + '\n';
     _tsetSetMode(true);
     editor.focus();
@@ -5573,7 +6283,7 @@ function toggleTemplateSettingsMode() {
   }
   errEl.style.display = 'none';
   _templateSettingsMeta = parsed;
-  _tsetFillForm(parsed);
+  _tsetFillForm(parsed, _templateSettingsBranchMarks);
   _tsetSetMode(false);
 }
 
@@ -5856,6 +6566,126 @@ async function submitNewTemplate() {
   }
 }
 
+var templateSyncName = '';
+var refreshingTemplates = new Set();
+
+// Environments a scheduled sync pinned keep their retained filestore; template
+// updates report them instead of remounting them.
+function pinnedEnvsNote(result) {
+  var pinned = (result && result.pinned_envs) || [];
+  return pinned.length
+    ? ' Left on the filestore a scheduled sync retained for them: ' + pinned.join(', ') + '.'
+    : '';
+}
+
+async function refreshTemplateFiles(name) {
+  if (refreshingTemplates.has(name)) return;
+  if (!(await confirmDialog({title: 'Refresh template',
+    message: 'Reload "' + name + '" from the dump already in its directory? Overlay environments using its live filestore will briefly stop and remount, preserving local file changes. Environment databases are unchanged. Retained filestore generations are unchanged.',
+    confirmLabel: 'Refresh template', danger: true}))) return;
+  refreshingTemplates.add(name);
+  renderTemplates(cachedTemplates);
+  try {
+    var response = await fetch(API_TEMPLATES + '/import-from-odoo', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({template_name: name, refresh: true})});
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Refresh failed');
+    var failures = data.result.remount_failures || [];
+    showToast((failures.length ? 'Template loaded; remount errors: ' + failures.map(function(f) { return f.join(': '); }).join('; ') : 'Template "' + name + '" refreshed') + pinnedEnvsNote(data.result), !!failures.length);
+  } catch (e) { showToast(e.message, true); }
+  finally {
+    refreshingTemplates.delete(name);
+    await loadTemplates();
+    loadEnvironments();
+  }
+}
+
+function closeTemplateSync(event) {
+  if (event && event.target !== event.currentTarget) return;
+  hideModal('template-sync-modal');
+  templateSyncName = '';
+}
+
+async function openTemplateSync(name) {
+  templateSyncName = name;
+  document.getElementById('template-sync-title').textContent = 'Template sync — ' + name;
+  document.getElementById('template-sync-log').textContent = '';
+  document.getElementById('template-sync-state').textContent = 'Loading...';
+  ['host', 'user', 'path', 'port', 'schedule'].forEach(function(key) { document.getElementById('template-sync-' + key).value = ''; });
+  document.getElementById('template-sync-enabled').checked = false;
+  document.getElementById('template-sync-error').style.display = 'none';
+  showModal('template-sync-modal');
+  await loadTemplateSync(true);
+}
+
+async function loadTemplateSync(fill) {
+  var name = templateSyncName;
+  if (!name) return;
+  var error = document.getElementById('template-sync-error');
+  if (fill) document.querySelectorAll('#template-sync-modal input, #template-sync-modal .form-actions button').forEach(function(el) { el.disabled = true; });
+  try {
+    var data = await readResult(await fetch(API_TEMPLATES + '/' + encodeURIComponent(name) + '/sync'));
+    if (name !== templateSyncName) return;
+    if (!data.ok) throw new Error(data.error || 'Could not load sync settings');
+    if (fill) {
+      ['host', 'user', 'path', 'port', 'schedule'].forEach(function(key) {
+        document.getElementById('template-sync-' + key).value = data.config[key] || (key === 'port' ? 22 : key === 'schedule' ? '0 3 * * *' : '');
+      });
+      document.getElementById('template-sync-enabled').checked = !!data.config.enabled;
+    }
+    var state = data.state || {};
+    document.getElementById('template-sync-state').textContent =
+      (data.pending ? 'Queued — cron will pick up the request within a minute. ' : '') +
+      'Status: ' + (state.status || 'Never run') +
+      (state.started_at ? ' | Started: ' + state.started_at : '') +
+      (state.finished_at ? ' | Finished: ' + state.finished_at : '') +
+      (state.error ? ' | ' + state.error : '') +
+      (state.failed_envs && Object.keys(state.failed_envs).length ? ' | Failed environments: ' + JSON.stringify(state.failed_envs) : '') +
+      (state.skipped_envs && state.skipped_envs.length ? ' | Protected: ' + state.skipped_envs.join(', ') : '') +
+      (data.cron_installed ? '' : ' | Cron job is not installed');
+    document.getElementById('template-sync-log').textContent = data.log || '(no log yet)';
+  } catch (e) { error.textContent = e.message; error.style.display = 'block'; }
+  finally {
+    if (fill && name === templateSyncName) document.querySelectorAll('#template-sync-modal input, #template-sync-modal .form-actions button').forEach(function(el) { el.disabled = false; });
+  }
+}
+
+async function templateSyncAction(action) {
+  var name = templateSyncName;
+  if (!name) return;
+  var body;
+  if (action === 'POST') {
+    body = {enabled: document.getElementById('template-sync-enabled').checked};
+    ['host', 'user', 'port', 'path', 'schedule'].forEach(function(key) { body[key] = document.getElementById('template-sync-' + key).value; });
+  }
+  if (action === 'DELETE' && !(await confirmDialog({title: 'Remove sync configuration', message: 'Remove the cron schedule and queued request for "' + name + '"? The downloaded backup copy is deleted; template data and logs remain.', confirmLabel: 'Remove configuration'}))) return;
+  var buttons = document.querySelectorAll('#template-sync-modal .form-actions button');
+  buttons.forEach(function(el) { el.disabled = true; });
+  var error = document.getElementById('template-sync-error');
+  error.style.display = 'none';
+  try {
+    var response = await fetch(API_TEMPLATES + '/' + encodeURIComponent(name) + (action === 'queue' ? '/sync-now' : '/sync'), {
+      method: action === 'queue' ? 'POST' : action, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined
+    });
+    var data = await readResult(response);
+    if (!data.ok) throw new Error(data.error || 'Operation failed');
+    showToast(action === 'queue' ? 'Sync queued for cron (uses saved settings)' : action === 'DELETE' ? 'Sync configuration removed' : 'Sync configuration saved');
+    await loadTemplateSync(action === 'DELETE');
+  } catch (e) { error.textContent = e.message; error.style.display = 'block'; }
+  finally { buttons.forEach(function(el) { el.disabled = false; }); }
+}
+
+async function toggleTemplateAutoRefresh(name) {
+  var env = cachedEnvs.find(function(e) { return e.branch === name; });
+  if (!env) return;
+  var enabled = !env.auto_refresh_template;
+  if (enabled && !(await confirmDialog({title: 'Enable automatic data refresh', message: 'Every successful source sync will replace the database and filestore of "' + name + '". Local data changes will be lost. Code and environment settings are preserved; protected environments are skipped.', confirmLabel: 'Enable auto-refresh', danger: true}))) return;
+  try {
+    var data = await readResult(await fetch(API + '/' + encodeURIComponent(name) + '/template-sync', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({auto_refresh: enabled})}));
+    if (!data.ok) throw new Error(data.error || 'Could not save preference');
+    await loadEnvironments();
+  } catch (e) { showToast(e.message, true); }
+}
+
 function renderTemplates(templates) {
   var el = document.getElementById('tpl-list');
   if (!templates || templates.length === 0) {
@@ -5880,6 +6710,9 @@ function renderTemplates(templates) {
     var metadataTag = t.metadata_valid === false
       ? '<span class="tag tag-missing" title="metadata.json is invalid; open Settings to repair it">Invalid metadata</span>'
       : '';
+    var s3Tag = t.s3_source
+      ? '<span class="tag tag-neutral" title="Imported from ' + escHtmlAttr(t.s3_source.url) + ' and can be re-synced from it">S3</span>'
+      : '';
     var sizeHtml = '';
     if (t.filestore_size_mb != null || t.dump_size_mb != null) {
       var fmtSize = function(mb) {
@@ -5900,38 +6733,51 @@ function renderTemplates(templates) {
       if (envCount) parts.push('<span>Env vars: <strong>' + envCount + '</strong></span>');
       metaHtml = '<div class="tpl-meta" style="margin-top:8px;flex-wrap:wrap;">' + parts.join('') + '</div>';
     }
+    var s3Meta = t.s3_source
+      ? '<div class="tpl-meta" style="margin-top:8px;flex-wrap:wrap;"><span>S3: <strong>' +
+        esc(t.s3_source.url) + '</strong></span></div>'
+      : '';
     return '<div class="tpl-card tpl-card-stacked">' +
       '<div class="tpl-head">' +
         '<span class="tpl-name">' + esc(t.template_name) + '</span>' +
         '<div class="tpl-head-right">' +
-          '<div class="tpl-meta">' + dbTag + sqlTag + fsTag + modeTag + metadataTag + sizeHtml + '</div>' +
+          '<div class="tpl-meta">' + dbTag + sqlTag + fsTag + modeTag + metadataTag + s3Tag + sizeHtml + '</div>' +
           '<button class="btn-create btn-sm" onclick="openCreateFromTemplate(\'' + escAttr(t.template_name) + '\')">+ New Env</button>' +
+          (t.s3_source
+            ? '<button class="btn btn-sm" onclick="openS3SyncModal(\'' + escAttr(t.template_name) + '\')">Sync</button>'
+            : '') +
           '<button class="btn btn-sm" onclick="openTemplateSettingsModal(\'' + escAttr(t.template_name) + '\')">Settings</button>' +
-          '<button class="btn btn-sm" onclick="openRenameTemplateModal(\'' + escAttr(t.template_name) + '\')">Rename</button>' +
-          '<button class="btn btn-delete btn-sm" onclick="doDeleteTemplate(\'' + escAttr(t.template_name) + '\')">Remove</button>' +
+          '<div class="menu-wrap"><button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button><div class="menu" role="menu">' +
+          '<button role="menuitem" onclick="refreshTemplateFiles(\'' + escAttr(t.template_name) + '\')" ' + (refreshingTemplates.has(t.template_name) || !t.has_sql ? 'disabled' : '') + '>' + (refreshingTemplates.has(t.template_name) ? 'Refreshing...' : 'Refresh') + '</button>' +
+          '<button role="menuitem" onclick="openTemplateSync(\'' + escAttr(t.template_name) + '\')">Source / schedule / log</button>' +
+          '<button role="menuitem" onclick="openRenameTemplateModal(\'' + escAttr(t.template_name) + '\')">Rename</button>' +
+          '<button role="menuitem" class="danger" onclick="doDeleteTemplate(\'' + escAttr(t.template_name) + '\')">Remove</button>' +
+          '</div></div>' +
         '</div>' +
       '</div>' +
       metaHtml +
+      s3Meta +
     '</div>';
   }).join('');
 }
 
-function populateTemplateSelect() {
+// selected: the template a card opened the modal for; without one the first
+// template stays selected.
+function populateTemplateSelect(selected) {
   var sel = document.getElementById('cr-template');
   sel.innerHTML = '';
   cachedTemplates.forEach(function(t) {
     sel.innerHTML += '<option value="' + esc(t.template_name) + '">' + esc(t.template_name) + '</option>';
   });
   sel.innerHTML += '<option value="none">None (init from scratch)</option>';
+  if (selected) sel.value = selected;
   sel.onchange = function() {
     var tpl = cachedTemplates.find(function(t) { return t.template_name === sel.value; });
     if (tpl) {
       if (tpl.repo_url && !document.getElementById('cr-repo').value.trim()) {
         document.getElementById('cr-repo').value = tpl.repo_url;
       }
-      if (tpl.odoo_image && !document.getElementById('cr-image').value.trim()) {
-        document.getElementById('cr-image').value = tpl.odoo_image;
-      }
+      setCreateTemplateImage(tpl);
       if (tpl.git_user && !document.getElementById('cr-git-user').value) {
         document.getElementById('cr-git-user').value = tpl.git_user;
       }
@@ -5943,12 +6789,19 @@ function populateTemplateSelect() {
       document.querySelectorAll('.cr-extra-cb').forEach(function(cb) {
         cb.checked = cb.value in tplExtras;
         var brInput = document.querySelector('.cr-extra-branch-input[data-repo="' + cb.value + '"]');
-        if (brInput) brInput.value = tplExtras[cb.value] || '';
+        if (!brInput) return;
+        brInput.value = tplExtras[cb.value] || '';
+        // The template's own branches are a decision, not a guess, and they
+        // replace whatever was typed: an empty one is open to a guess again.
+        brInput.removeAttribute('data-autofilled');
+        brInput.removeAttribute('data-edited');
       });
       // The template just decided the whole selection (replacing whatever a
       // branch was filled into); a filter left over from the previous one must
-      // not keep its picks off screen.
+      // not keep its picks off screen. Repos it left empty fall back to the
+      // branch the Odoo image implies.
       revealExtraRepos('cr-extra');
+      autofillExtraBranches('cr-extra');
     }
     fillCreateTemplateEnvVars(tpl);
   };
@@ -5957,7 +6810,14 @@ function populateTemplateSelect() {
   if (_createFromProduction) return;
   var initial = cachedTemplates.find(function(t) { return t.template_name === sel.value; });
   fillCreateTemplateEnvVars(initial);
-  if (initial) setCreateBaseBranch(initial.source_branch);
+  if (initial) {
+    setCreateBaseBranch(initial.source_branch);
+    // The server runs the preselected template's image when the field is
+    // left empty, so the field shows it and the extra repo branches are
+    // guessed from it, as they are for a template picked by hand.
+    setCreateTemplateImage(initial);
+    autofillExtraBranches('cr-extra');
+  }
 }
 
 // A new branch starts from the code its database snapshot was taken from (a
@@ -5965,6 +6825,19 @@ function populateTemplateSelect() {
 // replaces the field, so a template without one keeps what the user typed.
 function setCreateBaseBranch(branch) {
   if (branch) document.getElementById('cr-base-branch').value = branch;
+}
+
+// An image a template filled in follows the selected template: left stale, it
+// would run that template's database on another template's Odoo, and guess
+// its extra repo branches from it. One the user typed, or a production's,
+// stays.
+function setCreateTemplateImage(tpl) {
+  var imageField = document.getElementById('cr-image');
+  var image = imageField.value.trim();
+  if (!image || image === _createTemplateImage) {
+    imageField.value = (tpl && tpl.odoo_image) || '';
+    _createTemplateImage = imageField.value;
+  }
 }
 
 function openCreateFromTemplate(templateName) {
@@ -5975,6 +6848,7 @@ function openCreateFromTemplate(templateName) {
   document.getElementById('cr-hostname').value = '';
   document.getElementById('cr-repo').value = tpl && tpl.repo_url ? tpl.repo_url : '';
   document.getElementById('cr-image').value = tpl && tpl.odoo_image ? tpl.odoo_image : '';
+  _createTemplateImage = document.getElementById('cr-image').value;
   document.getElementById('cr-auto-install').value = tpl && tpl.auto_install_modules ? tpl.auto_install_modules : '';
   document.getElementById('cr-base-branch').value = tpl && tpl.source_branch ? tpl.source_branch : '';
   fillCreateTemplateEnvVars(tpl);
@@ -5983,12 +6857,11 @@ function openCreateFromTemplate(templateName) {
   errEl.textContent = '';
   document.getElementById('cr-submit').disabled = false;
   loadTemplates().then(function() {
-    populateTemplateSelect();
-    var sel = document.getElementById('cr-template');
-    sel.value = templateName;
+    populateTemplateSelect(templateName);
     var fresh = cachedTemplates.find(function(t) { return t.template_name === templateName; }) || tpl;
     fillCreateTemplateEnvVars(fresh);
-    // Assigned outright: populateTemplateSelect() filled the first template's.
+    // Assigned outright: setCreateBaseBranch() would keep a branch the card's
+    // older copy of the template put there.
     document.getElementById('cr-base-branch').value = fresh && fresh.source_branch ? fresh.source_branch : '';
   });
   loadCredentials().then(function() {
@@ -6025,6 +6898,7 @@ function openCreateFromTemplate(templateName) {
     }).join('');
     setExtraRepoActionsEnabled('cr-extra', true);
     initExtraRepoTools('cr-extra');
+    autofillExtraBranches('cr-extra');
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
@@ -6033,6 +6907,9 @@ function openCreateFromTemplate(templateName) {
 // Set when the create modal was opened from a production card: the environment
 // is then built from a dev copy of that production instead of a template.
 var _createFromProduction = '';
+// The Odoo image a template put into the create modal, so that picking another
+// template can tell it from one the user typed.
+var _createTemplateImage = '';
 
 function setCreateSourceProduction(name) {
   _createFromProduction = name || '';
@@ -6058,6 +6935,7 @@ function openCreateModal(fromProduction) {
   document.getElementById('cr-hostname').value = '';
   document.getElementById('cr-repo').value = prod && prod.repo_url ? prod.repo_url : '';
   document.getElementById('cr-image').value = prod && prod.odoo_image ? prod.odoo_image : '';
+  _createTemplateImage = '';
   document.getElementById('cr-base-branch').value = prod && prod.branch ? prod.branch : '';
   document.getElementById('cr-auto-install').value = '';
   document.getElementById('cr-env-vars').value = '';
@@ -6067,7 +6945,7 @@ function openCreateModal(fromProduction) {
   errEl.style.display = 'none';
   errEl.textContent = '';
   document.getElementById('cr-submit').disabled = false;
-  loadTemplates().then(populateTemplateSelect);
+  loadTemplates().then(function() { populateTemplateSelect(); });
   loadCredentials().then(function() {
     var sel = document.getElementById('cr-git-user');
     sel.innerHTML = '<option value="">— None —</option>';
@@ -6101,6 +6979,7 @@ function openCreateModal(fromProduction) {
     }).join('');
     setExtraRepoActionsEnabled('cr-extra', true);
     initExtraRepoTools('cr-extra');
+    autofillExtraBranches('cr-extra');
   });
   showModal('create-modal');
   document.getElementById('cr-branch').focus();
@@ -7646,6 +8525,411 @@ async function activateLicense() {
 const API_EXTRA_REPOS = '/api/extra-repos';
 let cachedExtraRepos = [];
 
+// The import runs on the server; this page only renders the catalogue and
+// polls the team's latest import job, so a reload or a closed dialog loses
+// nothing.
+var ocaRows = [];
+var ocaByName = new Map();
+var ocaVisibleCount = 0;
+var ocaLoading = false;
+var ocaStarting = false;
+var ocaStale = false;
+var ocaJob = null;
+var ocaJobItems = new Map();
+var ocaPollTimer = 0;
+var ocaBranchQueue = [];
+var ocaBranchActive = 0;
+
+function ocaVersions() {
+  return Array.from(new Set(document.getElementById('oca-versions').value.split(/[\s,]+/).filter(Boolean)));
+}
+
+function ocaRunning() {
+  return !!ocaJob && ocaJob.status === 'running';
+}
+
+// Successful imports show up as existing_as once the catalogue is reloaded,
+// so after that only a finished job's failures still need its state.
+function applyOcaJob(job, reconciled) {
+  ocaJob = job || null;
+  ocaJobItems = new Map();
+  (ocaJob ? ocaJob.items : []).forEach(function(item) {
+    if (ocaJob.status === 'running' || !reconciled || item.status === 'error') ocaJobItems.set(item.name, item);
+  });
+}
+
+function ocaRowState(row) {
+  var item = ocaJobItems.get(row.name);
+  return item ? item.status : '';
+}
+
+function ocaRowLocked(row) {
+  return !!(row.existing_as || row.name_taken) || ['queued', 'adding', 'done'].includes(ocaRowState(row));
+}
+
+function ocaPending() {
+  return ocaRows.filter(function(row) { return row.selected && !ocaRowLocked(row); });
+}
+
+function ocaFailedItems() {
+  if (!ocaJob || ocaRunning()) return [];
+  return ocaJob.items.filter(function(item) {
+    var row = ocaByName.get(item.name);
+    return item.status === 'error' && row && !row.existing_as && !row.name_taken;
+  });
+}
+
+function setOcaError(message) {
+  var error = document.getElementById('oca-error');
+  error.textContent = message;
+  error.style.display = message ? 'block' : 'none';
+}
+
+function openOcaImportModal() {
+  showModal('oca-import-modal');
+  document.getElementById('oca-search').focus();
+  if (ocaRows.length) renderOcaRepos();
+  // Reload every time: the team's repositories may have changed meanwhile.
+  loadOcaCatalog();
+}
+
+function closeOcaImportModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  hideModal('oca-import-modal');
+}
+
+async function loadOcaCatalog() {
+  if (ocaLoading) return;
+  ocaLoading = true;
+  setOcaError('');
+  if (ocaRows.length) updateOcaSummary(); else renderOcaRepos();
+  try {
+    var data = await readResult(await fetch(API_EXTRA_REPOS + '/oca'));
+    if (!data.ok) throw new Error(data.error || 'Failed to load OCA catalogue');
+    var old = ocaByName;
+    ocaRows = data.repos.map(function(repo, idx) {
+      var row = Object.assign(old.get(repo.name) || {
+        selected: false, desired: [], branches: null, branchState: '', branchError: ''
+      }, repo);
+      row.idx = idx;
+      if (row.existing_as || row.name_taken) row.selected = false;
+      return row;
+    });
+    ocaByName = new Map(ocaRows.map(function(row) { return [row.name, row]; }));
+    ocaStale = !!data.stale;
+    applyOcaJob(data.job, true);
+    scheduleOcaPoll();
+  } catch (e) {
+    setOcaError(e.message);
+  } finally {
+    ocaLoading = false;
+    renderOcaRepos();
+  }
+}
+
+function scheduleOcaPoll() {
+  clearTimeout(ocaPollTimer);
+  if (ocaRunning()) ocaPollTimer = setTimeout(pollOcaJob, 1500);
+}
+
+async function fetchOcaJob() {
+  var data = await readResult(await fetch(API_EXTRA_REPOS + '/oca/import'));
+  if (!data.ok) throw new Error(data.error || 'Failed to read import progress');
+  return data.job;
+}
+
+async function pollOcaJob() {
+  clearTimeout(ocaPollTimer);
+  var job;
+  try {
+    job = await fetchOcaJob();
+  } catch (e) {
+    // A proxy restart or network blip must not end the progress display.
+    scheduleOcaPoll();
+    return;
+  }
+  await followOcaJob(job);
+}
+
+async function followOcaJob(job) {
+  applyOcaJob(job, false);
+  updateOcaRows();
+  if (ocaRunning()) { scheduleOcaPoll(); return; }
+  // Finished: reload so new repositories appear as existing here and in the tab.
+  loadExtraRepos();
+  await loadOcaCatalog();
+}
+
+function ocaMissingBranches(row) {
+  return !row.branches ? [] : row.desired.filter(function(b) { return !row.branches.includes(b); });
+}
+
+function ocaReady(row) {
+  return !ocaRowLocked(row) && row.branchState === 'loaded' && row.branches.length > 0 &&
+    !ocaMissingBranches(row).length;
+}
+
+function applyOcaVersions() {
+  var versions = ocaVersions();
+  ocaRows.forEach(function(row) {
+    if (row.selected && !ocaRowLocked(row)) {
+      row.desired = versions.slice();
+      updateOcaRow(row);
+    }
+  });
+  updateOcaSummary();
+}
+
+function queueOcaBranches(row) {
+  if (row.branchState === 'queued' || row.branchState === 'loading' || row.branchState === 'loaded') return;
+  row.branchState = 'queued';
+  row.branchError = '';
+  ocaBranchQueue.push(row);
+  pumpOcaBranches();
+}
+
+function pumpOcaBranches() {
+  while (ocaBranchActive < 3 && ocaBranchQueue.length) {
+    var row = ocaBranchQueue.shift();
+    if (!row.selected) { row.branchState = ''; continue; }
+    ocaBranchActive++;
+    fetchOcaBranches(row);
+  }
+}
+
+async function fetchOcaBranches(row) {
+  row.branchState = 'loading';
+  updateOcaRow(row);
+  try {
+    var data = await readResult(await fetch(API_EXTRA_REPOS + '/ls-remote', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_url: row.repo_url})
+    }));
+    if (!data.ok) throw new Error(data.error || 'Failed to list branches');
+    row.branches = (data.branches || []).slice().sort(function(a, b) { return b.localeCompare(a, undefined, {numeric: true}); });
+    row.branchState = 'loaded';
+  } catch (e) {
+    row.branchState = 'error';
+    row.branchError = e.message;
+  } finally {
+    ocaBranchActive--;
+    pumpOcaBranches();
+    updateOcaRow(row);
+    updateOcaSummary();
+  }
+}
+
+function ocaRowStatus(row) {
+  var item = ocaJobItems.get(row.name);
+  var state = item ? item.status : '';
+  if (state === 'queued') return ['Queued', false];
+  if (state === 'adding') return ['Adding…', false];
+  if (state === 'done') return ['Imported as ' + row.extra_name, false];
+  if (row.existing_as) return ['Already added as ' + row.existing_as, false];
+  if (row.name_taken) return ['Name already in use: ' + row.extra_name, true];
+  if (state === 'error') return ['Import failed: ' + item.error, true];
+  if (state === 'skipped') return [item.error, false];
+  if (!row.selected) return ['', false];
+  if (row.branchState === 'error') return [row.branchError, true];
+  if (row.branchState !== 'loaded') return ['Loading branches…', false];
+  if (!row.branches.length) return ['No branches found', true];
+  var missing = ocaMissingBranches(row);
+  if (missing.length) return ['Unavailable: ' + missing.join(', '), true];
+  return row.desired.length ? ['Downloads now: ' + row.desired.join(', '), false] :
+    ['Downloads nothing now; each branch downloads on first use', false];
+}
+
+function ocaRowHtml(row) {
+  var id = row.idx;
+  return '<div class="oca-heading"><label class="check-item"><input type="checkbox" id="oca-select-' + id + '" data-row="' + id + '" data-action="select">' + esc(row.name) + '</label>' +
+    '<span class="hint">' + Number(row.stars) + ' stars' + (row.archived ? ' · Archived' : '') + '</span></div>' +
+    '<div class="oca-description">' + esc(row.description) + '</div>' +
+    '<div class="oca-description">Import as <code>' + esc(row.extra_name) + '</code></div>' +
+    '<div class="oca-status"></div><div class="oca-branch-area"></div>';
+}
+
+function ocaBranchesHtml(row, missing) {
+  var id = row.idx;
+  if (row.branchState === 'error') {
+    return '<button class="btn" id="oca-retry-branches-' + id + '" data-row="' + id + '" data-action="reload-branches">Retry loading branches</button>';
+  }
+  if (row.branchState !== 'loaded' || !row.branches.length) return '';
+  return '<div class="oca-branches">' +
+    row.branches.concat(missing).map(function(branch, index) {
+      return '<label class="check-item"><input type="checkbox" id="oca-branch-' + id + '-' + index + '" data-row="' + id + '" data-action="branch" value="' + escHtmlAttr(branch) + '">' +
+        esc(branch) + (missing.includes(branch) ? ' (unavailable)' : '') + '</label>';
+    }).join('') + '</div>';
+}
+
+// Patch the row's existing nodes in place. Async events (branch lists, import
+// progress) must never replace a control the user may be clicking right now.
+function updateOcaRow(row) {
+  var el = row && row.el;
+  if (!el) return;
+  var locked = ocaRowLocked(row);
+  var state = ocaRowState(row);
+  var select = el.querySelector('[data-action="select"]');
+  select.checked = row.selected || state === 'queued' || state === 'adding' || state === 'done';
+  select.disabled = locked;
+  var status = ocaRowStatus(row);
+  var statusEl = el.querySelector('.oca-status');
+  statusEl.textContent = status[0];
+  statusEl.classList.toggle('error', status[1]);
+  var area = el.querySelector('.oca-branch-area');
+  var missing = ocaMissingBranches(row);
+  var shown = row.selected && !row.existing_as && !row.name_taken;
+  var key = JSON.stringify([shown, row.branchState, row.branches, missing]);
+  if (area.dataset.key !== key) {
+    var focus = area.contains(document.activeElement) ? document.activeElement.id : '';
+    area.dataset.key = key;
+    area.innerHTML = shown ? ocaBranchesHtml(row, missing) : '';
+    if (focus) (document.getElementById(focus) || select).focus({preventScroll: true});
+  }
+  area.querySelectorAll('input').forEach(function(input) {
+    input.checked = row.desired.includes(input.value);
+    input.disabled = locked;
+  });
+  var retry = area.querySelector('[data-action="reload-branches"]');
+  if (retry) retry.disabled = locked;
+}
+
+function updateOcaRows() {
+  ocaRows.forEach(updateOcaRow);
+  updateOcaSummary();
+}
+
+// Rebuilds the list; only for search, sort, filters and catalogue loads.
+function renderOcaRepos() {
+  var query = document.getElementById('oca-search').value.trim().toLowerCase();
+  var selectedOnly = document.getElementById('oca-selected-only').checked;
+  var archived = document.getElementById('oca-archived').checked;
+  var sort = document.getElementById('oca-sort').value;
+  var visible = ocaRows.filter(function(row) {
+    return (!selectedOnly || row.selected) && (archived || !row.archived || row.selected) &&
+      (row.name + ' ' + row.description).toLowerCase().includes(query);
+  }).sort(function(a, b) { return (sort === 'stars' ? b.stars - a.stars : 0) || a.name.localeCompare(b.name); });
+  var list = document.getElementById('oca-repos');
+  var focus = list.contains(document.activeElement) ? document.activeElement.id : '';
+  ocaRows.forEach(function(row) { row.el = null; });
+  list.innerHTML = visible.length ? '' :
+    '<div class="empty">' + (ocaLoading ? 'Loading OCA catalogue…' : 'No matching repositories.') + '</div>';
+  visible.forEach(function(row) {
+    var el = document.createElement('div');
+    el.className = 'oca-row';
+    el.innerHTML = ocaRowHtml(row);
+    list.appendChild(el);
+    row.el = el;
+    updateOcaRow(row);
+  });
+  if (focus) { var target = document.getElementById(focus); if (target) target.focus({preventScroll: true}); }
+  ocaVisibleCount = visible.length;
+  updateOcaSummary();
+}
+
+function updateOcaSummary() {
+  var running = ocaRunning();
+  var pending = ocaPending();
+  var failed = ocaFailedItems();
+  var items = ocaJob ? ocaJob.items : [];
+  function count(status) { return items.filter(function(item) { return item.status === status; }).length; }
+  var submit = document.getElementById('oca-submit');
+  submit.disabled = running || ocaLoading || ocaStarting || !pending.length || !pending.every(ocaReady);
+  submit.textContent = running || ocaStarting ? 'Importing…' : 'Import ' + pending.length + ' repositories';
+  var retry = document.getElementById('oca-retry');
+  retry.hidden = running || !failed.length;
+  retry.disabled = ocaLoading || ocaStarting;
+  retry.textContent = 'Retry ' + failed.length + ' failed';
+  document.getElementById('oca-reload').disabled = ocaLoading;
+  document.getElementById('oca-stale').hidden = !ocaStale;
+  var parts = [ocaVisibleCount + ' of ' + ocaRows.length + ' repositories', pending.length + ' selected'];
+  if (items.length) {
+    parts.push((running ? 'Importing: ' : 'Last import: ') + count('done') + ' imported, ' + count('error') + ' failed' +
+      (count('skipped') ? ', ' + count('skipped') + ' skipped' : '') +
+      (running ? ', ' + (count('queued') + count('adding')) + ' remaining' : ''));
+  }
+  document.getElementById('oca-summary').textContent = parts.join(' · ');
+}
+
+document.getElementById('oca-repos').addEventListener('change', function(event) {
+  var input = event.target;
+  var row = ocaRows[Number(input.dataset.row)];
+  if (!row || ocaRowLocked(row)) return;
+  if (input.dataset.action === 'select') {
+    row.selected = input.checked;
+    if (row.selected) {
+      // Selecting always starts from the current Common versions.
+      row.desired = ocaVersions();
+      queueOcaBranches(row);
+    }
+  } else if (input.dataset.action === 'branch') {
+    row.desired = row.desired.filter(function(b) { return b !== input.value; });
+    if (input.checked) row.desired.push(input.value);
+  }
+  updateOcaRow(row);
+  updateOcaSummary();
+});
+
+document.getElementById('oca-repos').addEventListener('click', function(event) {
+  if (event.target.dataset.action !== 'reload-branches') return;
+  var row = ocaRows[Number(event.target.dataset.row)];
+  if (!row || ocaRowLocked(row)) return;
+  queueOcaBranches(row);
+  updateOcaRow(row);
+});
+
+async function startOcaImport(retryOnly) {
+  if (ocaRunning() || ocaLoading || ocaStarting) return;
+  var selections;
+  if (retryOnly) {
+    selections = ocaFailedItems().map(function(item) {
+      return {name: item.name, branches: item.branches};
+    });
+  } else {
+    var pending = ocaPending();
+    if (!pending.length || !pending.every(ocaReady)) return;
+    // Listed branches download now; an empty list downloads each on first use.
+    selections = pending.map(function(row) {
+      return {name: row.name, branches: row.desired.slice()};
+    });
+  }
+  if (!selections.length) return;
+  ocaStarting = true;
+  setOcaError('');
+  updateOcaSummary();
+  var previous = ocaJob ? ocaJob.id : '';
+  var response = null;
+  var data;
+  try {
+    response = await fetch(API_EXTRA_REPOS + '/oca/import', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repos: selections})
+    });
+    data = await readResult(response);
+  } catch (e) {
+    data = {ok: false, error: 'Connection error: ' + e.message};
+  } finally {
+    ocaStarting = false;
+  }
+  if (data.ok) {
+    applyOcaJob(data.job, false);
+    scheduleOcaPoll();
+  } else {
+    setOcaError(data.error || 'Failed to start the import');
+  }
+  updateOcaRows();
+  if (data.ok || (response && !isAmbiguousGatewayStatus(response.status))) return;
+  // A lost response does not mean the import did not start: ask the server.
+  try {
+    var job = await fetchOcaJob();
+    if (job && job.id !== previous) {
+      setOcaError('');
+      await followOcaJob(job);
+    }
+  } catch (e) {
+    // Keep the original error; the next dialog open shows the server state.
+  }
+}
+
 async function loadExtraRepos() {
   try {
     var r = await fetch(API_EXTRA_REPOS);
@@ -9164,9 +10448,12 @@ var MODAL_CLOSERS = {
   'version-modal': closeVersionModal,
   'add-extra-repo-modal': closeAddExtraRepoModal,
   'extra-branches-modal': closeExtraBranchesModal,
+  'oca-import-modal': closeOcaImportModal,
   'add-credential-modal': closeAddCredentialModal,
   'secret-modal': closeSecretModal,
   'import-from-odoo-modal': closeImportFromOdooModal,
+  's3-template-modal': closeS3TemplateModal,
+  'template-sync-modal': closeTemplateSync,
   'import-odoo-modal': closeImportOdooModal,
   'template-settings-modal': closeTemplateSettingsModal,
   'confirm-modal': cancelConfirm,
@@ -9324,7 +10611,12 @@ function renderWalStatus() {
   var g = s.guard || {};
   var a = s.archiver || {};
   var badge = s.status === 'ok' ? 'badge-running' : s.status === 'warn' ? 'badge-busy' : s.status === 'off' ? 'badge-neutral' : 'badge-exited';
-  function metric(label, value) { return '<span>' + label + ': <strong>' + esc(value) + '</strong></span>'; }
+  // esc() blanks falsy input, which would hide zero counts; missing values show "—".
+  function metric(label, value) { return '<span>' + label + ': <strong>' + esc(value == null ? '—' : String(value)) + '</strong></span>'; }
+  function localTime(value) {
+    var d = value ? new Date(value) : null;
+    return d && !isNaN(d) ? d.toLocaleString() : value;
+  }
   function button(action, label, disabled) {
     return '<button class="btn"' + ((_walBusy || disabled) ? ' disabled' : '') +
       ' onclick="controlWal(\'' + action + '\')">' + (_walBusy ? 'Working…' : label) + '</button>';
@@ -9337,22 +10629,22 @@ function renderWalStatus() {
     '<div class="env-actions">' + actions + '</div></div>' +
     '<p>' + esc(s.detail || '') + '</p>' +
     '<div class="env-meta">' +
-      metric('Queue', s.ready_count == null ? '—' : s.ready_count + ' segments · ' + fmtBytes(s.ready_bytes)) + ' · ' +
-      metric('Queue stop limit', s.stop_queue_bytes == null ? '—' : fmtBytes(s.stop_queue_bytes)) + ' · ' +
+      metric('Queue', s.ready_count == null ? null : s.ready_count + ' segments · ' + fmtBytes(s.ready_bytes)) + ' · ' +
+      metric('Queue stop limit', s.stop_queue_bytes == null ? null : fmtBytes(s.stop_queue_bytes)) + ' · ' +
       metric('Oldest waiting', walDuration(s.oldest_ready_seconds)) + ' · ' +
       metric('No progress', walDuration(s.no_progress_seconds)) + '</div>' +
-    '<div class="env-meta">' + metric('WAL on disk', s.wal_bytes == null ? '—' : fmtBytes(s.wal_bytes)) + ' · ' +
-      metric('Available to PostgreSQL', s.disk_free_bytes == null ? '—' : fmtBytes(s.disk_free_bytes)) + ' · ' +
-      metric('Safety reserve', s.reserve_bytes == null ? '—' : fmtBytes(s.reserve_bytes)) + ' · ' +
-      metric('Disk consumption', s.disk_growth_bytes_per_second == null ? '—' : fmtBytes(s.disk_growth_bytes_per_second) + '/s') + ' · ' +
+    '<div class="env-meta">' + metric('WAL on disk', s.wal_bytes == null ? null : fmtBytes(s.wal_bytes)) + ' · ' +
+      metric('Available to PostgreSQL', s.disk_free_bytes == null ? null : fmtBytes(s.disk_free_bytes)) + ' · ' +
+      metric('Safety reserve', s.reserve_bytes == null ? null : fmtBytes(s.reserve_bytes)) + ' · ' +
+      metric('Disk consumption', s.disk_growth_bytes_per_second == null ? null : fmtBytes(s.disk_growth_bytes_per_second) + '/s') + ' · ' +
       metric('Estimated time to reserve', walDuration(s.seconds_to_reserve)) + '</div>' +
-    '<div class="env-meta">' + metric('Archived', a.archived_count == null ? '—' : a.archived_count) + ' · ' +
-      metric('Last archive', a.last_archived_time || '—') + ' · ' + metric('Failed attempts', a.failed_count == null ? '—' : a.failed_count) + ' · ' +
-      metric('PG restarts', s.restart_count == null ? '—' : s.restart_count) + '</div>' +
+    '<div class="env-meta">' + metric('Archived', a.archived_count) + ' · ' +
+      metric('Last archive', localTime(a.last_archived_time) || null) + ' · ' + metric('Failed attempts', a.failed_count) + ' · ' +
+      metric('PG restarts', s.restart_count) + '</div>' +
     (s.attempt ? '<div class="env-meta">' + metric('Current upload', s.attempt.segment + ' · ' + walDuration(s.attempt.seconds)) + '</div>' : '') +
     (s.last_attempt && s.last_attempt.exit_code ? '<p>Last upload failed: exit ' + esc(s.last_attempt.exit_code) + '. Check PostgreSQL logs.</p>' : '') +
     (s.storage ? '<div class="env-meta">' + metric('Storage probe', s.storage.detail) + '</div>' : '') +
-    (s.preflight && s.preflight.status ? '<div class="env-meta">' + metric('Last startup check', s.preflight.status + ' · ' + s.preflight.detail) + '</div>' : '') +
+    (s.preflight && s.preflight.status ? '<div class="env-meta">' + metric('Last startup check', [s.preflight.status, s.preflight.detail].filter(Boolean).join(' · ')) + '</div>' : '') +
     '<div class="env-meta">Shared by all productions and teams. ' +
       (g.latched ? 'Applications remain stopped during recovery. ' : '') +
       (g.paused ? 'Paused archiving retains WAL and does not free disk space. ' : '') +
@@ -9471,6 +10763,12 @@ async function loadProductions() {
     cachedProds = data.productions || [];
     window._prodBackupConfigured = !!data.backup_configured;
     window._teamBaseDomain = data.base_domain || window._teamBaseDomain || '';
+    // The token is set in Server settings and applied on restart; follow the
+    // live state so the setup notice does not outlive it.
+    var tokenNotice = document.getElementById('prod-token-notice');
+    if (tokenNotice && data.production_token_set !== undefined) {
+      tokenNotice.hidden = !!data.production_token_set;
+    }
     _prodWebhookSecret = (data.webhook && data.webhook.secret) || '';
     var box = document.getElementById('prod-webhook-box');
     if (box) {
@@ -9521,6 +10819,11 @@ function renderProductions() {
             return '<a class="prod-domain prod-mono" href="' + escAttr(scheme + '://' + d) + '" target="_blank" rel="noopener">' + esc(d) + '</a>';
           }).join('') +
           '<span class="badge ' + prodBadgeClass(p.status) + '">' + esc(p.status) + '</span>' +
+          (p.mcp_status === 'sync_failed'
+            ? '<span class="badge badge-partial" title="OduMCP addon installation or key setup failed, so the production_odoo_* MCP tools are unavailable. Check the production logs, then run sync_production_mcp.">MCP failed</span>'
+            : p.mcp_status === 'unsupported'
+              ? '<span class="badge badge-neutral" title="OduMCP supports Odoo 16 and later, so the production_odoo_* MCP tools are not available for this production. Infrastructure tools work.">MCP n/a</span>'
+              : '') +
           prodProgressBadge(p) +
           prodQueuedBadge(p) +
           (p.auto_update ? '<span class="badge badge-neutral" title="Deploys automatically on GitHub push">auto</span>' : '') +
@@ -9711,7 +11014,7 @@ function _prodSettingsHtml(p) {
     '<div style="margin-bottom:16px"><button class="btn btn-start" onclick="prodApplySettings(\'' + n + '\')">Apply — recreates container</button></div>' +
     '<div class="form-group"><label for="ps-conf-' + n + '">odoo.conf overrides (one per line, key = value)</label>' +
       '<textarea id="ps-conf-' + n + '" rows="4" placeholder="limit_time_real = 300">' + esc(conf) + '</textarea>' +
-      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*, listen ports) are refused; workers must stay at least 1.</div></div>' +
+      '<div class="hint">Win over the auto-tuned workers/limits and survive deploys. Managed keys (addons_path, data_dir, db_*, listen interface/ports) are refused; workers must stay at least 1. Enabling the database manager (list_db = True) also needs an admin_passwd of at least 12 characters.</div></div>' +
     '<div><button class="btn" onclick="prodSaveOdooConf(\'' + n + '\')">Save odoo.conf — restarts Odoo</button></div>' +
   '</div>';
 }
@@ -9817,9 +11120,16 @@ async function _prodPost(url, body, okMsg, skipReload) {
   return null;
 }
 
-function prodAction(name, action) {
-  _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/' + action, undefined,
-    'Production "' + name + '": ' + action);
+async function prodAction(name, action) {
+  var data = await _prodPost(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/' + action, undefined, '');
+  if (!data) return;
+  // Start/restart re-check a production flagged unhealthy; one that still
+  // fails the check keeps the flag, so it is not reported as a success.
+  if (data.healthy === false) {
+    showToast('Production "' + name + '": ' + action + ' done, but it is still unhealthy (health check timed out). Check its logs.', true);
+  } else {
+    showToast('Production "' + name + '": ' + action);
+  }
 }
 
 async function prodUpdate(name) {
@@ -9908,6 +11218,7 @@ async function _prodPublishTemplate(name, template, overwrite) {
       msg += affected.length
         ? '. Remounted (changes preserved): ' + affected.join(', ')
         : '. No other environments were affected.';
+      msg += pinnedEnvsNote(res);
       var failures = res.remount_failures || [];
       if (failures.length) {
         msg += ' Remount issues: ' + failures.map(function(f) {
@@ -10034,6 +11345,10 @@ function _parseProductionEnvLines(raw) {
 }
 
 function openCreateProductionModal(fromEnv) {
+  // The server refuses creation without the team's production_token; repeat
+  // the Production tab's setup notice here instead of failing after submit.
+  var tokenNotice = document.getElementById('prod-token-notice');
+  var tokenMissing = !!tokenNotice && !tokenNotice.hidden;
   var overlay = document.createElement('div');
   overlay.className = 'modal-overlay show';
   overlay.id = 'create-prod-modal';
@@ -10041,11 +11356,14 @@ function openCreateProductionModal(fromEnv) {
     '<div class="modal" role="dialog" aria-modal="true">' +
       '<div class="modal-header"><h3>Create Production</h3></div>' +
       '<div class="modal-body">' +
+        (tokenMissing ? '<div class="prod-notice" role="note">' + tokenNotice.innerHTML + '</div>' : '') +
+        '<div class="form-error" id="cp-error" role="alert"></div>' +
         '<div class="form-group"><label for="cp-name">Name</label><input type="text" id="cp-name" placeholder="erp"></div>' +
         '<div class="form-group"><label for="cp-fromenv">Promote from environment (optional)</label>' +
           '<input type="text" id="cp-fromenv" value="' + escHtmlAttr(fromEnv || '') + '" placeholder="empty = fresh or template seed">' +
           '<div class="hint">Copies the environment\'s database and filestore (its Odoo briefly stops for a consistent copy); repository, branch and image default to the environment\'s</div></div>' +
-        '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/org/repo.git"></div>' +
+        '<div class="form-group"><label for="cp-repo">Repository URL</label><input type="text" id="cp-repo" placeholder="https://github.com/owner/repo.git">' +
+          '<div class="hint">HTTPS or SSH (<code>git@github.com:owner/repo.git</code>). For a private repository, use the SSH URL with the team deploy key from Credentials → SSH deploy key</div></div>' +
         '<div class="form-group"><label for="cp-branch">Branch</label><input type="text" id="cp-branch" placeholder="production"></div>' +
         '<div class="form-group"><label for="cp-domain">Domain' + (window._teamBaseDomain ? ' (optional)' : '') + '</label>' +
           '<input type="text" id="cp-domain" placeholder="' + escHtmlAttr(window._teamBaseDomain ? 'empty = default under ' + window._teamBaseDomain : 'erp.customer.com') + '">' +
@@ -10062,10 +11380,15 @@ function openCreateProductionModal(fromEnv) {
           '<div class="hint">Unchecked: inherit variables when promoting from an environment. Checked: use only the variables below; empty means none. One KEY=VALUE per line. Manage named secrets in Credentials → Secrets. HOST, USER and PASSWORD are set automatically from the database credentials; those three and PORT are reserved names.</div></div>' +
         '<div class="form-group"><label for="cp-template">Template (optional)</label><input type="text" id="cp-template" placeholder="empty = fresh database"></div>' +
         '<div class="form-group"><label class="select-box"><input type="checkbox" id="cp-auto"> Deploy automatically on GitHub push</label></div>' +
+        '<div class="hint" id="cp-progress" role="status" aria-live="polite" style="display:none">' +
+          '<span>Pulling the image and initializing the database… Closing this dialog does not stop creation.</span> ' +
+          '<span id="cp-elapsed" aria-hidden="true"></span>' +
+        '</div>' +
       '</div>' +
       '<div class="modal-footer">' +
-        '<button class="btn" onclick="document.getElementById(\'create-prod-modal\').remove()">Cancel</button>' +
-        '<button class="btn btn-start" onclick="submitCreateProduction()">Create production</button>' +
+        '<button class="btn" id="cp-cancel" onclick="document.getElementById(\'create-prod-modal\').remove()">Cancel</button>' +
+        '<button class="btn btn-start" id="cp-submit" onclick="submitCreateProduction()"' +
+          (tokenMissing ? ' disabled title="Set this team\'s production_token first"' : '') + '>Create production</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -10074,6 +11397,15 @@ function openCreateProductionModal(fromEnv) {
 
 async function submitCreateProduction() {
   var v = function(id) { return document.getElementById(id).value.trim(); };
+  var errEl = document.getElementById('cp-error');
+  var fail = function(msg) {
+    // The dialog may have been closed while the request ran: an error then
+    // goes to a persistent toast instead of a detached element.
+    if (!document.body.contains(errEl)) { showToast(msg, true); return; }
+    errEl.textContent = msg;
+    errEl.style.display = 'block';
+    errEl.scrollIntoView({ block: 'nearest' });
+  };
   var body = {
     name: v('cp-name'),
     repo_url: v('cp-repo'),
@@ -10087,27 +11419,77 @@ async function submitCreateProduction() {
     auto_update: document.getElementById('cp-auto').checked
   };
   if (!body.name || (!body.domain && !window._teamBaseDomain)) {
-    showToast(window._teamBaseDomain ? 'Name is required' : 'Name and domain are required', true);
+    fail(window._teamBaseDomain ? 'Name is required.' : 'Name and domain are required.');
     return;
   }
   if (!body.from_environment && (!body.repo_url || !body.branch || !body.odoo_image)) {
-    showToast('Repository, branch and image are required (or promote from an environment)', true);
+    fail('Repository, branch and image are required (or promote from an environment).');
     return;
   }
   if (body.from_environment && body.template_name) {
-    showToast('Pick either a template or an environment to seed from, not both', true);
+    fail('Pick either a template or an environment to seed from, not both.');
     return;
   }
   if (document.getElementById('cp-set-envvars').checked) {
     body.env_vars = _parseProductionEnvLines(document.getElementById('cp-envvars').value);
     if (body.env_vars === null) return;
   }
-  showToast('Creating production "' + body.name + '"… this can take a few minutes');
-  var data = await _prodPost(API_PRODUCTIONS + '/create', body,
-    'Production "' + body.name + '" created');
-  if (data) {
-    var modal = document.getElementById('create-prod-modal');
+  errEl.style.display = 'none';
+  var btn = document.getElementById('cp-submit');
+  var cancel = document.getElementById('cp-cancel');
+  var progress = document.getElementById('cp-progress');
+  var elapsed = document.getElementById('cp-elapsed');
+  var started = Date.now();
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+  // Closing the dialog does not cancel the request; the label says so.
+  cancel.textContent = 'Close';
+  progress.style.display = 'block';
+  var updateProgress = function() {
+    elapsed.textContent = _fmtElapsed(Date.now() - started);
+  };
+  updateProgress();
+  var progressTimer = setInterval(updateProgress, 1000);
+  // This request's own dialog: after Close, a dialog reopened for another
+  // production carries the same id and must survive this request's outcome.
+  var modal = document.getElementById('create-prod-modal');
+  var closeModal = function() {
     if (modal) modal.remove();
+  };
+  try {
+    var r = await fetch(API_PRODUCTIONS + '/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    var data = await readResult(r);
+    if (r.ok && data.ok) {
+      closeModal();
+      // Notes report partial failures, such as OduMCP setup, that the
+      // operator has to read, so they persist instead of fading.
+      var notes = data.notes || [];
+      if (notes.length) {
+        showToast('Production "' + body.name + '" created. ' + notes.join(' '), true);
+      } else {
+        showToast('Production "' + body.name + '" created');
+      }
+      await loadProductions();
+    } else if (isAmbiguousGatewayStatus(r.status)) {
+      closeModal();
+      showToast('The proxy stopped waiting, but production "' + body.name +
+        '" may still be being created. Refresh in a moment.');
+      await loadProductions();
+    } else {
+      fail(data.error || ('Creation failed (HTTP ' + r.status + ')'));
+    }
+  } catch (e) {
+    fail('Connection error: ' + e.message);
+  } finally {
+    clearInterval(progressTimer);
+    progress.style.display = 'none';
+    btn.disabled = false;
+    btn.textContent = 'Create production';
+    cancel.textContent = 'Cancel';
   }
 }
 

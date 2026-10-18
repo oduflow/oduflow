@@ -84,6 +84,8 @@ def test_live_mount_uses_mounted_checkout_and_runs_legacy_first(tmp_path, caplog
     ]
     assert any(".oduflow/odoo_sanitize" in line for line in logs)
     assert ".oduflow/odoo_sanitize" in caplog.text
+    # The scripts still ran: callers read a WARNING line as a failed step.
+    assert not any("WARNING:" in line for line in logs)
 
 
 def test_canonical_live_mount_path_does_not_warn(tmp_path, caplog):

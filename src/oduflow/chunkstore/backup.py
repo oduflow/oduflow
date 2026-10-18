@@ -250,7 +250,7 @@ class _Stream:
         self.sink.emit_new(plaintext)
         self.seg_lens.append(len(plaintext))
 
-    def add_file(self, entry: dict[str, Any], path: str) -> None:
+    def add_file(self, entry: dict[str, Any], path: str) -> int:
         if self.pos == 0 and not self.seg_lens and not self.pending:
             # Fresh segment: preserved chunks of unchanged files may have
             # been spliced into the sink since the last flush — rebase.
@@ -264,7 +264,14 @@ class _Stream:
                 self.pos += len(block)
                 for chunk in self.chunker.update(block):
                     self._emit(chunk)
+        # A live filestore can grow or shrink a file between the scan's lstat
+        # and this read. Record what was actually chunked: restore compares the
+        # written bytes against entry["size"], so a scan-time size would make
+        # every restore of this revision fail with a size mismatch.
+        actual = self.pos - start
+        entry["size"] = actual
         self.pending.append((entry, start, self.pos))
+        return actual
 
     def flush(self) -> None:
         for chunk in self.chunker.flush():
@@ -553,8 +560,19 @@ def backup(
                     unchanged_count += 1
                 continue
 
+            try:
+                actual = stream.add_file(entry, full)
+            except FileNotFoundError:
+                # Deleted between the scan's lstat and the read — routine on a
+                # live filestore. Skipping one vanished file beats aborting the
+                # whole snapshot (open() raises before anything was chunked, so
+                # the stream state is untouched).
+                file_count -= 1
+                total_bytes -= st.st_size
+                logger.warning("File vanished during backup, skipping: %s", rel)
+                continue
+            total_bytes += actual - st.st_size
             entries.append(entry)
-            stream.add_file(entry, full)
 
         stream.flush()
 

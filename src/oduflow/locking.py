@@ -13,12 +13,14 @@ never blocked by — a team-wide operation.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import threading
 import time
 from contextlib import contextmanager
 from typing import Iterator, cast
 
-from oduflow.errors import BusyError
+from oduflow.errors import BusyError, PrerequisiteNotMetError
 
 # Keys in the production keyspace. The system lock (cluster-wide PITR) and every
 # `prod:` key are mutually exclusive; see acquire_system.
@@ -265,7 +267,13 @@ def _describe_key(key: str, with_team: bool = False) -> str:
     "environment 'main'" otherwise. *with_team* names the team for messages
     that span teams."""
     if _is_prod_key(key):
-        _prefix, team_id, name = key.split(":", 2)
+        parts = key.split(":", 2)
+        if len(parts) < 3:
+            # The cluster-wide key ("prod:__cluster__") has no team/name parts;
+            # crashing here turned every contended scheduled base backup into a
+            # ValueError instead of a clean BusyError.
+            return "the production cluster"
+        _prefix, team_id, name = parts
         suffix = f" of team '{team_id}'" if with_team else ""
         return f"production '{name}'{suffix}"
     return f"environment '{key}'"
@@ -297,10 +305,38 @@ class _Holder:
         return f" (running for {age})"
 
 
+def _prepare_lock_dir(lock_dir: str) -> tuple[int, int] | None:
+    """Create *lock_dir*; as root, return the uid/gid to give lock files.
+
+    A root CLI or cron worker must not leave root-only lock files behind: a
+    server running as the data directory's owner could no longer open them, and
+    every one of its operations would fail. None when no change is needed.
+    """
+    os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    if os.geteuid() != 0:
+        return None
+    parent = os.stat(os.path.dirname(os.path.abspath(lock_dir)))
+    if parent.st_uid == 0:
+        return None
+    if os.stat(lock_dir).st_uid != parent.st_uid:
+        os.chown(lock_dir, parent.st_uid, parent.st_gid)
+    return parent.st_uid, parent.st_gid
+
+
+class _ProcessBusy(BusyError):
+    """Another process holds one of the file gates (named by ``gate``)."""
+
+    def __init__(self, message: str, gate: str) -> None:
+        super().__init__(message)
+        self.gate = gate
+
+
 class LockManager:
     """Thread-safe lock manager with per-environment and per-team granularity."""
 
-    def __init__(self) -> None:
+    def __init__(self, lock_dir: str | None = None) -> None:
+        self.lock_dir = lock_dir
+        self._file_handles: dict[tuple[str, str], list[int]] = {}
         self._env_locks: dict[str, threading.Lock] = {}
         self._team_locks: dict[str, threading.Lock] = {}
         self._active_team_locks: set[str] = set()
@@ -316,6 +352,49 @@ class LockManager:
         self._active_prod_keys: set[str] = set()
         self._system_holder: _Holder | None = None
         self._map_lock = threading.Lock()  # protects dict access
+
+    def _acquire_files(
+        self, kind: str, key: str, gates: list[tuple[str, bool]]
+    ) -> None:
+        """Use shared gates for readers, exclusive gates for team/system writers.
+
+        Files are never unlinked: replacing an inode would split the lock space.
+        All acquires are nonblocking, including mixed key/team acquisition.
+        """
+        if not self.lock_dir:
+            return
+        import fcntl
+
+        handles: list[int] = []
+        gate = ""
+        try:
+            owner = _prepare_lock_dir(self.lock_dir)
+            for gate, exclusive in gates:
+                path = os.path.join(
+                    self.lock_dir, hashlib.sha256(gate.encode()).hexdigest()
+                )
+                fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+                handles.append(fd)
+                if owner is not None and os.fstat(fd).st_uid != owner[0]:
+                    os.fchown(fd, *owner)
+                fcntl.flock(
+                    fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+                )
+        except OSError as exc:
+            for fd in handles:
+                os.close(fd)
+            if isinstance(exc, BlockingIOError):
+                raise _ProcessBusy(
+                    f"Another process holds {kind} '{key}'. Try again later.", gate
+                ) from exc
+            raise PrerequisiteNotMetError(
+                f"Cannot take a lock under {self.lock_dir}: {exc}"
+            ) from exc
+        self._file_handles[kind, key] = handles
+
+    def _release_files(self, kind: str, key: str) -> None:
+        for fd in self._file_handles.pop((kind, key), []):
+            os.close(fd)
 
     # -- environment locks --
 
@@ -362,6 +441,16 @@ class LockManager:
                     "It is still running server-side — wait for it to finish "
                     "rather than restarting it."
                 )
+            gates = [("key:" + env_name, True)]
+            if team_id is not None:
+                gates.append(("team:" + team_id, False))
+            if _is_prod_key(env_name):
+                gates.append(("system", False))
+            try:
+                self._acquire_files("env", env_name, gates)
+            except Exception:
+                lock.release()
+                raise
             self._env_holders[env_name] = _Holder(operation, env_name)
             if _is_prod_key(env_name):
                 self._active_prod_keys.add(env_name)
@@ -378,12 +467,48 @@ class LockManager:
         deploys queue behind a running one instead of dropping the push.
         Returns False when the timeout expires (caller skips the run).
         While waiting, the caller is listed by :func:`current_waiters`."""
+        deadline = time.monotonic() + timeout
         lock = self._get_env_lock(env_name)
         waiter: dict[str, object] = {"operation": operation, "since": time.monotonic()}
         with _progress_guard:
             _waiters.setdefault(env_name, []).append(waiter)
         try:
-            acquired = lock.acquire(blocking=True, timeout=timeout)
+            if not lock.acquire(blocking=True, timeout=timeout):
+                return False
+            gates = [("key:" + env_name, True)]
+            if _is_prod_key(env_name):
+                gates.append(("system", False))
+            while True:
+                with self._map_lock:
+                    if _is_prod_key(env_name) and self._system_holder is not None:
+                        # A cluster-wide operation owns the production keyspace.
+                        # Waiting it out is pointless here, so the caller skips
+                        # this run exactly as it would on a timeout.
+                        lock.release()
+                        return False
+                    try:
+                        self._acquire_files("env", env_name, gates)
+                    except _ProcessBusy as exc:
+                        if exc.gate == "system":
+                            # The same holds for a cluster-wide operation in
+                            # another process (a CLI PITR).
+                            lock.release()
+                            return False
+                    except Exception:
+                        lock.release()
+                        raise
+                    else:
+                        self._env_holders[env_name] = _Holder(operation, env_name)
+                        if _is_prod_key(env_name):
+                            self._active_prod_keys.add(env_name)
+                        return True
+                # Another process holds the key's file lock: poll it until the
+                # deadline, keeping this process's lock so no thread overtakes.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    lock.release()
+                    return False
+                time.sleep(min(0.05, remaining))
         finally:
             with _progress_guard:
                 queue = [w for w in _waiters.get(env_name, []) if w is not waiter]
@@ -391,19 +516,6 @@ class LockManager:
                     _waiters[env_name] = queue
                 else:
                     _waiters.pop(env_name, None)
-        if not acquired:
-            return False
-        with self._map_lock:
-            if _is_prod_key(env_name) and self._system_holder is not None:
-                # A cluster-wide operation owns the production keyspace. Waiting
-                # it out is pointless here, so the caller skips this run exactly
-                # as it would on a timeout.
-                lock.release()
-                return False
-            self._env_holders[env_name] = _Holder(operation, env_name)
-            if _is_prod_key(env_name):
-                self._active_prod_keys.add(env_name)
-        return True
 
     def describe_env_holder(self, env_name: str) -> str:
         """Holder hint for callers that report contention without raising."""
@@ -431,6 +543,7 @@ class LockManager:
                 lock.release()
             except RuntimeError:
                 return
+            self._release_files("env", env_name)
             self._env_holders.pop(env_name, None)
             clear_progress(env_name)
             self._active_prod_keys.discard(env_name)
@@ -474,6 +587,11 @@ class LockManager:
                     f"An environment operation in team '{team_id}' is in "
                     f"progress: {busy}. Try again later."
                 )
+            try:
+                self._acquire_files("team", team_id, [("team:" + team_id, True)])
+            except Exception:
+                lock.release()
+                raise
             self._active_team_locks.add(team_id)
             self._team_holders[team_id] = _Holder(operation)
 
@@ -510,6 +628,7 @@ class LockManager:
             lock = self._team_locks.get(team_id)
             if lock is None:
                 return
+            self._release_files("team", team_id)
             self._active_team_locks.discard(team_id)
             self._team_holders.pop(team_id, None)
             try:
@@ -564,10 +683,12 @@ class LockManager:
                 raise BusyError(
                     f"A production operation is in progress: {busy}. Try again later."
                 )
+            self._acquire_files("system", "system", [("system", True)])
             self._system_holder = _Holder(operation)
 
     def release_system(self) -> None:
         with self._map_lock:
+            self._release_files("system", "system")
             self._system_holder = None
 
     def active_operations(self) -> list[str]:

@@ -475,6 +475,7 @@ def test_schema_defaults_match_the_parser():
         ("storage", "overlay_threshold_mb"): settings.overlay_threshold_mb,
         ("agent", "image"): settings.agent_image,
         ("production", "workers_cap"): settings.prod_workers_cap,
+        ("production", "health_timeout"): settings.prod_health_timeout,
         ("production", "wal", "stop_queue_gb"): settings.wal_stop_queue_gb,
         ("team", "1", "environment_slots"): team.environment_slots,
         ("team", "1", "service_slots"): team.service_slots,

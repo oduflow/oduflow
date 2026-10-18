@@ -187,6 +187,7 @@ def _get_settings() -> Settings:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
         if _no_telemetry:
             settings = dataclasses.replace(settings, disable_telemetry=True)
+        _locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")
         _settings = settings
         _settings_raw = raw
     return _settings
@@ -1115,7 +1116,7 @@ def create_environment(
     Args:
         branch: The git branch to clone (e.g. "19.0", "feature/my-feature").
         env_name: Optional environment name. If empty, defaults to the branch name. Use this to create multiple environments from the same branch (e.g. env_name="client-a" with branch="19.0").
-        hostname: Optional short Traefik hostname (for example "qa"). By default public hostnames remain environment-derived (feature.dev.example.com). Teams that explicitly set environment_hostname_mode="slots" reuse dev1.example.com through devN.example.com. An explicit value replaces the team prefix in either mode, so hostname="qa" produces qa.example.com.
+        hostname: Optional short Traefik hostname (for example "qa"). By default public hostnames remain environment-derived (feature.dev.example.com). Teams that explicitly set environment_hostname_mode="slots" reuse dev1.example.com through devN.example.com. An explicit value replaces the team prefix in either mode, so hostname="qa" produces qa.example.com; a bare team domain (example.com) has no prefix to replace, so it also produces qa.example.com.
         template_name: Name of the template profile to use as database template. Pass "none" to skip template and initialise Odoo from scratch with -i base. When a template is specified, repo_url and odoo_image are loaded from template metadata (but can be overridden). A template saved from a live-mounted environment supplies local_path instead of repo_url and recreates the live-mount when allow_local_path is enabled. Installed modules whose __manifest__.py version in the checkout is higher than the one recorded in the template database are upgraded (-u) before the environment is reported ready; the setup log lists them under [TEMPLATE-UPGRADE].
         repo_url: URL of the git repository to clone. Optional when template_name is specified (loaded from template metadata).
         odoo_image: Full Docker image name with tag (e.g. "odoo:19.0"). Optional when template_name is specified (loaded from template metadata).
@@ -1413,6 +1414,7 @@ def save_as_template(
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
     else:
         lines.append("No other environments were affected.")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1500,6 +1502,7 @@ def save_production_as_template(
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
     else:
         lines.append("No other environments were affected.")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1548,6 +1551,17 @@ def list_templates(ctx: Context | None = None) -> str:
     return output
 
 
+def _pinned_envs_lines(result: dict[str, object]) -> list[str]:
+    pinned = cast("list[str]", result.get("pinned_envs", []))
+    if not pinned:
+        return []
+    return [
+        "Left on the filestore a scheduled sync retained for them (enable "
+        "Auto-refresh data or recreate them to follow the template): "
+        + ", ".join(pinned)
+    ]
+
+
 def _format_template_import_result(result: dict[str, object]) -> str:
     """Human-readable summary shared by the MCP tool and the CLI runner."""
     if "dump_reloaded" in result:  # s3 / local-path / refresh engine
@@ -1588,6 +1602,7 @@ def _format_template_import_result(result: dict[str, object]) -> str:
             "Remounted (changes preserved) filestore overlays for: "
             + ", ".join(affected)
         )
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1614,14 +1629,19 @@ def import_template(
     ctx: Context | None = None,
 ) -> str:
     """
-    Import a template. One tool, four source shapes:
+    Import a template. One tool, five source shapes:
 
     - http(s) URL of a running Odoo: downloads a full ZIP backup or
       database-only dump via the database manager API (master_pwd required).
     - "s3://bucket/prefix": syncs a raw backup layout file-by-file —
       efficient for very large databases and filestores (parallel downloads,
       resume, no archiving on the source). Credentials: s3_* args if given,
-      else the [backup] settings when the bucket matches, else anonymous.
+      else the secret remembered for this template, else the [backup]
+      settings when the bucket matches, else anonymous.
+    - "s3://bucket/path/backup.zip": a single Odoo backup archive already in
+      the bucket. Fetched whole whenever it changes and its filestore
+      replaces the template's wholesale, so prefer the prefix layout for a
+      large database; this shape is for the archive you already have.
     - Local path on the Oduflow host: a directory with the same raw layout
       (files are hardlinked, near-instant on the same filesystem), or a
       single dump file for a database-only import.
@@ -1636,7 +1656,7 @@ def import_template(
     `aws s3 sync`).
 
     Args:
-        source: http(s) Odoo URL, "s3://bucket/prefix", or a local path. Empty only with refresh=true.
+        source: http(s) Odoo URL, "s3://bucket/prefix", "s3://bucket/path/backup.zip", or a local path. Empty only with refresh=true.
         master_pwd: Odoo master password (database manager password). Required for http(s) sources only.
         db_name: Name of the database to back up (http mode only). If empty, auto-detected (fails if multiple DBs exist).
         template_name: Name of the template profile to create or update.
@@ -1644,8 +1664,8 @@ def import_template(
         overwrite: s3/local only: incrementally re-sync an EXISTING template — only changed files are fetched, an unchanged dump skips the DB reload. Requires explicit user permission: it replaces the template's current data.
         refresh: Reload the template DB from files already in the template directory (no source). Requires explicit user permission: it rebuilds the template database.
         s3_endpoint: s3 only: custom S3 endpoint URL (MinIO etc.); empty = AWS S3 or the configured [backup] endpoint.
-        s3_access_key: s3 only: access key for the source bucket (with s3_secret_key); empty = [backup] credentials or anonymous.
-        s3_secret_key: s3 only: secret key paired with s3_access_key.
+        s3_access_key: s3 only: access key for the source bucket (with s3_secret_key); empty = the key remembered for this template, else [backup] credentials or anonymous.
+        s3_secret_key: s3 only: secret key paired with s3_access_key, or "secret:<name>" to sign with an existing team secret. A raw value is stored as the team secret "s3-template-<template>" and the template records only the reference, so re-syncing needs no key. Leave empty to reuse it; required again when the endpoint or access key changes.
         s3_region: s3 only: region of the source bucket.
     """
     settings = _get_settings()
@@ -1712,11 +1732,14 @@ def refresh_template(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines = [f"{verb} filestore overlays for: {', '.join(affected)}"]
+    elif result.get("pinned_envs"):
+        lines = []
     else:
         lines = [
             f"No live overlay environments use template '{template_name}'; "
             "nothing to do."
         ]
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -1776,6 +1799,7 @@ def attach_filestore(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "⚠️ Remount issues:\n"
@@ -2124,6 +2148,40 @@ def delete_environment(env_name: str, ctx: Context | None = None) -> str:
     if warnings:
         result += "\n\n⚠️ Warnings:\n" + "\n".join(f"- {w}" for w in warnings)
     return result
+
+
+@mcp.tool()
+@handle_errors
+@with_env_lock
+def recreate_environment(env_name: str, ctx: Context | None = None) -> str:
+    """
+    Rebuild an environment from scratch while keeping its identity.
+
+    Tears the environment down and provisions it again from its recorded
+    configuration (git branch, repo, image, template, extra addons, env vars,
+    hostname) — a clean slate without re-entering anything. Unlike
+    delete_environment + create_environment, the environment's identity
+    survives: the dashboard share link already handed out stays valid, and the
+    scoped /mcp/<env> endpoint keeps the same Bearer token, so connected MCP
+    clients need no reconfiguration. Prefer this tool over delete + create
+    whenever the environment is being replaced rather than retired.
+
+    Args:
+        env_name: The environment to tear down and provision again.
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    result = env_ops.recreate_environment(settings, team, env_name)
+    lines = [
+        f"Environment '{env_name}' recreated from its recorded configuration.",
+        f"URL: {result['url']}",
+        f"Odoo Container: {result['odoo_container']}",
+        f"Database: {result['database']}",
+        f"Workspace: {result['workspace']}",
+        f"Creation time: {result.get('elapsed_seconds', '?')}s",
+        "The share link and the scoped MCP token were preserved.",
+    ]
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -5477,7 +5535,9 @@ def create_production(
 
     Args:
         name: Production name, e.g. "erp" (lowercase letters/digits/dashes).
-        repo_url: HTTPS git repository URL. Required unless from_environment
+        repo_url: Repository URL — HTTPS (https://github.com/owner/repo.git)
+                or SSH (git@github.com:owner/repo.git, needs the team deploy
+                key, see get_ssh_public_key). Required unless from_environment
                 is given (then it defaults to the environment's).
         branch: Git branch to deploy (full history is kept). Required unless
                 from_environment is given.
@@ -5588,16 +5648,36 @@ def create_production(
 @mcp.tool()
 @handle_errors
 @production_enabled
-def sync_production_mcp(name: str = "", ctx: Context | None = None) -> str:
+def sync_production_mcp(
+    name: str = "", refresh: bool = False, ctx: Context | None = None
+) -> str:
     """Install/configure odumcp and synchronize the configured production key.
 
     Empty name processes every production of this team, reporting failures
     separately. Use after changing production_token in TOML and restarting
-    Oduflow. No secret is accepted or returned. Stopped productions must be
-    started first. Adding the managed addon mount recreates the container.
+    Oduflow, or after moving a production to another Odoo version. No secret
+    is accepted or returned. Stopped productions must be started first.
+
+    Oduflow ships odumcp as a managed checkout unless the production's own
+    repositories contain the module; once they do, the managed copy is removed
+    (by this tool, or automatically by the deploy that brought the module in)
+    and never touched again. refresh=True re-clones the managed checkout from
+    the connector repository (same Odoo version) and upgrades the module —
+    the only way the managed module is updated; it requires an explicit name
+    (one production per call) and is a no-op for a module shipped in the
+    client repository. Adding or removing the managed mount, replacing or
+    refreshing the checkout, recreates the container. Each result reports the
+    addon source, the connector branch and commit, and whether the container
+    was recreated.
     """
     from oduflow import production_mcp
 
+    if refresh and not name:
+        raise ValueError(
+            "refresh=True re-clones the connector and recreates the production "
+            "container: name one production; refreshing every production of the "
+            "team in one call is not allowed."
+        )
     settings, team = _get_settings(), _resolve_team(ctx)
     names = [name] if name else sorted(production_registry.list_productions(team))
     results = []
@@ -5607,7 +5687,9 @@ def sync_production_mcp(name: str = "", ctx: Context | None = None) -> str:
         try:
             _locks.acquire_env(key, operation="sync_production_mcp")
             acquired = True
-            results.append(production_mcp.synchronize(settings, team, target))
+            results.append(
+                production_mcp.synchronize(settings, team, target, refresh=refresh)
+            )
         except FlowError as exc:
             results.append({"name": target, "status": "failed", "error": str(exc)})
         except Exception as exc:
@@ -5767,6 +5849,9 @@ def get_production_info(name: str, ctx: Context | None = None) -> str:
     settings = _get_settings()
     team = _resolve_team(ctx)
     info = production_ops.get_production_info(settings, team, name)
+    # Credential-valued odoo.conf overrides are masked for agents; the
+    # dashboard reads the same function and shows the operator the values.
+    info["odoo_conf"] = production_ops.mask_odoo_conf(info.get("odoo_conf"))
     import json as _json
 
     return _json.dumps(info, indent=2)
@@ -5804,6 +5889,18 @@ def production_logs(
     )
 
 
+def _still_unhealthy_note(settings: Settings, result: dict[str, Any]) -> str:
+    """Warning for a production that was flagged unhealthy and still is after
+    a start/restart (its result then carries ``healthy``)."""
+    if result.get("healthy") is not False:
+        return ""
+    return (
+        " WARNING: it still did not pass the health check within "
+        f"{settings.prod_health_timeout}s and stays marked unhealthy; inspect "
+        "production_logs."
+    )
+
+
 @mcp.tool()
 @handle_errors
 @production_enabled
@@ -5818,7 +5915,9 @@ def start_production(name: str, ctx: Context | None = None) -> str:
     settings = _get_settings()
     team = _resolve_team(ctx)
     result = production_ops.start_production(settings, team, name)
-    return f"Production '{name}' started ({result['odoo_container']})."
+    return f"Production '{name}' started ({result['odoo_container']})." + (
+        _still_unhealthy_note(settings, result)
+    )
 
 
 @mcp.tool()
@@ -5858,7 +5957,9 @@ def restart_production(name: str, ctx: Context | None = None) -> str:
             f"Production '{name}' recreated ({result['odoo_container']}) to "
             "apply its current Traefik routing."
         )
-    return f"Production '{name}' restarted ({result['odoo_container']})."
+    return f"Production '{name}' restarted ({result['odoo_container']})." + (
+        _still_unhealthy_note(settings, result)
+    )
 
 
 @mcp.tool()
@@ -6003,8 +6104,12 @@ def set_production_odoo_conf(
     Set or remove odoo.conf [options] overrides for a production and re-apply
     the config. Overrides are stored per production, win over the auto-tuned
     worker settings, and survive deploys and retunes. Keys managed by Oduflow
-    (addons_path, data_dir, db_*) cannot be overridden. Current overrides are
-    shown by get_production_info.
+    (addons_path, data_dir, db_*, the listen interface/ports and their
+    xmlrpc* aliases) cannot be overridden. Current overrides are shown by
+    get_production_info. Enabling Odoo's database manager
+    ("list_db": "True") requires an "admin_passwd" override of at least 12
+    characters. Credential values (admin_passwd, smtp_password) are stored
+    but reported back masked.
 
     Args:
         name: The production name.
@@ -6025,7 +6130,7 @@ def set_production_odoo_conf(
         unset_options=unset_list,
         restart=restart,
     )
-    conf = result["odoo_conf"]
+    conf = production_ops.mask_odoo_conf(result["odoo_conf"])
     conf_desc = "\n".join(f"  {k} = {v}" for k, v in sorted(conf.items())) or "  (none)"
     if result.get("message"):
         return f"{result['message']}\nCurrent overrides:\n{conf_desc}"
@@ -6127,20 +6232,35 @@ def rollback_production(
 @mcp.tool()
 @handle_errors
 @production_enabled
-def production_deploys(name: str, limit: int = 20, ctx: Context | None = None) -> str:
+def production_deploys(
+    name: str,
+    limit: int = 20,
+    include_output: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """
     Deploy history of a production (newest last): commits, actions, modules,
     status (success / rolled_back / rollback_failed / skipped), errors.
 
+    A failed deploy also records the step that failed (failed_step:
+    dependencies / install / upgrade / health / exception) and
+    failure_excerpt — the Odoo error record with its traceback. Exit code 255
+    from install/upgrade means Odoo could not load or upgrade the registry;
+    the excerpt says why.
+
     Args:
         name: The production name.
         limit: Max number of records (default 20).
+        include_output: Also return output_tail, the last lines of a failed
+            step's output (or of the server log for a failed health check).
     """
     team = _resolve_team(ctx)
     production_registry.get_production(team, name)
     deploys = production_ops.read_deploys(team, name, limit=limit)
     if not deploys:
         return f"No deploys recorded for production '{name}'."
+    if not include_output:
+        deploys = production_ops.strip_deploy_output(deploys)
     import json as _json
 
     return _json.dumps(deploys, indent=2)
@@ -6497,10 +6617,9 @@ def delete_production(
     are KEPT unless drop_database=true. Kept leftovers are tombstoned: the
     reaper purges them [lifecycle] prod_purge_hours after the deletion
     (0 = keep forever, the default), and `oduflow cleanup
-    --purge-deleted-productions --force` purges them immediately.
-    Re-creating a production with the same name revives the leftovers'
-    tombstone-free state (the kept database itself must still be dealt with
-    explicitly, see create_production).
+    --purge-deleted-productions --force` purges them immediately. The name
+    stays taken while leftovers are kept: create_production refuses it until
+    they are purged.
 
     Args:
         name: The production name.
@@ -7036,6 +7155,7 @@ def _run_retune_postgres(
                             ],
                             plan=plan,
                             output_path=str(candidate_path),
+                            odoo_image=record.get("odoo_image", ""),
                         )
                     except Exception as exc:  # noqa: BLE001 - report each production
                         odoo_errors.append(f"team {team.team_id}/{name}: {exc}")
@@ -7167,6 +7287,9 @@ def _run_retune_postgres(
         if existing is not None:
             _backup(path)
         path.write_text(candidate, encoding="utf-8")
+        # Same owner-only mode _build_prod_odoo_conf writes: this conf may
+        # carry admin_passwd. _backup copies the mode along with the bytes.
+        path.chmod(0o600)
         print(f"Updated: {path}")
         staged_container = production_ops.stage_prod_odoo_conf(
             client, settings, team, name, str(path)
@@ -7364,6 +7487,55 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
     return _get_settings()
 
 
+def _cli_locks(settings: Settings) -> LockManager:
+    return LockManager(os.path.join(settings.base_data_dir, ".locks"))
+
+
+def _cli_template_lock(
+    team_wide: Callable[[dict[str, Any]], bool] = lambda arguments: True,
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Direct CLI mutations share the server/cron file lock space.
+
+    Like the MCP tools, every command takes its template's key, and only the
+    ones that remount other environments (``team_wide`` of the bound
+    arguments) add the team lock. That acquire waits up to
+    ATTACH_SWAP_LOCK_TIMEOUT instead of failing the moment the server runs any
+    environment operation in the team.
+    """
+
+    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+        @functools.wraps(fn)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            values = inspect.signature(fn).bind(*args, **kwargs)
+            values.apply_defaults()
+            arguments = values.arguments
+            settings = arguments["settings"]
+            team = arguments["team"]
+            name = arguments.get("template_name") or arguments.get("branch", "default")
+            locks = _cli_locks(settings)
+            with locks.env_lock(
+                template_lock_key(team.team_id, name), operation=fn.__name__
+            ):
+                guard = (
+                    locks.team_lock_blocking(
+                        team.team_id, ATTACH_SWAP_LOCK_TIMEOUT, operation=fn.__name__
+                    )
+                    if team_wide(arguments)
+                    else contextlib.nullcontext()
+                )
+                with guard:
+                    return fn(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+# Re-initialising an existing template replaces the lower layer under its
+# environments; a new one has none yet.
+@_cli_template_lock(
+    lambda a: os.path.isdir(a["team"].get_template_dir(a["template_name"]))
+)
 def _run_init_template(
     settings: Settings,
     team: TeamSettings,
@@ -7391,6 +7563,7 @@ def _run_init_template(
     print(msg)
 
 
+@_cli_template_lock()
 def _run_template_from_env(
     settings: Settings,
     team: TeamSettings,
@@ -7416,6 +7589,7 @@ def _run_template_from_env(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
@@ -7423,6 +7597,7 @@ def _run_template_from_env(
     print("\n".join(lines))
 
 
+@_cli_template_lock()
 def _run_refresh_template(
     settings: Settings,
     team: TeamSettings,
@@ -7437,11 +7612,14 @@ def _run_refresh_template(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines = [f"{verb} filestore overlays for: {', '.join(affected)}"]
+    elif result.get("pinned_envs"):
+        lines = []
     else:
         lines = [
             f"No live overlay environments use template '{template_name}'; "
             "nothing to do."
         ]
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
@@ -7449,6 +7627,9 @@ def _run_refresh_template(
     print("\n".join(lines))
 
 
+# As in the MCP tool, the team lock covers only the remount-and-swap window,
+# not the staging of a possibly very large source.
+@_cli_template_lock(lambda a: False)
 def _run_attach_filestore(
     settings: Settings,
     team: TeamSettings,
@@ -7457,6 +7638,7 @@ def _run_attach_filestore(
     reset_env_changes: bool = False,
     strip_prefix: str = "auto",
 ) -> None:
+    locks = _cli_locks(settings)
     result = system_ops.attach_filestore(
         settings,
         team,
@@ -7464,6 +7646,9 @@ def _run_attach_filestore(
         source,
         reset_env_changes=reset_env_changes,
         strip_prefix=strip_prefix,
+        lock=lambda: locks.team_lock_blocking(
+            team.team_id, ATTACH_SWAP_LOCK_TIMEOUT, operation="attach_filestore"
+        ),
     )
     lines = [
         f"Filestore attached to template '{result['template_name']}'.",
@@ -7478,6 +7663,7 @@ def _run_attach_filestore(
     if affected:
         verb = "Reset" if reset_env_changes else "Remounted (changes preserved)"
         lines.append(f"{verb} filestore overlays for: {', '.join(affected)}")
+    lines += _pinned_envs_lines(result)
     if failures:
         lines.append(
             "Remount issues:\n" + "\n".join(f"- {env}: {msg}" for env, msg in failures)
@@ -7485,6 +7671,7 @@ def _run_attach_filestore(
     print("\n".join(lines))
 
 
+@_cli_template_lock()
 def _run_delete_template(
     settings: Settings, team: TeamSettings, template_name: str
 ) -> None:
@@ -7494,6 +7681,8 @@ def _run_delete_template(
     )
 
 
+# Replacement imports mutate lower layers under existing environments.
+@_cli_template_lock(lambda a: bool(a["overwrite"] or a["refresh"]))
 def _run_import_template(
     settings: Settings,
     team: TeamSettings,
@@ -7971,6 +8160,12 @@ def _run_cli() -> None:
         action="store_true",
         help="disable anonymous usage telemetry for this run (e.g. test runs)",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["debug", "info", "warning", "error"],
+        default="info",
+        help="log verbosity (default: info; warning hides progress messages)",
+    )
     sub = parser.add_subparsers(dest="command", title="commands", metavar="")
 
     p_ui_2fa = sub.add_parser(
@@ -8151,9 +8346,9 @@ def _run_cli() -> None:
         nargs="?",
         default="",
         help=(
-            "http(s) Odoo URL, s3://bucket/prefix, or a local path with "
-            "dump.* + filestore/ (a single dump file for DB-only). "
-            "Omit together with --refresh"
+            "http(s) Odoo URL, s3://bucket/prefix, s3://bucket/backup.zip, "
+            "or a local path with dump.* + filestore/ (a single dump file "
+            "for DB-only). Omit together with --refresh"
         ),
     )
     p_import.add_argument(
@@ -8193,12 +8388,29 @@ def _run_cli() -> None:
         "--s3-access-key", default="", help="s3 only: source bucket access key"
     )
     p_import.add_argument(
-        "--s3-secret-key", default="", help="s3 only: source bucket secret key"
+        "--s3-secret-key",
+        # A key typed on the command line lands in ~/.bash_history; the env var
+        # keeps it out while staying scriptable. An explicit flag still wins.
+        default=os.environ.get("ODUFLOW_S3_SECRET_KEY", ""),
+        help=(
+            "s3 only: source bucket secret key, or secret:<name> for a team "
+            "secret (default: $ODUFLOW_S3_SECRET_KEY). Omit when re-syncing: "
+            "the secret stored for the template is reused"
+        ),
     )
     p_import.add_argument(
         "--s3-region", default="", help="s3 only: source bucket region"
     )
     p_import.add_argument("--team", default="1", help="Team ID (default: 1)")
+
+    p_sync_tpl = sub.add_parser(
+        "sync-template", help="Run a cron-owned SSH template sync"
+    )
+    p_sync_tpl.add_argument("template_name")
+    p_sync_tpl.add_argument("--team", default="1")
+    p_sync_tpl.add_argument(
+        "--pending", action="store_true", help="Only consume a UI-queued request"
+    )
 
     p_lt = sub.add_parser("list-templates", help="List available template profiles")
     p_lt.add_argument("--team", default="1", help="Team ID (default: 1)")
@@ -8380,7 +8592,7 @@ def _run_cli() -> None:
     # --- Load TOML settings ----------------------------------------
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     logging.getLogger("docker").setLevel(logging.WARNING)
@@ -8542,6 +8754,20 @@ def _run_cli() -> None:
         )
         return
 
+    if args.command == "sync-template":
+        from oduflow import template_sync
+
+        result = template_sync.run(
+            _settings, _cli_team(), args.template_name, pending=args.pending
+        )
+        # Quiet ticks print nothing, so cron mails only real outcomes: nothing
+        # queued, or a request left queued behind a busy template.
+        if result.get("status") not in ("idle", "busy", "unconfigured", "disabled"):
+            print(json.dumps(result))
+        if result.get("status") == "partial":
+            raise SystemExit(1)
+        return
+
     if args.command == "list-templates":
         _run_list_templates(_settings, _cli_team())
         return
@@ -8573,43 +8799,52 @@ def _run_cli() -> None:
         manifest = load_stack(args.manifest)
         environ = stack_environ(args.manifest, args.env_file)
         team = _cli_team()
-        if args.stack_command == "plan":
-            print(
-                format_plan(
-                    build_plan(
-                        _settings, team, manifest, args.manifest, environ=environ
+        try:
+            if args.stack_command == "plan":
+                print(
+                    format_plan(
+                        build_plan(
+                            _settings, team, manifest, args.manifest, environ=environ
+                        )
                     )
                 )
-            )
-            return
-        if args.stack_command == "apply":
-            from oduflow import postgres_migration
+                return
+            if args.stack_command == "apply":
+                from oduflow import postgres_migration
 
-            postgres_migration.validate_configuration(_settings)
-            postgres_migration.refuse_pending(_settings)
-            migrations.run_pending(_settings)
-            _ensure_initialized(_settings)
-            quotas.apply_all(_settings)
-            stack_result = apply_stack(
-                _settings,
-                team,
-                manifest,
-                args.manifest,
-                environ=environ,
-                lock_manager=_locks,
-            )
-            print(format_plan(stack_result))
-            return
-        if args.stack_command == "status":
-            print(
-                json.dumps(
-                    stack_status(
-                        _settings, team, manifest, args.manifest, environ=environ
-                    ),
-                    indent=2,
+                postgres_migration.validate_configuration(_settings)
+                postgres_migration.refuse_pending(_settings)
+                migrations.run_pending(_settings)
+                _ensure_initialized(_settings)
+                quotas.apply_all(_settings)
+                stack_result = apply_stack(
+                    _settings,
+                    team,
+                    manifest,
+                    args.manifest,
+                    environ=environ,
+                    lock_manager=_locks,
                 )
-            )
-            return
+                print(format_plan(stack_result))
+                return
+            if args.stack_command == "status":
+                print(
+                    json.dumps(
+                        stack_status(
+                            _settings, team, manifest, args.manifest, environ=environ
+                        ),
+                        indent=2,
+                    )
+                )
+                return
+        except StackValidationError:
+            raise
+        except ValueError as exc:
+            # Manifest values flow into validators that raise bare ValueError
+            # (e.g. an invalid environment hostname): at this boundary that is
+            # a manifest error. Scoped to stack commands on purpose, so a
+            # ValueError bug anywhere else in the CLI keeps its traceback.
+            raise StackValidationError(str(exc)) from exc
 
 
 def _warn_local_path_security(settings: Settings) -> None:
@@ -8829,6 +9064,8 @@ def _start_http() -> None:
         timeout_graceful_shutdown=10,
         proxy_headers=True,
         forwarded_allow_ips=forwarded_allow_ips,
+        # Follow --log-level, so its access log is quieted along with ours.
+        log_level=logging.getLogger().getEffectiveLevel(),
     )
     server = uvicorn.Server(config)
     global _uvicorn_server
@@ -8948,13 +9185,18 @@ def main() -> None:
     prerequisite (e.g. Docker daemon unreachable) into a friendly process exit
     instead of a traceback. get_client() raises PrerequisiteNotMetError rather
     than SystemExit so the long-running server can recover; here at the CLI
-    boundary we convert it to an exit code."""
+    boundary we convert it to an exit code.
+
+    StackValidationError gets the same treatment: like FlowError it is
+    developer-authored input validation (a bad stack manifest) whose message
+    is the whole story. A bare ValueError stays a traceback on purpose — it
+    is just as likely a programming bug, and the traceback is the one thing
+    that identifies the fault in a bug report. The friendly branch still
+    records its traceback at --log-level debug."""
     try:
         _run_cli()
-    except FlowError as exc:
-        print(f"\n❌ {exc}", file=sys.stderr)
-        sys.exit(1)
-    except StackValidationError as exc:
+    except (FlowError, StackValidationError) as exc:
+        logger.debug("CLI command failed", exc_info=True)
         print(f"\n❌ {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

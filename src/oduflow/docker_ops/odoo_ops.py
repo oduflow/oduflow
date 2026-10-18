@@ -334,6 +334,9 @@ def _get_module_states(
     env_name: str,
     modules: tuple[str, ...],
 ) -> dict[str, str]:
+    # The names are interpolated into SQL, so validate them here rather than
+    # trusting every caller to have done it first.
+    _validate_module_names(modules)
     names = ", ".join(f"'{module}'" for module in modules)
     # This is a fixed, validated SELECT, so legacy environments may safely use
     # the cluster credential that their Odoo container already runs with.

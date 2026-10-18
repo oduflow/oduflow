@@ -44,7 +44,10 @@ certificate reuse is more important than descriptive URLs. For
 `hostname = "dev.example.com"`, that mode allocates `dev1.example.com` through
 `devN.example.com`; assignments survive stops and updates and return to the
 pool on deletion. Pass `hostname="qa"` to request `qa.example.com` in either
-mode. Explicit hostnames still consume environment capacity.
+mode. A bare team domain has no prefix to replace, so with
+`hostname = "example.com"` the same call gives `qa.example.com` (the Public
+Suffix List decides what is bare, so `example.co.uk` is also kept whole).
+Explicit hostnames still consume environment capacity.
 
 When creating an environment, Oduflow:
 
@@ -55,7 +58,7 @@ When creating an environment, Oduflow:
 5. **Installs dependencies** — auto-installs from `.oduflow/apt_packages.txt` and `.oduflow/requirements.txt` (the latter falls back to the repo root) if present
 6. **Configures Odoo** — uses repo's `.oduflow/odoo.conf` if available, otherwise the default template; if the repo keeps its modules in a top-level `addons/` directory, `addons_path` points there automatically
 7. **Starts the container** — with `--dev=xml` for hot-reloading XML/QWeb changes
-8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init`
+8. **Initializes base** — when `template=none`, runs `odoo -i base --stop-after-init` in a short-lived container *before* step 7, with the same generated `odoo.conf`, so options that only matter when a database is created — demo data (`without_demo`, or `with_demo` on Odoo 19+) — follow the repo's `.oduflow/odoo.conf`. The default template sets `without_demo = True`
 
 ### Starting a New Branch
 
@@ -185,17 +188,15 @@ Both folders support `.sql` and `.py` files, executed in alphabetical order (fir
 
 ### Team-level sanitization
 
-On startup, the folder `{team_data_dir}/odoo_sanitize/` is created and seeded with a default script:
-
-**`01_disable_mail.sql`** — disables incoming and outgoing mail servers:
+On startup, the folder `{team_data_dir}/odoo_sanitize/` is created and seeded with an example script, **`01_disable_mail.sql`**. All of its statements are commented out, so it runs without changing anything. On Odoo 16+, the native neutralization already deactivates outgoing and incoming mail servers. The example shows the format:
 
 ```sql
--- Disable incoming mail servers (fetchmail)
-UPDATE fetchmail_server SET active = false WHERE active = true;
-
--- Disable outgoing mail servers
-UPDATE ir_mail_server SET active = false WHERE active = true;
+-- Examples:
+-- UPDATE ir_mail_server SET active = false WHERE active = true;
+-- UPDATE fetchmail_server SET active = false WHERE active = true;
 ```
+
+Each `.sql` file runs as one transaction. If any statement fails, for example on a table whose module is not installed (`fetchmail_server` is absent until `mail` is installed), the whole file is rolled back.
 
 The team administrator can add, modify, or remove scripts in this folder to control sanitization for all environments in the team.
 
@@ -423,7 +424,7 @@ recorded in `productions.json`) or of an environment managed by a
 
 ### Recreating Environments
 
-The **Recreate** action (available via the Web Dashboard and REST API) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
+The **Recreate** action (available via the Web Dashboard, the REST API and the `recreate_environment` MCP tool) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
 
 ```bash
 # Via REST API
@@ -431,6 +432,15 @@ curl -X POST http://localhost:8000/api/environments/feature-login/recreate
 ```
 
 Recreate reads the original configuration from the container's Docker labels, so all parameters (repo URL, image, template, extra addons, git user) are preserved automatically.
+
+Recreate also preserves the environment's **identity**, which a manual delete +
+create does not: the [share link](security.md#shared-single-environment-dashboard-envname)
+already handed to a client keeps opening
+the scoped dashboard, and the scoped `/mcp/<env>` endpoint keeps the same
+Secret Key, so configured MCP clients reconnect without changes. Agents should
+therefore prefer `recreate_environment` over `delete_environment` +
+`create_environment` whenever the environment is being replaced rather than
+retired.
 
 ### Automatic Stop and Cleanup
 

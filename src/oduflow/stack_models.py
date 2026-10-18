@@ -199,6 +199,8 @@ class Production(StackModel):
     def valid_odoo_conf(cls, value: dict[str, str]) -> dict[str, str]:
         from oduflow.docker_ops.production_ops import (
             RESERVED_ODOO_CONF_KEYS,
+            parse_list_db_override,
+            validate_admin_passwd_override,
             validate_workers_override,
         )
 
@@ -207,15 +209,25 @@ class Production(StackModel):
             key = key.lower()
             if key in normalized:
                 raise ValueError(f"Duplicate odoo.conf option: {key}")
-            if key in RESERVED_ODOO_CONF_KEYS or not re.fullmatch(
-                r"[A-Za-z0-9_.-]+", key
-            ):
-                raise ValueError(f"Invalid or reserved odoo.conf option: {key}")
+            if key in RESERVED_ODOO_CONF_KEYS:
+                raise ValueError(
+                    f"odoo.conf option {key} is reserved: Oduflow manages it "
+                    "(see set_production_odoo_conf for the managed keys)"
+                )
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+                raise ValueError(f"Invalid odoo.conf option: {key}")
             if "\n" in option or "\r" in option:
                 raise ValueError(f"odoo.conf option must be a single line: {key}")
             if key == "workers":
                 validate_workers_override(option)
+            if key == "admin_passwd":
+                validate_admin_passwd_override(option)
+            if key == "list_db":
+                parse_list_db_override(option)
             normalized[key] = option
+        # The pair rule itself (an enabled database manager needs a master
+        # password) is enforced at plan/apply time, where the team's base
+        # conf chain is known: the password may legitimately live there.
         return normalized
 
 

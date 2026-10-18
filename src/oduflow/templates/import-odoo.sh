@@ -22,6 +22,10 @@
 #                        cloned from their origin (stay updatable), private ones
 #                        are downloaded as local extra-addons repos
 #
+# Database only (the "Database only" checkbox) skips the filestore entirely —
+# for a dev template the database and addons are usually enough:
+#   --without-filestore  upload the manifest and SQL dump but no filestore
+#
 # The --token is minted by the "Import from Odoo.sh" button in the Oduflow
 # dashboard and is valid for 15 minutes.
 set -euo pipefail
@@ -31,6 +35,7 @@ TOKEN=""
 WITH_ENTERPRISE=0
 WITH_THEMES=0
 WITH_EXTRA=0
+WITHOUT_FILESTORE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --server) SERVER="${2:-}"; shift 2 ;;
@@ -40,8 +45,10 @@ while [ $# -gt 0 ]; do
         --with-enterprise) WITH_ENTERPRISE=1; shift ;;
         --with-themes) WITH_THEMES=1; shift ;;
         --with-extra-addons) WITH_EXTRA=1; shift ;;
+        --without-filestore) WITHOUT_FILESTORE=1; shift ;;
         -h|--help)
-            grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -n 28
+            # The header comment, up to the first line of code.
+            awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"
             exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -79,8 +86,10 @@ if [ ! -f "$SQL_GZ" ] || [ ! -f "$MANIFEST" ]; then
     echo "       trigger a backup from the Odoo.sh dashboard and try again." >&2
     exit 3
 fi
-if [ ! -d "$FS" ]; then
+if [ "$WITHOUT_FILESTORE" != 1 ] && [ ! -d "$FS" ]; then
     echo "ERROR: filestore directory not found: $FS" >&2
+    echo "       To import the database without the filestore, re-run the" >&2
+    echo "       same command with --without-filestore." >&2
     exit 3
 fi
 
@@ -235,27 +244,6 @@ dir_bytes() {  # exact on GNU coreutils (du -sb); KB-approx fallback elsewhere
     fi
 }
 
-chunks=()
-total_bytes=0
-for path in "$FS"/*; do
-    [ -d "$path" ] || continue
-    name="$(basename "$path")"
-    if [[ "$name" =~ ^[0-9a-f]{2}$ ]] || [ "$name" = "checklist" ]; then
-        chunks+=("$name")
-        total_bytes=$((total_bytes + $(dir_bytes "$path")))
-    fi
-done
-
-done_bytes=0
-remaining=()
-for c in "${chunks[@]}"; do
-    if [[ "$done_chunks" == *" $c "* ]]; then
-        done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
-    else
-        remaining+=("$c")
-    fi
-done
-
 progress() {  # done total label
     local pct=0
     [ "$2" -gt 0 ] && pct=$(( $1 * 100 / $2 ))
@@ -279,20 +267,50 @@ upload_chunk() {  # name
     done
 }
 
-echo ">> filestore: $(human "$total_bytes") in ${#chunks[@]} chunks (${#remaining[@]} to upload)"
-for c in "${remaining[@]}"; do
-    progress "$done_bytes" "$total_bytes" "uploading $c"
-    if ! upload_chunk "$c"; then
-        echo >&2
-        echo "ERROR: failed to upload filestore chunk '$c' after retries." >&2
-        echo "       Re-run the same command to resume from here." >&2
-        exit 5
-    fi
-    done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
-    progress "$done_bytes" "$total_bytes" "done $c"
-done
-progress "$total_bytes" "$total_bytes" "complete"
-echo >&2
+upload_filestore() {
+    local path name c
+    local -a chunks=() remaining=()
+    local total_bytes=0 done_bytes=0
+    for path in "$FS"/*; do
+        [ -d "$path" ] || continue
+        name="$(basename "$path")"
+        if [[ "$name" =~ ^[0-9a-f]{2}$ ]] || [ "$name" = "checklist" ]; then
+            chunks+=("$name")
+            total_bytes=$((total_bytes + $(dir_bytes "$path")))
+        fi
+    done
+
+    for c in "${chunks[@]}"; do
+        if [[ "$done_chunks" == *" $c "* ]]; then
+            done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
+        else
+            remaining+=("$c")
+        fi
+    done
+
+    echo ">> filestore: $(human "$total_bytes") in ${#chunks[@]} chunks (${#remaining[@]} to upload)"
+    for c in "${remaining[@]}"; do
+        progress "$done_bytes" "$total_bytes" "uploading $c"
+        if ! upload_chunk "$c"; then
+            echo >&2
+            echo "ERROR: failed to upload filestore chunk '$c' after retries." >&2
+            echo "       Re-run the same command to resume from here." >&2
+            exit 5
+        fi
+        done_bytes=$((done_bytes + $(dir_bytes "$FS/$c")))
+        progress "$done_bytes" "$total_bytes" "done $c"
+    done
+    progress "$total_bytes" "$total_bytes" "complete"
+    echo >&2
+}
+
+if [ "$WITHOUT_FILESTORE" = 1 ]; then
+    # The server also learns this at finalize, so chunks staged by an earlier,
+    # interrupted full run are not promoted as a partial filestore.
+    echo ">> filestore: skipped (--without-filestore)"
+else
+    upload_filestore
+fi
 
 # ---- addons (optional: enterprise / themes / extra repos) ------------------
 #
@@ -439,9 +457,11 @@ fi
 echo ">> finalizing (restoring database — this can take a few minutes)…"
 RESULT_FILE="$(mktemp)"
 trap 'rm -f "$STATUS_FILE" "$RESULT_FILE"' EXIT
+FINALIZE_URL="${API}/finalize"
+[ "$WITHOUT_FILESTORE" = 1 ] && FINALIZE_URL="${FINALIZE_URL}?without_filestore=1"
 # --fail-with-body keeps the server's error body on HTTP >= 400 (plain -f
 # would discard it, hiding the reason the riskiest step failed).
-if ! curl -sS "${CURL_FAIL[@]}" -H "$AUTH" -X POST "${API}/finalize" -o "$RESULT_FILE"; then
+if ! curl -sS "${CURL_FAIL[@]}" -H "$AUTH" -X POST "$FINALIZE_URL" -o "$RESULT_FILE"; then
     echo "ERROR: finalize request failed:" >&2
     cat "$RESULT_FILE" >&2 || true
     echo >&2
@@ -463,6 +483,13 @@ if not d.get("ok"):
 r=d.get("result",{})
 print(">> Done — template ready:", r.get("template_name"))
 print("   DB:", r.get("template_db"), " restore:", r.get("restore_seconds"), "s")
+filestore = {
+    "imported": "imported",
+    "kept": "not imported — the template keeps its existing filestore",
+    "none": "not included",
+}.get(r.get("filestore"))
+if filestore:
+    print("   Filestore:", filestore)
 warnings = r.get("addon_warnings") or []
 if warnings:
     print(">> Addon warnings:")

@@ -78,7 +78,7 @@ def _visitor(app, url: str) -> TestClient:
     client = TestClient(app)
     path = url.split("/", 3)[3]
     resp = client.get("/" + path, follow_redirects=False)
-    assert resp.status_code == 303, resp.text
+    assert resp.status_code == 200, resp.text
     assert ui_scope.SHARE_COOKIE in client.cookies
     return client
 
@@ -121,10 +121,17 @@ def test_key_is_exchanged_for_a_cookie_and_dropped_from_the_url(app):
     url = _share_url(app)
     client = TestClient(app)
     resp = client.get("/" + url.split("/", 3)[3], follow_redirects=False)
-    assert resp.status_code == 303
+    # A page, not an HTTP redirect: a link opened from another site keeps that
+    # site as initiator across redirects, and the browser would then withhold
+    # the SameSite=Strict cookie from the landing request.
+    assert resp.status_code == 200
+    assert "location" not in resp.headers
+    assert f'<meta http-equiv="refresh" content="0;url=/env/{_ENV}">' in resp.text
+    assert f'location.replace("/env/{_ENV}")' in resp.text
     # Landing URL carries no key: it must not sit in history or a Referer.
-    assert resp.headers["location"] == f"/env/{_ENV}"
-    assert "key=" not in resp.headers["location"]
+    assert "key=" not in resp.text
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    assert resp.headers["cache-control"] == "no-store"
     cookie = resp.headers["set-cookie"]
     assert cookie.startswith(f"{ui_scope.SHARE_COOKIE}=")
     assert "HttpOnly" in cookie and "strict" in cookie.lower()
@@ -162,7 +169,7 @@ def test_share_cookie_scopes_an_existing_operator_session(app):
     result = client.post(f"/api/environments/{_ENV}/share").json()["result"]
     path = str(result["url"]).split("/", 3)[3]
 
-    assert client.get("/" + path, follow_redirects=False).status_code == 303
+    assert client.get("/" + path, follow_redirects=False).status_code == 200
     envs = client.get("/api/environments").json()["environments"]
     assert [e["env_name"] for e in envs] == [_ENV]
 
@@ -286,7 +293,7 @@ def test_scoped_logout_restores_an_existing_operator_session(app):
     client = _operator(app)
     result = client.post(f"/api/environments/{_ENV}/share").json()["result"]
     path = str(result["url"]).split("/", 3)[3]
-    assert client.get("/" + path, follow_redirects=False).status_code == 303
+    assert client.get("/" + path, follow_redirects=False).status_code == 200
     assert len(client.get("/api/environments").json()["environments"]) == 1
     page = client.get("/")
     assert page.url.path == f"/env/{_ENV}"
@@ -306,7 +313,7 @@ def test_logout_signs_out_an_operator_holding_a_revoked_share_cookie(app):
     client = _operator(app)
     result = client.post(f"/api/environments/{_ENV}/share").json()["result"]
     path = str(result["url"]).split("/", 3)[3]
-    assert client.get("/" + path, follow_redirects=False).status_code == 303
+    assert client.get("/" + path, follow_redirects=False).status_code == 200
     _operator(app).post(f"/api/environments/{_ENV}/share/revoke")
     # The dead cookie no longer scopes anything: they are back on the full
     # dashboard, so Logout has to mean a real sign-out.

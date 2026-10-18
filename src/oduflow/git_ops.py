@@ -863,6 +863,44 @@ def rev_parse(repo_path: str, ref: str = "HEAD") -> str:
         raise ExternalCommandError("git rev-parse", e.returncode, e.stderr or "")
 
 
+def current_branch(repo_path: str) -> str:
+    """Name of the branch checked out in *repo_path*.
+
+    Best-effort: a detached HEAD reports the literal ``"HEAD"`` and any Git
+    failure (not a repository, no commits yet) reports ``""``. Callers use
+    this as a drift signal — a non-empty name different from the expected
+    branch (including a detached ``"HEAD"``) is drift; ``""`` is "unknown"
+    and never drift on its own. Guarded against Git's upward repository
+    discovery: a *repo_path* that is not itself a working-tree root (e.g. a
+    plain directory nested inside some other repository) reports ``""``
+    instead of the enclosing repository's branch.
+    """
+    # rev-parse prints the toplevel and the abbreviated HEAD in argument
+    # order, so one call answers both questions.
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo_path,
+            "rev-parse",
+            "--show-toplevel",
+            "--abbrev-ref",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        env=_GIT_BASE_ENV,
+    )
+    lines = result.stdout.splitlines()
+    if (
+        result.returncode != 0
+        or len(lines) != 2
+        or os.path.realpath(lines[0]) != os.path.realpath(repo_path)
+    ):
+        return ""
+    return lines[1]
+
+
 def is_git_repository(repo_path: str) -> bool:
     """Whether *repo_path* is a Git working tree.
 

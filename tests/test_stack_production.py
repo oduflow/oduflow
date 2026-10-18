@@ -107,6 +107,10 @@ def test_production_schema_requires_exactly_one_target(setup):
         ("odooConf", {"workers": "2\ndb_host = evil"}),
         ("odooConf", {"workers": "0"}),
         ("odooConf", {"gevent_port": "9000"}),
+        ("odooConf", {"admin_passwd": "admin"}),
+        ("odooConf", {"admin_passwd": "short"}),
+        # Odoo reads anything but True/true/False/false as a truthy string.
+        ("odooConf", {"list_db": "0"}),
         ("serverMode", "threaded"),
         ("env", {"SELF": {"productionField": "url"}}),
         ("env", {"DB": {"database": "x", "databaseField": "url"}}),
@@ -481,6 +485,21 @@ def test_odoo_conf_keys_follow_odoo_case_normalization(setup):
         StackManifest.model_validate(raw)
 
 
+def test_enabling_the_database_manager_needs_a_master_password(setup, tmp_path):
+    # The pair rule lands at plan time, where the team's base conf chain is
+    # readable: the password may legitimately live there instead.
+    setup[2].spec.production.odoo_conf = {"list_db": "True"}
+    plan = build_plan(*setup)
+    assert plan.has_conflicts
+    assert any("admin_passwd" in str(action) for action in plan.actions)
+
+    setup[2].spec.production.odoo_conf = {
+        "list_db": "True",
+        "admin_passwd": "correct-horse-battery",
+    }
+    assert not build_plan(*setup).has_conflicts
+
+
 def test_default_server_mode_keeps_pre_existing_spec_hash(setup):
     # Manifests applied before serverMode existed must keep their
     # appliedHash, or every Stack production would be recreated on upgrade.
@@ -536,3 +555,57 @@ def test_legacy_record_without_server_mode_is_not_reconfigured(setup):
     ) as reconfigure:
         apply_stack(*setup)
     reconfigure.assert_not_called()
+
+
+class _ReachedContainer(Exception):
+    """The real reconfigure got past its env_vars check to the container."""
+
+
+def test_layout_env_var_refuses_stack_creation(setup):
+    settings, team, manifest, path = setup
+    team = replace(team, production_token="p" * 40)
+    settings = replace(settings, teams={"1": team})
+    manifest.spec.production.env = {"PYTHONUSERBASE": "/tmp/empty"}
+    with (
+        patch("oduflow.stack_production.production_ops.get_client"),
+        patch("oduflow.stack_production.production_ops.ensure_prod_infra") as provision,
+    ):
+        with pytest.raises(ValueError, match="Cannot set PYTHONUSERBASE"):
+            apply_stack(settings, team, manifest, path)
+    provision.assert_not_called()
+    assert production_registry.list_productions(team) == {}
+
+
+def test_changed_env_with_layout_var_refuses_stack_update(setup):
+    register(setup, owned=True)
+    settings, team, manifest, _ = setup
+    manifest.spec.production.env = {"MODE": "production", "HOME": "/srv/odoo"}
+    with (
+        patch("oduflow.stack_production.production_ops.get_client"),
+        patch(
+            "oduflow.stack_production.production_ops._get_container",
+            side_effect=_ReachedContainer,
+        ),
+    ):
+        with pytest.raises(ValueError, match="Cannot set HOME"):
+            apply_stack(*setup)
+    record = production_registry.get_production(team, "control")
+    assert record["env_vars"] == {"MODE": "production"}
+
+
+def test_stored_layout_var_does_not_block_stack_update(setup):
+    # Recorded before the check existed: re-applying the same env with another
+    # change reaches the container instead of being refused.
+    settings, team, manifest, _ = setup
+    manifest.spec.production.env = {"PYTHONUSERBASE": "/opt/pyuser"}
+    register(setup, owned=True)
+    manifest.spec.production.server_mode = "gevent"
+    with (
+        patch("oduflow.stack_production.production_ops.get_client"),
+        patch(
+            "oduflow.stack_production.production_ops._get_container",
+            side_effect=_ReachedContainer,
+        ),
+    ):
+        with pytest.raises(_ReachedContainer):
+            apply_stack(*setup)

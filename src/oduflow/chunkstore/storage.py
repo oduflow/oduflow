@@ -23,6 +23,12 @@ class Storage(Protocol):
 
     def put(self, key: str, data: bytes) -> None: ...
 
+    def put_if_absent(self, key: str, data: bytes) -> bool:
+        """Create *key* with *data* only if it does not exist yet; True when
+        this call created it. The one conditional primitive: first-writer-wins
+        for shared objects such as the store config."""
+        ...
+
     def list(self, prefix: str) -> list[str]:
         """All keys under *prefix* (recursive), sorted."""
         ...
@@ -67,6 +73,28 @@ class LocalStorage:
                 pass
             raise
 
+    def put_if_absent(self, key: str, data: bytes) -> bool:
+        path = self._path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Write the full content to a temp file first, then publish it with
+        # os.link: the link is atomic and fails with EEXIST when the key
+        # already exists, so exactly one concurrent creator wins and nobody
+        # can ever observe a partially written object.
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".put-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
     def list(self, prefix: str) -> list[str]:
         base = self._path(prefix.rstrip("/")) if prefix else self.root
         keys: list[str] = []
@@ -106,6 +134,7 @@ class CountingStorage:
             "exists": 0,
             "get": 0,
             "put": 0,
+            "put_if_absent": 0,
             "list": 0,
             "rename": 0,
             "delete": 0,
@@ -126,6 +155,10 @@ class CountingStorage:
     def put(self, key: str, data: bytes) -> None:
         self._count("put")
         self.inner.put(key, data)
+
+    def put_if_absent(self, key: str, data: bytes) -> bool:
+        self._count("put_if_absent")
+        return self.inner.put_if_absent(key, data)
 
     def list(self, prefix: str) -> list[str]:
         self._count("list")

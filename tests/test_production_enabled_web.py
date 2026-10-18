@@ -9,8 +9,12 @@ from oduflow.settings import Settings, TeamSettings
 from oduflow.web_ui import mount_web_ui
 
 
-def _client(tmp_path, *, enabled: bool) -> TestClient:
-    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team_1"))
+def _client(tmp_path, *, enabled: bool, production_token: str = "") -> TestClient:
+    team = TeamSettings(
+        team_id="1",
+        data_dir=str(tmp_path / "team_1"),
+        production_token=production_token,
+    )
     settings = Settings(
         base_data_dir=str(tmp_path),
         prod_enabled=enabled,
@@ -23,6 +27,12 @@ def _client(tmp_path, *, enabled: bool) -> TestClient:
 
 def _production_tab(html: str) -> str:
     match = re.search(r'<button[^>]+data-tab="production"[^>]*>', html)
+    assert match is not None
+    return match.group(0)
+
+
+def _token_notice(html: str) -> str:
+    match = re.search(r'<div id="prod-token-notice"[^>]*>', html)
     assert match is not None
     return match.group(0)
 
@@ -80,3 +90,37 @@ def test_wal_control_requires_cluster_confirmation(tmp_path):
         response = client.post("/api/productions/wal-control", json={"action": "pause"})
     assert response.json()["ok"] is False
     assert "ALL-PRODUCTIONS" in response.json()["error"]
+
+
+def test_missing_production_token_is_announced_before_the_form(tmp_path):
+    client = _client(tmp_path, enabled=True)
+
+    dashboard = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert " hidden" not in _token_notice(dashboard.text)
+    assert "__PROD_TOKEN_NOTICE_HIDDEN__" not in dashboard.text
+    # Only a signed-in Server settings browser gets the console link.
+    assert '<a href="/admin" hidden>Open Server settings</a>' in dashboard.text
+    # The dialog repeats the notice and cannot be submitted meanwhile.
+    assert "(tokenMissing ? ' disabled" in dashboard.text
+    with patch("oduflow.web_ui.production_ops.list_productions", return_value=[]):
+        response = client.get("/api/productions")
+    assert response.json()["production_token_set"] is False
+
+
+def test_configured_production_token_hides_the_notice(tmp_path):
+    client = _client(tmp_path, enabled=True, production_token="p" * 40)
+
+    dashboard = client.get("/")
+
+    assert " hidden" in _token_notice(dashboard.text)
+    with patch("oduflow.web_ui.production_ops.list_productions", return_value=[]):
+        response = client.get("/api/productions")
+    assert response.json()["production_token_set"] is True
+
+
+def test_disabled_production_never_shows_the_token_notice(tmp_path):
+    dashboard = _client(tmp_path, enabled=False).get("/")
+
+    assert " hidden" in _token_notice(dashboard.text)

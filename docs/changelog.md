@@ -2,7 +2,49 @@
 
 ## Unreleased
 
-### Bug Fixes
+### Features
+
+- **Template Refresh in the dashboard** — reload a template from its own
+  dump files and report overlay remount errors.
+- **Cron-owned SSH template sync** — manage source/schedule/logs from
+  Templates; manual requests are queued for host cron. Optional environment
+  data refresh prepares and sanitizes new data before switching, retains old
+  filestore generations for environments that stay behind, and rolls back
+  caught switch failures. CLI/UI/MCP mutations share process-safe file locks.
+
+### Security
+
+- **Environments are isolated inside the team's coding-agent container** —
+  every environment's Agent CLI/Chat sessions, checkout, attachments and HOME
+  now belong to that environment's own Linux user (`oduflow-coder:0.4.0`).
+  Previously all sessions shared one user, so an agent in one environment could
+  read another environment's scoped MCP token from its process environment and
+  see or change other environments' checkouts and conversations. Existing
+  checkouts, attachments and Claude/Codex conversations are handed over to
+  their environment on the first start; OpenCode conversations from before the
+  upgrade are not carried over. Interactive logins (Claude `/login`,
+  `codex login`, `opencode auth login`) are now per environment; credentials in
+  `[team.X.agent_env]` keep working for every environment. Agents read other
+  branches through git instead of neighbouring checkouts. An `[agent].image`
+  explicitly pinned to an older coder image is refused; use 0.4.0 or later.
+  See decision record
+  [0079](https://github.com/oduflow/oduflow/blob/main/specs/0079-per-environment-agent-identities.md).
+
+### Features
+
+- **Extra repo branches are filled in from the Odoo image** — the **Create
+  Environment** dialog and a template's **Settings** fill each extra repo's
+  branch from the Odoo image (`odoo:19.0` → `19.0`) wherever the repo carries
+  that branch, so per-version repos such as the OCA sets or enterprise no
+  longer have to be typed out. An online-release image (`odoo:saas~19.1`) only
+  gets its own `saas-19.1`. Branches from a template, a production or your own
+  typing are never replaced, a field you cleared stays empty, and each selected
+  repo with a filled-in branch is marked **guessed** and counted under the list.
+  The image field now also follows a template switch when a template filled it,
+  so the new template's database no longer runs on the previous template's
+  Odoo. (#337)
+
+### Fixes
 
 - **Branch switches restore dependencies after container recreation** —
   `switch_branch` reinstalls declared APT/PIP dependencies from the target code
@@ -10,12 +52,199 @@
   or an empty diff. Same-branch renames restore dependencies too. Strict
   guardrail refusals still restore the currently mounted code's dependencies;
   installation failures are reported and stop subsequent module actions.
-  Failures retain the pending module plan and explicit retry arguments after
-  the Git diff has been consumed. Completed renames keep the agent checkout
-  and MCP configuration synchronized and report the resulting identity even
-  when dependency setup fails. The dashboard shows full failure output.
-  Same-branch renames combine extra-addons mount changes in one recreation;
-  checking repositories without dependency files adds no restart.
+  Failures retain the pending module plan and an explicit two-step retry plan
+  (restore dependencies, then replay the module actions) after the Git diff
+  has been consumed. Completed renames keep the agent checkout and MCP
+  configuration synchronized and report the resulting identity even when
+  dependency setup fails. A completed switch whose module apply failed is
+  reported honestly as a partial result instead of success prose. The
+  dashboard shows full failure output. Same-branch renames combine
+  extra-addons mount changes in one recreation; checking repositories without
+  dependency files adds no restart.
+- **Environment creation on development-only hosts with limited disk space** —
+  the disk check now reserves max(1 GiB, min(1% of the disk, 2 GiB)) on devices
+  that hold no production data, derived from the disk size rather than from
+  current free space so repeated creations face a stable threshold. A copy
+  estimated to write 5.2 GiB can therefore proceed with 8.6 GiB free. Devices
+  shared with the production database volume retain the full 5–10 GiB reserve
+  (all devices, when that volume's device cannot be determined); a host with
+  production on a separate disk keeps the relaxed policy on its dev disk. The
+  shared PostgreSQL data volume additionally budgets 1 GiB of WAL/catalog
+  writes per creation; write estimates still include the 20% safety margin.
+- **Failed production deploys explain themselves** — a failed
+  `update_production` used to record only `Deploy failed (exit_code=255)`.
+  The Odoo output that held the cause reached only the response, which a
+  client that timed out on a long upgrade never received. The deploy record
+  in `production_deploys` now names the step that failed (`dependencies`,
+  `install`, `upgrade`, `health` or `exception`), keeps the reinstall's own
+  exit code, and stores the Odoo error record with its traceback
+  (`failure_excerpt`) and the last 200 lines of the step's output
+  (`output_tail`, returned with `include_output=true`). For a failed health
+  check, that is the server log. The deploy's error line ends with the cause,
+  for example `Cause: psycopg2.errors.SerializationFailure: …`, and the
+  server log gets the excerpt. The production docs now describe the
+  environment the upgrade runs in and what the exit codes mean.
+- **Oversized command output keeps its end** — an output over the 10 MB
+  output cache limit kept only its start, which can drop the traceback that
+  Odoo prints last. The cache now keeps the first 1 MB and the end.
+- **Production health waits stop on a crash loop** — a container that Docker
+  restarts twice while Oduflow waits for health now fails the wait at once.
+  Before, `reconfigure_production` and deploy verification kept the
+  production's lock for the full 180 s, so a broken setting could not be
+  reverted during that time.
+- **Auto deploys skip uninstalled modules** — an extra-addons repo bundles
+  many modules of which only a few are installed, and a fast-forward that
+  touched the others failed the whole `update_production` (or
+  `pull_environment`) with "not installed and cannot be upgraded". Auto mode
+  now drops the changes of uninstalled modules with a warning and classifies
+  the rest again, so a JS or view change in an installed module still reloads
+  and a changed `.py`, including one outside any module, still restarts. A
+  module the database already has is upgraded even when it looks new (moved
+  between directories or repos), and a production never auto-installs new
+  modules. Explicit `install=`/`upgrade=` requests keep the strict error.
+- **Configurable production health wait** — the new `[production]
+  health_timeout` (default 180 s) sets how long every production health wait
+  lasts: deploy verification, the rollback restart (was 120 s), reconfigure,
+  restore and Stack apply. Workers-mode productions with many modules can take
+  minutes to start serving.
+- **Starting a production clears a stale unhealthy flag** —
+  `start_production` and `restart_production` on a production flagged
+  unhealthy now wait for its health check and clear the flag once Odoo
+  answers. When it still does not, the MCP reply and the dashboard say so
+  instead of reporting a plain success.
+- **Production environment variables that break the container are refused**
+  — `create_production` and a changed `reconfigure_production(env_vars=…)`
+  refuse `HOME`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONNOUSERSITE` and a
+  `PYTHONPATH` that lists a `site-packages` directory. These variables hid the
+  pip packages installed for the repositories (`ModuleNotFoundError`) or let a
+  `dataclasses` backport shadow the standard library, which took the server
+  down. Existing productions that store such a variable still recreate.
+- **Share links open from email** — a share link opened from another site, such
+  as a button in a webmail message, landed on "This link is missing its key":
+  the browser kept the other site as initiator across the redirect and withheld
+  the SameSite=Strict share cookie. The link now answers with a small landing
+  page that navigates to `/env/<name>` itself, so the cookie stays Strict and
+  the key still leaves the address bar.
+- **Production setup is clear from the start** — when the team's
+  `production_token` is not set, the Production tab and the Create Production
+  dialog now say so up front, and the dialog cannot be submitted, instead of
+  failing after the whole form was filled. While a production is being created,
+  the dialog shows the elapsed time and disables its submit button, so a
+  multi-minute image pull and database initialization can no longer be
+  submitted twice. Errors appear inside the dialog.
+- **OduMCP for Odoo 16–20** — automatic OduMCP provisioning was hard-wired to
+  Odoo 19. A production on another version, for example `odoo:20.0`, was created
+  with "OduMCP installation or key setup failed" and had no Odoo MCP tools. The
+  connector branch now follows each production's Odoo version: the image tag, or
+  `odoo --version` for an unversioned custom image. The `[production].odumcp_ref`
+  setting is retired; a leftover value is ignored with a warning.
+  `reconfigure_production` switches the checkout when the image moves to another
+  Odoo version, and `sync_production_mcp` replaces a checkout made for another
+  version and recreates the container whenever it does not see the current
+  checkout. This repairs existing productions, including after a failed
+  recreation. Provisioning refuses an addon built for another Odoo version. Odoo
+  15 and older get a clear explanation and an **MCP N/A** badge instead of a
+  retry hint that cannot help.
+- **OduMCP setup failures are visible** — a production whose OduMCP addon
+  installation or key setup failed now shows an **MCP FAILED** badge on its card.
+  The creation warning is also shown in the dashboard, not only in the server
+  log.
+- **SSH repository URLs for productions** — the Create Production dialog and the
+  `create_production` tool description now say that SSH URLs
+  (`git@github.com:owner/repo.git`) work with the team deploy key, which private
+  repositories need.
+- **Quiet default sanitize script** — the seeded team script
+  `odoo_sanitize/01_disable_mail.sql` failed with
+  `relation "fetchmail_server" does not exist` on every environment created from a
+  template without the `mail` module. Because the file runs as one transaction,
+  the failure also rolled back its `ir_mail_server` update. The script is now a
+  commented-out example: on Odoo 16+, the native neutralization already
+  deactivates mail servers. Run `oduflow upgrade` to update an existing,
+  unmodified copy.
+- **Production database left by a failed create** — when a failed
+  `create_production` could not drop the database it had created, the
+  rollback ignored the error. The retry then failed with "already exists in
+  the production cluster" and suggested `delete_production`, which cannot find
+  a production with no registry record. The rollback now tombstones such an
+  attempt, so `oduflow cleanup --purge-deleted-productions` reclaims it. The
+  error now names the remedy that applies: purge for tombstoned leftovers, a
+  manual `DROP DATABASE` for an unmarked database. An existing production
+  gets a plain "already exists" error.
+- **Re-creating a deleted production over its kept workspace** — after
+  `delete_production` without `drop_database` and a manual drop of the
+  database, re-creating the name failed at `git clone` on the old repository,
+  and the rollback removed the workspace's purge marker. `create_production`
+  now refuses up front while the workspace is still on disk, and names the
+  purge that frees the name.
+- **Database-only import from Odoo.sh** — the Odoo.sh import always uploaded
+  the whole filestore, which can run to hundreds of GB from a limited shell
+  session, and stopped with exit code 3 when the backup had no filestore
+  directory. The **Import from Odoo.sh** dialog now has a **Database only**
+  checkbox, like the HTTP, S3 and local-path imports; it adds
+  `--without-filestore` to the command, which uploads the manifest, the SQL
+  dump and any selected addons but no filestore. An existing template keeps its
+  current filestore, and chunks left by an interrupted full upload are not
+  promoted as a partial filestore. The client's summary says whether the
+  filestore was imported, kept or not included. Without the flag, a missing
+  filestore still stops the import, now with a hint to re-run with
+  `--without-filestore`.
+
+## v1.88.0
+
+### Features
+
+- **Import OCA repositories in bulk** — the **Extra Addons** tab has a new
+  **Import OCA** dialog. It lists the public OCA catalogue with search, sorting
+  by stars or name and an archived filter, reads each selected repository's
+  branches, and adds the selection as `oca-<name>` extra repos. As with
+  **Add Repo**, nothing is downloaded by default: the **Common versions** you
+  enter (for example `18.0, 19.0`) are downloaded right away, and a version a
+  repository lacks must be unchecked before importing. The import runs on the
+  server, up to three repositories at a time, so closing the dialog, reloading
+  the page or a proxy timeout neither stops it nor loses its progress. Failures
+  are reported per repository, and **Retry failed** resends only those.
+  Repositories the team already has are recognised by origin in any URL form,
+  and colliding import names get a numeric suffix. The catalogue is cached for
+  15 minutes and falls back to the last good copy when GitHub is unavailable;
+  no token is needed. (#317)
+- **GitHub CLI in the coder image** — the coding-agent image ships a current
+  `gh` from GitHub's apt repository, so agents can work with pull requests and
+  issues out of the box. Coder image `oduflow-coder:0.3.4`. (#227)
+
+### Bug Fixes
+
+- **Odoo 20 environments are reachable** — Odoo 20 listens on `127.0.0.1` when
+  `http_interface` is unset, which neither Traefik nor a published port can
+  reach. Every generated `odoo.conf` (dev and production) now pins
+  `http_interface = 0.0.0.0` and drops the legacy `xmlrpc_interface` alias that
+  would override it. A startup migration rewrites the conf in existing
+  containers, which pick it up on their next restart, start or
+  `pull_and_apply`. `set_production_odoo_conf` and stack manifests refuse the
+  listen settings instead of storing a value that is silently replaced. (#315)
+- **Changed CSV data files upgrade their module** — a commit that only touched
+  a module's CSV data (for example `security/ir.model.access.csv`) was
+  classified as a plain refresh, so the environment silently kept stale access
+  rules. Odoo loads CSV data only on install or upgrade, so such a change now
+  upgrades the owning module; a CSV outside any module still only refreshes.
+  (#316)
+- **`without_demo` is honoured on Odoo 19+** — Odoo 19 reads `with_demo`
+  instead. Generated confs translate `without_demo` into the matching
+  `with_demo` value the way Odoo 19 itself does (only an explicit false enables
+  demo data; an explicit `with_demo` wins), and template initialisation passes
+  `--without-demo=True` on 19+. (#227)
+- **White label: two remaining gaps** — the agent guides viewer rebrands the
+  file-name title it shows for a guide without a heading, and
+  `get_agent_instructions` documents `submit_agent_feedback` only when the tool
+  was published at startup, so a license that changes while the server runs no
+  longer points agents at a missing tool. (#311)
+
+### Security
+
+- **The repository can no longer tune the production server** — the repo's
+  `.oduflow/odoo.prod.conf` is no longer part of the production conf chain
+  (team `odoo.prod.conf` > bundled), because anyone who can push to the
+  deployed branch must not change server settings. A repo file is logged as
+  ignored and no longer triggers a restart on deploy. (#315)
 
 ## v1.87.0
 

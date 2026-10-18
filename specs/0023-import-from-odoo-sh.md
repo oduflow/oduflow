@@ -109,3 +109,9 @@ single-purpose token** minted by a dashboard button, not the UI password.
   module, `/import-odoo.sh` client + `/api/templates/import/*` ingest endpoints,
   `finalize_imported_template`/`extract_filestore_tar` reusing `reload_template`,
   and the dashboard "Import from Odoo.sh" button.
+- `add-without-filestore-odoo-sh-import` (2026-10-17) — database-only mode:
+  `--without-filestore` skips the filestore upload; the dashboard choice is
+  also stored on the token, and either one makes finalize leave staged chunks
+  unpromoted and keep the live filestore. Resume counts the live filestore only
+  when finalize actually promoted one (a separate marker beside `.promoted`), so
+  a retry with the full upload never mistakes a kept filestore for its own.

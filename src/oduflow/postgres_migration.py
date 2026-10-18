@@ -43,7 +43,7 @@ from oduflow import (
     service_database_credentials,
 )
 from oduflow.docker_ops import system_ops
-from oduflow.docker_ops.client import get_client, run_for_output
+from oduflow.docker_ops.client import get_client, pull_with_progress, run_for_output
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
 from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
 from oduflow.naming import (
@@ -241,16 +241,7 @@ def _data_major(container: Any) -> int:
 
 def _download_image(client: DockerClient, image: str) -> None:
     logger.info("Downloading PostgreSQL image %s", image)
-    last_progress = 0.0
-    for event in client.api.pull(image, stream=True, decode=True):
-        if event.get("error"):
-            raise PrerequisiteNotMetError(f"Cannot pull {image}: {event['error']}")
-        now = time.monotonic()
-        if event.get("status") and (
-            "progressDetail" not in event or now - last_progress >= 15
-        ):
-            logger.info("PostgreSQL image: %s", event["status"])
-            last_progress = now
+    pull_with_progress(client, image, "PostgreSQL image")
 
 
 def _binary_major(client: DockerClient, image: str) -> int:

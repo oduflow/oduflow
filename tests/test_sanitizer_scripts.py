@@ -395,3 +395,18 @@ class TestDetectOdooMajor:
             sanitizer._detect_odoo_major_from_container(container, "oduflow.image")
             is None
         )
+
+
+def test_seeded_team_script_is_a_commented_out_example():
+    """The seeded 01_disable_mail.sql runs on every template-based environment,
+    including databases without the mail module, where an active statement on
+    fetchmail_server failed and rolled back the whole file. It ships as
+    commented-out examples only; psql accepts a comment-only command."""
+    from pathlib import Path
+
+    script = Path(sanitizer.__file__).parent / "templates" / "01_disable_mail.sql"
+    lines = [line.strip() for line in script.read_text().splitlines() if line.strip()]
+
+    assert lines
+    assert all(line.startswith("--") for line in lines)
+    assert "-- UPDATE ir_mail_server SET active = false WHERE active = true;" in lines

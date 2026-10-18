@@ -539,22 +539,29 @@ GROUPS: tuple[Group, ...] = (
                 note="Existing productions pick it up on reconfigure.",
             ),
             Field(
+                "health_timeout",
+                "int",
+                "Health wait (s)",
+                "Seconds a production gets to become healthy after a deploy, "
+                "rollback, reconfigure, restore, Stack apply or recovery "
+                "start/restart.",
+                default=180,
+                minimum=1,
+                apply=LIVE,
+                note="Raise it for workers-mode productions with many modules; "
+                "they can take minutes to start serving.",
+            ),
+            Field(
                 "odumcp_repo_url",
                 "str",
                 "Production MCP addon repo",
+                "Repository with one branch per Odoo version (18.0, 19.0, ...); "
+                "each production gets its own version's odumcp.",
                 default="https://github.com/oduflow/oduflow-client-addons.git",
                 apply=LIVE,
                 advanced=True,
-                note="Used for new checkouts only.",
-            ),
-            Field(
-                "odumcp_ref",
-                "str",
-                "Production MCP addon ref",
-                default="19.0",
-                apply=LIVE,
-                advanced=True,
-                note="Used for new checkouts only.",
+                note="Used for new checkouts, including after a production "
+                "moves to another Odoo version.",
             ),
             Field(
                 "walg_version",

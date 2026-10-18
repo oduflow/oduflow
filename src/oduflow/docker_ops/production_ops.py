@@ -16,15 +16,16 @@ Key differences from dev environments:
   the ``{slug}.{team.hostname}`` scheme — traefik routing mode required;
 - full git clone (commit history is the point: rollback targets, deploy
   history) instead of ``--depth 1``;
-- a production odoo.conf chain (``.oduflow/odoo.prod.conf`` > team
-  ``odoo.prod.conf`` > bundled ``odoo-prod.conf``) with auto-tuned
-  workers/limits injected on top (see :mod:`oduflow.prod_tune`);
+- a production odoo.conf chain (team ``odoo.prod.conf`` > bundled
+  ``odoo-prod.conf``; never the repo) with auto-tuned workers/limits
+  injected on top (see :mod:`oduflow.prod_tune`);
 - no ``--dev=xml``, no sanitize/neutralize, plain filestore directory
   (no overlay), no reaper.
 """
 
 from __future__ import annotations
 
+import configparser
 import datetime
 import fcntl
 import json
@@ -36,6 +37,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from dataclasses import replace
+from pathlib import PurePosixPath
 from typing import Any, Callable, ContextManager, overload
 
 import docker
@@ -50,6 +52,7 @@ from oduflow.docker_ops.client import (
 )
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
+    _CONTAINER_CONF_MODE,
     _copy_file_from_container,
     _copy_file_to_container,
     _create_pg_role,
@@ -75,10 +78,16 @@ from oduflow.env_credentials import create_credentials, load_credentials
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
+    FlowError,
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.extra_addons import DB_CONN_CONF_KEYS, validate_extra_repo_name
+from oduflow.extra_addons import (
+    DB_CONN_CONF_KEYS,
+    LISTEN_INTERFACE_ALIASES,
+    LISTEN_INTERFACE_CONF,
+    validate_extra_repo_name,
+)
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     PRODUCTION_TEMPLATE_PREFIX,
@@ -117,23 +126,6 @@ TOMBSTONE_FILENAME = "deleted.json"
 # Signature: hook(settings, team, name) -> None.
 pre_update_hooks: list[Callable[[Settings, TeamSettings, str], None]] = []
 
-# odoo.conf [options] keys a per-production override may not touch:
-# addons_path is generated from the repo + extra addon worktrees, data_dir
-# anchors the filestore bind mount, the db_* connection keys are managed
-# via container env vars (a conf value would override them inside Odoo), and
-# the listen ports are what the Traefik routes target (see SERVER_MODES).
-# Compared lowercased: Odoo lowercases option names on read.
-RESERVED_ODOO_CONF_KEYS = frozenset(
-    {
-        "addons_path",
-        "data_dir",
-        "http_port",
-        "xmlrpc_port",
-        "gevent_port",
-        "longpolling_port",
-    }
-) | frozenset(DB_CONN_CONF_KEYS)
-
 # How a production serves HTTP (record["server_mode"]; a missing key reads
 # as "workers"). Both run Odoo's prefork server, which always spawns the
 # gevent process on 8072 next to the HTTP workers on 8069:
@@ -151,10 +143,11 @@ _GEVENT_PORT = "8072"
 # regardless of version: the one a version lacks 404s on either port.
 _BUS_PATH_RULE = "PathPrefix(`/websocket`) || PathPrefix(`/longpolling`)"
 # Listen settings forced into every production conf, over the base conf chain
-# (repo .oduflow/odoo.prod.conf, team odoo.prod.conf) and the overrides:
-# Traefik and the health probe target these ports whatever the conf says.
+# (team odoo.prod.conf, bundled odoo-prod.conf) and the overrides: Traefik
+# and the health probe target these ports whatever the conf says.
 # gevent_port (16+) and longpolling_port (<=15) are both pinned; a version
-# ignores the key it does not know.
+# ignores the key it does not know. The listen interface is pinned by
+# generate_odoo_conf for every conf, dev and production alike.
 _PINNED_LISTEN_CONF = {
     "http_enable": "True",
     "http_port": _HTTP_PORT,
@@ -162,18 +155,50 @@ _PINNED_LISTEN_CONF = {
     "longpolling_port": _GEVENT_PORT,
 }
 # Base-conf keys that could move a listener away from what Traefik targets
-# (legacy xmlrpc_* aliases, a loopback-only interface); dropped, so Odoo
-# listens on every interface.
+# (legacy xmlrpc_* aliases of the pinned http_* keys); dropped.
 _DROPPED_LISTEN_CONF_KEYS = (
-    "http_interface",
     "xmlrpc",
     "xmlrpc_port",
-    "xmlrpc_interface",
+)
+# odoo.conf [options] keys a per-production override may not touch:
+# addons_path is generated from the repo + extra addon worktrees, data_dir
+# anchors the filestore bind mount, the db_* connection keys are managed
+# via container env vars (a conf value would override them inside Odoo), and
+# every listen key the generated conf pins or drops is what the Traefik
+# routes target (see SERVER_MODES) — refused rather than silently replaced.
+# Compared lowercased: Odoo lowercases option names on read.
+RESERVED_ODOO_CONF_KEYS = frozenset(
+    {
+        "addons_path",
+        "data_dir",
+        *DB_CONN_CONF_KEYS,
+        *LISTEN_INTERFACE_CONF,
+        *LISTEN_INTERFACE_ALIASES,
+        *_PINNED_LISTEN_CONF,
+        *_DROPPED_LISTEN_CONF_KEYS,
+    }
 )
 # Both Odoo processes must answer for a production to be healthy: the
 # workers on 8069 and the gevent process on 8072, which carries the bus in
 # "workers" mode and every page in "gevent" mode.
 _HEALTH_PORTS = (_HTTP_PORT, _GEVENT_PORT)
+# Odoo's config loader (odoo/tools/config.py load()) turns *only* these exact
+# strings into booleans; every other value stays a non-empty string, which is
+# truthy. So `list_db = 0`, `list_db = no` and even `list_db = FALSE` all
+# ENABLE database management. Refused rather than stored as a footgun.
+_ODOO_CONF_TRUE = ("True", "true")
+_ODOO_CONF_FALSE = ("False", "false")
+# odoo.conf overrides whose value is a credential. Masked on the MCP read
+# surfaces (get_production_info, set_production_odoo_conf) so an agent that
+# can read a production never receives its master password. The dashboard is
+# the operator's own console and keeps showing the values.
+SENSITIVE_ODOO_CONF_KEYS = frozenset({"admin_passwd", "smtp_password"})
+MASKED_VALUE = "********"
+# Odoo's compiled-in default master password is the literal "admin", and the
+# generated conf does not set one — database management is closed by
+# list_db = False instead. Unlocking it therefore means choosing a real
+# password first, and "admin" is not one.
+_MIN_ADMIN_PASSWD_LEN = 12
 
 
 def validate_server_mode(value: str) -> str:
@@ -227,6 +252,101 @@ def validate_workers_override(value: object) -> None:
             f"got '{value}': both server modes run Odoo's multi-process server, "
             "which serves the gevent port Traefik routes to."
         )
+
+
+def parse_list_db_override(value: object) -> bool:
+    """Whether a ``list_db`` value leaves Odoo's database manager reachable.
+
+    Mirrors Odoo's own conf parsing: only the exact strings True/true/False/
+    false become booleans, so anything else is a truthy string that *enables*
+    database management. Raises ValueError for such a value instead of
+    storing an override that reads the opposite of what it looks like.
+    """
+    text = str(value).strip()
+    if text in _ODOO_CONF_TRUE:
+        return True
+    if text in _ODOO_CONF_FALSE:
+        return False
+    raise ValueError(
+        f"odoo.conf 'list_db' must be exactly True or False, got '{value}': "
+        "Odoo converts only those spellings to a boolean and reads every "
+        "other value as a non-empty (truthy) string, which would enable "
+        "database management."
+    )
+
+
+def validate_admin_passwd_override(value: object) -> None:
+    """A master password that actually locks Odoo's database manager."""
+    text = str(value)
+    if text != text.strip() or "\n" in text or "\r" in text:
+        raise ValueError(
+            "odoo.conf 'admin_passwd' must be a single line without leading "
+            "or trailing whitespace (Odoo strips it when reading the conf)."
+        )
+    if text.lower() == "admin" or len(text) < _MIN_ADMIN_PASSWD_LEN:
+        raise ValueError(
+            f"odoo.conf 'admin_passwd' must be at least "
+            f"{_MIN_ADMIN_PASSWD_LEN} characters and not 'admin': it is the "
+            "master password for creating, dropping, backing up and restoring "
+            "databases."
+        )
+
+
+def effective_admin_passwd(team: TeamSettings, name: str, conf: dict[str, str]) -> str:
+    """The master password the next generated conf would carry.
+
+    The per-production override when set, otherwise whatever the base conf
+    chain (team odoo.prod.conf > bundled) defines. The bundled conf sets
+    none, so this is empty unless an operator put one somewhere.
+    """
+    if "admin_passwd" in conf:
+        return str(conf["admin_passwd"])
+    base = configparser.RawConfigParser()
+    base.read(
+        _prod_base_conf_path(
+            team, get_repo_path(prod_env_name(name), team.workspaces_dir)
+        )
+    )
+    return base.get("options", "admin_passwd", fallback="")
+
+
+def validate_db_manager_overrides(
+    team: TeamSettings, name: str, conf: dict[str, str]
+) -> None:
+    """Refuse an override set that opens Odoo's database manager unlocked.
+
+    ``list_db = True`` makes /web/database/* reachable (Odoo gates every
+    database management function on it), and the only thing between that page
+    and the databases is the master password — which Oduflow never generates,
+    so unset means Odoo's default "admin". The two settings are therefore
+    validated as a pair, in whichever order they are sent.
+    """
+    if "list_db" in conf:
+        parse_list_db_override(conf["list_db"])
+    if "admin_passwd" in conf:
+        validate_admin_passwd_override(conf["admin_passwd"])
+    if not parse_list_db_override(conf.get("list_db", "False")):
+        return
+    passwd = effective_admin_passwd(team, name, conf)
+    if not passwd:
+        raise ValueError(
+            "odoo.conf 'list_db = True' exposes Odoo's database manager, so "
+            "it also needs an 'admin_passwd' override (or one in the team "
+            "odoo.prod.conf): without it Odoo falls back to its default "
+            "master password 'admin', which would let anyone who reaches the "
+            "domain create, drop, back up and restore databases."
+        )
+    if "admin_passwd" not in conf:
+        # It came from the base conf chain, so it has not been checked above.
+        validate_admin_passwd_override(passwd)
+
+
+def mask_odoo_conf(conf: dict[str, str] | None) -> dict[str, str]:
+    """A copy of the overrides with credential values replaced by a mask."""
+    return {
+        key: (MASKED_VALUE if key in SENSITIVE_ODOO_CONF_KEYS and value else value)
+        for key, value in (conf or {}).items()
+    }
 
 
 def prod_url(settings: Settings, team: TeamSettings, record: dict[str, Any]) -> str:
@@ -295,15 +415,23 @@ def _require_container(
 
 
 def _prod_base_conf_path(team: TeamSettings, repo_path: str) -> str:
-    """Resolve the production base conf: repo > team > bundled.
+    """Resolve the production base conf: team > bundled.
 
     A separate chain from the dev one on purpose: a repo's dev conf
     (workers=0) must never leak into production, so the file names are
-    explicit (``odoo.prod.conf`` / bundled ``odoo-prod.conf``).
+    explicit (``odoo.prod.conf`` / bundled ``odoo-prod.conf``). The repo is
+    never consulted: whoever can push to the branch must not get to tune the
+    production server. Per-production settings go through the operator-only
+    overrides (set_production_odoo_conf). A repo ``.oduflow/odoo.prod.conf``
+    (honoured by earlier versions) is logged as ignored.
     """
     repo_conf = os.path.join(repo_path, ".oduflow", "odoo.prod.conf")
     if os.path.isfile(repo_conf):
-        return repo_conf
+        logger.warning(
+            "Ignoring %s: production odoo.conf comes from the team "
+            "odoo.prod.conf and per-production overrides only",
+            repo_conf,
+        )
     team_conf = _resolve_instance_conf("odoo.prod.conf", team.data_dir)
     if team_conf.exists():
         return str(team_conf)
@@ -319,6 +447,7 @@ def _build_prod_odoo_conf(
     *,
     plan: ResourcePlan | None = None,
     output_path: str | None = None,
+    odoo_image: str = "",
 ) -> str:
     """Generate the merged production odoo.conf; return the host path."""
     from oduflow.extra_addons import generate_odoo_conf, resolve_main_addons_path
@@ -356,8 +485,10 @@ def _build_prod_odoo_conf(
             name,
             ", ".join(reserved),
         )
-    for key, value in (record.get("odoo_conf") or {}).items():
-        key = str(key).lower()
+    stored = {
+        str(k).lower(): str(v) for k, v in (record.get("odoo_conf") or {}).items()
+    }
+    for key, value in stored.items():
         if key in RESERVED_ODOO_CONF_KEYS:
             continue
         if key == "workers":
@@ -367,10 +498,26 @@ def _build_prod_odoo_conf(
                 logger.warning("Ignoring odoo.conf override for '%s': %s", name, exc)
                 continue
         overrides[key] = str(value)
-    from oduflow.production_mcp import MOUNT, addon_checkout
+    # Fail closed on the database manager: set_production_odoo_conf refuses
+    # these combinations, but a hand-edited productions.json must not end up
+    # serving /web/database/* behind Odoo's default master password. Dropping
+    # the override restores the managed list_db = False.
+    if "list_db" in overrides:
+        try:
+            validate_db_manager_overrides(team, name, stored)
+        except ValueError as exc:
+            logger.warning("Database management stays disabled for '%s': %s", name, exc)
+            overrides["list_db"] = "False"
+    from oduflow.production_mcp import (
+        MOUNT,
+        extra_worktree_paths,
+        mounts_managed_module,
+    )
 
     extra_container_paths = list(extra_container_paths)
-    if (addon_checkout(team, name) / "addons/odumcp/__manifest__.py").is_file():
+    # Mounted only while the client repositories do not ship odumcp: the
+    # same rule as _container_spec, so conf and mounts always agree.
+    if mounts_managed_module(team, name, extra_worktree_paths(team, name, record)):
         extra_container_paths.append(MOUNT)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
@@ -381,6 +528,12 @@ def _build_prod_odoo_conf(
         overrides=overrides,
         pinned=_PINNED_LISTEN_CONF,
         remove_keys=_DROPPED_LISTEN_CONF_KEYS,
+        odoo_image=odoo_image,
+        # A production conf may carry admin_passwd (the only secret that can
+        # reach it — db_* credentials travel as container env vars), so the
+        # host copy is owner-only. The copy inside the container is widened
+        # to _CONTAINER_CONF_MODE: Odoo reads it as a non-root user.
+        mode=0o600,
     )
     return generated
 
@@ -396,7 +549,9 @@ def stage_prod_odoo_conf(
     container = _get_container(client, settings, team, name)
     if container is None:
         return None
-    _copy_file_to_container(container, generated_path, "/etc/odoo")
+    _copy_file_to_container(
+        container, generated_path, "/etc/odoo", mode=_CONTAINER_CONF_MODE
+    )
     return str(container.name)
 
 
@@ -424,8 +579,17 @@ def reapply_prod_odoo_conf(
             ]
         except (json.JSONDecodeError, TypeError):
             extra_paths = []
-    generated = _build_prod_odoo_conf(settings, team, name, repo_path, extra_paths)
-    _copy_file_to_container(container, generated, "/etc/odoo")
+    generated = _build_prod_odoo_conf(
+        settings,
+        team,
+        name,
+        repo_path,
+        extra_paths,
+        odoo_image=(container.labels or {}).get(settings.image_label, ""),
+    )
+    _copy_file_to_container(
+        container, generated, "/etc/odoo", mode=_CONTAINER_CONF_MODE
+    )
     return True
 
 
@@ -476,6 +640,143 @@ def read_deploys(
     return deploys[-limit:] if limit else deploys
 
 
+# Diagnostics stored on a failed deploy record. Whoever started the deploy may
+# never read its response (an MCP client gives up long before a big -u ends; a
+# webhook has no caller), so the record itself must explain the failure. Kept
+# bounded: deploys.json holds _DEPLOYS_CAP records.
+_OUTPUT_TAIL_LINES = 200
+_OUTPUT_TAIL_CHARS = 16 * 1024
+_EXCERPT_LINES = 80
+_EXCERPT_CHARS = 8 * 1024
+_CAUSE_CHARS = 300
+# The header of one Odoo log record ("2026-10-18 13:57:01,123 42 CRITICAL db
+# odoo.service.server: ..."); traceback lines under it have none.
+_ODOO_LOG_RECORD_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \d+ (?P<level>[A-Z]+) "
+)
+# pip ("ERROR: ...") and apt ("E: ...") state their failure on such a line.
+_TOOL_ERROR_RE = re.compile(r"^(ERROR|E):\s")
+
+
+def _output_tail(output: str) -> str:
+    """The last lines of *output*, bounded for a deploy record."""
+    tail = "\n".join(output.splitlines()[-_OUTPUT_TAIL_LINES:])
+    if len(tail) > _OUTPUT_TAIL_CHARS:
+        tail = tail[-_OUTPUT_TAIL_CHARS:]
+        # Drop the line the cut went through.
+        _, newline, rest = tail.partition("\n")
+        if newline:
+            tail = rest
+    return tail
+
+
+def _failure_excerpt(output: str) -> str:
+    """The log record that explains a failed Odoo run, with its traceback.
+
+    A failed ``-i``/``-u`` ends with Odoo's CRITICAL "Failed to initialize
+    database" record (``preload_registries`` returns -1: exit code 255) and
+    the traceback under it, so the last CRITICAL record wins, then the last
+    ERROR one — but a bare CRITICAL summary (some Odoo versions log it
+    without ``exc_info``) yields to an earlier ERROR record that carries the
+    traceback, the actual cause. Output without Odoo log records (a crash
+    before logging is set up) falls back to its last Python traceback; empty
+    when there is neither.
+    """
+    lines = output.splitlines()
+    records = [
+        (i, match.group("level"))
+        for i, line in enumerate(lines)
+        if (match := _ODOO_LOG_RECORD_RE.match(line))
+    ]
+
+    def _last_record(level: str) -> int | None:
+        return next((i for i, lv in reversed(records) if lv == level), None)
+
+    def _record_block(start: int) -> list[str]:
+        end = next((i for i, _ in records if i > start), len(lines))
+        return lines[start:end]
+
+    def _has_traceback(candidate: list[str]) -> bool:
+        return any(
+            line.startswith("Traceback (most recent call last):") for line in candidate
+        )
+
+    block: list[str] | None = None
+    start = _last_record("CRITICAL")
+    if start is not None:
+        block = _record_block(start)
+    error_start = _last_record("ERROR")
+    if error_start is not None and (block is None or not _has_traceback(block)):
+        error_block = _record_block(error_start)
+        if block is None or _has_traceback(error_block):
+            block = error_block
+    if block is None:
+        start = next(
+            (
+                i
+                for i in range(len(lines) - 1, -1, -1)
+                if lines[i].startswith("Traceback (most recent call last):")
+            ),
+            None,
+        )
+        if start is None:
+            return ""
+        block = _record_block(start)
+    if len(block) > _EXCERPT_LINES:
+        # The record's own line, then the end of the traceback: the exception.
+        block = [block[0], "..."] + block[-(_EXCERPT_LINES - 2) :]
+    excerpt = "\n".join(block).rstrip()
+    if len(excerpt) > _EXCERPT_CHARS:
+        head = block[0][:512]
+        excerpt = f"{head}\n...\n{excerpt[-(_EXCERPT_CHARS - len(head) - 5) :]}"
+    return excerpt
+
+
+def _failure_cause(step: str, excerpt: str, output: str) -> str:
+    """One line naming the failure, for the deploy's error message: the
+    exception closing the excerpt's traceback, else the last pip/apt error
+    line; an Oduflow exception is its own first line."""
+    lines = [line.strip() for line in excerpt.splitlines() if line.strip()]
+    if not lines:
+        lines = [
+            line.strip()
+            for line in output.splitlines()
+            if _TOOL_ERROR_RE.match(line.strip())
+        ]
+    if not lines and step == "exception":
+        lines = [line.strip() for line in output.splitlines()[:1] if line.strip()]
+    return lines[-1][:_CAUSE_CHARS] if lines else ""
+
+
+def _container_log_tail(settings: Settings, team: TeamSettings, name: str) -> str:
+    """The production container's recent log: the evidence for a deploy whose
+    module commands succeeded but whose server never answered the health
+    check."""
+    try:
+        return production_logs(settings, team, name, n_lines=_OUTPUT_TAIL_LINES)
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        return f"(container logs unavailable: {exc})"
+
+
+def _failure_diagnostics(step: str, output: str) -> tuple[dict[str, str], str]:
+    """Deploy-record fields describing a failed *step*, plus its one-line
+    cause (empty when the output names none)."""
+    excerpt = _failure_excerpt(output)
+    tail = _output_tail(output)
+    fields = {"failed_step": step}
+    if excerpt:
+        fields["failure_excerpt"] = excerpt
+    if tail:
+        fields["output_tail"] = tail
+    return fields, _failure_cause(step, excerpt, output)
+
+
+def strip_deploy_output(deploys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deploy records without ``output_tail`` (up to 16 KB each), for the
+    summaries an agent reads unless it asks for the output."""
+    return [{k: v for k, v in d.items() if k != "output_tail"} for d in deploys]
+
+
 # ---------------------------------------------------------------------------
 # Health probe
 # ---------------------------------------------------------------------------
@@ -505,22 +806,59 @@ def _probe_odoo_health(container: Any) -> bool:
     return bool(code == 0)
 
 
+# Restarts by Docker's restart policy, during one health wait, that count as a
+# crash loop. More than one: a single restart can be a transient failure.
+_CRASH_LOOP_RESTARTS = 2
+
+
+def _restart_count(container: Any) -> int:
+    """Docker's restart-policy counter for *container* (0 when unknown)."""
+    try:
+        return int((container.attrs or {}).get("RestartCount") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def wait_production_healthy(
     client: DockerClient,
     settings: Settings,
     team: TeamSettings,
     name: str,
-    timeout: int = 180,
+    timeout: int | None = None,
 ) -> bool:
-    """Poll the production's Odoo until healthy or timeout."""
+    """Poll the production's Odoo until healthy or timeout.
+
+    The timeout defaults to ``[production] health_timeout``. Gives up early
+    on a crash loop: once Docker has restarted the container
+    :data:`_CRASH_LOOP_RESTARTS` times during the wait, its main process keeps
+    dying (an env var that hides the Python packages, a broken import) and
+    waiting out the timeout only holds the production's lock longer.
+    """
+    if timeout is None:
+        timeout = settings.prod_health_timeout
     deadline = time.monotonic() + timeout
+    baseline: int | None = None
     while time.monotonic() < deadline:
         container = _get_container(client, settings, team, name)
         if container is not None:
             try:
                 container.reload()
+                restarts = _restart_count(container)
+                # A manual start/restart resets the counter: re-baseline.
+                if baseline is None or restarts < baseline:
+                    baseline = restarts
+                # Probe before the crash-loop verdict: a container that
+                # restarted transiently but answers NOW is healthy.
                 if container.status == "running" and _probe_odoo_health(container):
                     return True
+                if restarts - baseline >= _CRASH_LOOP_RESTARTS:
+                    logger.error(
+                        "Production '%s' is crash-looping (%d restarts while "
+                        "waiting for health); giving up early",
+                        name,
+                        restarts - baseline,
+                    )
+                    return False
             except docker.errors.APIError:
                 pass
         time.sleep(3)
@@ -757,6 +1095,46 @@ def _production_env_vars(raw: object) -> dict[str, str]:
     return env_vars
 
 
+# Variables the production container's layout depends on: Odoo's data_dir (the
+# bind-mounted filestore and sessions) is under HOME, and the requirements
+# Oduflow installs live in the odoo user's pip --user site. Every process in
+# the container inherits them — the server, the deploy's `odoo -u`, pip — so
+# an override hides the installed packages or moves data out of the mounts.
+_LAYOUT_ENV_VARS = ("HOME", "PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONUSERBASE")
+
+
+def _check_new_production_env_vars(env_vars: dict[str, str]) -> None:
+    """Refuse variables that break the container's Python/data layout.
+
+    Applied to variables being set (create, the variables a reconfigure adds
+    or changes), not to stored ones, so a production recorded before this
+    check still recreates and keeps taking unrelated edits.
+    """
+    layout = [key for key in _LAYOUT_ENV_VARS if key in env_vars]
+    if layout:
+        raise ValueError(
+            "Cannot set " + ", ".join(layout) + " on a production: Odoo keeps "
+            "its filestore and sessions under HOME and the repositories' pip "
+            "requirements are installed into the odoo user's pip --user site; "
+            "overriding them hides the installed packages or moves data out "
+            "of the mounted volumes."
+        )
+    site_dirs = [
+        entry
+        for entry in env_vars.get("PYTHONPATH", "").split(":")
+        if PurePosixPath(entry).name in ("site-packages", "dist-packages")
+    ]
+    if site_dirs:
+        raise ValueError(
+            "PYTHONPATH must not list a site-packages directory ("
+            + ", ".join(site_dirs)
+            + "): Python searches PYTHONPATH before the standard library, so a "
+            "backport installed there (such as dataclasses) shadows the "
+            "stdlib module and Odoo fails to start. The pip --user site is "
+            "already on sys.path."
+        )
+
+
 def _source_env_info(
     client: DockerClient, settings: Settings, team: TeamSettings, env_name: str
 ) -> dict[str, Any]:
@@ -874,56 +1252,110 @@ def _cleanup_partial_production(
     team: TeamSettings,
     name: str,
     *,
-    remove_workspace: bool = True,
+    db_created: bool,
 ) -> None:
-    """Best-effort teardown of a half-created production (rollback path).
+    """Teardown of a half-created production (rollback path), its registry
+    record included. create_production refused any leftovers of the name, so
+    everything here belongs to this attempt.
 
-    ``remove_workspace=False`` preserves a workspace that existed BEFORE this
-    create attempt — e.g. one kept by ``delete_production(drop_database=False)``
-    ("productions are precious"): its filestore and deploy history must survive
-    a failed re-create, which only borrowed the directory via
-    ``makedirs(exist_ok=True)``.
+    The database is dropped only if this attempt issued CREATE DATABASE. If
+    that drop fails, the database would be orphaned once the record goes:
+    nothing could ever reclaim it. The workspace, which holds the PG
+    credentials, is then kept and tombstoned instead, so the purge sweep
+    drops the database, role and workspace later.
     """
-    env_name = prod_env_name(name)
+    from oduflow import production_registry
+
     try:
         container = _get_container(client, settings, team, name)
         if container is not None:
             container.remove(force=True)
     except Exception:
         pass
-    env_db = prod_db_name(team, name)
-    try:
-        if _db_exists(
-            client, settings, env_db, container_name=settings.prod_db_container
-        ):
-            _exec_sql(
-                client,
-                settings,
-                f'DROP DATABASE IF EXISTS "{env_db}" WITH (FORCE);',
-                container_name=settings.prod_db_container,
+    db_left = False
+    if db_created:
+        db_dropped, warnings = _destroy_leftovers(
+            client, settings, team, name, require_db_drop=True
+        )
+        db_left = not db_dropped
+        for warning in warnings:
+            logger.warning("Rollback of production '%s': %s", name, warning)
+    else:
+        # No database means no PG role either: it is created after it.
+        _remove_workspace(team, name)
+    production_registry.delete_production(team, name)
+    if db_left:
+        # Only once the record is gone: the purge sweep clears a tombstone it
+        # finds on a registered production as stale.
+        try:
+            _write_tombstone(team, name, prod_db_name(team, name))
+            logger.warning(
+                "Tombstoned failed create of production '%s'; "
+                "`oduflow cleanup --purge-deleted-productions` reclaims it",
+                name,
             )
-    except Exception:
-        pass
-    try:
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
-        _drop_pg_role(
-            client,
-            settings,
-            creds["pg_user"],
-            container_name=settings.prod_db_container,
-        )
-    except Exception:
-        pass
+        except Exception as exc:
+            logger.warning(
+                "Could not tombstone failed create of production '%s': %s",
+                name,
+                exc,
+            )
+
+
+def _refuse_leftovers(
+    client: DockerClient, settings: Settings, team: TeamSettings, name: str
+) -> None:
+    """Refuse a name whose database or workspace is still around with no
+    registered production, naming the remedy that applies: delete_production
+    cannot help, since it needs a registry record.
+
+    A kept workspace is refused too. Creating over it would collide with its
+    repo and worktrees, and would mix the old filestore and deploy history
+    into the new production; so a deleted production's leftovers are purged
+    before its name is reused.
+    """
+    from oduflow import production_registry
+
+    env_db = prod_db_name(team, name)
     workspace = _workspace(team, name)
-    if not remove_workspace:
-        logger.warning(
-            "Leaving pre-existing production workspace intact after failed create: %s",
-            workspace,
+    db_exists = _db_exists(
+        client, settings, env_db, container_name=settings.prod_db_container
+    )
+    workspace_exists = os.path.isdir(workspace)
+    if not db_exists and not workspace_exists:
+        return
+    # A concurrent create may have registered the name since the early
+    # check: its resources are not leftovers.
+    production_registry.ensure_name_free(team, name)
+    kept = []
+    if db_exists:
+        kept.append(f"database '{env_db}'")
+    if workspace_exists:
+        kept.append(f"workspace '{workspace}'")
+    leftovers = " and ".join(kept)
+    if os.path.isfile(_tombstone_path(team, name)):
+        raise ConflictError(
+            f"Leftovers of production '{name}' are still kept: {leftovers}. "
+            "It was deleted without drop_database, or its failed create could "
+            "not drop the database. Copy anything you still need out of the "
+            f"workspace, run `oduflow cleanup --team {team.team_id} "
+            "--purge-deleted-productions` to review the leftovers, then add "
+            "--force to purge them permanently (it also removes the orphaned "
+            "dev resources it lists), and retry."
         )
-    elif os.path.isdir(workspace):
-        shutil.rmtree(workspace, ignore_errors=True)
+    message = (
+        f"No production '{name}' is registered, and nothing marks these "
+        f"leftovers as deleted: {leftovers}. A production deleted before "
+        "deletions were tombstoned, or a failed create, can leave them behind. "
+        "Check that they hold nothing you need, remove them, and retry."
+    )
+    if db_exists:
+        message += (
+            f" Drop the database with: docker exec {settings.prod_db_container} "
+            f"psql -U {settings.db_user} -d postgres -c "
+            f"'DROP DATABASE \"{env_db}\" WITH (FORCE);'"
+        )
+    raise ConflictError(message)
 
 
 def _container_spec(
@@ -954,11 +1386,16 @@ def _container_spec(
     odoo_volumes: dict[str, dict[str, str]] = {
         repo_path: {"bind": "/mnt/extra-addons", "mode": "rw"}
     }
-    from oduflow.production_mcp import MOUNT, addon_checkout
+    from oduflow.production_mcp import MOUNT, managed_module, mounts_managed_module
 
-    connector = addon_checkout(team, name) / "addons/odumcp"
-    if (connector / "__manifest__.py").is_file():
-        odoo_volumes[str(connector)] = {"bind": MOUNT + "/odumcp", "mode": "ro"}
+    # The managed odumcp copy is mounted only while the client repositories
+    # (main repo and extra worktrees) do not ship the module: any recreate
+    # drops the mount once they do, before the checkout itself is retired.
+    if mounts_managed_module(team, name, [host for host, _ in extra_mount_paths]):
+        odoo_volumes[str(managed_module(team, name))] = {
+            "bind": MOUNT + "/odumcp",
+            "mode": "ro",
+        }
     for host_path, container_path in extra_mount_paths:
         odoo_volumes[host_path] = {"bind": container_path, "mode": "ro"}
     odoo_volumes[prod_filestore_dir(team, name)] = {
@@ -1030,7 +1467,9 @@ def _run_odoo_container(
         # auto-reloads assets; any change requires at least a restart.
         command=f"odoo -d {prod_db_name(team, name)}",
     )
-    _copy_file_to_container(container, generated_conf, "/etc/odoo")
+    _copy_file_to_container(
+        container, generated_conf, "/etc/odoo", mode=_CONTAINER_CONF_MODE
+    )
     dep_paths = [(repo_path, "/mnt/extra-addons")] + list(extra_mount_paths or [])
     _, _, setup_logs = _install_repo_dependencies(container, dep_paths)
     # One restart picks up both the copied odoo.conf and pip packages.
@@ -1097,6 +1536,10 @@ def create_production(
             'Production hosting requires routing_mode = "traefik" (custom '
             "domains are routed via Traefik Host rules)."
         )
+    # A registered production owns its database and workspace: report the
+    # name as taken before the leftover check below can mistake them for
+    # debris.
+    production_registry.ensure_name_free(team, name)
     if not domain:
         # In a base-domain team the first production defaults to the zone
         # apex, later ones to <name>.<base_domain>.
@@ -1145,6 +1588,7 @@ def create_production(
     workspace = _workspace(team, name)
 
     env_vars = _production_env_vars(env_vars)
+    _check_new_production_env_vars(env_vars)
     # Fail before creating resources or interrupting the source environment.
     secret_store.resolve_env_secrets(team, env_vars)
 
@@ -1154,15 +1598,10 @@ def create_production(
         client, settings, odoo_image, container_name=settings.prod_db_container
     )
 
-    # Refuse to clobber leftovers: a previous production's database kept by
-    # delete_production(drop_database=False) must be dealt with explicitly.
-    if _db_exists(client, settings, env_db, container_name=settings.prod_db_container):
-        raise ConflictError(
-            f"Database '{env_db}' already exists in the production cluster "
-            f"(left by a previous production '{name}'). Delete it first "
-            "(delete_production with drop_database=true recreates cleanly) "
-            "or drop it manually."
-        )
+    # Refuse to clobber leftovers: a database or workspace with no registered
+    # production (kept by delete_production(drop_database=False), or left by
+    # a failed create) must be dealt with explicitly.
+    _refuse_leftovers(client, settings, team, name)
     try:
         client.containers.get(container_name)
         raise ConflictError(f"Production '{name}' container already exists.")
@@ -1190,18 +1629,11 @@ def create_production(
         },
     )
 
-    # A workspace kept by delete_production(drop_database=False) holds the old
-    # production's filestore and deploy history; the rollback below must not
-    # destroy what this attempt did not create.
-    workspace_preexisted = os.path.isdir(workspace)
-
+    db_created = False
     promo_notes: list[str] = []
     try:
         ensure_team_network(client, settings, team)
         os.makedirs(workspace, exist_ok=True)
-        # Re-creating a soft-deleted name revives it: drop the tombstone so
-        # the purge sweep never eats the new production's bytes.
-        clear_tombstone(team, name)
 
         # Full clone — commit history is the point for production.
         repo_path = get_repo_path(env_name, team.workspaces_dir)
@@ -1238,18 +1670,50 @@ def create_production(
                 extra_mount_paths.append((wt_path, f"/mnt/extra-addons-{repo_name}"))
                 extra_conf_paths.append(resolve_extra_addons_path(wt_path, repo_name))
 
+        # Pulled before the OduMCP addon is chosen: an unversioned custom tag
+        # is asked for its Odoo version, and a stale local copy of a moving tag
+        # would pick the wrong addon series.
+        image_cleanup.note_image_requested(odoo_image)
+        try:
+            logger.info("Pulling image %s", odoo_image)
+            client.images.pull(odoo_image)
+        except Exception as exc:
+            logger.warning(
+                "Could not pull image %s, using local copy: %s", odoo_image, exc
+            )
+
         from oduflow import production_mcp
 
         mcp_warning = ""
+        mcp_status = "sync_failed"
         try:
-            production_mcp.prepare_addon(settings, team, name, extra_mount_paths)
+            production_mcp.prepare_addon(
+                settings, team, name, extra_mount_paths, odoo_image
+            )
+        except PrerequisiteNotMetError as exc:
+            # Our own explanation (unsupported or undetectable Odoo version,
+            # repository without odumcp) says more than the generic warning.
+            if isinstance(exc, production_mcp.UnsupportedOdooVersion):
+                mcp_status = "unsupported"
+            mcp_warning = (
+                f"Production created, but Odoo MCP tools are unavailable: {exc} "
+                "Production infrastructure tools work."
+            )
         except Exception:
+            # The cause goes to the server log only: a clone error can quote
+            # the repository URL with credentials.
+            logger.warning(
+                "%s: OduMCP addon source preparation failed", name, exc_info=True
+            )
             mcp_warning = (
                 "Production created, but OduMCP addon source preparation failed. "
                 "Odoo MCP tools are unavailable; check the connector repository "
                 "and retry sync_production_mcp."
             )
 
+        # Set before the statement: a database PG created despite an error
+        # (a lost connection, a timeout) is still this attempt's to drop.
+        db_created = True
         _exec_sql(
             client,
             settings,
@@ -1326,16 +1790,8 @@ def create_production(
             name,
             repo_path,
             extra_conf_paths,
+            odoo_image=odoo_image,
         )
-
-        image_cleanup.note_image_requested(odoo_image)
-        try:
-            logger.info("Pulling image %s", odoo_image)
-            client.images.pull(odoo_image)
-        except Exception as exc:
-            logger.warning(
-                "Could not pull image %s, using local copy: %s", odoo_image, exc
-            )
 
         setup_logs: list[str] = []
         if template_name is None and source_env is None:
@@ -1349,6 +1805,7 @@ def create_production(
                     odoo_env,
                     odoo_volumes,
                     env_name,
+                    generated_conf,
                 )
             )
 
@@ -1369,7 +1826,19 @@ def create_production(
         if not mcp_warning:
             try:
                 production_mcp.provision(settings, team, name)
+            except PrerequisiteNotMetError as exc:
+                # Our own explanation (no production_token, an addon of
+                # another Odoo series, a failed shell step) names the fix; it
+                # never carries the token.
+                mcp_warning = (
+                    "Production created, but OduMCP installation or key setup "
+                    f"failed: {exc} Odoo MCP tools are unavailable; fix the cause, "
+                    "then retry sync_production_mcp."
+                )
             except Exception:
+                logger.warning(
+                    "%s: OduMCP installation or key setup failed", name, exc_info=True
+                )
                 mcp_warning = (
                     "Production created, but OduMCP installation or key setup failed. "
                     "Odoo MCP tools are unavailable; check production logs and addon "
@@ -1377,7 +1846,7 @@ def create_production(
                 )
         if mcp_warning:
             production_registry.update_production(
-                team, name, {"mcp": {"status": "sync_failed"}}
+                team, name, {"mcp": {"status": mcp_status}}
             )
             logger.warning("%s: %s", name, mcp_warning)
             promo_notes.append(mcp_warning)
@@ -1410,14 +1879,7 @@ def create_production(
         logger.error(
             "create_production('%s') failed; rolling back partial resources", name
         )
-        _cleanup_partial_production(
-            client,
-            settings,
-            team,
-            name,
-            remove_workspace=not workspace_preexisted,
-        )
-        production_registry.delete_production(team, name)
+        _cleanup_partial_production(client, settings, team, name, db_created=db_created)
         raise
 
     logger.info(
@@ -1476,6 +1938,10 @@ def set_production_odoo_conf(
     case-variant must not bypass the reserved-key refusal. A call that leaves
     the overrides unchanged returns early without touching (or restarting)
     the container. The caller must hold the production's lock.
+
+    ``list_db`` and ``admin_passwd`` are validated as a pair: enabling
+    Odoo's database manager without a real master password is refused (see
+    validate_db_manager_overrides).
     """
     from oduflow.wal_monitor import assert_writable
 
@@ -1503,7 +1969,9 @@ def set_production_odoo_conf(
             f"odoo.conf keys managed by Oduflow cannot be overridden: "
             f"{', '.join(reserved)}. addons_path and data_dir are generated; "
             "db_* connection keys come from container env vars; the listen "
-            "ports are what Traefik routes to (choose server_mode instead)."
+            "settings (interface, ports, http_enable and their legacy xmlrpc* "
+            "aliases) are pinned to what Traefik routes to (use server_mode to "
+            "pick the serving port)."
         )
     invalid = sorted(k for k in cleaned if not _ODOO_CONF_KEY_RE.match(k))
     if invalid:
@@ -1518,6 +1986,10 @@ def set_production_odoo_conf(
         conf.update(cleaned)
         for key in unset_list:
             conf.pop(key, None)
+    # Validated on the resulting set, not on this call's keys: list_db and
+    # admin_passwd guard each other, and either can arrive (or be dropped) in
+    # a separate call.
+    validate_db_manager_overrides(team, name, conf)
     notes = (
         [
             f"Removed odoo.conf overrides Oduflow manages and ignores: "
@@ -1558,6 +2030,48 @@ def set_production_odoo_conf(
     }
 
 
+def _refresh_odumcp_for_image(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    extra_mount_paths: list[tuple[str, str]],
+    odoo_image: str,
+) -> None:
+    """Point the managed OduMCP checkout at a changed image's Odoo series.
+
+    Only an existing managed checkout is touched; adopting a production that
+    never had one stays with sync_production_mcp. A checkout the client
+    repository has since taken over is removed instead (the container is
+    recreated by the caller either way). Optional like the rest of OduMCP: a
+    failure is recorded on the production (and logged), never fails the
+    reconfiguration.
+    """
+    from oduflow import production_mcp, production_registry
+
+    if not production_mcp.addon_checkout(team, name).exists():
+        return
+    try:
+        production_mcp.prepare_addon(
+            settings, team, name, extra_mount_paths, odoo_image
+        )
+    except Exception as exc:
+        status = (
+            "unsupported"
+            if isinstance(exc, production_mcp.UnsupportedOdooVersion)
+            else "sync_failed"
+        )
+        production_registry.update_production(team, name, {"mcp": {"status": status}})
+        # Our own errors explain themselves; anything else (an OSError while
+        # retiring the checkout, a clone failure) keeps its traceback.
+        logger.warning(
+            "%s: OduMCP addon not updated for image %s: %s",
+            name,
+            odoo_image,
+            exc,
+            exc_info=not isinstance(exc, FlowError),
+        )
+
+
 def reconfigure_production(
     settings: Settings,
     team: TeamSettings,
@@ -1582,9 +2096,11 @@ def reconfigure_production(
     The registry record (intent) is updated first, then the workspace and
     container are converged to it — on a mid-way failure re-running the
     same call resumes the convergence: a request that changes nothing
-    still repairs a missing container or repo checkout, or a container
+    still repairs a missing container or repo checkout, a container
     whose Traefik routing no longer matches the record (e.g. one created
-    before the bus route existed), instead of reporting a no-op. Changing
+    before the bus route existed), or a checkout/container still on a
+    branch the record has moved away from, instead of reporting a no-op.
+    Changing
     ``server_mode`` re-tunes odoo.conf and re-points Traefik at the other
     Odoo port. Changing ``odoo_image`` does NOT migrate the
     database: a major Odoo version bump additionally needs an explicit
@@ -1602,7 +2118,13 @@ def reconfigure_production(
         remove_worktree,
         resolve_extra_addons_path,
     )
-    from oduflow.git_ops import checkout_branch, fetch_branch, rev_parse
+    from oduflow.git_ops import (
+        checkout_branch,
+        current_branch,
+        fetch_branch,
+        is_git_repository,
+        rev_parse,
+    )
 
     record = production_registry.get_production(team, name)
     start_time = time.time()
@@ -1655,7 +2177,13 @@ def reconfigure_production(
 
     if env_vars is not None:
         env_vars = _production_env_vars(env_vars)
-        if env_vars != (record.get("env_vars") or {}):
+        stored_env = record.get("env_vars") or {}
+        if env_vars != stored_env:
+            # Only the variables this call adds or changes: a layout variable
+            # stored before the check existed must not block unrelated edits.
+            _check_new_production_env_vars(
+                {k: v for k, v in env_vars.items() if stored_env.get(k) != v}
+            )
             updates["env_vars"] = env_vars
     server_mode = resolve_server_mode(server_mode, None)
     if server_mode is not None and server_mode != server_mode_of(record):
@@ -1671,9 +2199,9 @@ def reconfigure_production(
         }
 
     # No-op only when the request changes nothing AND actual state matches
-    # the record; a missing container or checkout (a previous run failed
-    # mid-way) or stale routing labels are drift that the run below repairs
-    # from the record.
+    # the record; a missing container, a missing or corrupt checkout (a
+    # previous run failed mid-way) or stale routing labels are drift that
+    # the run below repairs from the record.
     container = _get_container(client, settings, team, name)
     # A rotated team secret keeps its reference, so only the values the
     # container runs with reveal it; recreating applies the new value.
@@ -1693,12 +2221,36 @@ def reconfigure_production(
         rotated_secrets = [
             key for key in secret_drift if created_refs.get(key) == effective_env[key]
         ]
+    # The branch the production actually runs: deploys resolve it from the
+    # container's oduflow.git_branch label and pull into the checkout, so a
+    # record whose branch neither of them matches (an earlier reconfigure
+    # updated the registry, then failed before converging) would keep
+    # deploying the old branch forever if this call early-returned as a no-op.
+    # "branch" not in updates covers both an explicit no-change value and a
+    # retry whose intent the registry already holds.
+    target_branch = record.get("branch", "")
+    label_branch = (
+        (container.labels or {}).get("oduflow.git_branch", "")
+        if container is not None
+        else ""
+    )
+    repo_ok = is_git_repository(repo_path)
+    checked_out = current_branch(repo_path) if repo_ok else ""
+    branch_drift = (
+        "branch" not in updates
+        and bool(target_branch)
+        and (
+            (bool(label_branch) and label_branch != target_branch)
+            or (bool(checked_out) and checked_out != target_branch)
+        )
+    )
     drift = (
         force_recreate
         or container is None
-        or not os.path.isdir(repo_path)
+        or not repo_ok
         or routing_drift(settings, team, name, record, container.labels or {})
         or bool(secret_drift)
+        or branch_drift
     )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
@@ -1734,8 +2286,10 @@ def reconfigure_production(
 
     # --- Converge the workspace (repo checkout + extra addon worktrees). ---
     staged_clone_path: str | None = None
-    if "repo_url" in updates or "git_user" in updates or not os.path.isdir(repo_path):
-        # A changed remote (or credential identity) invalidates the clone.
+    if "repo_url" in updates or "git_user" in updates or not repo_ok:
+        # A changed remote (or credential identity) invalidates the clone, and
+        # a missing or corrupt checkout (not a Git working tree) cannot be
+        # fetched into — re-clone instead of handing git a broken tree.
         # Clone beside the live checkout — the running container bind-mounts
         # repo_path, so the old tree must keep serving until the container
         # swap below; the directories are switched inside that window.
@@ -1751,7 +2305,11 @@ def reconfigure_production(
             depth=0,
             timeout=300,
         )
-    elif "branch" in updates:
+    elif "branch" in updates or (branch_drift and checked_out != target_branch):
+        # Label-only drift (the checkout already sits on the record's branch)
+        # is repaired by the container recreate below; fetch+checkout here
+        # would silently move the production to the origin tip — a deploy
+        # nobody asked for.
         fetch_branch(repo_path, record["branch"], team.git_credentials_file())
         checkout_branch(repo_path, record["branch"])
 
@@ -1783,15 +2341,6 @@ def reconfigure_production(
         extra_conf_paths.append(resolve_extra_addons_path(wt_path, repo_name))
 
     # --- Prepare everything, then swap the container (minimal downtime). ---
-    env_creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
-    generated_conf = _build_prod_odoo_conf(
-        settings, team, name, repo_path, extra_conf_paths
-    )
-    odoo_env, odoo_volumes, labels = _container_spec(
-        settings, team, name, record, env_creds, extra_mount_paths
-    )
     odoo_image_new = record["odoo_image"]
     image_cleanup.note_image_requested(odoo_image_new)
     # Pull only when the image actually changed (or is absent locally) — an
@@ -1825,6 +2374,25 @@ def reconfigure_production(
             chown_recursive(
                 sessions_path, int(uid_str), int(gid_str), client, odoo_image_new
             )
+        _refresh_odumcp_for_image(
+            settings, team, name, extra_mount_paths, odoo_image_new
+        )
+
+    # Built after the addon refresh above: both mount the managed checkout.
+    env_creds = load_credentials(
+        env_name, team.workspaces_dir, settings.db_user, settings.db_password
+    )
+    generated_conf = _build_prod_odoo_conf(
+        settings,
+        team,
+        name,
+        repo_path,
+        extra_conf_paths,
+        odoo_image=odoo_image_new,
+    )
+    odoo_env, odoo_volumes, labels = _container_spec(
+        settings, team, name, record, env_creds, extra_mount_paths
+    )
 
     container = _get_container(client, settings, team, name)
     if container is not None:
@@ -1854,7 +2422,7 @@ def reconfigure_production(
         repo_path,
         extra_mount_paths,
     )
-    healthy = wait_production_healthy(client, settings, team, name, timeout=180)
+    healthy = wait_production_healthy(client, settings, team, name)
     production_registry.update_production(team, name, {"unhealthy": not healthy})
 
     new_head = ""
@@ -1862,7 +2430,13 @@ def reconfigure_production(
         new_head = rev_parse(repo_path)
     except Exception:
         pass
-    code_changed = bool({"branch", "repo_url", "extra_addons"} & set(updates))
+    # A drift repair that moved the checkout changed the running code just as
+    # an explicit branch change does: it must land in the deploy ledger (the
+    # rollback target) and trigger the module-upgrade note below. An unknown
+    # head ("") proves nothing moved, so it never counts on its own.
+    code_changed = bool({"branch", "repo_url", "extra_addons"} & set(updates)) or (
+        bool(old_head) and bool(new_head) and old_head != new_head
+    )
     if code_changed:
         append_deploy(
             team,
@@ -1891,8 +2465,8 @@ def reconfigure_production(
     elif not updates and not rotated_secrets:
         notes.append(
             "No settings changed, but drifted state was repaired (the "
-            "container, its Traefik routing and/or the repo checkout did not "
-            "match the record and have been recreated from it)."
+            "container, its Traefik routing, the repo checkout and/or its "
+            "branch did not match the record and have been recreated from it)."
         )
     if purged_conf:
         notes.append(
@@ -2026,7 +2600,6 @@ def _destroy_leftovers(
     sweep retries instead of orphaning the database silently."""
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
-    workspace = _workspace(team, name)
     warnings: list[str] = []
 
     db_dropped = True
@@ -2054,17 +2627,25 @@ def _destroy_leftovers(
         )
     except Exception as exc:
         warnings.append(f"Failed to drop PG role: {exc}")
-    if os.path.isdir(workspace):
-        extra_dir = os.path.join(workspace, "extra")
-        if os.path.isdir(extra_dir):
-            from oduflow.extra_addons import remove_worktree
-
-            for repo_name in os.listdir(extra_dir):
-                wt_path = os.path.join(extra_dir, repo_name)
-                if os.path.isdir(wt_path):
-                    remove_worktree(team, repo_name, wt_path)
-        shutil.rmtree(workspace, ignore_errors=True)
+    _remove_workspace(team, name)
     return db_dropped, warnings
+
+
+def _remove_workspace(team: TeamSettings, name: str) -> None:
+    """Delete a production workspace, unregistering its extra-addons
+    worktrees from their shared bare clones first."""
+    workspace = _workspace(team, name)
+    if not os.path.isdir(workspace):
+        return
+    extra_dir = os.path.join(workspace, "extra")
+    if os.path.isdir(extra_dir):
+        from oduflow.extra_addons import remove_worktree
+
+        for repo_name in os.listdir(extra_dir):
+            wt_path = os.path.join(extra_dir, repo_name)
+            if os.path.isdir(wt_path):
+                remove_worktree(team, repo_name, wt_path)
+    shutil.rmtree(workspace, ignore_errors=True)
 
 
 def purge_deleted_productions(
@@ -2081,8 +2662,8 @@ def purge_deleted_productions(
 
     ``older_than_hours`` keeps leftovers younger than the cutoff (the reaper
     passes ``[lifecycle] prod_purge_hours``); ``0`` purges immediately (the
-    ``cleanup --purge-deleted-productions`` CLI). A tombstone on a production
-    that is back in the registry is stale (the name was re-created): it is
+    ``cleanup --purge-deleted-productions`` CLI). A tombstone on a registered
+    production is stale (create_production refuses a tombstoned name): it is
     removed and the leftovers are NOT touched. Pass the server's LockManager
     as ``locks`` to skip productions busy with another operation.
 
@@ -2178,6 +2759,31 @@ def purge_deleted_productions(
 # ---------------------------------------------------------------------------
 
 
+def _rejudge_unhealthy(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    record: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-judge a production flagged unhealthy once it was (re)started.
+
+    Starting or restarting is how operators recover a flagged production, so
+    either must drop a stale flag (e.g. from a rollback whose restart outlived
+    the health wait) once Odoo answers again; ``result`` then reports the
+    verdict as ``healthy``. An unflagged production stays instant: no wait,
+    no verdict. (A routing-drift recreate re-judges in reconfigure_production.)
+    """
+    if not record.get("unhealthy"):
+        return result
+    from oduflow import production_registry
+
+    healthy = wait_production_healthy(client, settings, team, name)
+    production_registry.update_production(team, name, {"unhealthy": not healthy})
+    return {**result, "healthy": healthy}
+
+
 def start_production(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, Any]:
@@ -2186,14 +2792,15 @@ def start_production(
     assert_writable(settings)
     from oduflow import production_registry
 
-    production_registry.get_production(team, name)
+    record = production_registry.get_production(team, name)
     client = get_client()
     # The production DB must be up before Odoo.
     ensure_prod_infra(client, settings, force=True)
     container = _require_container(client, settings, team, name)
     container.start()
     logger.info("Production started", extra={"env_name": prod_env_name(name)})
-    return {"name": name, "odoo_container": container.name, "status": "running"}
+    result = {"name": name, "odoo_container": container.name, "status": "running"}
+    return _rejudge_unhealthy(client, settings, team, name, record, result)
 
 
 def stop_production(
@@ -2217,7 +2824,7 @@ def restart_production(
     assert_writable(settings)
     from oduflow import production_registry
 
-    production_registry.get_production(team, name)
+    record = production_registry.get_production(team, name)
     client = get_client()
     if settings.backup is not None:
         ensure_prod_infra(client, settings, force=True, accept_live_evidence=True)
@@ -2241,7 +2848,8 @@ def restart_production(
     assert_writable(settings)
     container.restart()
     logger.info("Production restarted", extra={"env_name": prod_env_name(name)})
-    return {"name": name, "odoo_container": container.name, "status": "running"}
+    result = {"name": name, "odoo_container": container.name, "status": "running"}
+    return _rejudge_unhealthy(client, settings, team, name, record, result)
 
 
 def _has_routing_drift(
@@ -2273,6 +2881,85 @@ def _repair_routing_after_deploy(
         )
     return "Container recreated to apply its current Traefik routing" + (
         "." if result.get("healthy", True) else ", but it is NOT healthy yet."
+    )
+
+
+def _complete_odumcp_takeover(
+    settings: Settings,
+    team: TeamSettings,
+    name: str,
+    container: Any,
+    progress_key: str,
+) -> tuple[str, str]:
+    """After a SUCCESSFUL deploy: when the pulled code now ships odumcp and the
+    running container still mounts Oduflow's managed copy, recreate the
+    container (the builders no longer mount the copy once the repository
+    provides the module) and then retire the checkout.
+
+    Keyed on the repository state after the pull, not on the changed-files
+    list: a deploy classified "none" still completes the takeover. Returns
+    ``(status, note)`` — ``("", "")`` when nothing applied, ``"completed"``,
+    or ``"failed"`` when the recreate did not succeed; the still-mounted
+    checkout is then left intact for sync_production_mcp to finish the job.
+    A recreated container that did not become healthy still completes the
+    takeover (the repository copy was already the one Odoo loaded), but the
+    note says so instead of reporting a clean recreate. Never fails the
+    (already successful) deploy.
+    """
+    from oduflow import production_mcp
+    from oduflow.locking import report_progress
+
+    if not production_mcp.repository_provides_addon(team, name):
+        return "", ""
+    if not production_mcp._has_managed_mount(container):
+        return "", ""
+    report_progress(progress_key, "removing the managed odumcp copy")
+    try:
+        outcome = reconfigure_production(settings, team, name, force_recreate=True)
+    except Exception as exc:
+        logger.warning(
+            "%s: the repository now ships odumcp, but recreating the container "
+            "without the managed copy failed",
+            name,
+            exc_info=True,
+        )
+        # Our own errors explain themselves; anything else stays in the server
+        # log (same policy as create_production: a git error can quote URLs).
+        cause = f" ({exc})" if isinstance(exc, FlowError) else ""
+        return (
+            "failed",
+            "The repository now ships odumcp, but recreating the container to "
+            f"drop the managed copy failed{cause}; run sync_production_mcp to "
+            "complete the takeover.",
+        )
+    # reconfigure_production records an unhealthy recreate instead of raising.
+    health = (
+        ""
+        if outcome.get("healthy", True)
+        else (
+            " The recreated container did not become healthy within the health "
+            "timeout; check production_logs."
+        )
+    )
+    try:
+        production_mcp.retire_managed_checkout(team, name)
+    except OSError:
+        logger.warning(
+            "%s: the container runs without the managed odumcp copy, but its "
+            "checkout could not be removed",
+            name,
+            exc_info=True,
+        )
+        return (
+            "completed",
+            "odumcp now comes from the repository; the container was recreated "
+            "without the managed copy, whose directory could not be removed yet "
+            "(the next sync_production_mcp retries)." + health,
+        )
+    return (
+        "completed",
+        "odumcp now comes from the repository; the managed copy was removed and "
+        "the container recreated without it." + health,
     )
 
 
@@ -2501,7 +3188,13 @@ def _update_production(
         except Exception as exc:
             # A preflight SQL error can happen after Git advanced. Route it
             # through the same code rollback as a nonzero module exit code.
-            result = {"action": "error", "exit_code": 1, "output": str(exc)}
+            result = {
+                "action": "error",
+                "exit_code": 1,
+                "output": str(exc),
+                "failed_step": "exception",
+                "failed_step_output": f"{type(exc).__name__}: {exc}",
+            }
         new_head = rev_parse(repo_path)
         deploy.update(
             {
@@ -2513,6 +3206,10 @@ def _update_production(
                 "changed_files_count": len(result.get("changed_files", []) or []),
             }
         )
+        if "dependencies_exit_code" in result:
+            deploy["dependencies_exit_code"] = int(
+                result["dependencies_exit_code"] or 0
+            )
 
         if result.get("action") == "none" and new_head == old_head:
             # Nothing pulled, nothing applied — not a deploy.
@@ -2537,22 +3234,32 @@ def _update_production(
 
         report_progress(progress_key, "verifying health")
         ok = deploy["exit_code"] == 0 and wait_production_healthy(
-            client, settings, team, name, timeout=180
+            client, settings, team, name
         )
         if ok:
             production_registry.update_production(
                 team, name, {"deploy_in_progress": False, "unhealthy": False}
             )
-            deploy["ts_end"] = _now_iso()
             # Extra-addon worktree HEADs at this deployed state (pull advanced
             # them), so a later rollback to new_head reverts them in lockstep.
             deploy["worktrees"] = _worktree_heads(team, name)
+            takeover, takeover_note = _complete_odumcp_takeover(
+                settings, team, name, container, progress_key
+            )
+            if takeover:
+                deploy["odumcp_takeover"] = takeover
+            deploy["ts_end"] = _now_iso()
             append_deploy(team, name, deploy)
-            routing_note = _repair_routing_after_deploy(settings, team, name, container)
-            if routing_note:
-                result["message"] = " ".join(
-                    filter(None, [result.get("message", ""), routing_note])
-                )
+            # The takeover recreated the container from the record, routing
+            # included; otherwise legacy routing labels get their repair here.
+            routing_note = (
+                ""
+                if takeover == "completed"
+                else _repair_routing_after_deploy(settings, team, name, container)
+            )
+            notes = [result.get("message", ""), takeover_note, routing_note]
+            if takeover_note or routing_note:
+                result["message"] = " ".join(filter(None, notes))
             return {
                 **result,
                 "name": name,
@@ -2561,12 +3268,33 @@ def _update_production(
             }
 
         # ------------------------- rollback (code only) -------------------
+        # Record the evidence before the rollback restart buries it: the
+        # failed step's own output, or the server log when every command
+        # succeeded and the health check did not.
+        if deploy["exit_code"]:
+            step = str(result.get("failed_step") or "apply")
+            failed_output = str(
+                result.get("failed_step_output") or result.get("output") or ""
+            )
+        else:
+            step = "health"
+            failed_output = _container_log_tail(settings, team, name)
+        diagnostics, cause = _failure_diagnostics(step, failed_output)
+        deploy.update(diagnostics)
+        failure = f"Deploy failed at step '{step}' (exit_code={deploy['exit_code']})"
+        cause_note = f" Cause: {cause}" if cause else ""
+        evidence = diagnostics.get("failure_excerpt") or "\n".join(
+            diagnostics.get("output_tail", "").splitlines()[-40:]
+        )
         logger.error(
-            "Production '%s' deploy failed (exit_code=%s) — rolling back code %s -> %s",
+            "Production '%s' deploy failed at step '%s' (exit_code=%s) — rolling "
+            "back code %s -> %s%s",
             name,
+            step,
             deploy["exit_code"],
             new_head[:10],
             old_head[:10],
+            f"\n{evidence}" if evidence else "",
         )
         report_progress(progress_key, "rolling back code")
         rollback_error = ""
@@ -2577,9 +3305,7 @@ def _update_production(
 
             assert_writable(settings)
             container.restart()
-            recovered = wait_production_healthy(
-                client, settings, team, name, timeout=120
-            )
+            recovered = wait_production_healthy(client, settings, team, name)
         except Exception as exc:
             recovered = False
             rollback_error = str(exc)
@@ -2588,8 +3314,7 @@ def _update_production(
         if recovered:
             deploy["status"] = "rolled_back"
             deploy["error"] = (
-                f"Deploy failed (exit_code={deploy['exit_code']}); code "
-                f"reverted to {old_head[:10]}."
+                f"{failure}; code reverted to {old_head[:10]}.{cause_note}"
             )
             production_registry.update_production(
                 team, name, {"deploy_in_progress": False, "unhealthy": False}
@@ -2604,8 +3329,10 @@ def _update_production(
                 "output": result.get("output", ""),
                 "deploy": deploy,
                 "message": (
-                    f"Deploy of {new_head[:10]} FAILED; code was rolled back "
-                    f"to {old_head[:10]} and the production is healthy again. "
+                    f"Deploy of {new_head[:10]} FAILED at step '{step}'"
+                    + (f" ({cause})" if cause else "")
+                    + f"; code was rolled back to {old_head[:10]} and the "
+                    "production is healthy again. "
                     "The DATABASE was NOT rolled back — if module upgrades "
                     "left it inconsistent, restore a snapshot manually "
                     "(restore_production)."
@@ -2613,8 +3340,16 @@ def _update_production(
             }
 
         deploy["status"] = "rollback_failed"
-        deploy["error"] = rollback_error or (
-            "Rollback restart did not become healthy within 120s."
+        rollback_problem = (
+            rollback_error
+            or (
+                "the restart did not become healthy within "
+                f"{settings.prod_health_timeout}s (configurable as [production] "
+                "health_timeout); a later healthy start or restart clears the flag"
+            )
+        ).rstrip(".")
+        deploy["error"] = (
+            f"{failure}; the rollback did not recover: {rollback_problem}.{cause_note}"
         )
         production_registry.update_production(
             team, name, {"deploy_in_progress": False, "unhealthy": True}
@@ -2644,11 +3379,27 @@ def _update_production(
         # no-op poll does not clear it).
         deploy["ts_end"] = _now_iso()
         deploy["status"] = "error"
-        deploy["error"] = str(exc)
+        deploy["error"] = str(exc) or type(exc).__name__
+        deploy.setdefault("failed_step", "exception")
         try:
             serving = wait_production_healthy(client, settings, team, name, timeout=15)
         except Exception:
             serving = False
+        if not serving and "output_tail" not in deploy:
+            # The record may be the caller's only evidence (a timed-out MCP
+            # client, a webhook): keep the server log and the failure record
+            # it names alongside the exception. Skipped when the site still
+            # serves — the log then predates this failure.
+            try:
+                diagnostics, cause = _failure_diagnostics(
+                    str(deploy["failed_step"]),
+                    _container_log_tail(settings, team, name),
+                )
+                deploy.update(diagnostics)
+                if cause:
+                    deploy["error"] += f" Cause: {cause}"
+            except Exception:  # noqa: BLE001 - diagnostics must not mask exc
+                pass
         production_registry.update_production(
             team, name, {"deploy_in_progress": False, "unhealthy": not serving}
         )
@@ -2719,7 +3470,7 @@ def rollback_production(
 
     assert_writable(settings)
     container.restart()
-    healthy = wait_production_healthy(client, settings, team, name, timeout=120)
+    healthy = wait_production_healthy(client, settings, team, name)
 
     production_registry.update_production(team, name, {"unhealthy": not healthy})
     deploy = {
@@ -2847,6 +3598,9 @@ def list_productions(settings: Settings, team: TeamSettings) -> list[dict[str, A
                 "allow_copy_to_dev_mcp": bool(
                     record.get("allow_copy_to_dev_mcp", True)
                 ),
+                # "ready" / "sync_failed"; empty for records from before
+                # OduMCP provisioning. The dashboard flags "sync_failed".
+                "mcp_status": (record.get("mcp") or {}).get("status", ""),
                 "commit": head,
                 "commit_short": head[:10],
                 "created_at": record.get("created_at", ""),
@@ -2915,7 +3669,7 @@ def get_production_info(
         "container_status": container.status if container is not None else "missing",
         "commit": head,
         "commits": commits,
-        "deploys": read_deploys(team, name, limit=5),
+        "deploys": strip_deploy_output(read_deploys(team, name, limit=5)),
         "backup": record.get("backup", {}),
     }
 

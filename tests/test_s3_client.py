@@ -362,3 +362,33 @@ class TestMultipartUploadStream:
             s3_client.multipart_upload_stream(
                 client, "backups", "dump.sql", iter([b"ab"])
             )
+
+
+class TestS3PutIfAbsent:
+    """P-M16: the store config must be created first-writer-wins, not
+    exists-then-put — two concurrent first backups minted different chunker
+    keys and the loser's revision was permanently unrestorable."""
+
+    def _storage(self, client):
+        return s3_client.S3Storage(_backup(), "p", client=client)
+
+    def test_sends_conditional_put_and_reports_creation(self):
+        client = MagicMock()
+        assert self._storage(client).put_if_absent("config", b"x") is True
+        kwargs = client.put_object.call_args.kwargs
+        assert kwargs["IfNoneMatch"] == "*"
+        assert kwargs["Key"] == "p/config"
+
+    def test_precondition_failed_means_already_exists(self):
+        client = MagicMock()
+        err = _client_error(412)
+        client.exceptions.ClientError = err
+        client.put_object.side_effect = err()
+        assert self._storage(client).put_if_absent("config", b"x") is False
+
+    def test_conditional_conflict_means_a_concurrent_creator(self):
+        client = MagicMock()
+        err = _client_error(409)
+        client.exceptions.ClientError = err
+        client.put_object.side_effect = err()
+        assert self._storage(client).put_if_absent("config", b"x") is False

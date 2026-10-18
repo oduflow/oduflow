@@ -489,8 +489,25 @@ def test_import_token_flags_in_command(tmp_path):
     assert "--with-enterprise" in data["command"]
     assert "--with-extra-addons" in data["command"]
     assert "--with-themes" not in data["command"]
+    assert "--without-filestore" not in data["command"]
     _resolved_team, record = import_tokens.load_token(settings, data["token"])
     assert record["addon_error_policy"] == "best_effort"
+    assert record["without_filestore"] is False
+
+
+def test_import_token_without_filestore_flag_in_command(tmp_path):
+    from oduflow import import_tokens
+
+    client, settings, _team = _client(tmp_path)
+    r = client.post(
+        "/api/templates/import-token",
+        json={"template_name": "zipfit", "without_filestore": True},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["command"].endswith(" --without-filestore")
+    _resolved_team, record = import_tokens.load_token(settings, data["token"])
+    assert record["without_filestore"] is True
 
 
 def test_import_token_rejects_unknown_addon_policy(tmp_path):
@@ -537,6 +554,71 @@ def test_finalize_uses_addon_policy_stored_in_token(tmp_path):
 
     assert response.status_code == 200
     assert finalize.call_args.kwargs["addon_error_policy"] == "best_effort"
+    assert finalize.call_args.kwargs["without_filestore"] is False
+
+
+def _finalize_request(client, team, token, query):
+    """POST finalize over a staged manifest + dump, the engine mocked."""
+    staging = team.get_import_staging_dir("zipfit")
+    os.makedirs(staging)
+    with open(os.path.join(staging, "metadata.json"), "w") as f:
+        f.write("{}")
+    with open(os.path.join(staging, "dump.sql.gz"), "wb") as f:
+        f.write(b"gz")
+
+    with patch.object(
+        system_ops,
+        "finalize_imported_template",
+        return_value={"template_name": "zipfit", "addon_warnings": []},
+    ) as finalize:
+        response = client.post(
+            f"/api/templates/import/finalize{query}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    return response, finalize
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES"])
+def test_finalize_passes_database_only_from_the_client(tmp_path, value):
+    client, _settings, team = _client(tmp_path)
+    token, _ = _mint(client, "zipfit")
+
+    response, finalize = _finalize_request(
+        client, team, token, f"?without_filestore={value}"
+    )
+
+    assert response.status_code == 200
+    assert finalize.call_args.kwargs["without_filestore"] is True
+
+
+def test_finalize_is_database_only_when_the_token_says_so(tmp_path):
+    """A client run without the flag cannot turn a database-only token into a
+    full import that would promote chunks left by an interrupted upload."""
+    client, _settings, team = _client(tmp_path)
+    r = client.post(
+        "/api/templates/import-token",
+        json={"template_name": "zipfit", "without_filestore": True},
+    )
+
+    response, finalize = _finalize_request(
+        client, team, r.json()["token"], "?without_filestore=0"
+    )
+
+    assert response.status_code == 200
+    assert finalize.call_args.kwargs["without_filestore"] is True
+
+
+def test_finalize_rejects_an_unknown_database_only_value(tmp_path):
+    client, _settings, team = _client(tmp_path)
+    token, _ = _mint(client, "zipfit")
+
+    response, finalize = _finalize_request(
+        client, team, token, "?without_filestore=maybe"
+    )
+
+    assert response.status_code == 400
+    assert "without_filestore" in response.json()["error"]
+    finalize.assert_not_called()
 
 
 def test_filestore_tar_zip_slip_is_skipped(tmp_path):
@@ -617,6 +699,7 @@ def test_promoted_import_reports_live_artifacts_for_retry(tmp_path):
     staging = team.get_import_staging_dir("zipfit")
     os.makedirs(staging)
     open(os.path.join(staging, ".promoted"), "w").close()
+    open(os.path.join(staging, ".filestore-promoted"), "w").close()
     tpl_dir = team.get_template_dir("zipfit")
     os.makedirs(os.path.join(tpl_dir, "filestore", "ab"))
     with open(team.get_template_metadata_path("zipfit"), "w") as f:
@@ -634,6 +717,31 @@ def test_promoted_import_reports_live_artifacts_for_retry(tmp_path):
     assert st["progress"]["dump"] is True
     assert st["progress"]["dump_bytes"] == len(b"promoted")
     assert st["progress"]["filestore_chunks"] == ["ab"]
+
+
+def test_database_only_promotion_does_not_report_the_kept_filestore(tmp_path):
+    """Only the dump was promoted: the live filestore is an older one, so a
+    full retry must upload every chunk rather than skip its hash-directories."""
+    client, _s, team = _client(tmp_path)
+    staging = team.get_import_staging_dir("zipfit")
+    os.makedirs(staging)
+    open(os.path.join(staging, ".promoted"), "w").close()
+    tpl_dir = team.get_template_dir("zipfit")
+    os.makedirs(os.path.join(tpl_dir, "filestore", "ab"))
+    with open(team.get_template_metadata_path("zipfit"), "w") as f:
+        f.write("{}")
+    with open(os.path.join(tpl_dir, "dump.sql.gz"), "wb") as f:
+        f.write(b"promoted")
+
+    token, _ = _mint(client, "zipfit")
+    st = client.get(
+        "/api/templates/import/status",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+
+    assert st["progress"]["manifest"] is True
+    assert st["progress"]["dump"] is True
+    assert st["progress"]["filestore_chunks"] == []
 
 
 def test_private_remote_addon_url_is_rejected(tmp_path):
@@ -822,6 +930,144 @@ def test_finalize_swaps_staging_into_template(tmp_path):
     assert not os.path.exists(staging)  # staging cleaned up
 
 
+def _finalize_with_mocks(settings, team, staging, *, reload_error=None, **kwargs):
+    """Run finalize_imported_template with Docker and the DB restore mocked.
+
+    Returns the result, the metadata handed to _update_template_sizes and the
+    chown mock; ``reload_error`` makes the DB restore fail instead."""
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from oduflow.docker_ops import env_ops
+
+    @contextmanager
+    def fake_remount(*a, **kw):
+        yield MagicMock(affected=[], failures=[])
+
+    with (
+        patch.object(system_ops, "get_client"),
+        patch.object(env_ops, "remount_template_overlays", fake_remount),
+        patch.object(system_ops, "get_odoo_uid_gid", return_value="101:101"),
+        patch.object(system_ops, "chown_recursive") as chown,
+        patch.object(system_ops, "_update_template_sizes") as sizes,
+        patch.object(
+            system_ops,
+            "reload_template",
+            return_value={"template_db": "tdb", "restore_seconds": 1.0},
+            side_effect=reload_error,
+        ),
+    ):
+        result = system_ops.finalize_imported_template(
+            settings, team, "zipfit", staging_dir=staging, **kwargs
+        )
+    return result, sizes.call_args.args[3], chown
+
+
+def _stage_database(team, *, leftover_chunk=False):
+    staging = team.get_import_staging_dir("zipfit")
+    os.makedirs(staging)
+    with open(os.path.join(staging, "metadata.json"), "w") as f:
+        json.dump({"odoo_version": "18.0"}, f)
+    with open(os.path.join(staging, "dump.sql.gz"), "wb") as f:
+        f.write(b"gz")
+    if leftover_chunk:
+        # Left by an earlier full upload that was interrupted.
+        os.makedirs(os.path.join(staging, "filestore", "ab"))
+        with open(os.path.join(staging, "filestore", "ab", "f"), "wb") as f:
+            f.write(b"partial")
+    return staging
+
+
+def test_finalize_full_import_records_filestore(tmp_path):
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    staging = _stage_database(team, leftover_chunk=True)
+
+    result, metadata, chown = _finalize_with_mocks(settings, team, staging)
+
+    fs = team.get_template_filestore_path("zipfit")
+    assert os.path.isfile(os.path.join(fs, "ab", "f"))
+    assert metadata["includes_filestore"] is True
+    assert result["includes_filestore"] is True
+    assert result["filestore"] == "imported"
+    chown.assert_called_once()
+
+
+def test_finalize_database_only_keeps_live_filestore(tmp_path):
+    """Staged chunks are not promoted as a partial filestore; the template's
+    existing filestore stays, like the other database-only imports."""
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    staging = _stage_database(team, leftover_chunk=True)
+    fs = team.get_template_filestore_path("zipfit")
+    os.makedirs(os.path.join(fs, "ff"))
+    with open(os.path.join(fs, "ff", "old"), "wb") as f:
+        f.write(b"old")
+
+    result, metadata, chown = _finalize_with_mocks(
+        settings, team, staging, without_filestore=True
+    )
+
+    assert result["template_db"] == "tdb"
+    assert os.listdir(fs) == ["ff"]
+    assert metadata["includes_filestore"] is True
+    assert result["filestore"] == "kept"
+    # Nothing in the kept filestore changed, so it is not walked again.
+    chown.assert_not_called()
+    tpl_dir = team.get_template_dir("zipfit")
+    assert os.path.isfile(os.path.join(tpl_dir, "dump.sql.gz"))
+    assert not os.path.exists(staging)
+
+
+def test_finalize_database_only_new_template_has_empty_filestore(tmp_path):
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team1"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+    staging = _stage_database(team, leftover_chunk=True)
+
+    result, metadata, chown = _finalize_with_mocks(
+        settings, team, staging, without_filestore=True
+    )
+
+    fs = team.get_template_filestore_path("zipfit")
+    assert os.path.isdir(fs)
+    assert os.listdir(fs) == []
+    assert metadata["includes_filestore"] is False
+    assert metadata["odoo_version"] == "18.0"
+    assert result["includes_filestore"] is False
+    assert result["filestore"] == "none"
+    chown.assert_called_once()  # the freshly created, empty filestore
+
+
+def test_full_retry_after_database_only_promotion_reuploads_filestore(tmp_path):
+    """A database-only finalize promotes the dump, then the restore fails.
+    Re-running without the flag must re-upload the whole filestore: the kept
+    one is not this import's, and a few uploaded chunks would otherwise
+    replace it as the template's entire filestore."""
+    client, settings, team = _client(tmp_path)
+    staging = _stage_database(team)
+    fs = team.get_template_filestore_path("zipfit")
+    for prefix in ("00", "7f", "ff"):
+        os.makedirs(os.path.join(fs, prefix))
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        _finalize_with_mocks(
+            settings,
+            team,
+            staging,
+            without_filestore=True,
+            reload_error=RuntimeError("restore failed"),
+        )
+
+    token, _ = _mint(client, "zipfit")
+    st = client.get(
+        "/api/templates/import/status",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    assert st["progress"]["dump"] is True
+    assert st["progress"]["filestore_chunks"] == []
+    assert sorted(os.listdir(fs)) == ["00", "7f", "ff"]
+
+
 def test_finalize_can_retry_after_reload_failure_without_reupload(tmp_path):
     """Promotion leaves a marker and live artifacts when DB reload fails."""
     from contextlib import contextmanager
@@ -864,6 +1110,7 @@ def test_finalize_can_retry_after_reload_failure_without_reupload(tmp_path):
             )
 
         assert os.path.isfile(os.path.join(staging, ".promoted"))
+        assert os.path.isfile(os.path.join(staging, ".filestore-promoted"))
         assert not os.path.isfile(os.path.join(staging, "dump.sql.gz"))
         assert os.path.isfile(
             os.path.join(team.get_template_dir("zipfit"), "dump.sql.gz")

@@ -97,6 +97,27 @@ def run_for_output(
     return cast(bytes, output)
 
 
+def pull_with_progress(client: DockerClient, image: str, label: str) -> None:
+    """Pull *image*, logging the daemon's progress at most every 15 seconds.
+
+    ``images.pull`` drains the progress stream silently, so a large image (the
+    coder image is ~1 GB compressed) shows no sign of life for minutes; during
+    startup that silence would also trip the startup watchdog. An error the
+    daemon reports inside the stream raises like a failed request.
+    """
+    last_progress = 0.0
+    for event in client.api.pull(image, stream=True, decode=True):
+        if event.get("error"):
+            raise PrerequisiteNotMetError(f"Cannot pull {image}: {event['error']}")
+        now = time.monotonic()
+        if event.get("status") and (
+            "progressDetail" not in event or now - last_progress >= 15
+        ):
+            detail = (event["status"], event.get("id"), event.get("progress"))
+            logger.info("%s: %s", label, " ".join(str(p) for p in detail if p))
+            last_progress = now
+
+
 def wait_for_docker(timeout: float = 60.0, poll_seconds: float = 2.0) -> None:
     """Block until the Docker daemon answers, or raise after *timeout*.
 

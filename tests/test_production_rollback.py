@@ -1,7 +1,11 @@
 """Update engine tests: auto code rollback on failed production deploys."""
 
+import asyncio
+import inspect
+import json
 import os
 import subprocess
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -79,12 +83,19 @@ def _run_update(settings, team, pull_result, healthy_sequence, container):
     """Run update_production with pull/health mocked; return (result, health_mock)."""
     client = MagicMock()
     health = MagicMock(side_effect=healthy_sequence)
+
+    def container_logs(*args, n_lines=0, **kwargs):
+        # Stand in for production_logs: serve the mocked container's log.
+        raw = container.logs(tail=n_lines)
+        return raw.decode() if isinstance(raw, bytes) else str(raw)
+
     with (
         patch.object(production_ops, "get_client", return_value=client),
         patch.object(production_ops, "_require_container", return_value=container),
         patch("oduflow.docker_ops.env_ops.pull_environment", return_value=pull_result),
         patch.object(production_ops, "wait_production_healthy", health),
         patch.object(production_ops, "reapply_prod_odoo_conf", return_value=True),
+        patch.object(production_ops, "production_logs", side_effect=container_logs),
     ):
         result = production_ops.update_production(settings, team, "erp", trigger="test")
     return result, health
@@ -246,6 +257,302 @@ class TestUpdateRollback:
         assert result["action"] == "rolled_back"
         assert rev_parse(repo_path) == old_head
         assert result["failed_commit"] == new_head
+
+
+# What a failed `odoo -u` prints: Odoo resets the module states, logs the
+# CRITICAL record with the traceback, and exits with 255.
+_ODOO_UPGRADE_FAILURE = """\
+2026-10-18 13:57:01,100 42 INFO erp odoo.modules.loading: loading 412 modules...
+2026-10-18 13:57:30,200 42 ERROR erp odoo.addons.base.models.ir_ui_view: non-fatal view error
+2026-10-18 13:57:40,300 42 WARNING erp odoo.modules.registry: Transient module states were reset
+2026-10-18 13:57:40,301 42 CRITICAL erp odoo.service.server: Failed to initialize database `erp`.
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/odoo/service/server.py", line 1340, in preload_registries
+    registry = Registry.new(dbname, update_module=update_module)
+psycopg2.errors.SerializationFailure: could not serialize access due to concurrent update
+2026-10-18 13:57:40,500 42 INFO erp odoo.service.server: Stopping gracefully"""
+
+
+class TestFailureDiagnostics:
+    """A failed deploy explains itself in deploys.json: its caller (an MCP
+    client that timed out, a webhook) may never see the response."""
+
+    def test_failed_upgrade_records_step_excerpt_and_cause(
+        self, settings, team, prod_repo
+    ):
+        result, _ = _run_update(
+            settings,
+            team,
+            {
+                "action": "upgrade",
+                "exit_code": 255,
+                "changed_files": ["a.py"],
+                "output": "[PIP] noise\n" + _ODOO_UPGRADE_FAILURE,
+                "failed_step": "upgrade",
+                "failed_step_output": _ODOO_UPGRADE_FAILURE,
+                "message": "failed",
+            },
+            [True],
+            _container(),
+        )
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["status"] == "rolled_back"
+        assert deploy["failed_step"] == "upgrade"
+        assert deploy["exit_code"] == 255
+        excerpt = deploy["failure_excerpt"]
+        # The CRITICAL record wins over the earlier ERROR one, traceback included.
+        assert excerpt.startswith("2026-10-18 13:57:40,301 42 CRITICAL")
+        assert "SerializationFailure" in excerpt
+        assert "non-fatal view error" not in excerpt
+        assert "Stopping gracefully" not in excerpt
+        assert deploy["output_tail"] == _ODOO_UPGRADE_FAILURE
+        assert deploy["error"].startswith(
+            "Deploy failed at step 'upgrade' (exit_code=255); code reverted to"
+        )
+        assert deploy["error"].endswith(
+            "Cause: psycopg2.errors.SerializationFailure: could not serialize "
+            "access due to concurrent update"
+        )
+        assert "SerializationFailure" in result["message"]
+
+    def test_health_failure_records_the_server_log(self, settings, team, prod_repo):
+        container = _container()
+        container.logs.return_value = (
+            b"2026-10-18 13:57:01,100 1 ERROR ? odoo.modules.loading: boom\n"
+            b"Traceback (most recent call last):\n"
+            b"ModuleNotFoundError: No module named 'boto3'\n"
+        )
+        _run_update(
+            settings,
+            team,
+            {
+                "action": "restart",
+                "exit_code": 0,
+                "changed_files": ["a.py"],
+                "output": "",
+                "message": "restarted",
+            },
+            [False, True],
+            container,
+        )
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["failed_step"] == "health"
+        assert "No module named 'boto3'" in deploy["output_tail"]
+        assert deploy["error"].endswith(
+            "Cause: ModuleNotFoundError: No module named 'boto3'"
+        )
+
+    def test_exception_during_apply_is_its_own_cause(self, settings, team, prod_repo):
+        client = MagicMock()
+        with (
+            patch.object(production_ops, "get_client", return_value=client),
+            patch.object(
+                production_ops, "_require_container", return_value=_container()
+            ),
+            patch(
+                "oduflow.docker_ops.env_ops.pull_environment",
+                side_effect=RuntimeError("preflight query failed"),
+            ),
+            patch.object(production_ops, "wait_production_healthy", return_value=True),
+            patch.object(production_ops, "reapply_prod_odoo_conf", return_value=True),
+        ):
+            production_ops.update_production(settings, team, "erp")
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["failed_step"] == "exception"
+        assert deploy["error"].endswith("Cause: RuntimeError: preflight query failed")
+
+    def test_unexpected_exception_records_diagnostics(self, settings, team, prod_repo):
+        # The outer BaseException handler: the record is the only evidence
+        # when the client timed out, so it too carries the server log — and
+        # an exception with an empty str() still names itself.
+        container = _container()
+        container.logs.return_value = (
+            b"2026-10-18 13:57:01,100 1 CRITICAL erp odoo.service.server: "
+            b"Failed to initialize database `erp`.\n"
+            b"Traceback (most recent call last):\n"
+            b"KeyError: 'x'\n"
+        )
+        with pytest.raises(RuntimeError):
+            _run_update(
+                settings,
+                team,
+                {
+                    "action": "restart",
+                    "exit_code": 0,
+                    "changed_files": ["a.py"],
+                    "message": "restarted",
+                },
+                [RuntimeError(""), RuntimeError("")],  # verify + handler's probe
+                container,
+            )
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["status"] == "error"
+        assert deploy["failed_step"] == "exception"
+        assert deploy["error"].startswith("RuntimeError")
+        assert deploy["error"].endswith("Cause: KeyError: 'x'")
+        assert "Failed to initialize database" in deploy["failure_excerpt"]
+        assert "KeyError: 'x'" in deploy["output_tail"]
+        assert production_registry.get_production(team, "erp")["unhealthy"] is True
+
+    def test_dependency_code_is_recorded(self, settings, team, prod_repo):
+        _run_update(
+            settings,
+            team,
+            {
+                "action": "upgrade",
+                "exit_code": 255,
+                "changed_files": ["requirements.txt"],
+                "dependencies_exit_code": 1,
+                "failed_step": "upgrade",
+                "failed_step_output": _ODOO_UPGRADE_FAILURE,
+                "message": "failed",
+            },
+            [True],
+            _container(),
+        )
+        assert (
+            production_ops.read_deploys(team, "erp")[-1]["dependencies_exit_code"] == 1
+        )
+
+    def test_failed_rollback_keeps_the_original_failure(
+        self, settings, team, prod_repo
+    ):
+        _run_update(
+            settings,
+            team,
+            {
+                "action": "upgrade",
+                "exit_code": 255,
+                "changed_files": ["a.py"],
+                "failed_step": "upgrade",
+                "failed_step_output": _ODOO_UPGRADE_FAILURE,
+                "message": "failed",
+            },
+            [False],
+            _container(),
+        )
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["status"] == "rollback_failed"
+        assert deploy["error"].startswith(
+            "Deploy failed at step 'upgrade' (exit_code=255); the rollback did "
+            "not recover: the restart did not become healthy within "
+            f"{settings.prod_health_timeout}s (configurable as [production] "
+            "health_timeout); a later healthy start or restart clears the flag. "
+            "Cause: psycopg2.errors.SerializationFailure"
+        )
+        assert "SerializationFailure" in deploy["failure_excerpt"]
+
+    def test_success_carries_no_diagnostics(self, settings, team, prod_repo):
+        _run_update(
+            settings,
+            team,
+            {
+                "action": "upgrade",
+                "exit_code": 0,
+                "changed_files": ["a.py"],
+                "output": _ODOO_UPGRADE_FAILURE,
+                "message": "ok",
+            },
+            [True],
+            _container(),
+        )
+        deploy = production_ops.read_deploys(team, "erp")[-1]
+        assert deploy["status"] == "success"
+        for key in ("failed_step", "failure_excerpt", "output_tail"):
+            assert key not in deploy
+
+
+class TestFailureExcerpt:
+    def test_last_critical_record_wins(self):
+        output = (
+            "2026-10-18 13:00:00,000 1 CRITICAL db x: first\nold\n"
+            + _ODOO_UPGRADE_FAILURE
+        )
+        excerpt = production_ops._failure_excerpt(output)
+        assert excerpt.startswith("2026-10-18 13:57:40,301 42 CRITICAL")
+
+    def test_error_record_when_there_is_no_critical(self):
+        output = (
+            "2026-10-18 13:00:00,000 1 INFO db x: ok\n"
+            "2026-10-18 13:00:01,000 1 ERROR db x: broken\n"
+            "Traceback (most recent call last):\n"
+            "ValueError: nope\n"
+            "2026-10-18 13:00:02,000 1 INFO db x: after"
+        )
+        assert production_ops._failure_excerpt(output) == (
+            "2026-10-18 13:00:01,000 1 ERROR db x: broken\n"
+            "Traceback (most recent call last):\n"
+            "ValueError: nope"
+        )
+
+    def test_bare_critical_yields_to_the_error_with_the_traceback(self):
+        # Some Odoo versions log the CRITICAL summary without exc_info: the
+        # earlier ERROR record then holds the actual exception.
+        output = (
+            "2026-10-18 13:00:01,000 1 ERROR db x: broken\n"
+            "Traceback (most recent call last):\n"
+            "ValueError: nope\n"
+            "2026-10-18 13:00:02,000 1 CRITICAL db x: "
+            "Failed to initialize database `db`."
+        )
+        excerpt = production_ops._failure_excerpt(output)
+        assert excerpt.startswith("2026-10-18 13:00:01,000 1 ERROR")
+        assert "ValueError: nope" in excerpt
+
+    def test_bare_critical_without_a_traceback_anywhere_still_wins(self):
+        output = (
+            "2026-10-18 13:00:01,000 1 ERROR db x: broken\n"
+            "2026-10-18 13:00:02,000 1 CRITICAL db x: dead"
+        )
+        assert (
+            production_ops._failure_excerpt(output)
+            == "2026-10-18 13:00:02,000 1 CRITICAL db x: dead"
+        )
+
+    def test_bare_traceback_without_log_records(self):
+        # A crash before Odoo set up logging (e.g. at `import odoo`).
+        output = (
+            "Traceback (most recent call last):\n"
+            '  File "odoo-bin", line 5\n'
+            "AttributeError: module 'typing' has no attribute '_ClassVar'"
+        )
+        assert production_ops._failure_excerpt(output) == output
+
+    def test_nothing_to_excerpt(self):
+        assert production_ops._failure_excerpt("") == ""
+        assert production_ops._failure_excerpt("ERROR: pip failed") == ""
+
+    def test_a_long_traceback_keeps_its_header_and_end(self):
+        frames = [f"  frame {i}" for i in range(500)]
+        output = "\n".join(
+            ["2026-10-18 13:00:01,000 1 CRITICAL db x: dead", *frames, "KeyError: 'x'"]
+        )
+        excerpt = production_ops._failure_excerpt(output).splitlines()
+        assert len(excerpt) == production_ops._EXCERPT_LINES
+        assert excerpt[0].endswith("CRITICAL db x: dead")
+        assert excerpt[1] == "..."
+        assert excerpt[-1] == "KeyError: 'x'"
+
+    def test_a_huge_excerpt_is_bounded_in_chars(self):
+        output = "2026-10-18 13:00:01,000 1 CRITICAL db x: dead\n" + "y" * 50_000
+        excerpt = production_ops._failure_excerpt(output)
+        assert len(excerpt) == production_ops._EXCERPT_CHARS
+        assert excerpt.startswith("2026-10-18 13:00:01,000 1 CRITICAL")
+
+
+class TestOutputTail:
+    def test_keeps_the_last_lines(self):
+        output = "\n".join(str(i) for i in range(1000))
+        tail = production_ops._output_tail(output).splitlines()
+        assert len(tail) == production_ops._OUTPUT_TAIL_LINES
+        assert tail[-1] == "999"
+
+    def test_is_bounded_in_chars_on_a_line_boundary(self):
+        output = "\n".join(f"{i:04d}" + "z" * 200 for i in range(150))
+        tail = production_ops._output_tail(output)
+        assert len(tail) <= production_ops._OUTPUT_TAIL_CHARS
+        assert tail.splitlines()[0][:4].isdigit()
+        assert tail.endswith("0149" + "z" * 200)
 
 
 class TestManualRollback:
@@ -470,3 +777,79 @@ class TestPreUpdateHooks:
 
         assert phases == ["fetching code", "fetching code", "applying changes"]
         assert current_progress(key) is None
+
+
+class TestDeployHistoryTool:
+    """production_deploys returns the failure excerpt; the bulkier output tail
+    only on request."""
+
+    @pytest.fixture
+    def deploys_tool(self, settings, team):
+        import oduflow.server
+        from oduflow.server import mcp as mcp_server
+
+        oduflow.server._settings = replace(settings, prod_enabled=True)
+        production_registry.create_production(team, "erp", {"domain": "e.example"})
+        production_ops.append_deploy(
+            team,
+            "erp",
+            {
+                "status": "rolled_back",
+                "failed_step": "upgrade",
+                "failure_excerpt": "CRITICAL ... SerializationFailure",
+                "output_tail": "the whole tail",
+            },
+        )
+        fn = mcp_server._tool_manager._tools["production_deploys"].fn
+
+        def call(**kwargs):
+            result = fn(**kwargs)
+            return asyncio.run(result) if inspect.isawaitable(result) else result
+
+        with patch("oduflow.server._resolve_team", return_value=team):
+            yield call
+        oduflow.server._settings = None
+
+    def test_output_tail_is_hidden_by_default(self, deploys_tool):
+        deploys = json.loads(deploys_tool(name="erp"))
+        assert deploys[-1]["failure_excerpt"] == "CRITICAL ... SerializationFailure"
+        assert "output_tail" not in deploys[-1]
+
+    def test_output_tail_on_request(self, deploys_tool):
+        deploys = json.loads(deploys_tool(name="erp", include_output=True))
+        assert deploys[-1]["output_tail"] == "the whole tail"
+
+
+class TestDeployHistoryWebAPI:
+    """The dashboard renders only the summary fields of a deploy record, so
+    the endpoint never ships the bulky diagnostics."""
+
+    def test_bulky_diagnostics_are_stripped(self, settings, team):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        from oduflow.locking import LockManager
+        from oduflow.web_ui import mount_web_ui
+
+        production_registry.create_production(team, "erp", {"domain": "e.example"})
+        production_ops.append_deploy(
+            team,
+            "erp",
+            {
+                "status": "rolled_back",
+                "error": "Deploy failed at step 'upgrade'",
+                "failed_step": "upgrade",
+                "failure_excerpt": "CRITICAL ... SerializationFailure",
+                "output_tail": "the whole tail",
+            },
+        )
+        app = Starlette()
+        web_settings = replace(settings, prod_enabled=True)
+        mount_web_ui(app, lambda: web_settings, LockManager())
+        response = TestClient(app).get("/api/productions/erp/deploys")
+        assert response.status_code == 200, response.text
+        record = response.json()["deploys"][-1]
+        assert record["error"] == "Deploy failed at step 'upgrade'"
+        assert record["failed_step"] == "upgrade"
+        assert "output_tail" not in record
+        assert "failure_excerpt" not in record

@@ -223,6 +223,7 @@ def _publish(
     env_template: str,
     target_template: str,
     existing_dump_name: str | None = None,
+    extra_patches: tuple = (),
 ):
     """Drive publish_env_as_template over a real on-disk filestore layout."""
     import contextlib
@@ -278,7 +279,10 @@ def _publish(
         patch.object(
             system_ops, "_snapshot_filestore", wraps=system_ops._snapshot_filestore
         ) as snapshot,
+        contextlib.ExitStack() as extra,
     ):
+        for patcher in extra_patches:
+            extra.enter_context(patcher)
         system_ops.publish_env_as_template(
             settings, team, env_name, target_template, overwrite=True
         )
@@ -294,6 +298,45 @@ def test_publish_links_against_the_environments_own_baseline(tmp_path):
     assert snapshot.call_args.kwargs["link_dests"] == [baseline]
     published = team.get_template_filestore_path("prod")
     assert _tree(published) == _tree(merged)
+
+
+def test_publish_unpins_the_source_environment(tmp_path):
+    from oduflow import template_generations as gen
+    from oduflow.docker_ops import env_ops
+    from oduflow.fsutil import atomic_write_private_json
+    from oduflow.naming import get_filestore_paths, get_workspace_path
+    from oduflow.settings import TeamSettings
+
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+    generation = "a" * 32
+    os.makedirs(os.path.join(gen._generation_dir(team, generation), "filestore"))
+    os.makedirs(get_workspace_path("feature-x", team.workspaces_dir))
+    atomic_write_private_json(
+        str(gen._marker(team, "feature-x")), {"generation": generation}
+    )
+    merged = get_filestore_paths("feature-x", team.workspaces_dir)["merged"]
+    lowers = []
+
+    def mount(client, settings, team, env_name, *args, **kwargs):
+        lowers.append(gen.lower_paths(team, env_name, kwargs["template_name"])[0])
+
+    _publish(
+        tmp_path,
+        env_template="prod",
+        target_template="prod",
+        extra_patches=(
+            patch.object(system_ops.os.path, "ismount", lambda path: path == merged),
+            patch.object(env_ops, "_unmount_filestore"),
+            patch.object(env_ops, "_wait_unmounted"),
+            patch.object(env_ops, "_mount_filestore", side_effect=mount),
+        ),
+    )
+
+    # What it published is now the template filestore it remounts on, not the
+    # generation a sync once pinned it to; that generation is freed.
+    assert lowers == [team.get_template_filestore_path("prod")]
+    assert not gen.has_pin(team, "feature-x")
+    assert not gen._generation_dir(team, generation).exists()
 
 
 def test_publish_ignores_the_none_template_sentinel(tmp_path):

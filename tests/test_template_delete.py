@@ -92,3 +92,24 @@ def test_missing_template_raises_not_found(settings, team):
     ):
         with pytest.raises(NotFoundError, match="Template 'prod' not found"):
             system_ops.delete_template(settings, team, "prod")
+
+
+def test_delete_forgets_sync_state_and_unused_generations(settings, team):
+    from oduflow import template_generations as gen
+    from oduflow import template_sync
+
+    os.makedirs(team.get_template_dir("prod"), exist_ok=True)
+    inbox = template_sync.job_dir(team, "prod") / "inbox"
+    inbox.mkdir(parents=True)
+    orphan = gen._generation_dir(team, "b" * 32)
+    orphan.mkdir(parents=True)
+
+    with (
+        patch("oduflow.docker_ops.system_ops.get_client", return_value=_client([])),
+        patch("oduflow.docker_ops.system_ops._db_exists", return_value=False),
+    ):
+        system_ops.delete_template(settings, team, "prod")
+
+    # The inbox is a full copy of the backup once the template is gone.
+    assert not template_sync.job_dir(team, "prod").exists()
+    assert not orphan.exists()

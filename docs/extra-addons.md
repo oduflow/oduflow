@@ -89,6 +89,42 @@ so the next update does not bring the branch back.
 A stalled HTTPS download is aborted after two minutes without progress; a slow
 but progressing one may run up to an hour.
 
+### Importing several OCA repositories
+
+In the dashboard, open **Extra Addons → Import OCA**. Search the OCA catalogue
+by name or description and sort by stars or name. Archived repositories are
+hidden unless **Show archived** is enabled.
+
+Like **Add Repo**, importing downloads no code by default: each branch
+downloads when an environment first uses it. To have branches ready, enter
+**Common versions**, for example `18.0, 19.0`. Each repository you select
+starts from the current Common versions, and changing the field updates every
+selected repository. Oduflow reads the branch list of each selected repository
+without downloading anything; adjust its branch checkboxes as needed. Versions
+a repository does not have are shown as unavailable: uncheck them or choose
+another version before importing.
+
+Click **Import N repositories** to start the import on the server. It adds up
+to three repositories at a time, and each repository shows its own result. You
+can close the dialog or reload the page: the import continues, and reopening the
+dialog shows its progress. A team runs one import at a time. **Retry failed**
+starts a new import of only the failed repositories, with the same branches.
+
+Imported names use an `oca-` prefix, such as `oca-server-tools`. If two OCA
+repositories would get the same name (for example `foo-bar` and `foo.bar`, or
+very long names that are shortened), the second one gets a numeric suffix, such
+as `oca-foo-bar-2`. Repositories the team already has are recognised by their
+origin in any URL form (HTTPS, SSH, with or without `.git`) and cannot be
+selected; neither can an import name that another repository already uses.
+Import makes repositories available to the team; choose them separately when
+configuring an environment.
+
+The public catalogue is cached for 15 minutes. If GitHub cannot be reached or
+limits requests, the dialog shows the error, or the last loaded catalogue with a
+notice when one is available; no GitHub token is required. Import progress is
+kept in server memory: after a server restart, repositories that were added
+appear as already added, and the rest can be imported again.
+
 ## Using Extra Addons in Environments
 
 When creating an environment, specify which extra repos to mount:
@@ -100,6 +136,19 @@ oduflow call create_environment feature-x "" default https://github.com/company/
 # Mount multiple extra repos
 oduflow call create_environment feature-x "" default https://github.com/company/addons.git odoo:19.0 "enterprise:19.0,custom-themes:main"
 ```
+
+In the dashboard, the branch next to each repo is filled in from the **Odoo
+image** of the environment being created (`odoo:19.0` → `19.0`), for every repo
+that really carries such a branch — the usual case for a repository branched
+per Odoo version, such as the OCA sets or enterprise. An online-release image
+(`odoo:saas~19.1`) only ever gets its own `saas-19.1` branch, never the stable
+`19.0`. A repo whose branches are not known yet shows the expected name as a
+placeholder instead, and a repo that does not have that branch is left empty.
+Anything a template, a production or you typed is never overwritten, and a
+branch you cleared stays empty. Each selected repo whose branch was filled in
+this way is marked **guessed**, and a line under the list counts them, so you
+can check them before creating the environment. The same applies to the extra
+repos in a template's **Settings**.
 
 For each development environment Oduflow automatically:
 

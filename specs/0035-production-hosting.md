@@ -113,8 +113,8 @@ webhook secret) → full clone → `CREATE DATABASE` in the prod cluster
 (optionally seeded from a template via pg_dump/pg_restore — template DBs live
 in the dev cluster and `CREATE DATABASE ... TEMPLATE` cannot cross clusters) →
 plain filestore dir (no overlay) → container with a custom-domain Traefik
-`Host()` rule, production odoo.conf chain (`.oduflow/odoo.prod.conf` > team >
-bundled) with auto-tuned workers, no `--dev=xml`, no sanitize. Failure rolls
+`Host()` rule, production odoo.conf chain (team > bundled; never the repo)
+with auto-tuned workers, no `--dev=xml`, no sanitize. Failure rolls
 everything back including the registry record. `[backup]` in `oduflow.toml`
 (bucket + keys; everything else defaulted) configures the backup subsystem;
 scheduled backup work runs only while `[production].enabled = true`.
@@ -138,6 +138,10 @@ scheduled backup work runs only while `[production].enabled = true`.
 
 ## History
 
+- 2026-10-14 — the repo `.oduflow/odoo.prod.conf` was dropped from the
+  production conf chain: anyone who can push to the deployed branch could
+  otherwise tune the production server. Operator-only per-production
+  overrides and the team `odoo.prod.conf` remain.
 - 2026-07-21 — production hosting became an explicit global opt-in; disabling
   it gates every entry point and stops the managed production workload stack
   without deleting state.

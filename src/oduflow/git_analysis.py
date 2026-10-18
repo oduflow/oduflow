@@ -19,7 +19,7 @@ def _trace(msg: str, *args: object) -> None:
 
 
 MANIFEST_KEYS_WITH_FILES = ("data", "demo", "assets", "qweb")
-RESTART_REQUIRED_PATHS = {".oduflow/odoo.conf", ".oduflow/odoo.prod.conf"}
+RESTART_REQUIRED_PATHS = {".oduflow/odoo.conf"}
 
 # Dependency descriptors Oduflow can read into the container. A change to the
 # active one means Python/apt deps changed → reinstall + restart. The
@@ -238,6 +238,7 @@ def classify_changes(
     py_changed = False
     xml_hot = []
     xml_security = []
+    csv_data: list[str] = []
     js_changed = []
     i18n_changed: list[str] = []
     restart_required = []
@@ -320,6 +321,19 @@ def classify_changes(
                     _trace("  file=%s ext=.xml module=%s -> hot-reload XML", f, module)
             continue
 
+        if ext == ".csv" and module:
+            # CSV data files — most critically security/ir.model.access.csv —
+            # are loaded by Odoo only on install/upgrade; there is no hot path.
+            # Classifying them as "refresh" silently deployed stale access
+            # rules. An unnecessary upgrade is cheap; a missed one is not.
+            csv_data.append(f)
+            if module not in modules_to_install:
+                modules_to_upgrade.add(module)
+            _trace(
+                "  file=%s ext=.csv module=%s -> data/security CSV, UPGRADE", f, module
+            )
+            continue
+
         if ext == ".js":
             js_changed.append(f)
             _trace("  file=%s ext=.js module=%s -> hot-reload JS", f, module)
@@ -340,6 +354,7 @@ def classify_changes(
         "py_changed": py_changed,
         "xml_hot": xml_hot,
         "xml_security": xml_security,
+        "csv_data": csv_data,
         "manifest_upgrade": sorted(modules_to_upgrade),
         "manifest_install": sorted(modules_to_install),
         "js_changed": js_changed,
@@ -468,6 +483,7 @@ def shallow_classify(changed_files: list[str], repo_path: str = "") -> dict[str,
     py_changed = False
     xml_hot: list[str] = []
     xml_security: list[str] = []
+    csv_data: list[str] = []
     js_changed: list[str] = []
     i18n_changed: list[str] = []
     restart_required: list[str] = []
@@ -497,6 +513,12 @@ def shallow_classify(changed_files: list[str], repo_path: str = "") -> dict[str,
             else:
                 xml_hot.append(f)
             continue
+        if ext == ".csv" and module:
+            # Same rule as classify_changes: CSVs (ir.model.access.csv above
+            # all) load only on install/upgrade — never leave them on "refresh".
+            csv_data.append(f)
+            modules_to_upgrade.add(module)
+            continue
         if ext == ".js":
             js_changed.append(f)
             continue
@@ -508,6 +530,7 @@ def shallow_classify(changed_files: list[str], repo_path: str = "") -> dict[str,
         "py_changed": py_changed,
         "xml_hot": xml_hot,
         "xml_security": xml_security,
+        "csv_data": csv_data,
         "manifest_upgrade": sorted(modules_to_upgrade),
         "manifest_install": [],
         "js_changed": js_changed,
