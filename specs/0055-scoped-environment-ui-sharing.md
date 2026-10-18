@@ -100,6 +100,14 @@ power to anyone holding its token.
 - Sharing is **operator-controlled and audit-visible**: `shares.json` records
   which environments are shared and since when.
 
+## Evolution
+
+- 2026-10-18 — the MCP token adopted this registry model (`mcp_tokens.json`),
+  and recreate became identity-preserving on every surface: the dashboard
+  action and the new `recreate_environment` MCP tool keep both the share secret
+  and the MCP token, while a plain delete still revokes them
+  ([[0080-stable-environment-identity-across-recreate]]).
+
 ## History
 
 - 2026-09-02 — shared single-environment dashboard: `/env/<name>` page, per-env

@@ -156,10 +156,13 @@ override — which environment it operates on.
 
 ### Per-environment Secret Key
 
-Every environment created after this feature gets its own access token, generated
-at creation time and stored on the container. Use it as a **Bearer token** or as
-an **OAuth** client credential — exactly like a team `auth_token`, but it only
-unlocks its own `/mcp/<env>` endpoint:
+Every environment gets its own access token, minted at creation time and kept
+in the team's data directory (`mcp_tokens.json`, mode 0600), keyed by the
+environment name. It survives **rename and recreate** — an MCP client
+configured once keeps working for as long as an environment of that name
+exists — and is revoked when the environment is deleted. Use it as a **Bearer
+token** or as an **OAuth** client credential — exactly like a team
+`auth_token`, but it only unlocks its own `/mcp/<env>` endpoint:
 
 ```
 Authorization: Bearer <environment-secret-key>

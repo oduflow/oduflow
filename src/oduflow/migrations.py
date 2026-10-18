@@ -504,6 +504,48 @@ def _migrate_regenerate_odoo_confs(settings: Settings) -> None:
                 )
 
 
+def _migrate_env_mcp_token_registry(settings: Settings) -> None:
+    """Copy each environment's ``oduflow.mcp_token`` label into the team's
+    ``mcp_tokens.json`` registry.
+
+    The scoped-MCP token used to live only in that label, frozen at container
+    creation; the registry (keyed by environment name) is now the source of
+    truth so the token survives recreation. Adoption keeps the already-issued
+    credential, so configured MCP clients keep working. Idempotent: an
+    environment that already has a registry record is left alone. Best effort
+    per container: a team whose registry cannot be written is logged and its
+    environments fall back to the label at their point of use.
+    """
+    from oduflow import env_tokens
+    from oduflow.docker_ops.client import get_client
+
+    client = get_client()
+    for team_id, team in settings.teams.items():
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{settings.managed_label}=true",
+                    f"{settings.team_label}={team_id}",
+                ]
+            },
+        )
+        for container in containers:
+            env_name = container.labels.get(settings.branch_label)
+            token = container.labels.get(env_tokens.MCP_TOKEN_LABEL)
+            if not env_name or not token:
+                continue
+            try:
+                env_tokens.adopt(team, env_name, token)
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "Could not adopt MCP token of '%s' (team %s): %s",
+                    env_name,
+                    team_id,
+                    exc,
+                )
+
+
 # Append-only registry, executed in list order. Ids are recorded in
 # migrations.json once applied; reordering or renaming entries would re-run
 # or skip steps on existing installs.
@@ -593,6 +635,15 @@ MIGRATIONS: list[Migration] = [
             "drop repo odoo.prod.conf from productions; applied on next restart"
         ),
         apply=_migrate_regenerate_odoo_confs,
+    ),
+    Migration(
+        id="0012-env-mcp-token-registry",
+        description=(
+            "Move per-environment MCP tokens from the oduflow.mcp_token "
+            "container label into the team mcp_tokens.json registry, so the "
+            "token survives environment recreation"
+        ),
+        apply=_migrate_env_mcp_token_registry,
     ),
 ]
 

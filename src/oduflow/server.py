@@ -2133,6 +2133,40 @@ def delete_environment(env_name: str, ctx: Context | None = None) -> str:
 
 @mcp.tool()
 @handle_errors
+@with_env_lock
+def recreate_environment(env_name: str, ctx: Context | None = None) -> str:
+    """
+    Rebuild an environment from scratch while keeping its identity.
+
+    Tears the environment down and provisions it again from its recorded
+    configuration (git branch, repo, image, template, extra addons, env vars,
+    hostname) — a clean slate without re-entering anything. Unlike
+    delete_environment + create_environment, the environment's identity
+    survives: the dashboard share link already handed out stays valid, and the
+    scoped /mcp/<env> endpoint keeps the same Bearer token, so connected MCP
+    clients need no reconfiguration. Prefer this tool over delete + create
+    whenever the environment is being replaced rather than retired.
+
+    Args:
+        env_name: The environment to tear down and provision again.
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    result = env_ops.recreate_environment(settings, team, env_name)
+    lines = [
+        f"Environment '{env_name}' recreated from its recorded configuration.",
+        f"URL: {result['url']}",
+        f"Odoo Container: {result['odoo_container']}",
+        f"Database: {result['database']}",
+        f"Workspace: {result['workspace']}",
+        f"Creation time: {result.get('elapsed_seconds', '?')}s",
+        "The share link and the scoped MCP token were preserved.",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@handle_errors
 def list_environments(ctx: Context | None = None) -> str:
     """
     List all managed Odoo environments.

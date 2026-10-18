@@ -39,6 +39,7 @@ end to end.
 
     [`create_environment`](#create_environment)&nbsp;·
     [`delete_environment`](#delete_environment)&nbsp;·
+    [`recreate_environment`](#recreate_environment)&nbsp;·
     [`list_environments`](#list_environments)&nbsp;·
     [`get_environment_info`](#get_environment_info)&nbsp;·
     [`start_environment`](#start_environment)&nbsp;·
@@ -326,6 +327,31 @@ Lock: environment.
 
 - A branch is merged and its environment is no longer needed.
 - You need to free an environment slot and no existing environment is worth keeping (otherwise prefer [`switch_branch`](#switch_branch)).
+- The environment itself is being replaced, not retired — then use [`recreate_environment`](#recreate_environment) instead, so its share link and MCP token survive.
+
+### `recreate_environment`
+
+Tear an environment down and provision it again from its recorded
+configuration (git branch, repo URL, image, template, extra addons, env vars,
+hostname) — a clean slate without re-entering anything.
+
+Unlike `delete_environment` + `create_environment`, the environment's identity
+survives: the dashboard **share link** already handed out stays valid, and the
+scoped `/mcp/<env>` endpoint keeps the **same Bearer token**, so connected MCP
+clients need no reconfiguration.
+
+Lock: environment.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`env_name`
+:   *str · required* — The environment to tear down and provision again.
+
+**Use it when**
+
+- A database or filestore is beyond repair and you want a fresh start from the same template/branch.
+- The environment is shared with a client or wired into MCP clients — never delete + create it by hand in that case.
 
 ### `list_environments`
 

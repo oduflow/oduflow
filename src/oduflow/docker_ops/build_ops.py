@@ -83,20 +83,28 @@ def _environment_container(
     return container
 
 
-def environment_owner_id(settings: Settings, team: TeamSettings, env_name: str) -> str:
-    """Stable, non-secret identity for an environment instance.
-
-    The environment MCP token survives rename and changes on delete/recreate.
-    Persisting only its SHA-256 digest binds jobs to that lifecycle without
-    putting the bearer credential in job.json.
-    """
-    container = _environment_container(settings, team, env_name)
-    token = str(container.labels.get(env_tokens.MCP_TOKEN_LABEL, ""))
+def _environment_token(container: Any, team: TeamSettings, env_name: str) -> str:
+    """The environment's MCP token: registry first, legacy label fallback."""
+    token = env_tokens.get(team, env_name) or str(
+        container.labels.get(env_tokens.MCP_TOKEN_LABEL, "")
+    )
     if not token:
         raise PrerequisiteNotMetError(
             f"Environment '{env_name}' has no scoped MCP identity; recreate it "
             "before starting or accessing image builds."
         )
+    return token
+
+
+def environment_owner_id(settings: Settings, team: TeamSettings, env_name: str) -> str:
+    """Stable, non-secret identity for an environment instance.
+
+    The environment MCP token survives rename and recreate and changes on
+    delete. Persisting only its SHA-256 digest binds jobs to that lifecycle
+    without putting the bearer credential in job.json.
+    """
+    container = _environment_container(settings, team, env_name)
+    token = _environment_token(container, team, env_name)
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -121,12 +129,7 @@ def env_checkout_for_build(
             f"Environment '{env_name}' has no managed git checkout at its "
             "workspace; image builds require one."
         )
-    token = str(container.labels.get(env_tokens.MCP_TOKEN_LABEL, ""))
-    if not token:
-        raise PrerequisiteNotMetError(
-            f"Environment '{env_name}' has no scoped MCP identity; recreate it "
-            "before starting image builds."
-        )
+    token = _environment_token(container, team, env_name)
     owner_id = hashlib.sha256(token.encode()).hexdigest()
     return repo_path, branch, owner_id
 

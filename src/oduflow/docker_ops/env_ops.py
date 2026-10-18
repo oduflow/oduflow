@@ -20,7 +20,15 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import activity, agent_uids, branding, env_share, secret_store, settings
+from oduflow import (
+    activity,
+    agent_uids,
+    branding,
+    env_share,
+    env_tokens,
+    secret_store,
+    settings,
+)
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import (
     chown_recursive,
@@ -49,7 +57,7 @@ from oduflow.docker_ops.system_ops import (
 )
 from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
-from oduflow.env_tokens import MCP_TOKEN_LABEL, generate_token, invalidate_cache
+from oduflow.env_tokens import invalidate_cache
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -2534,8 +2542,6 @@ def _create_environment_impl(
         "oduflow.template": template_name if template_name is not None else "none",
         "oduflow.git_branch": branch,
         "oduflow.created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        # Personal token authorizing the scoped MCP endpoint /mcp/<env>.
-        MCP_TOKEN_LABEL: generate_token(),
     }
 
     if extra_addons:
@@ -2888,7 +2894,20 @@ def _create_environment_impl(
     result["template_lineage"] = lineage
     result["elapsed_seconds"] = round(time.time() - start_time, 1)
     activity.touch(team, env_name)
-    # Let the new env's MCP token resolve without waiting for the scan interval.
+    # Personal token authorizing the scoped MCP endpoint /mcp/<env>. Minted on
+    # first create; a recreate under the same name finds the preserved record
+    # and keeps already-configured MCP clients working. Best-effort: an
+    # unwritable registry must not fail an environment that already works
+    # (MCP Access then reports no token).
+    try:
+        env_tokens.create_or_get(team, env_name)
+    except (OSError, ValueError) as e:
+        logger.warning(
+            "Could not store MCP token for '%s': %s",
+            env_name,
+            e,
+            extra={"env_name": env_name},
+        )
     invalidate_cache()
     return result
 
@@ -3795,11 +3814,14 @@ def require_environment(settings: Settings, team: TeamSettings, env_name: str) -
 
 
 def get_env_token(settings: Settings, team: TeamSettings, env_name: str) -> str | None:
-    """Return the per-environment MCP access token from the container label.
+    """Return the per-environment MCP access token.
 
-    Returns ``None`` for environments created before the feature existed (their
-    container carries no ``oduflow.mcp_token`` label and Docker labels cannot be
-    added without recreating the container).
+    The token lives in the team's registry (``mcp_tokens.json``), keyed by the
+    environment name, so it survives container recreation. A container whose
+    team registry has no record (state restored from a pre-registry backup)
+    falls back to the legacy ``oduflow.mcp_token`` label and adopts it into the
+    registry so it resolves again. Returns ``None`` for environments created
+    before tokens existed.
     """
     client = get_client()
     container_name = get_resource_name(env_name, "odoo", settings.prefix, team.team_id)
@@ -3807,7 +3829,16 @@ def get_env_token(settings: Settings, team: TeamSettings, env_name: str) -> str 
         container = client.containers.get(container_name)
     except docker.errors.NotFound:
         raise NotFoundError(f"Environment '{env_name}' does not exist.")
-    return container.labels.get(MCP_TOKEN_LABEL) or None
+    token = env_tokens.get(team, env_name)
+    if token:
+        return token
+    legacy = container.labels.get(env_tokens.MCP_TOKEN_LABEL) or None
+    if legacy:
+        try:
+            env_tokens.adopt(team, env_name, legacy)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not adopt legacy MCP token for '%s': %s", env_name, e)
+    return legacy
 
 
 def get_note(settings: Settings, team: TeamSettings, env_name: str) -> str:
@@ -3841,8 +3872,17 @@ def delete_environment(
     team: TeamSettings,
     env_name: str,
     *,
-    preserve_share: bool = False,
+    preserve_access: bool = False,
 ) -> list[str]:
+    """Tear the environment down.
+
+    ``preserve_access=True`` (the recreate paths) keeps the environment's
+    name-keyed credentials — the dashboard share secret and the scoped MCP
+    token — so links and MCP clients configured against this name keep working
+    on the replacement environment. A plain delete revokes both: a *future*
+    unrelated environment under the same name must not be reachable with
+    credentials handed out for this one.
+    """
     if is_protected(settings, team, env_name):
         raise ProtectedError(
             f"Environment '{env_name}' is protected. Unprotect it before deleting."
@@ -3938,11 +3978,102 @@ def delete_environment(
         shutil.rmtree(workspace_path)
 
     activity.remove(team, env_name)
-    if not preserve_share:
+    if not preserve_access:
         env_share.remove(team, env_name)
+        env_tokens.remove(team, env_name)
     invalidate_cache()
     logger.info("Environment deleted", extra={"env_name": env_name})
     return warnings
+
+
+def recreate_environment(
+    settings: Settings, team: TeamSettings, env_name: str
+) -> dict[str, Any]:
+    """Tear the environment down and provision it again from its recorded
+    configuration (repo, image, template, extra addons, git user, env vars,
+    live-mount path, hostname).
+
+    Unlike delete + create, the environment's *identity* is kept: the dashboard
+    share link and the scoped MCP token are preserved (``preserve_access``), so
+    a link already handed to a client and an MCP client already configured
+    against ``/mcp/<env>`` keep working on the replacement.
+
+    Shared by the dashboard Recreate action and the MCP tool; the caller holds
+    the environment lock.
+    """
+    from oduflow.docker_ops import system_ops
+    from oduflow.docker_ops.client import get_client as _get_client
+
+    client = _get_client()
+    odoo_container_name = get_resource_name(
+        env_name, "odoo", settings.prefix, team.team_id
+    )
+    try:
+        container = client.containers.get(odoo_container_name)
+        labels = container.labels
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Environment '{env_name}' not found.")
+
+    repo_url = labels.get(settings.repo_label, "")
+    odoo_image = labels.get(settings.image_label, "")
+    template_raw = labels.get("oduflow.template", "")
+    template_name = template_raw if template_raw and template_raw != "none" else None
+    extra_addons = json.loads(labels.get("oduflow.extra_addons", "{}")) or None
+    git_user = labels.get("oduflow.git_user", "")
+    env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
+    local_path = labels.get("oduflow.local_path", "")
+    # The environment name and the git branch it tracks can differ (several
+    # environments off one branch), so recreate from the recorded branch label
+    # rather than from the environment name.
+    git_branch = labels.get("oduflow.git_branch", env_name)
+    recreate_labels = dict(labels)
+    _reconcile_environment_hostname_for_update(
+        client, settings, team, env_name, recreate_labels
+    )
+    hostname = recreate_labels.get(ENV_HOSTNAME_LABEL, "")
+    hostname_source = recreate_labels.get(ENV_HOSTNAME_SOURCE_LABEL, "")
+
+    # Check disk space BEFORE deleting the old environment: refusing here loses
+    # nothing, while failing after delete_environment would destroy a working
+    # environment. Conservative on purpose — the old environment's own space is
+    # not yet freed at measurement time.
+    est_db_bytes = system_ops.estimate_new_db_bytes(
+        client, settings, team, template_name
+    )
+    system_ops.check_disk_space(
+        client,
+        settings,
+        team,
+        template_name,
+        estimated_db_bytes=est_db_bytes,
+        local_mount=bool(local_path),
+        env_name=env_name,
+    )
+
+    # Same reasoning as the disk-space check: a dangling secret reference must
+    # refuse the recreate here, while refusing loses nothing —
+    # create_environment would only re-check after delete_environment has
+    # already destroyed the working environment.
+    secret_store.resolve_env_secrets(team, env_vars)
+    # Same for a stopped database server or a template without its database.
+    _ensure_system_ready(client, settings, team, template_name, odoo_image)
+
+    delete_environment(settings, team, env_name, preserve_access=True)
+    return create_environment(
+        settings,
+        team,
+        git_branch,
+        repo_url,
+        odoo_image,
+        env_name=env_name,
+        template_name=template_name,
+        extra_addons=extra_addons,
+        git_user=git_user,
+        env_vars=env_vars,
+        local_path=local_path,
+        hostname=hostname,
+        hostname_source=hostname_source,
+    )
 
 
 def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
@@ -5783,6 +5914,7 @@ def _relocate_environment_state(
         rename_hostname_env(_hostname_registry_path(team), old_name, new_name)
     activity.rename(team, old_name, new_name)
     env_share.rename(team, old_name, new_name)
+    env_tokens.rename(team, old_name, new_name)
 
     from oduflow import agent_sessions
 

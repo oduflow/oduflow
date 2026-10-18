@@ -424,7 +424,7 @@ recorded in `productions.json`) or of an environment managed by a
 
 ### Recreating Environments
 
-The **Recreate** action (available via the Web Dashboard and REST API) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
+The **Recreate** action (available via the Web Dashboard, the REST API and the `recreate_environment` MCP tool) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
 
 ```bash
 # Via REST API
@@ -432,6 +432,15 @@ curl -X POST http://localhost:8000/api/environments/feature-login/recreate
 ```
 
 Recreate reads the original configuration from the container's Docker labels, so all parameters (repo URL, image, template, extra addons, git user) are preserved automatically.
+
+Recreate also preserves the environment's **identity**, which a manual delete +
+create does not: the [share link](security.md#shared-single-environment-dashboard-envname)
+already handed to a client keeps opening
+the scoped dashboard, and the scoped `/mcp/<env>` endpoint keeps the same
+Secret Key, so configured MCP clients reconnect without changes. Agents should
+therefore prefer `recreate_environment` over `delete_environment` +
+`create_environment` whenever the environment is being replaced rather than
+retired.
 
 ### Automatic Stop and Cleanup
 

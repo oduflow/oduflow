@@ -549,3 +549,40 @@ class TestRegenerateOdooConfsMigration:
 
         assert reapply.call_count == 2
         assert "Could not regenerate odoo.conf in prod-a" in caplog.text
+
+
+class TestEnvMcpTokenRegistryMigration:
+    def test_adopts_labelled_tokens_per_team(self, tmp_path, monkeypatch):
+        from oduflow import env_tokens
+        from oduflow.migrations import _migrate_env_mcp_token_registry
+        from oduflow.settings import TeamSettings
+
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path / "team_1"))
+        settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+
+        env = MagicMock()
+        env.labels = {
+            "oduflow.branch": "feature/x",
+            "oduflow.mcp_token": "label-token",
+        }
+        # Pre-token-feature environment: no label to adopt.
+        legacy = MagicMock()
+        legacy.labels = {"oduflow.branch": "old-env"}
+        # Infra/service containers carry no branch label.
+        infra = MagicMock()
+        infra.labels = {"oduflow.service": "redis"}
+        client = MagicMock()
+        client.containers.list.return_value = [env, legacy, infra]
+        monkeypatch.setattr("oduflow.docker_ops.client.get_client", lambda: client)
+
+        _migrate_env_mcp_token_registry(settings)
+
+        assert env_tokens.get(team, "feature/x") == "label-token"
+        assert env_tokens.get(team, "old-env") is None
+        assert env_tokens.resolve_token(settings, "label-token") == ("1", "feature/x")
+
+        # Idempotent: a rerun (or a later re-adoption attempt) never replaces
+        # a token the registry already holds.
+        env.labels["oduflow.mcp_token"] = "rotated-label"
+        _migrate_env_mcp_token_registry(settings)
+        assert env_tokens.get(team, "feature/x") == "label-token"

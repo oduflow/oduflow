@@ -1861,92 +1861,9 @@ def _build_routes(
         except BusyError as e:
             return _error_response(e)
         try:
-            import docker as _docker
-            from oduflow.docker_ops.client import get_client as _get_client
-            from oduflow.naming import get_resource_name
-
             settings = get_settings()
             activity.touch(team, branch)
-            client = _get_client()
-            odoo_container_name = get_resource_name(
-                branch, "odoo", settings.prefix, team.team_id
-            )
-            try:
-                container = client.containers.get(odoo_container_name)
-                labels = container.labels
-            except _docker.errors.NotFound:
-                return _error_response(
-                    NotFoundError(f"Environment '{branch}' not found.")
-                )
-
-            repo_url = labels.get(settings.repo_label, "")
-            odoo_image = labels.get(settings.image_label, "")
-            template_raw = labels.get("oduflow.template", "")
-            template_name = (
-                template_raw if template_raw and template_raw != "none" else None
-            )
-            extra_addons_raw = labels.get("oduflow.extra_addons", "{}")
-            extra_addons = json.loads(extra_addons_raw) or None
-            git_user = labels.get("oduflow.git_user", "")
-            env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
-            local_path = labels.get("oduflow.local_path", "")
-            # The environment name and the git branch it tracks can differ
-            # (several environments off one branch), so recreate from the
-            # recorded branch label rather than from the environment name.
-            git_branch = labels.get("oduflow.git_branch", branch)
-            recreate_labels = dict(labels)
-            env_ops._reconcile_environment_hostname_for_update(
-                client, settings, team, branch, recreate_labels
-            )
-            hostname = recreate_labels.get(env_ops.ENV_HOSTNAME_LABEL, "")
-            hostname_source = recreate_labels.get(env_ops.ENV_HOSTNAME_SOURCE_LABEL, "")
-
-            # Check disk space BEFORE deleting the old environment: refusing
-            # here loses nothing, while failing after delete_environment would
-            # destroy a working environment. Conservative on purpose — the old
-            # environment's own space is not yet freed at measurement time.
-            from oduflow.docker_ops import system_ops
-
-            est_db_bytes = system_ops.estimate_new_db_bytes(
-                client, settings, team, template_name
-            )
-            system_ops.check_disk_space(
-                client,
-                settings,
-                team,
-                template_name,
-                estimated_db_bytes=est_db_bytes,
-                local_mount=bool(local_path),
-                env_name=branch,
-            )
-
-            # Same reasoning as the disk-space check: a dangling secret
-            # reference must refuse the recreate here, while refusing loses
-            # nothing — create_environment would only re-check after
-            # delete_environment has already destroyed the working environment.
-            secret_store.resolve_env_secrets(team, env_vars)
-            # Same for a stopped database server or a template without its
-            # database: create_environment would refuse only after the delete.
-            env_ops._ensure_system_ready(
-                client, settings, team, template_name, odoo_image
-            )
-
-            env_ops.delete_environment(settings, team, branch, preserve_share=True)
-            result = env_ops.create_environment(
-                settings,
-                team,
-                git_branch,
-                repo_url,
-                odoo_image,
-                env_name=branch,
-                template_name=template_name,
-                extra_addons=extra_addons,
-                git_user=git_user,
-                env_vars=env_vars,
-                local_path=local_path,
-                hostname=hostname,
-                hostname_source=hostname_source,
-            )
+            result = env_ops.recreate_environment(settings, team, branch)
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)

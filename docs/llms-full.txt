@@ -2552,7 +2552,7 @@ recorded in `productions.json`) or of an environment managed by a
 
 ### Recreating Environments
 
-The **Recreate** action (available via the Web Dashboard and REST API) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
+The **Recreate** action (available via the Web Dashboard, the REST API and the `recreate_environment` MCP tool) deletes an environment and immediately creates a fresh one using the same parameters (repo URL, Odoo image, template, extra addons). This is useful when you want a clean slate without manually re-entering all environment settings.
 
 ```bash
 # Via REST API
@@ -2560,6 +2560,15 @@ curl -X POST http://localhost:8000/api/environments/feature-login/recreate
 ```
 
 Recreate reads the original configuration from the container's Docker labels, so all parameters (repo URL, image, template, extra addons, git user) are preserved automatically.
+
+Recreate also preserves the environment's **identity**, which a manual delete +
+create does not: the [share link](security.md#shared-single-environment-dashboard-envname)
+already handed to a client keeps opening
+the scoped dashboard, and the scoped `/mcp/<env>` endpoint keeps the same
+Secret Key, so configured MCP clients reconnect without changes. Agents should
+therefore prefer `recreate_environment` over `delete_environment` +
+`create_environment` whenever the environment is being replaced rather than
+retired.
 
 ### Automatic Stop and Cleanup
 
@@ -5316,6 +5325,7 @@ end to end.
 
     [`create_environment`](#create_environment)&nbsp;·
     [`delete_environment`](#delete_environment)&nbsp;·
+    [`recreate_environment`](#recreate_environment)&nbsp;·
     [`list_environments`](#list_environments)&nbsp;·
     [`get_environment_info`](#get_environment_info)&nbsp;·
     [`start_environment`](#start_environment)&nbsp;·
@@ -5603,6 +5613,31 @@ Lock: environment.
 
 - A branch is merged and its environment is no longer needed.
 - You need to free an environment slot and no existing environment is worth keeping (otherwise prefer [`switch_branch`](#switch_branch)).
+- The environment itself is being replaced, not retired — then use [`recreate_environment`](#recreate_environment) instead, so its share link and MCP token survive.
+
+### `recreate_environment`
+
+Tear an environment down and provision it again from its recorded
+configuration (git branch, repo URL, image, template, extra addons, env vars,
+hostname) — a clean slate without re-entering anything.
+
+Unlike `delete_environment` + `create_environment`, the environment's identity
+survives: the dashboard **share link** already handed out stays valid, and the
+scoped `/mcp/<env>` endpoint keeps the **same Bearer token**, so connected MCP
+clients need no reconfiguration.
+
+Lock: environment.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`env_name`
+:   *str · required* — The environment to tear down and provision again.
+
+**Use it when**
+
+- A database or filestore is beyond repair and you want a fresh start from the same template/branch.
+- The environment is shared with a client or wired into MCP clients — never delete + create it by hand in that case.
 
 ### `list_environments`
 
@@ -9792,10 +9827,13 @@ override — which environment it operates on.
 
 ### Per-environment Secret Key
 
-Every environment created after this feature gets its own access token, generated
-at creation time and stored on the container. Use it as a **Bearer token** or as
-an **OAuth** client credential — exactly like a team `auth_token`, but it only
-unlocks its own `/mcp/<env>` endpoint:
+Every environment gets its own access token, minted at creation time and kept
+in the team's data directory (`mcp_tokens.json`, mode 0600), keyed by the
+environment name. It survives **rename and recreate** — an MCP client
+configured once keeps working for as long as an environment of that name
+exists — and is revoked when the environment is deleted. Use it as a **Bearer
+token** or as an **OAuth** client credential — exactly like a team
+`auth_token`, but it only unlocks its own `/mcp/<env>` endpoint:
 
 ```
 Authorization: Bearer <environment-secret-key>
