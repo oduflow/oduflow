@@ -442,13 +442,7 @@ def with_env_lock(fn: Callable[P, R]) -> Callable[P, R]:
         # Dev environment tools must never operate on the production
         # namespace (their name-derived container/DB chains would resolve to
         # production resources). Productions have their own tool stack.
-        from oduflow.naming import PROD_ENV_PREFIX
-
-        if env_name.startswith(PROD_ENV_PREFIX):
-            raise ToolError(
-                f"'{env_name}' is a production environment. Use the "
-                "*_production tools instead of the dev environment tools."
-            )
+        _reject_prod_env(env_name)
         _locks.acquire_env(env_name, team.team_id, operation=fn.__name__)
         try:
             try:
@@ -462,6 +456,25 @@ def with_env_lock(fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+def _reject_prod_env(env_name: str) -> None:
+    """Dev-environment tools must never touch the production namespace.
+
+    Production containers share the dev naming scheme under the reserved
+    ``prod-`` prefix, so without this guard a lock-free dev tool accepts
+    env_name="prod-<name>" and operates on the production directly — including
+    _wake_for_work STARTING a production that stop_production deliberately took
+    offline, and http_request_to_odoo/odoo_* sending mutations around the
+    production tool stack (locks, approvals, deploy history).
+    """
+    from oduflow.naming import PROD_ENV_PREFIX
+
+    if env_name.startswith(PROD_ENV_PREFIX):
+        raise ToolError(
+            f"'{env_name}' is a production environment. Use the "
+            "*_production tools instead of the dev environment tools."
+        )
+
+
 def _wake_for_work(
     settings: Settings,
     team: TeamSettings,
@@ -471,6 +484,7 @@ def _wake_for_work(
     """Container-level tools start a stopped environment instead of failing:
     with auto-stop, 'stopped' is a routine state, not an error. Returns the
     one-line note to prepend to the tool response ('' if already running)."""
+    _reject_prod_env(env_name)
     if env_ops.ensure_running(settings, env_name, team):
         activity.mark_started(team, env_name)
         return f"Note: environment was stopped; started it {purpose}.\n"
@@ -2328,6 +2342,7 @@ def get_environment_logs(
         grep: Filter logs to only show lines matching this pattern (case-insensitive substring search). Useful to find specific errors, modules, or messages.
         level: Filter by Odoo log level. One of: "ERROR", "WARNING", "CRITICAL". Returns only lines containing the specified level marker. Can be combined with grep.
     """
+    _reject_prod_env(env_name)
     output = odoo_ops.get_environment_logs(
         _get_settings(),
         env_name,
@@ -2486,6 +2501,7 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
     Args:
         env_name: The name of the environment to check.
     """
+    _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
     info = env_ops.get_environment_info(settings, team, env_name)
@@ -3059,6 +3075,7 @@ def get_image_build(
     """
     from oduflow.docker_ops import build_ops
 
+    _reject_prod_env(env_name)
     team = _resolve_team(ctx)
     _image_registry_settings(team)
     settings = _get_settings()
@@ -3125,6 +3142,7 @@ def publish_image_build(
     from oduflow.docker_ops import build_ops
     from oduflow.locking import image_publish_lock_key
 
+    _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
     registry_cfg = _image_registry_settings(team)
@@ -3177,6 +3195,7 @@ def cancel_image_build(env_name: str, build_id: str, ctx: Context | None = None)
         env_name: The environment the build belongs to.
         build_id: The build to cancel.
     """
+    _reject_prod_env(env_name)
     team = _resolve_team(ctx)
     _image_registry_settings(team)
     settings = _get_settings()
@@ -3849,6 +3868,7 @@ def list_installed_modules(
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY name"
 
+    _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
     result = odoo_ops.run_db_query(settings, team, env_name, query, "csv")

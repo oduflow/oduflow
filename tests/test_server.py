@@ -3508,3 +3508,37 @@ class TestOdooGuideReminder:
         from oduflow.server import _odoo_guide_reminder
 
         assert _odoo_guide_reminder(image) == ""
+
+
+class TestProdNamespaceGuard:
+    """P-M3: lock-free dev tools accepted env_name="prod-<name>" and operated on
+    the production container directly — _wake_for_work even STARTED a
+    production that stop_production had deliberately taken offline, and
+    http_request_to_odoo/odoo_* could send mutations around the production tool
+    stack. The guard that lived only inside with_env_lock now also covers the
+    wake path and the lock-free read tools."""
+
+    @pytest.mark.parametrize(
+        "tool,kwargs",
+        [
+            ("get_environment_info", {}),
+            ("get_environment_logs", {}),
+            ("list_installed_modules", {}),
+            ("read_file_in_odoo", {"path": "x.py"}),
+            ("http_request_to_odoo", {"path": "/web"}),
+            ("search_in_odoo", {"pattern": "x"}),
+            ("odoo_search_read", {"model": "res.partner"}),
+            ("odoo_create", {"model": "res.partner", "values": '{"name": "x"}'}),
+        ],
+    )
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    def test_prod_env_name_is_rejected(self, mock_ensure, tool, kwargs):
+        import oduflow.server
+
+        with patch.object(oduflow.server, "_settings", TEST_SETTINGS):
+            with pytest.raises(ToolError, match="production environment"):
+                _get_tool_fn(tool)(env_name="prod-erp", **kwargs)
+
+        # Critically: the guard fires before the wake path, so a deliberately
+        # stopped production is never started by a dev tool.
+        mock_ensure.assert_not_called()
