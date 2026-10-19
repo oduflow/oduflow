@@ -3198,99 +3198,104 @@ def init_template(
     if odoo_conf.exists():
         volumes[str(odoo_conf)] = {"bind": "/etc/odoo/odoo.conf", "mode": "ro"}
 
-    temp_container = client.containers.run(
-        odoo_image,
-        name=temp_container_name,
-        detach=True,
-        network=ensure_team_network(client, settings, team),
-        **default_env_limits(),
-        environment={
-            "HOST": settings.shared_db_container,
-            "USER": settings.db_user,
-            "PASSWORD": settings.db_password,
-        },
-        volumes=volumes,
-        # Odoo 19 made --without-demo a boolean; "=all" (the pre-19 module
-        # list) still disables demo there but logs a deprecation warning,
-        # while bare/boolean forms don't exist before 19. The flag stays
-        # explicit on 19+ too, so the instance odoo.conf cannot turn demo
-        # data on in a template.
-        command=(
-            f"odoo -d {build_db} -i {modules} --stop-after-init "
-            + (
-                "--without-demo=True"
-                if (major_from_image_reference(odoo_image) or 0) >= 19
-                else "--without-demo=all"
-            )
-        ),
-        labels={settings.managed_label: "true"},
-    )
-
-    exit_info = temp_container.wait(timeout=600)
-    init_elapsed = time.monotonic() - init_start
-    exit_code = exit_info.get("StatusCode", -1)
-
-    if exit_code != 0:
-        logs = temp_container.logs(tail=50).decode("utf-8", errors="replace")
-        temp_container.remove(v=True)
-        _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
-        raise ExternalCommandError(
-            "odoo --stop-after-init",
-            exit_code,
-            f"Odoo init failed after {init_elapsed:.1f}s.\nLast logs:\n{logs}",
+    temp_container = None
+    try:
+        temp_container = client.containers.run(
+            odoo_image,
+            name=temp_container_name,
+            detach=True,
+            network=ensure_team_network(client, settings, team),
+            **default_env_limits(),
+            environment={
+                "HOST": settings.shared_db_container,
+                "USER": settings.db_user,
+                "PASSWORD": settings.db_password,
+            },
+            volumes=volumes,
+            # Odoo 19 made --without-demo a boolean; "=all" (the pre-19 module
+            # list) still disables demo there but logs a deprecation warning,
+            # while bare/boolean forms don't exist before 19. The flag stays
+            # explicit on 19+ too, so the instance odoo.conf cannot turn demo
+            # data on in a template.
+            command=(
+                f"odoo -d {build_db} -i {modules} --stop-after-init "
+                + (
+                    "--without-demo=True"
+                    if (major_from_image_reference(odoo_image) or 0) >= 19
+                    else "--without-demo=all"
+                )
+            ),
+            labels={settings.managed_label: "true"},
         )
 
-    logger.info("Odoo init completed in %.1fs", init_elapsed)
+        exit_info = temp_container.wait(timeout=600)
+        init_elapsed = time.monotonic() - init_start
+        exit_code = exit_info.get("StatusCode", -1)
 
-    os.makedirs(os.path.dirname(template_sql_path), exist_ok=True)
+        if exit_code != 0:
+            logs = temp_container.logs(tail=50).decode("utf-8", errors="replace")
+            raise ExternalCommandError(
+                "odoo --stop-after-init",
+                exit_code,
+                f"Odoo init failed after {init_elapsed:.1f}s.\nLast logs:\n{logs}",
+            )
 
-    db_container = client.containers.get(settings.shared_db_container)
-    dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fp", build_db]
-    try:
+        logger.info("Odoo init completed in %.1fs", init_elapsed)
+
+        os.makedirs(os.path.dirname(template_sql_path), exist_ok=True)
+
+        db_container = client.containers.get(settings.shared_db_container)
+        dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fp", build_db]
         _stream_exec_to_file(
             client, db_container, dump_cmd, template_sql_path, tool="pg_dump"
         )
-    except ExternalCommandError:
-        temp_container.remove(v=True)
-        _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
-        raise
 
-    logger.info("Dump saved to %s", template_sql_path)
+        logger.info("Dump saved to %s", template_sql_path)
 
-    if os.path.exists(template_filestore_path):
-        shutil.rmtree(template_filestore_path)
-    os.makedirs(template_filestore_path, exist_ok=True)
+        if os.path.exists(template_filestore_path):
+            shutil.rmtree(template_filestore_path)
+        os.makedirs(template_filestore_path, exist_ok=True)
 
-    odoo_data_container_path = "/var/lib/odoo/.local/share/Odoo"
-    try:
-        src_fs_prefix = f"Odoo/filestore/{build_db}/"
-        extracted = _extract_archive_from_container(
-            temp_container,
-            odoo_data_container_path,
-            template_filestore_path,
-            src_fs_prefix,
-        )
-        logger.info(
-            "Filestore extracted to %s (%d files)", template_filestore_path, extracted
-        )
+        odoo_data_container_path = "/var/lib/odoo/.local/share/Odoo"
+        try:
+            src_fs_prefix = f"Odoo/filestore/{build_db}/"
+            extracted = _extract_archive_from_container(
+                temp_container,
+                odoo_data_container_path,
+                template_filestore_path,
+                src_fs_prefix,
+            )
+            logger.info(
+                "Filestore extracted to %s (%d files)",
+                template_filestore_path,
+                extracted,
+            )
 
-    except docker.errors.NotFound:
-        logger.info(
-            "Odoo did not create data dir during init (normal for --stop-after-init). "
-            "The template filestore at %s is empty; environments will start with an empty filestore.",
-            template_filestore_path,
-        )
+        except docker.errors.NotFound:
+            logger.info(
+                "Odoo did not create data dir during init (normal for --stop-after-init). "
+                "The template filestore at %s is empty; environments will start with an empty filestore.",
+                template_filestore_path,
+            )
 
-    odoo_uid_gid = get_odoo_uid_gid(client, odoo_image)
-    uid_str, gid_str = odoo_uid_gid.split(":")
-    uid, gid = int(uid_str), int(gid_str)
-    chown_recursive(template_filestore_path, uid, gid, client, odoo_image)
-
-    temp_container.remove(v=True)
-    logger.info("Temporary container removed")
-
-    _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
-    logger.info("Temporary database dropped")
+        odoo_uid_gid = get_odoo_uid_gid(client, odoo_image)
+        uid_str, gid_str = odoo_uid_gid.split(":")
+        uid, gid = int(uid_str), int(gid_str)
+        chown_recursive(template_filestore_path, uid, gid, client, odoo_image)
+    finally:
+        # Best-effort teardown on every exit, including a wait() timeout or an
+        # unexpected extraction/chown failure: the builder and the build DB
+        # are per-run scratch, and leaving them behind wastes disk until the
+        # next init run cleans them up. force=True because after a wait()
+        # timeout the container may still be running.
+        if temp_container is not None:
+            with contextlib.suppress(Exception):
+                temp_container.remove(v=True, force=True)
+        with contextlib.suppress(Exception):
+            _exec_sql(
+                client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);"
+            )
+    logger.info("Temporary container removed and database dropped")
 
     logger.info("Template generation complete, loading into template DB")
     result = reload_template(settings, team, template_name=template_name)
