@@ -3255,6 +3255,124 @@ class TestProvisioningSetup:
         # Sanitization ran: this is the final gate failing, not the setup one.
         mock_sanitize.assert_called_once()
 
+    @patch("oduflow.sanitizer.sanitize_environment", return_value=["sanitize"])
+    @patch("oduflow.sanitizer.neutralize_environment", return_value=["neutralize"])
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 1.0, 1, 120),
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        return_value=(False, ""),
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_scratch_environment_runs_project_scripts_without_neutralization(
+        self,
+        mock_apt,
+        mock_pip,
+        mock_wait,
+        mock_neutralize,
+        mock_sanitize,
+    ):
+        """A from-scratch environment still gets the repo's wiring scripts.
+
+        ``.oduflow/odoo_sanitize/`` scripts set up dev infrastructure (Mailpit,
+        aliases, feature flags), so they apply to every environment; Odoo's
+        neutralization and the team-level scripts only make sense on a copied
+        database.
+        """
+        result = env_ops._configure_serving_environment(
+            MagicMock(),
+            TEST_SETTINGS,
+            TEST_TEAM,
+            MagicMock(),
+            "/repo",
+            "oduflow_1_feature",
+            "feature",
+            None,
+            True,
+            None,
+            None,
+        )
+
+        mock_neutralize.assert_not_called()
+        mock_sanitize.assert_called_once()
+        assert mock_sanitize.call_args.kwargs["include_team_scripts"] is False
+        assert result == ["sanitize"]
+
+    @patch("oduflow.sanitizer.sanitize_environment", return_value=["sanitize"])
+    @patch("oduflow.sanitizer.neutralize_environment", return_value=["neutralize"])
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 1.0, 1, 120),
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        return_value=(False, ""),
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_template_environment_passes_team_scripts_to_sanitization(
+        self,
+        mock_apt,
+        mock_pip,
+        mock_wait,
+        mock_neutralize,
+        mock_sanitize,
+    ):
+        env_ops._configure_serving_environment(
+            MagicMock(),
+            TEST_SETTINGS,
+            TEST_TEAM,
+            MagicMock(),
+            "/repo",
+            "oduflow_1_feature",
+            "feature",
+            "template",
+            True,
+            None,
+            None,
+        )
+
+        mock_neutralize.assert_called_once()
+        assert mock_sanitize.call_args.kwargs["include_team_scripts"] is True
+
+    @patch("oduflow.sanitizer.sanitize_environment", return_value=["sanitize"])
+    @patch("oduflow.sanitizer.neutralize_environment", return_value=["neutralize"])
+    @patch(
+        "oduflow.docker_ops.env_ops._wait_for_container_odoo_ready",
+        return_value=env_ops._OdooReadinessResult(True, 1.0, 1, 120),
+    )
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements",
+        return_value=(False, ""),
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    def test_sanitize_false_skips_scripts_on_a_scratch_environment(
+        self,
+        mock_apt,
+        mock_pip,
+        mock_wait,
+        mock_neutralize,
+        mock_sanitize,
+    ):
+        result = env_ops._configure_serving_environment(
+            MagicMock(),
+            TEST_SETTINGS,
+            TEST_TEAM,
+            MagicMock(),
+            "/repo",
+            "oduflow_1_feature",
+            "feature",
+            None,
+            False,
+            None,
+            None,
+        )
+
+        mock_neutralize.assert_not_called()
+        mock_sanitize.assert_not_called()
+        assert result == []
+
     @patch("oduflow.docker_ops.env_ops._cleanup_old_environment")
     @patch("oduflow.docker_ops.env_ops.release_port")
     def test_partial_environment_rollback_releases_all_resources(
@@ -4260,6 +4378,85 @@ class TestGetLogs:
 
         assert "log line 1" in output
         container.logs.assert_called_with(tail=50, stdout=True, stderr=True)
+
+
+class TestApplyActionsProjectScripts:
+    """Project wiring scripts re-run on the apply that installs the modules.
+
+    A from-scratch database only gets its alias domains with the first module
+    install, so the timing matters: the scripts must run after the install and
+    before the restart, so the serving process reads the fresh rows.
+    """
+
+    @staticmethod
+    def _client_with_container():
+        client = MagicMock()
+        container = MagicMock()
+        client.containers.get.return_value = container
+        return client, container
+
+    @patch(
+        "oduflow.sanitizer.sanitize_environment",
+        return_value=["[SANITIZE:repo] Executed 10_wire_mailpit.sql"],
+    )
+    @patch(
+        "oduflow.docker_ops.odoo_ops.install_odoo_modules",
+        return_value={"exit_code": 0, "output": "installed"},
+    )
+    def test_install_reruns_project_scripts_before_the_restart(
+        self, mock_install, mock_sanitize
+    ):
+        client, container = self._client_with_container()
+        calls = MagicMock()
+        calls.attach_mock(mock_install, "install")
+        calls.attach_mock(mock_sanitize, "sanitize")
+        calls.attach_mock(container.restart, "restart")
+
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=["sale"],
+            to_upgrade=[],
+            do_restart=False,
+            changed_files=[],
+        )
+
+        assert [entry[0] for entry in calls.mock_calls] == [
+            "install",
+            "sanitize",
+            "restart",
+        ]
+        assert mock_sanitize.call_args.kwargs["include_team_scripts"] is False
+        assert mock_sanitize.call_args.args[3] == "feature/x"
+        assert "[SANITIZE:repo]" in result["message"]
+        assert result["exit_code"] == 0
+
+    @patch("oduflow.sanitizer.sanitize_environment")
+    @patch(
+        "oduflow.docker_ops.odoo_ops.install_odoo_modules",
+        return_value={"exit_code": 1, "output": "boom"},
+    )
+    def test_failed_install_skips_project_scripts(self, mock_install, mock_sanitize):
+        client, container = self._client_with_container()
+
+        result = env_ops._apply_actions(
+            client,
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "feature/x",
+            "oduflow-1-feature-x-odoo",
+            to_install=["sale"],
+            to_upgrade=[],
+            do_restart=False,
+            changed_files=[],
+        )
+
+        mock_sanitize.assert_not_called()
+        container.restart.assert_called_once()
+        assert result["exit_code"] == 1
 
 
 class TestApplyActionsConf:

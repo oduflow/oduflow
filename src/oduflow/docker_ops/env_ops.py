@@ -1886,10 +1886,27 @@ def _configure_serving_environment(
         )
 
     if sanitize and template_name is not None:
-        from oduflow.sanitizer import neutralize_environment, sanitize_environment
+        from oduflow.sanitizer import neutralize_environment
 
         setup_logs.extend(neutralize_environment(client, settings, team, env_name))
-        setup_logs.extend(sanitize_environment(client, settings, team, env_name))
+
+    if sanitize:
+        # Project scripts are environment wiring (dev mail server, aliases,
+        # feature flags), not production protection: an environment started
+        # from scratch needs them just as much as a template copy, and they
+        # are written to be idempotent. Team-level scripts stay tied to
+        # template copies, where there is copied data to scrub.
+        from oduflow.sanitizer import sanitize_environment
+
+        setup_logs.extend(
+            sanitize_environment(
+                client,
+                settings,
+                team,
+                env_name,
+                include_team_scripts=template_name is not None,
+            )
+        )
 
     if auto_install_modules:
         # Reload only after sanitization has disabled the newly-installed
@@ -5126,6 +5143,23 @@ def _apply_actions(
         container = client.containers.get(odoo_container_name)
         if config_changed and _reapply_odoo_conf(settings, team, env_name, container):
             messages.append("Reapplied odoo.conf.")
+        if not apply_exit_code:
+            # Project wiring scripts (dev mail server, aliases) are idempotent
+            # and may depend on modules installed above: a from-scratch
+            # environment only gets its alias domains with the first module
+            # install. Re-running them here, before the restart, lets the
+            # serving process start with the full wiring in place.
+            from oduflow.sanitizer import sanitize_environment
+
+            messages.extend(
+                sanitize_environment(
+                    client,
+                    settings,
+                    team,
+                    env_name,
+                    include_team_scripts=False,
+                )
+            )
         container.restart()
         messages.append("Container restarted.")
         logger.info(

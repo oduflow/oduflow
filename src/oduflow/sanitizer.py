@@ -260,6 +260,7 @@ def sanitize_environment(
     *,
     runner: Any = None,
     database: str | None = None,
+    include_team_scripts: bool = True,
 ) -> list[str]:
     """Sanitize environment database after provisioning.
 
@@ -272,6 +273,13 @@ def sanitize_environment(
     Both folders support ``.sql`` and ``.py`` files executed in alphabetical
     order.
 
+    The two tiers answer different questions. Team-level scripts scrub a
+    copied database (PII, mail servers, crons), so they only make sense for an
+    environment that was cloned from a template: pass
+    ``include_team_scripts=False`` for an environment started from scratch.
+    Per-project scripts are project wiring — dev mail server, aliases, flags
+    — and run for every environment, which is why they are idempotent.
+
     Returns a list of human-readable log lines describing what was done.
     """
     env_db = database or get_db_name(env_name, team.team_id)
@@ -279,18 +287,19 @@ def sanitize_environment(
 
     # --- Team-level sanitization ---
     system_dir = os.path.join(team.data_dir, "odoo_sanitize")
-    logs.extend(
-        _run_scripts_from_dir(
-            system_dir,
-            "system",
-            client,
-            settings,
-            team,
-            env_db,
-            env_name,
-            **({"runner": runner} if runner is not None else {}),
+    if include_team_scripts:
+        logs.extend(
+            _run_scripts_from_dir(
+                system_dir,
+                "system",
+                client,
+                settings,
+                team,
+                env_db,
+                env_name,
+                **({"runner": runner} if runner is not None else {}),
+            )
         )
-    )
 
     # --- Per-project sanitization from repo ---
     # Managed-clone environments keep their checkout under the Oduflow

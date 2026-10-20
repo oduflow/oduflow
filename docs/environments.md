@@ -175,16 +175,18 @@ restarts the container.
 
 ## Database Sanitization
 
-When an environment is created from a template, Oduflow **automatically sanitizes** the database to prevent the test instance from sending real emails or polling mailboxes. This is enabled by default (`sanitize=True`).
+Every environment creation ends with a sanitization step. How much of it applies depends on where the database came from: an environment created from a template is fully sanitized before it is reported ready, while an environment started from scratch only gets the project's own wiring scripts. This is enabled by default (`sanitize=True`).
 
 For Odoo versions that provide it, Oduflow first runs Odoo's native `odoo neutralize` command inside the serving container, after any auto-installed modules are present. Odoo 15 and earlier do not include this command, so Oduflow detects the version from both official and custom Docker image references, skips the native step there, and continues with the custom scripts below.
 
-Custom sanitization then uses a **two-tier** approach:
+Custom sanitization uses a **two-tier** approach:
 
 1. **Team-level scripts** from `{team_data_dir}/odoo_sanitize/` — managed by the administrator, shared across all environments in the team
 2. **Per-project scripts** from `.oduflow/odoo_sanitize/` in the repository root — managed by the developer, specific to the project
 
 Both folders support `.sql` and `.py` files, executed in alphabetical order (first all `.sql`, then all `.py`). Team-level scripts run first, then per-project scripts.
+
+The two tiers are run for different environments. Team-level scripts scrub a copied database, so they only run for environments created from a template. Per-project scripts are **project wiring** — dev mail server, aliases, feature flags — and run for **every** environment, including one started from scratch with `template_name="none"`. Write them to be idempotent: they run on each environment creation, and re-running them must not duplicate or undo earlier state.
 
 ### Team-level sanitization
 
