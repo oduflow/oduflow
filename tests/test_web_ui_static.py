@@ -2360,3 +2360,323 @@ def test_guessed_branches_are_marked_in_their_own_row():
     css = source[source.index(rule) :]
     css = css[: css.index("}")]
     assert 'content: "guessed";' in css
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_environment_menu_renders_groups_and_respects_environment_conditions():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    harness = (
+        _js_function(dashboard, "renderEnvMenu")
+        + r"""
+function escAttr(value) { return String(value); }
+var SCOPED_ENV = '';
+var productionEnabled = true;
+function _prodEnabled() { return productionEnabled; }
+const assert = require('node:assert/strict');
+const env = {
+  branch: 'feature/test', note: '', local_path: '', protected: false,
+  template_name: 'base', auto_refresh_template: true
+};
+function render(overrides = {}, allStopped = false, dis = '', showAgent = true) {
+  return renderEnvMenu({...env, ...overrides}, allStopped, dis, showAgent);
+}
+function buttons(html) {
+  return [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].map(match => ({
+    attrs: match[1], text: match[2].replace(/<[^>]*>/g, '')
+  }));
+}
+function button(html, label) {
+  const result = buttons(html).find(item => item.text.includes(label));
+  assert.ok(result, `missing menu item: ${label}`);
+  return result;
+}
+function pageNames(html) {
+  return [...html.matchAll(/<div class="env-menu-page" data-env-menu-page="([^"]+)"([^>]*)>/g)]
+    .map(match => ({name: match[1], attrs: match[2]}));
+}
+const full = render();
+assert.match(full, /class="menu env-menu"/);
+assert.match(full, /onclick="envMenuClick\(event\)"/);
+assert.match(full, /onkeydown="envMenuKeydown\(event\)"/);
+const pages = pageNames(full);
+assert.deepEqual(pages.map(page => page.name), ['root', 'consoles', 'modules', 'access', 'management', 'data']);
+assert.doesNotMatch(pages[0].attrs, /\bhidden\b/);
+for (const page of pages.slice(1)) assert.match(page.attrs, /\bhidden\b/);
+for (const group of ['Consoles', 'Modules', 'Access', 'Management', 'Data']) {
+  const item = button(full, group);
+  assert.match(item.attrs, /data-env-menu-target=/);
+  assert.match(item.attrs, /aria-haspopup="menu"/);
+  assert.match(item.attrs, /aria-expanded="false"/);
+}
+assert.equal(buttons(full).filter(item => /data-env-menu-target="root"/.test(item.attrs)).length, 5);
+const rootMarker = 'data-env-menu-page="root">';
+const rootStart = full.indexOf(rootMarker) + rootMarker.length;
+const rootHtml = full.slice(rootStart).split('</div><div class="env-menu-page"', 1)[0];
+assert.deepEqual(buttons(rootHtml).map(item => item.text.replace('&#8250;', '')),
+  ['Info', 'Consoles', 'Modules', 'Access', 'Management', 'Data', 'Delete']);
+for (const action of ['Info', 'Delete', 'Open console', 'Open SQL console', 'Agent CLI',
+  'Install modules', 'Upgrade modules', 'MCP Access', 'Share UI', 'Add note',
+  'Switch branch', 'Protect', 'Update', 'Auto-refresh data: On', 'New Template',
+  'Promote to Production', 'Recreate']) button(full, action);
+assert.match(button(full, 'Open console').attrs, /openConsole\('feature\/test'\)/);
+assert.match(button(full, 'Delete').attrs, /doDelete\('feature\/test'\)/);
+assert.ok(render({note: 'deploy carefully'}).includes('Edit note'));
+
+const scoped = render();
+SCOPED_ENV = 'feature/test';
+const shared = render();
+assert.deepEqual(pageNames(shared).map(page => page.name), ['root', 'consoles', 'modules', 'access']);
+for (const absent of ['Management', 'Data', 'Delete', 'Share UI', 'Agent CLI', 'Add note', 'New Template']) {
+  assert.equal(buttons(shared).some(item => item.text.includes(absent)), false, `scoped menu includes ${absent}`);
+}
+assert.ok(button(shared, 'MCP Access'));
+assert.equal(buttons(shared).filter(item => /class="env-menu-group"/.test(item.attrs)).length, 3);
+assert.ok(scoped.includes('Agent CLI'));
+
+SCOPED_ENV = '';
+productionEnabled = false;
+const local = render({local_path: '/workspace'});
+assert.equal(buttons(local).some(item => item.text.includes('Switch branch')), false);
+assert.equal(buttons(local).some(item => item.text.includes('Promote to Production')), false);
+assert.ok(button(local, 'Protect'));
+
+productionEnabled = true;
+const protectedMenu = render({protected: true}, false, '', false);
+assert.equal(buttons(protectedMenu).some(item => item.text.includes('Agent CLI')), false);
+assert.doesNotMatch(button(protectedMenu, 'Unprotect').attrs, /\bdisabled\b/);
+for (const action of ['Update', 'Recreate', 'Delete']) {
+  assert.match(button(protectedMenu, action).attrs, /\bdisabled\b/);
+}
+assert.equal(buttons(protectedMenu).some(item => item.text.includes('Protect')), false);
+
+const stopped = render({}, true, '', false);
+for (const action of ['Open console', 'Open SQL console', 'Install modules', 'Upgrade modules']) {
+  assert.match(button(stopped, action).attrs, /\bdisabled\b/, `${action} should be disabled when stopped`);
+}
+
+const busy = render({}, false, 'disabled ', false);
+for (const action of ['Install modules', 'Upgrade modules', 'Switch branch', 'Protect',
+  'Update', 'New Template', 'Recreate', 'Delete']) {
+  assert.match(button(busy, action).attrs, /\bdisabled\b/, `${action} should be disabled when busy`);
+}
+assert.equal(buttons(render({template_name: 'none'})).some(item => item.text.includes('Auto-refresh data')), false);
+console.log(JSON.stringify({ok: true}));
+"""
+    )
+    assert _run_node(harness) == {"ok": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_environment_menu_positioning_preserves_scroll_and_viewport_bounds():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    harness = (
+        _js_function(dashboard, "positionEnvMenu")
+        + r"""
+const assert = require('node:assert/strict');
+let closed = 0;
+function closeMenus() { closed++; }
+function makeMenu(viewport, triggerRect, naturalHeight) {
+  const assignedMaxHeights = [];
+  const trigger = {getBoundingClientRect: () => triggerRect};
+  let width = 0;
+  const menu = {
+    parentElement: {querySelector: selector => selector === '.btn-more' ? trigger : null},
+    scrollHeight: naturalHeight,
+    offsetHeight: 0,
+    clientHeight: 0,
+    scrollTop: 120,
+    style: {}
+  };
+  Object.defineProperty(menu.style, 'width', {
+    set(value) { width = parseFloat(value); }, get() { return width + 'px'; }
+  });
+  Object.defineProperty(menu.style, 'maxHeight', {
+    set(value) {
+      assignedMaxHeights.push(parseFloat(value));
+      if (parseFloat(value) >= naturalHeight) menu.scrollTop = 0;
+    }, get() { return assignedMaxHeights.at(-1) + 'px'; }
+  });
+  menu.getBoundingClientRect = () => ({width});
+  global.window = {visualViewport: viewport, innerWidth: viewport.width, innerHeight: viewport.height};
+  return {menu, assignedMaxHeights};
+}
+function verifyCase(viewport, triggerRect, expected) {
+  const {menu, assignedMaxHeights} = makeMenu(viewport, triggerRect, expected.naturalHeight);
+  positionEnvMenu(menu);
+  assert.equal(menu.style.width, expected.width + 'px');
+  assert.equal(menu.style.left, expected.left + 'px');
+  assert.equal(menu.style.top, expected.top + 'px');
+  assert.equal(menu.style.maxHeight, expected.maxHeight + 'px');
+  assert.ok(parseFloat(menu.style.left) >= viewport.offsetLeft + 8);
+  assert.ok(parseFloat(menu.style.left) + expected.width <= viewport.offsetLeft + viewport.width - 8);
+  assert.ok(menu.scrollTop === 120, 'repositioning must preserve the current scroll offset');
+  assert.ok(assignedMaxHeights.every(height => height < expected.naturalHeight),
+    'positioning must not temporarily expand max-height to the natural menu height');
+}
+const narrow = {width: 390, height: 400, offsetLeft: 0, offsetTop: 0};
+verifyCase(narrow, {top: 20, bottom: 40, right: 385},
+  {naturalHeight: 396, width: 240, left: 142, top: 44, maxHeight: 348});
+verifyCase(narrow, {top: 300, bottom: 320, right: 385},
+  {naturalHeight: 396, width: 240, left: 142, top: 8, maxHeight: 288});
+const desktop = {width: 1440, height: 900, offsetLeft: 0, offsetTop: 0};
+verifyCase(desktop, {top: 20, bottom: 40, right: 1435},
+  {naturalHeight: 1000, width: 240, left: 1192, top: 44, maxHeight: 848});
+assert.equal(closed, 0);
+console.log(JSON.stringify({ok: true}));
+"""
+    )
+    assert _run_node(harness) == {"ok": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_environment_menu_page_switching_clicks_and_keyboard_navigation():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    harness = (
+        "\n".join(
+            _js_function(dashboard, name)
+            for name in ("showEnvMenuPage", "envMenuClick", "envMenuKeydown")
+        )
+        + r"""
+const assert = require('node:assert/strict');
+const document = {activeElement: null};
+global.document = document;
+let positioned = 0;
+let closed = 0;
+function positionEnvMenu() { positioned++; }
+function closeMenus() { closed++; }
+class Button {
+  constructor(name, target = '', {disabled = false, group = false} = {}) {
+    this.name = name;
+    this.dataset = target ? {envMenuTarget: target} : {};
+    this.disabled = disabled;
+    this.group = group;
+    this.attributes = {'aria-expanded': 'false'};
+  }
+  setAttribute(name, value) { this.attributes[name] = value; }
+  focus() { document.activeElement = this; }
+  closest(selector) { return selector === '[data-env-menu-target]' && this.dataset.envMenuTarget ? this : null; }
+}
+class Page {
+  constructor(name, buttons, hidden) {
+    this.dataset = {envMenuPage: name};
+    this.buttons = buttons;
+    this.hidden = hidden;
+  }
+  querySelectorAll(selector) {
+    return selector === 'button:not(:disabled)' ? this.buttons.filter(button => !button.disabled) : [];
+  }
+}
+const info = new Button('Info');
+const consolesGroup = new Button('Consoles', 'consoles', {group: true});
+const modulesGroup = new Button('Modules', 'modules', {group: true});
+const consoleBack = new Button('Back to root', 'root');
+const openConsole = new Button('Open console');
+const disabledConsole = new Button('Disabled action', '', {disabled: true});
+const root = new Page('root', [info, consolesGroup, modulesGroup], false);
+const consoles = new Page('consoles', [consoleBack, openConsole, disabledConsole], true);
+const modulesBack = new Button('Back to root', 'root');
+const install = new Button('Install modules');
+const modules = new Page('modules', [modulesBack, install], true);
+const pages = [root, consoles, modules];
+const more = new Button('More');
+const menu = {
+  pages,
+  scrollTop: 91,
+  parentElement: {querySelector: selector => selector === '.btn-more' ? more : null},
+  querySelectorAll(selector) {
+    if (selector === '[data-env-menu-page]') return pages;
+    if (selector === '[aria-haspopup="menu"]') return [consolesGroup, modulesGroup];
+    if (selector === '[data-env-menu-target]') return [consolesGroup, modulesGroup, consoleBack, modulesBack];
+    return [];
+  },
+  querySelector(selector) {
+    if (selector === '[data-env-menu-page]:not([hidden])') return pages.find(page => !page.hidden) || null;
+    const pageMatch = selector.match(/^\[data-env-menu-page="([^"]+)"\] button:not\(:disabled\)$/);
+    if (pageMatch) {
+      const page = pages.find(item => item.dataset.envMenuPage === pageMatch[1]);
+      return page && page.querySelectorAll('button:not(:disabled)')[0] || null;
+    }
+    const targetMatch = selector.match(/^\[data-env-menu-target="([^"]+)"\]$/);
+    if (targetMatch) return [consolesGroup, modulesGroup, consoleBack, modulesBack]
+      .find(button => button.dataset.envMenuTarget === targetMatch[1]) || null;
+    return null;
+  }
+};
+function event(target, key) {
+  return {target, currentTarget: menu, key, prevented: false, stopped: false,
+    preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; }};
+}
+
+showEnvMenuPage(menu, 'modules', false);
+assert.deepEqual(pages.map(page => page.hidden), [true, true, false]);
+assert.equal(modulesGroup.attributes['aria-expanded'], 'true');
+assert.equal(consolesGroup.attributes['aria-expanded'], 'false');
+assert.equal(menu.scrollTop, 0);
+assert.equal(positioned, 1);
+assert.equal(document.activeElement, null, 'focusItem=false must preserve focus');
+showEnvMenuPage(menu, 'root');
+assert.deepEqual(pages.map(page => page.hidden), [false, true, true]);
+
+const clickGroup = event(consolesGroup);
+envMenuClick(clickGroup);
+assert.equal(clickGroup.stopped, true);
+assert.deepEqual(pages.map(page => page.hidden), [true, false, true]);
+assert.equal(document.activeElement, consoleBack);
+assert.equal(consolesGroup.attributes['aria-expanded'], 'true');
+const actionClick = event(openConsole);
+envMenuClick(actionClick);
+assert.equal(actionClick.stopped, false, 'action clicks must bubble to closeMenus');
+const clickBack = event(consoleBack);
+envMenuClick(clickBack);
+assert.equal(clickBack.stopped, true);
+assert.deepEqual(pages.map(page => page.hidden), [false, true, true]);
+assert.equal(document.activeElement, consolesGroup);
+
+consolesGroup.focus();
+const right = event(consolesGroup, 'ArrowRight');
+envMenuKeydown(right);
+assert.equal(right.prevented, true);
+assert.equal(right.stopped, true);
+assert.deepEqual(pages.map(page => page.hidden), [true, false, true]);
+assert.equal(document.activeElement, consoleBack);
+let down = event(consoleBack, 'ArrowDown');
+envMenuKeydown(down);
+assert.equal(document.activeElement, openConsole);
+down = event(openConsole, 'ArrowDown');
+envMenuKeydown(down);
+assert.equal(document.activeElement, consoleBack, 'ArrowDown wraps and skips disabled items');
+const up = event(consoleBack, 'ArrowUp');
+envMenuKeydown(up);
+assert.equal(document.activeElement, openConsole, 'ArrowUp wraps');
+const home = event(openConsole, 'Home');
+envMenuKeydown(home);
+assert.equal(document.activeElement, consoleBack);
+const end = event(consoleBack, 'End');
+envMenuKeydown(end);
+assert.equal(document.activeElement, openConsole);
+const left = event(openConsole, 'ArrowLeft');
+envMenuKeydown(left);
+assert.deepEqual(pages.map(page => page.hidden), [false, true, true]);
+assert.equal(document.activeElement, consolesGroup);
+
+const rightAgain = event(consolesGroup, 'ArrowRight');
+envMenuKeydown(rightAgain);
+const escapePage = event(consoleBack, 'Escape');
+envMenuKeydown(escapePage);
+assert.deepEqual(pages.map(page => page.hidden), [false, true, true]);
+assert.equal(document.activeElement, consolesGroup);
+const escapeRoot = event(consolesGroup, 'Escape');
+envMenuKeydown(escapeRoot);
+assert.equal(closed, 1);
+assert.equal(document.activeElement, more);
+info.focus();
+const tab = event(info, 'Tab');
+envMenuKeydown(tab);
+assert.equal(closed, 2);
+assert.equal(document.activeElement, more, 'Tab close restores focus to More before default navigation');
+assert.equal(tab.prevented, false, 'Tab must not be trapped');
+assert.equal(tab.stopped, false, 'Tab must continue normally');
+console.log(JSON.stringify({ok: true}));
+"""
+    )
+    assert _run_node(harness) == {"ok": True}
