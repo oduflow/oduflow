@@ -537,6 +537,16 @@
   .menu button:disabled { opacity: 0.4; cursor: not-allowed; }
   .menu button.danger { color: var(--red); }
   .menu button.danger:hover { background: color-mix(in oklab, var(--red) 10%, transparent); }
+  .env-menu { width: 240px; min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .env-menu-page { display: flex; flex-direction: column; }
+  .env-menu-page[hidden] { display: none; }
+  .env-menu button { flex-shrink: 0; }
+  .env-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .env-menu .env-menu-group { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .env-menu-group > span { color: var(--text-dim); }
+  .env-menu-heading { display: flex; align-items: center; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .env-menu-heading > span { padding: 7px 10px; color: var(--text-dim); }
+  .env-menu-separator { border-top: 1px solid var(--border); margin: 4px 0; }
   .btn:hover { border-color: var(--accent); color: var(--accent); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
   input:disabled, select:disabled, textarea:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -3674,6 +3684,69 @@ function toggleExtras(btn) {
   applyExtrasState(box);
 }
 
+function renderEnvMenu(env, allStopped, dis, showAgent) {
+  var pages = '';
+  function group(name, label, items) {
+    if (!items) return '';
+    pages += '<div class="env-menu-page" data-env-menu-page="' + name + '" hidden>' +
+      '<div class="env-menu-heading"><button role="menuitem" data-env-menu-target="root" ' +
+        'aria-label="Back to main menu">&#8249; Back</button><span>' + label + '</span></div>' +
+      items + '</div>';
+    return '<button role="menuitem" class="env-menu-group" data-env-menu-target="' + name +
+      '" aria-haspopup="menu" aria-expanded="false">' + label +
+      '<span aria-hidden="true">&#8250;</span></button>';
+  }
+  var consoles = '<button role="menuitem" title="Shell inside the Odoo container" onclick="openConsole(\'' + escAttr(env.branch) + '\')" ' +
+      (allStopped ? 'disabled' : '') + '>Open console</button>' +
+    '<button role="menuitem" title="psql session on the environment database" onclick="openSqlConsole(\'' + escAttr(env.branch) + '\')" ' +
+      (allStopped ? 'disabled' : '') + '>Open SQL console</button>' +
+    (showAgent && !SCOPED_ENV
+      ? '<button role="menuitem" title="Terminal session with the coding agent for this environment" onclick="openAgentConsole(\'' + escAttr(env.branch) + '\')">Agent CLI</button>'
+      : '');
+  var modules = '<button role="menuitem" title="Install modules with odoo -i, then restart" onclick="openInstallModules(\'' + escAttr(env.branch) + '\')" ' + dis +
+      (allStopped ? 'disabled' : '') + '>Install modules</button>' +
+    '<button role="menuitem" title="Pick installed modules and upgrade them with odoo -u" onclick="openUpgradeModules(\'' + escAttr(env.branch) + '\')" ' + dis +
+      (allStopped ? 'disabled' : '') + '>Upgrade modules</button>';
+  var access = '<button role="menuitem" title="Scoped MCP endpoint and Secret Key for this environment only" onclick="openMcpAccess(\'' + escAttr(env.branch) + '\')">MCP Access</button>' +
+    (SCOPED_ENV
+      ? ''
+      : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and Agent Chat, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>');
+  var management = SCOPED_ENV ? '' :
+    '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
+      (env.note ? 'Edit note' : 'Add note') + '</button>' +
+    (env.local_path
+      ? ''
+      : '<button role="menuitem" onclick="openSwitchBranch(\'' + escAttr(env.branch) + '\')" ' + dis +
+        'title="Reuse this environment for another branch, keeping its database and URL">Switch branch</button>') +
+    '<button role="menuitem" title="' + (env.protected ? 'Allow Stop, Update, Recreate and Delete again' : 'Disable Stop, Update, Recreate and Delete') + '" onclick="doProtect(\'' + escAttr(env.branch) + '\',' + (env.protected ? 'true' : 'false') + ')" ' + dis + '>' +
+      (env.protected ? 'Unprotect' : 'Protect') + '</button>' +
+    '<button role="menuitem" onclick="doUpdate(\'' + escAttr(env.branch) + '\')" ' + dis +
+      (env.protected ? 'disabled title="Environment is protected"' : 'title="Recreate the container, keep the database and filestore"') + '>Update</button>';
+  var data = SCOPED_ENV ? '' :
+    (env.template_name && env.template_name !== 'none'
+      ? '<button role="menuitem" onclick="toggleTemplateAutoRefresh(\'' + escAttr(env.branch) + '\')">Auto-refresh data: ' + (env.auto_refresh_template ? 'On' : 'Off') + '</button>' : '') +
+    '<button role="menuitem" onclick="doNewTemplate(\'' + escAttr(env.branch) + '\')" ' + dis +
+      'title="Save this environment (DB + filestore) as a new template">New Template</button>' +
+    (_prodEnabled()
+      ? '<button role="menuitem" onclick="openCreateProductionModal(\'' + escAttr(env.branch) + '\')" ' +
+        'title="Create a production from a copy of this environment (database + filestore); the environment itself is not changed">Promote to Production</button>'
+      : '') +
+    '<div class="env-menu-separator" role="separator"></div>' +
+    '<button role="menuitem" class="danger" onclick="doRecreate(\'' + escAttr(env.branch) + '\')" ' + dis +
+      (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>';
+  var root = '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
+    group('consoles', 'Consoles', consoles) +
+    group('modules', 'Modules', modules) +
+    group('access', 'Access', access) +
+    group('management', 'Management', management) +
+    group('data', 'Data', data) +
+    (SCOPED_ENV ? '' : '<div class="env-menu-separator" role="separator"></div>' + '<button role="menuitem" class="danger" onclick="doDelete(\'' + escAttr(env.branch) + '\')" ' + dis +
+      (env.protected ? 'disabled title="Environment is protected"' : '') + '>Delete</button>');
+  return '<div class="menu env-menu" role="menu" aria-label="Environment actions" ' +
+    'onclick="envMenuClick(event)" onkeydown="envMenuKeydown(event)">' +
+    '<div class="env-menu-page" data-env-menu-page="root">' + root + '</div>' + pages + '</div>';
+}
+
 function renderEnvironments(envs, force) {
   const el = document.getElementById('env-list');
   if (!envs || envs.length === 0) {
@@ -3796,47 +3869,7 @@ function renderEnvironments(envs, force) {
                 (env.protected ? 'disabled title="Environment is protected"' : '') + '>Stop</button>') +
           '<div class="menu-wrap">' +
             '<button class="btn btn-more" onclick="toggleMenu(event)" aria-haspopup="menu" aria-expanded="false">More &#9662;</button>' +
-            '<div class="menu" role="menu">' +
-              '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
-              '<button role="menuitem" title="Shell inside the Odoo container" onclick="openConsole(\'' + escAttr(env.branch) + '\')" ' +
-                (allStopped ? 'disabled' : '') + '>Open console</button>' +
-              '<button role="menuitem" title="psql session on the environment database" onclick="openSqlConsole(\'' + escAttr(env.branch) + '\')" ' +
-                (allStopped ? 'disabled' : '') + '>Open SQL console</button>' +
-              '<button role="menuitem" title="Install modules with odoo -i, then restart" onclick="openInstallModules(\'' + escAttr(env.branch) + '\')" ' + dis +
-                (allStopped ? 'disabled' : '') + '>Install modules</button>' +
-              '<button role="menuitem" title="Pick installed modules and upgrade them with odoo -u" onclick="openUpgradeModules(\'' + escAttr(env.branch) + '\')" ' + dis +
-                (allStopped ? 'disabled' : '') + '>Upgrade modules</button>' +
-              '<button role="menuitem" title="Scoped MCP endpoint and Secret Key for this environment only" onclick="openMcpAccess(\'' + escAttr(env.branch) + '\')">MCP Access</button>' +
-              (SCOPED_ENV
-                ? ''
-                : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and Agent Chat, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>') +
-              (showAgent && !SCOPED_ENV
-                ? '<button role="menuitem" title="Terminal session with the coding agent for this environment" onclick="openAgentConsole(\'' + escAttr(env.branch) + '\')">Agent CLI</button>'
-                : '') +
-              (SCOPED_ENV ? '' :
-                '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
-                  (env.note ? 'Edit note' : 'Add note') + '</button>' +
-                (env.template_name && env.template_name !== 'none'
-                  ? '<button role="menuitem" onclick="toggleTemplateAutoRefresh(\'' + escAttr(env.branch) + '\')">Auto-refresh data: ' + (env.auto_refresh_template ? 'On' : 'Off') + '</button>' : '') +
-                '<button role="menuitem" title="' + (env.protected ? 'Allow Stop, Update, Recreate and Delete again' : 'Disable Stop, Update, Recreate and Delete') + '" onclick="doProtect(\'' + escAttr(env.branch) + '\',' + (env.protected ? 'true' : 'false') + ')" ' + dis + '>' +
-                  (env.protected ? 'Unprotect' : 'Protect') + '</button>' +
-                (env.local_path
-                  ? ''
-                  : '<button role="menuitem" onclick="openSwitchBranch(\'' + escAttr(env.branch) + '\')" ' + dis +
-                      'title="Reuse this environment for another branch, keeping its database and URL">Switch branch</button>') +
-                '<button role="menuitem" onclick="doUpdate(\'' + escAttr(env.branch) + '\')" ' + dis +
-                  (env.protected ? 'disabled title="Environment is protected"' : 'title="Recreate the container, keep the database and filestore"') + '>Update</button>' +
-                '<button role="menuitem" onclick="doRecreate(\'' + escAttr(env.branch) + '\')" ' + dis +
-                  (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>' +
-                '<button role="menuitem" onclick="doNewTemplate(\'' + escAttr(env.branch) + '\')" ' + dis +
-                  'title="Save this environment (DB + filestore) as a new template">New Template</button>' +
-                (_prodEnabled()
-                  ? '<button role="menuitem" onclick="openCreateProductionModal(\'' + escAttr(env.branch) + '\')" ' +
-                      'title="Create a production from a copy of this environment (database + filestore); the environment itself is not changed">Promote to Production</button>'
-                  : '') +
-                '<button role="menuitem" class="danger" onclick="doDelete(\'' + escAttr(env.branch) + '\')" ' + dis +
-                  (env.protected ? 'disabled title="Environment is protected"' : '') + '>Delete</button>') +
-            '</div>' +
+            renderEnvMenu(env, allStopped, dis, showAgent) +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -3995,6 +4028,103 @@ async function bulkDelete() {
   await _runBulk(branches, 'delete', 'Deleting', 'Deleted');
 }
 
+function positionEnvMenu(menu) {
+  var trigger = menu.parentElement.querySelector('.btn-more');
+  var rect = trigger.getBoundingClientRect();
+  var viewport = window.visualViewport;
+  var width = viewport ? viewport.width : window.innerWidth;
+  var height = viewport ? viewport.height : window.innerHeight;
+  var left = viewport ? viewport.offsetLeft : 0;
+  var top = viewport ? viewport.offsetTop : 0;
+  var gap = 8;
+  if (rect.bottom < top + gap || rect.top > top + height - gap) {
+    closeMenus();
+    return;
+  }
+  menu.style.position = 'fixed';
+  menu.style.right = 'auto';
+  menu.style.width = Math.min(240, width - gap * 2) + 'px';
+  var menuRect = menu.getBoundingClientRect();
+  var menuHeight = menu.scrollHeight + menu.offsetHeight - menu.clientHeight;
+  menu.style.left = Math.max(left + gap, Math.min(rect.right - menuRect.width, left + width - menuRect.width - gap)) + 'px';
+  var below = top + height - rect.bottom - gap;
+  var above = rect.top - top - gap;
+  var openAbove = menuHeight > below && above > below;
+  menu.style.maxHeight = Math.max(0, openAbove ? above - 4 : below - 4) + 'px';
+  menu.style.top = (openAbove ? rect.top - Math.min(menuHeight, above - 4) - 4 : rect.bottom + 4) + 'px';
+}
+
+function showEnvMenuPage(menu, pageName, focusItem = true) {
+  menu.querySelectorAll('[data-env-menu-page]').forEach(function(page) {
+    page.hidden = page.dataset.envMenuPage !== pageName;
+  });
+  menu.querySelectorAll('[aria-haspopup="menu"]').forEach(function(button) {
+    button.setAttribute('aria-expanded', button.dataset.envMenuTarget === pageName ? 'true' : 'false');
+  });
+  menu.scrollTop = 0;
+  positionEnvMenu(menu);
+  if (focusItem) {
+    var first = menu.querySelector('[data-env-menu-page="' + pageName + '"] button:not(:disabled)');
+    if (first) first.focus();
+  }
+}
+
+function envMenuClick(e) {
+  var button = e.target.closest('[data-env-menu-target]');
+  if (!button) return;
+  e.stopPropagation();
+  var menu = e.currentTarget;
+  var previous = menu.querySelector('[data-env-menu-page]:not([hidden])').dataset.envMenuPage;
+  var target = button.dataset.envMenuTarget;
+  showEnvMenuPage(menu, target);
+  if (target === 'root') menu.querySelector('[data-env-menu-target="' + previous + '"]').focus();
+}
+
+function envMenuKeydown(e) {
+  var menu = e.currentTarget;
+  var page = menu.querySelector('[data-env-menu-page]:not([hidden])');
+  var buttons = Array.from(page.querySelectorAll('button:not(:disabled)'));
+  var index = buttons.indexOf(document.activeElement);
+  var key = e.key;
+  if (key === 'Tab') {
+    var more = menu.parentElement.querySelector('.btn-more');
+    closeMenus();
+    more.focus();
+    return;
+  }
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'ArrowRight', 'ArrowLeft', 'Escape'].indexOf(key) === -1) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (key === 'ArrowRight') {
+    var target = document.activeElement.dataset.envMenuTarget;
+    if (target && target !== 'root') showEnvMenuPage(menu, target);
+  } else if (key === 'ArrowLeft' || key === 'Escape') {
+    if (page.dataset.envMenuPage !== 'root') {
+      var name = page.dataset.envMenuPage;
+      showEnvMenuPage(menu, 'root');
+      menu.querySelector('[data-env-menu-target="' + name + '"]').focus();
+    } else if (key === 'Escape') {
+      var trigger = menu.parentElement.querySelector('.btn-more');
+      closeMenus();
+      trigger.focus();
+    }
+  } else if (buttons.length) {
+    var next = key === 'Home' ? 0 : key === 'End' ? buttons.length - 1 :
+      (index + (key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next].focus();
+  }
+}
+
+function repositionEnvMenus() {
+  document.querySelectorAll('.menu-wrap.open .env-menu').forEach(positionEnvMenu);
+}
+window.addEventListener('resize', repositionEnvMenus);
+document.addEventListener('scroll', repositionEnvMenus, true);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', repositionEnvMenus);
+  window.visualViewport.addEventListener('scroll', repositionEnvMenus);
+}
+
 function toggleMenu(e) {
   e.stopPropagation();
   var wrap = e.currentTarget.parentElement;
@@ -4003,6 +4133,8 @@ function toggleMenu(e) {
   if (!wasOpen) {
     wrap.classList.add('open');
     e.currentTarget.setAttribute('aria-expanded', 'true');
+    var menu = wrap.querySelector('.env-menu');
+    if (menu) showEnvMenuPage(menu, 'root');
   }
 }
 

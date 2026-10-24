@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "run": "exec .venv/bin/python -c 'import tempfile; import uvicorn; from starlette.applications import Starlette; from oduflow.settings import Settings, TeamSettings; from oduflow.locking import LockManager; from oduflow.web_ui import mount_web_ui; settings = Settings(base_data_dir=tempfile.mkdtemp(prefix=\"oduflow-preview-\"), teams={\"1\": TeamSettings(team_id=\"1\")}); app = Starlette(); mount_web_ui(app, lambda: settings, LockManager()); uvicorn.run(app, host=\"0.0.0.0\", port=3000)'",
+    "setup": "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -e \".[dev]\" pytest"
+  }
+}
