@@ -30,7 +30,7 @@ def _client(labels: dict[str, str]) -> MagicMock:
     return client
 
 
-def _recorded_runner(path, label, *_args):
+def _recorded_runner(path, label, *_args, **_kwargs):
     return [f"ran:{label}:{path}"]
 
 

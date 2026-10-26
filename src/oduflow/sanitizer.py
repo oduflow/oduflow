@@ -46,8 +46,12 @@ def _run_scripts_from_dir(
     if not os.path.isdir(sanitize_dir):
         return logs
 
-    sql_files = sorted(glob_mod.glob(os.path.join(sanitize_dir, "*.sql")))
-    py_files = sorted(glob_mod.glob(os.path.join(sanitize_dir, "*.py")))
+    # Escape the directory part: the path contains user-chosen names (the
+    # environment subfolder, team data dir, repo checkout) whose []?* would
+    # otherwise be read as glob patterns and skip or mis-scope scripts.
+    escaped_dir = glob_mod.escape(sanitize_dir)
+    sql_files = sorted(glob_mod.glob(os.path.join(escaped_dir, "*.sql")))
+    py_files = sorted(glob_mod.glob(os.path.join(escaped_dir, "*.py")))
     if not sql_files and not py_files:
         return logs
 
@@ -176,10 +180,11 @@ def _run_scripts_for_scope(
     """Run a sanitize directory's scripts, then its env-named subfolder's.
 
     Files directly in ``sanitize_dir`` run for every environment. A
-    subdirectory whose name equals the environment name *exactly* (no globs)
-    holds scripts for that environment only: its ``.sql``/``.py`` files run
-    after the top-level files, with the same alphabetical .sql-then-.py order
-    within the subfolder. Every other subdirectory is ignored — other
+    subdirectory whose name equals the environment name *exactly* (no globs;
+    ``/`` in the environment name folds to ``-``, as in every other
+    filesystem identity derived from it) holds scripts for that environment
+    only: its ``.sql``/``.py`` files run after the top-level files, with the
+    same alphabetical .sql-then-.py order within the subfolder. Every other subdirectory is ignored — other
     environments' folders, and ``_``/``.``-prefixed folders holding shared
     assets (e.g. ``_steps/``) that env folders symlink into. Symlinked scripts
     are read through the link; the link's own filename decides ordering and
@@ -187,21 +192,24 @@ def _run_scripts_for_scope(
 
     Returns a list of human-readable log lines.
     """
-    extra = {"runner": runner} if runner is not None else {}
     logs = _run_scripts_from_dir(
-        sanitize_dir, label, client, settings, team, env_db, env_name, **extra
+        sanitize_dir, label, client, settings, team, env_db, env_name, runner=runner
     )
 
+    # Branch-like environment names may contain "/"; their filesystem identity
+    # folds it to "-" (exactly as get_workspace_path does), so the subfolder is
+    # named after the folded form: environment "feature/x" -> "feature-x/".
+    folder = env_name.replace("/", "-")
     # Underscore/dot names are reserved for shared assets, and a separator
     # would escape the sanitize directory; such names never map to a subfolder.
     if (
-        not env_name
-        or env_name.startswith(("_", "."))
-        or os.sep in env_name
-        or (os.altsep and os.altsep in env_name)
+        not folder
+        or folder.startswith(("_", "."))
+        or os.sep in folder
+        or (os.altsep and os.altsep in folder)
     ):
         return logs
-    env_dir = os.path.join(sanitize_dir, env_name)
+    env_dir = os.path.join(sanitize_dir, folder)
     if not os.path.isdir(env_dir):
         return logs
 
@@ -214,13 +222,13 @@ def _run_scripts_for_scope(
     logs.extend(
         _run_scripts_from_dir(
             env_dir,
-            f"{label}/{env_name}",
+            f"{label}/{folder}",
             client,
             settings,
             team,
             env_db,
             env_name,
-            **extra,
+            runner=runner,
         )
     )
     return logs
@@ -356,7 +364,7 @@ def sanitize_environment(
             team,
             env_db,
             env_name,
-            **({"runner": runner} if runner is not None else {}),
+            runner=runner,
         )
     )
 
@@ -400,7 +408,7 @@ def sanitize_environment(
                 team,
                 env_db,
                 env_name,
-                **({"runner": runner} if runner is not None else {}),
+                runner=runner,
             )
         )
 
@@ -414,7 +422,7 @@ def sanitize_environment(
             team,
             env_db,
             env_name,
-            **({"runner": runner} if runner is not None else {}),
+            runner=runner,
         )
     )
 

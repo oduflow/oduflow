@@ -449,6 +449,36 @@ class TestEnvScopedSubfolder:
         assert exec_sql.call_args.args[2] == "DELETE FROM res_partner;"
         assert logs[-1] == "[SANITIZE:repo/main] Executed 10_step.sql"
 
+    def test_slash_env_name_matches_dash_folded_folder(self, tmp_path):
+        # Branch-like env names ("feature/x") are valid; their filesystem
+        # identity folds "/" to "-" everywhere (workspace path, DB, container
+        # names), so the env-scoped subfolder is the folded name.
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "feature-x"
+        env_dir.mkdir(parents=True)
+        (env_dir / "10_x.sql").write_text("SELECT 'env';")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts, env_name="feature/x")
+
+        assert exec_sql.call_args.args[2] == "SELECT 'env';"
+        assert logs[-1] == "[SANITIZE:repo/feature-x] Executed 10_x.sql"
+
+    def test_glob_metacharacters_in_the_env_name_are_literal(self, tmp_path):
+        # "data[1]" is a valid env name; the folder must be matched and
+        # globbed literally, not as a character class (which would silently
+        # skip every script in a matched folder).
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "data[1]"
+        env_dir.mkdir(parents=True)
+        (env_dir / "10_x.sql").write_text("SELECT 'env';")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts, env_name="data[1]")
+
+        assert exec_sql.call_args.args[2] == "SELECT 'env';"
+        assert logs[-1] == "[SANITIZE:repo/data[1]] Executed 10_x.sql"
+
     def test_no_match_log_line_is_a_warning(self, tmp_path):
         # template_generations treats any "WARNING:" log line as a failed
         # sanitization; the subfolder-match notice must never read as one.

@@ -258,7 +258,7 @@ Scripts directly in `odoo_sanitize/` run for every environment. To run extra scr
 Rules:
 
 - The matching subfolder's scripts run **after** the top-level scripts of its tier, with the same ordering inside it (all `.sql` alphabetically, then all `.py`). Use numeric prefixes like `10_`, `20_` to order scripts.
-- Matching is an exact name comparison — no wildcards or globs.
+- Matching is an exact name comparison — no wildcards or globs. A `/` in the environment name folds to `-` in the folder name (environment `feature/x` → folder `feature-x/`), the same folding used for the environment's database and container names.
 - Subfolders whose name starts with `_` or `.` are never executed; use them for shared assets (such as `_steps/` above) that environment folders symlink to. A symlinked script executes its resolved content, while the symlink's own filename decides ordering and appears in the logs.
 - Any other subfolder — i.e. another environment's folder — is ignored.
 
