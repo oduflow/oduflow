@@ -162,6 +162,70 @@ def _run_scripts_from_dir(
     return logs
 
 
+def _run_scripts_for_scope(
+    sanitize_dir: str,
+    label: str,
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_db: str,
+    env_name: str,
+    *,
+    runner: Any = None,
+) -> list[str]:
+    """Run a sanitize directory's scripts, then its env-named subfolder's.
+
+    Files directly in ``sanitize_dir`` run for every environment. A
+    subdirectory whose name equals the environment name *exactly* (no globs)
+    holds scripts for that environment only: its ``.sql``/``.py`` files run
+    after the top-level files, with the same alphabetical .sql-then-.py order
+    within the subfolder. Every other subdirectory is ignored — other
+    environments' folders, and ``_``/``.``-prefixed folders holding shared
+    assets (e.g. ``_steps/``) that env folders symlink into. Symlinked scripts
+    are read through the link; the link's own filename decides ordering and
+    appears in the logs.
+
+    Returns a list of human-readable log lines.
+    """
+    extra = {"runner": runner} if runner is not None else {}
+    logs = _run_scripts_from_dir(
+        sanitize_dir, label, client, settings, team, env_db, env_name, **extra
+    )
+
+    # Underscore/dot names are reserved for shared assets, and a separator
+    # would escape the sanitize directory; such names never map to a subfolder.
+    if (
+        not env_name
+        or env_name.startswith(("_", "."))
+        or os.sep in env_name
+        or (os.altsep and os.altsep in env_name)
+    ):
+        return logs
+    env_dir = os.path.join(sanitize_dir, env_name)
+    if not os.path.isdir(env_dir):
+        return logs
+
+    note = (
+        f"[SANITIZE:{label}] Subfolder {env_dir} matches environment "
+        f"'{env_name}'; running its scripts"
+    )
+    logger.info(note)
+    logs.append(note)
+    logs.extend(
+        _run_scripts_from_dir(
+            env_dir,
+            f"{label}/{env_name}",
+            client,
+            settings,
+            team,
+            env_db,
+            env_name,
+            **extra,
+        )
+    )
+    return logs
+
+
 def neutralize_environment(
     client: DockerClient,
     settings: Settings,
@@ -270,7 +334,11 @@ def sanitize_environment(
        ``.oduflow/odoo_sanitize/`` folder (managed by the developer).
 
     Both folders support ``.sql`` and ``.py`` files executed in alphabetical
-    order.
+    order. In both tiers, files directly in the folder run for every
+    environment; a subfolder named exactly after the environment runs
+    afterwards, for that environment only (see
+    :func:`_run_scripts_for_scope`). The deprecated ``.odoo_sanitize``
+    legacy folder keeps its old flat behaviour.
 
     Returns a list of human-readable log lines describing what was done.
     """
@@ -280,7 +348,7 @@ def sanitize_environment(
     # --- Team-level sanitization ---
     system_dir = os.path.join(team.data_dir, "odoo_sanitize")
     logs.extend(
-        _run_scripts_from_dir(
+        _run_scripts_for_scope(
             system_dir,
             "system",
             client,
@@ -338,7 +406,7 @@ def sanitize_environment(
 
     repo_dir = os.path.join(repo_path, ".oduflow", "odoo_sanitize")
     logs.extend(
-        _run_scripts_from_dir(
+        _run_scripts_for_scope(
             repo_dir,
             "repo",
             client,

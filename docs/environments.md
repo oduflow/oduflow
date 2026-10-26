@@ -184,7 +184,7 @@ Custom sanitization then uses a **two-tier** approach:
 1. **Team-level scripts** from `{team_data_dir}/odoo_sanitize/` — managed by the administrator, shared across all environments in the team
 2. **Per-project scripts** from `.oduflow/odoo_sanitize/` in the repository root — managed by the developer, specific to the project
 
-Both folders support `.sql` and `.py` files, executed in alphabetical order (first all `.sql`, then all `.py`). Team-level scripts run first, then per-project scripts.
+Both folders support `.sql` and `.py` files, executed in alphabetical order (first all `.sql`, then all `.py`). Team-level scripts run first, then per-project scripts. In both folders, scripts placed directly in the folder run for **every** environment; scripts an environment alone should run go into an [environment-named subfolder](#environment-scoped-scripts).
 
 ### Team-level sanitization
 
@@ -238,6 +238,31 @@ conn.close()
 ```
 
 Python scripts receive the following environment variables: `ODOO_DB`, `DB_HOST`, `DB_USER`, `DB_PASSWORD`.
+
+### Environment-scoped scripts
+
+Scripts directly in `odoo_sanitize/` run for every environment. To run extra scripts for one environment only, put them in a subfolder named **exactly** after the environment — the environment name, not the git branch (an environment can run any branch). This works in both the team-level and the per-project folder:
+
+```
+.oduflow/odoo_sanitize/
+├── 10_anonymize.sql          # every environment
+├── _steps/                   # shared assets — never executed directly
+│   └── rescale_amounts.sql
+├── staging/                  # only the environment named "staging"
+│   ├── 10_rescale.sql -> ../_steps/rescale_amounts.sql
+│   └── 20_demo_users.sql
+└── jacob/                    # only the environment named "jacob"
+    └── 10_rescale.sql -> ../_steps/rescale_amounts.sql
+```
+
+Rules:
+
+- The matching subfolder's scripts run **after** the top-level scripts of its tier, with the same ordering inside it (all `.sql` alphabetically, then all `.py`). Use numeric prefixes like `10_`, `20_` to order scripts.
+- Matching is an exact name comparison — no wildcards or globs.
+- Subfolders whose name starts with `_` or `.` are never executed; use them for shared assets (such as `_steps/` above) that environment folders symlink to. A symlinked script executes its resolved content, while the symlink's own filename decides ordering and appears in the logs.
+- Any other subfolder — i.e. another environment's folder — is ignored.
+
+The provisioning log records which subfolder matched the environment and each script executed.
 
 ### Disabling sanitization
 
