@@ -109,3 +109,4 @@ precursors).
 Forward-looking feature design docs also live here, named by date:
 
 - [`2026-06-08-mkdocs-material-redesign-design.md`](2026-06-08-mkdocs-material-redesign-design.md) — docs-site (MkDocs Material) redesign.
+- [`2026-10-26-stack-service-references-design.md`](2026-10-26-stack-service-references-design.md) — Stack sibling-service references and deterministic internal service addressing.
