@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Share links include Agent CLI** — a shared environment (`/env/<name>`)
+  now offers the coding agent's terminal next to Agent Chat. Since every
+  environment runs as its own Linux user in the team's agent container
+  (v1.89.0), a CLI session reaches only that environment's checkout,
+  conversations and scoped MCP token, exactly like Chat. The Share modal and
+  the security docs now name what both still share with the team: its git
+  credentials and deploy key, provider credentials, any agent login made in
+  the environment, and the container network. For shared environments, set
+  provider credentials in `[team.X.agent_env]` instead of signing in with a
+  personal subscription.
+
+### Documentation
+
+- The Share modal and docs no longer claim that a shared visitor's Agent Chat
+  can read other environments' checkouts; that stopped being true in v1.89.0.
+
 ## v1.89.0
 
 ### Security

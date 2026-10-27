@@ -100,13 +100,13 @@ request:
 - start, stop, restart and sync it, and install or upgrade modules;
 - open its Odoo shell and `psql` consoles, use Connect As, and read its scoped
   MCP endpoint and Secret Key;
-- use **Agent Chat**.
+- use **Agent Chat** and **Agent CLI**.
 
 Everything else is out of scope: any other environment, every team-wide surface
 (templates, services, volumes, extra addons, credentials, productions, host
 statistics, license), the provisioning actions on the shared environment itself
 (create, delete, update, recreate, switch branch, protect, save as template),
-the share routes, and **Agent CLI**. API calls and state-changing requests are
+and the share routes. API calls and state-changing requests are
 refused with HTTP 403 and WebSockets close with 1008; a browser *navigating* to
 another page — the full dashboard at `/`, a bookmark — is sent back to
 `/env/<name>` with a 303 instead of being shown a raw error.
@@ -115,16 +115,17 @@ Leaving the shared view (**Logout**) clears the scoped cookie and returns to
 `/env/<name>`, which then explains how to get back in: reopen the full share
 link, or sign in at `/login` if you are an operator who was previewing it.
 
-Agent Chat runs in the *per-team* agent container as the environment's own
-Linux user, so it reaches only this environment's checkout, conversations and
-scoped MCP token (see [Coding Agent → Security model](agent.md#security-model)).
-It still shares the team's git credentials and deploy key, the team-wide
-provider credentials and the container network, so the scope of a shared link
-is a policy boundary on the dashboard — it is not the cryptographic confinement
-that the per-environment token gives on `/mcp/<env>`. Agent CLI stays excluded:
-a share link is for working with the agent through Chat, not for a raw terminal
-in the team's container. Share links with people you would let work in the
-environment.
+Agent Chat and Agent CLI run in the *per-team* agent container as the
+environment's own Linux user, so they reach only this environment's checkout,
+conversations and scoped MCP token (see
+[Coding Agent → Security model](agent.md#security-model)). Chat already runs
+commands without approval prompts, so the CLI's terminal grants nothing more.
+Both still share the team's git credentials and deploy key, the team-wide
+provider credentials and the container network, and they can read and replace
+an agent login made in this environment. So the scope of a shared link is a
+policy boundary on the dashboard — it is not the cryptographic confinement that
+the per-environment token gives on `/mcp/<env>`. Share links with people you
+would let work in the environment.
 
 ## Environment WebSockets
 

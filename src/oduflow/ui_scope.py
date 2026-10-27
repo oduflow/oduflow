@@ -3,8 +3,8 @@
 The UI counterpart of the scoped MCP endpoint (see ``oduflow.scoped_access``
 and ``specs/0028-scoped-environment-mcp-access.md``): an operator shares one
 environment with a client, who gets the normal dashboard reduced to that
-environment — its card, logs, dev-loop actions, consoles and Agent Chat — and
-nothing else of the team.
+environment — its card, logs, dev-loop actions, consoles, Agent Chat and
+Agent CLI — and nothing else of the team.
 
 Two pieces cooperate, both in ``web_ui``:
 
@@ -21,16 +21,16 @@ environment. So a scoped visitor cannot reach another environment, another
 team's resources, or the team-wide surfaces (templates, services, volumes,
 extra repos, credentials, productions, host stats) even by typing the URL.
 
-Deliberately denied although the environment is theirs to work in:
+Agent Chat (``WS .../agent-acp``) and Agent CLI (``WS .../agent``) both run in
+the *per-team* agent container as this environment's own uid (ADR 0079), at
+its checkout and with its scoped MCP token. Chat already runs commands
+approval-free, so the CLI's PTY grants nothing more. What both still share
+with the team: its git credentials and deploy key, provider keys and the
+container network.
 
-- ``WS .../agent`` — **Agent CLI**, a raw PTY in the *per-team* agent
-  container. Since per-environment uids (ADR 0079) it no longer reaches other
-  environments' checkouts, but it still shares the team's git credentials,
-  provider keys and container network. Agent Chat (``.../agent-acp``) is
-  exposed instead: same agent and same uid, driven over ACP at this
-  environment's checkout with its scoped MCP token.
-- everything that creates, destroys or re-provisions: create, delete, update,
-  recreate, switch-branch, protect/unprotect, save-as-template.
+Deliberately denied although the environment is theirs to work in:
+everything that creates, destroys or re-provisions — create, delete, update,
+recreate, switch-branch, protect/unprotect, save-as-template.
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ _ENV_API_PREFIX = "/api/environments/"
 
 # Team-wide paths a scoped session may still reach. `/api/agent` reports only
 # whether the team's coding agent is enabled and its default type — no secrets
-# — and the dashboard needs it to decide whether to offer Agent Chat. Feedback
-# returns only a prefilled public GitHub issue URL.
+# — and the dashboard needs it to decide whether to offer Agent Chat and Agent
+# CLI. Feedback returns only a prefilled public GitHub issue URL.
 _GLOBAL_ALLOWED: dict[str, frozenset[str]] = {
     "GET": frozenset({"/api/agent"}),
     # Ends the scoped session by clearing the cookie; the visitor gets back in
@@ -85,7 +85,7 @@ _ENV_ALLOWED: dict[str, frozenset[str]] = {
             "agent-acp/attachments",
         }
     ),
-    "WEBSOCKET": frozenset({"terminal", "sql", "agent-acp"}),
+    "WEBSOCKET": frozenset({"terminal", "sql", "agent", "agent-acp"}),
 }
 
 # Agent Chat attachment removal: the id is generated per upload.

@@ -393,13 +393,25 @@ def test_share_modal_ignores_stale_loads_and_blocks_unsafe_actions():
     }
 
 
-def test_share_modal_discloses_agent_chat_workspace_access(tmp_path):
+def test_share_modal_discloses_agent_workspace_access(tmp_path):
     dashboard = _client(tmp_path).get("/")
 
     assert dashboard.status_code == 200
-    assert "Agent Chat runs as this environment's own user" in dashboard.text
+    assert "Agent Chat and Agent CLI run as this environment's own user" in (
+        dashboard.text
+    )
     assert "the team's Git credentials and deploy key" in dashboard.text
+    assert "any agent login made in this environment" in dashboard.text
     assert "may read other team checkouts" not in dashboard.text
+    assert "as is Agent CLI" not in dashboard.text
+
+
+def test_scoped_view_offers_agent_cli(tmp_path):
+    dashboard = _client(tmp_path).get("/")
+
+    assert dashboard.status_code == 200
+    assert ">Agent CLI</button>" in dashboard.text
+    assert "showAgent && !SCOPED_ENV" not in dashboard.text
 
 
 def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):

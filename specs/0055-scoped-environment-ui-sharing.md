@@ -108,14 +108,21 @@ power to anyone holding its token.
   and scoped MCP token, so the "can read other environments' checkouts" caveat
   above no longer holds. It still shares the team's git credentials and deploy
   key, the team-wide provider keys and the container network, so the link
-  remains a dashboard boundary, not a sandbox. Agent CLI stays excluded, but
-  the shared workspace is no longer the reason: a share link exposes the agent
-  through Chat, not as a raw terminal in the team's container.
+  remains a dashboard boundary, not a sandbox.
 - 2026-10-18 — the MCP token adopted this registry model (`mcp_tokens.json`),
   and recreate became identity-preserving on every surface: the dashboard
   action and the new `recreate_environment` MCP tool keep both the share secret
   and the MCP token, while a plain delete still revokes them
   ([[0080-stable-environment-identity-across-recreate]]).
+- 2026-10-27 — **Agent CLI is opened to share links.** It was denied because
+  `/workspace` held every checkout of the team; per-environment uids removed
+  that. A CLI session now runs exactly like Agent Chat — the environment's
+  uid, HOME, checkout and scoped token — and Chat already runs commands
+  approval-free, so the PTY grants nothing Chat does not. What both share with
+  the team is unchanged. One thing becomes more visible: interactive agent
+  logins live in the environment's HOME, so a visitor can read or replace a
+  login made there; shared environments should use team provider credentials
+  instead of a personal subscription.
 
 ## History
 
@@ -130,3 +137,5 @@ power to anyone holding its token.
   close other environments' checkouts, conversations and tokens to a shared
   visitor's Agent Chat; the Share modal, `docs/web-api.md` and the scope
   rationale were brought in line afterwards.
+- 2026-10-27 — Agent CLI allowed for scoped sessions (own environment only)
+  and offered on the shared card.

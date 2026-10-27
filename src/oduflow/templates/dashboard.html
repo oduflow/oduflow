@@ -2724,7 +2724,7 @@
       <button class="modal-close" onclick="closeShare()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As and Agent Chat. Other team environments and team-wide pages are unavailable, as is Agent CLI. Agent Chat runs as this environment's own user in the team's coder container, so it cannot reach other environments' checkouts or conversations. Important: it still uses the team's Git credentials and deploy key, the team-wide agent provider keys and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
+      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As, Agent Chat and Agent CLI. Other team environments and team-wide pages are unavailable. Agent Chat and Agent CLI run as this environment's own user in the team's coder container, so they cannot reach other environments' checkouts or conversations. Important: they still use the team's Git credentials and deploy key, the team-wide agent provider keys, any agent login made in this environment and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
       <div class="form-group" id="share-link-group">
         <label for="share-url">Share link</label>
         <div class="copy-row">
@@ -3809,8 +3809,8 @@ function renderEnvironments(envs, force) {
               '<button role="menuitem" title="Scoped MCP endpoint and Secret Key for this environment only" onclick="openMcpAccess(\'' + escAttr(env.branch) + '\')">MCP Access</button>' +
               (SCOPED_ENV
                 ? ''
-                : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and Agent Chat, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>') +
-              (showAgent && !SCOPED_ENV
+                : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and coding agent, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>') +
+              (showAgent
                 ? '<button role="menuitem" title="Terminal session with the coding agent for this environment" onclick="openAgentConsole(\'' + escAttr(env.branch) + '\')">Agent CLI</button>'
                 : '') +
               (SCOPED_ENV ? '' :
