@@ -50,8 +50,18 @@ def _run_scripts_from_dir(
     # environment subfolder, team data dir, repo checkout) whose []?* would
     # otherwise be read as glob patterns and skip or mis-scope scripts.
     escaped_dir = glob_mod.escape(sanitize_dir)
-    sql_files = sorted(glob_mod.glob(os.path.join(escaped_dir, "*.sql")))
-    py_files = sorted(glob_mod.glob(os.path.join(escaped_dir, "*.py")))
+    # Environment subfolders can also end in .sql or .py. Exclude directories,
+    # while keeping script symlinks (including broken links, which must warn).
+    sql_files = sorted(
+        path
+        for path in glob_mod.glob(os.path.join(escaped_dir, "*.sql"))
+        if not os.path.isdir(path)
+    )
+    py_files = sorted(
+        path
+        for path in glob_mod.glob(os.path.join(escaped_dir, "*.py"))
+        if not os.path.isdir(path)
+    )
     if not sql_files and not py_files:
         return logs
 

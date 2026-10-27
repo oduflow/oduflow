@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import docker as _docker
 from oduflow import sanitizer
 from oduflow.env_credentials import MissingCredentialsError
@@ -412,6 +414,43 @@ class TestEnvScopedSubfolder:
 
         exec_sql.assert_not_called()
         assert logs == []
+
+    @pytest.mark.parametrize("folder", ["demo.sql", "contractor.py"])
+    @pytest.mark.parametrize("matches", [False, True])
+    def test_script_suffix_folders_are_not_top_level_scripts(
+        self, tmp_path, folder, matches
+    ):
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / folder
+        env_dir.mkdir(parents=True)
+        (scripts / "10_shared.sql").write_text("SELECT 'shared';")
+        (env_dir / "10_env.sql").write_text("SELECT 'env';")
+        (env_dir / "20_env.py").write_text("print('env')")
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(
+                tmp_path,
+                scripts,
+                env_name=folder if matches else "main",
+                container=container,
+            )
+
+        expected_sql = ["SELECT 'shared';"]
+        if matches:
+            expected_sql.append("SELECT 'env';")
+            container.exec_run.assert_called_once()
+            assert container.exec_run.call_args.args[0] == [
+                "python3",
+                "-c",
+                "print('env')",
+            ]
+        else:
+            container.exec_run.assert_not_called()
+        assert [call.args[2] for call in exec_sql.call_args_list] == expected_sql
+        # Refresh rejects any warning, including opening a directory as a script.
+        assert not any("WARNING:" in line for line in logs)
 
     def test_env_py_scripts_run_in_the_container(self, tmp_path):
         scripts = tmp_path / "sanitize"
