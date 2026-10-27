@@ -49,6 +49,30 @@ class _FakeArchiveContainer:
         return chunks, {}
 
 
+class _FakePutArchiveContainer:
+    """Container whose put_archive consumes a streaming tar input."""
+
+    def __init__(self) -> None:
+        self.dest_dir = ""
+        self.member_name = ""
+        self.member_mode = 0
+        self.payload = b""
+
+    def put_archive(self, dest_dir: str, archive) -> bool:
+        self.dest_dir = dest_dir
+        # Docker SDK passes an iterable body through requests using chunked
+        # transfer. Adapt those chunks back to a file interface for tarfile.
+        reader = io.BufferedReader(system_ops._ChunkReader(iter(archive)))
+        with tarfile.open(fileobj=reader, mode="r|") as tar:
+            member = next(iter(tar))
+            member_file = tar.extractfile(member)
+            assert member_file is not None
+            self.member_name = member.name
+            self.member_mode = member.mode
+            self.payload = member_file.read()
+        return True
+
+
 class _FakeExecApi:
     def __init__(self, frames, exit_codes=(0,)) -> None:
         self.frames = frames
@@ -98,6 +122,123 @@ def test_chunk_reader_reassembles_across_chunk_boundaries():
 def test_chunk_reader_reports_eof_on_exhausted_iterator():
     reader = system_ops._ChunkReader(iter([]))
     assert reader.readinto(bytearray(16)) == 0
+
+
+# --------------------------------------------------------------------------
+# _copy_file_to_container
+# --------------------------------------------------------------------------
+
+
+def test_copy_file_to_container_streams_tar_without_a_full_temp_copy(tmp_path):
+    # Larger than a typical pipe buffer: without concurrent production and
+    # consumption this test deadlocks instead of completing.
+    payload = b"PGDMP" + os.urandom(256 * 1024)
+    source = tmp_path / "dump.pgdump"
+    source.write_bytes(payload)
+    source.chmod(0o600)
+    container = _FakePutArchiveContainer()
+
+    system_ops._copy_file_to_container(
+        container,
+        str(source),
+        "/tmp",
+        archive_name="restore-input",
+        mode=0o640,
+    )
+
+    assert container.dest_dir == "/tmp"
+    assert container.member_name == "restore-input"
+    assert container.member_mode == 0o640
+    assert container.payload == payload
+
+
+def test_copy_file_to_container_propagates_archive_producer_errors(tmp_path):
+    container = MagicMock()
+    container.put_archive.side_effect = lambda _dest, archive: b"".join(archive)
+
+    with pytest.raises(FileNotFoundError):
+        system_ops._copy_file_to_container(
+            container,
+            str(tmp_path / "missing.pgdump"),
+            "/tmp",
+        )
+
+
+def test_copy_file_to_container_prefers_producer_error_over_docker_error(tmp_path):
+    # A failing producer truncates the tar, so Docker rejects the request with
+    # an opaque error of its own. The file error is what the operator needs.
+    import docker
+
+    def _reject_truncated(_dest, archive):
+        b"".join(archive)
+        raise docker.errors.APIError("unexpected EOF")
+
+    container = MagicMock()
+    container.put_archive.side_effect = _reject_truncated
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        system_ops._copy_file_to_container(
+            container,
+            str(tmp_path / "missing.pgdump"),
+            "/tmp",
+        )
+
+    assert isinstance(excinfo.value.__cause__, docker.errors.APIError)
+
+
+def test_copy_file_to_container_keeps_the_docker_error_when_it_rejects_early(
+    tmp_path,
+):
+    # Docker can refuse the request (e.g. the target path is not a directory)
+    # before consuming the whole archive. Closing the read end then breaks the
+    # producer's pipe; that self-inflicted BrokenPipeError must not displace
+    # Docker's error, which is what the operator needs to see.
+    import docker
+
+    source = tmp_path / "dump.pgdump"
+    # Larger than a typical pipe buffer so the producer is blocked in write(2)
+    # when the consumer gives up.
+    source.write_bytes(b"PGDMP" + os.urandom(4 * 1024 * 1024))
+
+    def _reject_after_first_chunk(_dest, archive):
+        next(iter(archive))
+        raise docker.errors.APIError("path /nope is not a directory")
+
+    container = MagicMock()
+    container.put_archive.side_effect = _reject_after_first_chunk
+
+    with pytest.raises(docker.errors.APIError, match="not a directory"):
+        system_ops._copy_file_to_container(container, str(source), "/nope")
+
+
+def test_copy_file_to_container_closes_the_pipe_when_the_thread_cannot_start(
+    tmp_path,
+):
+    source = tmp_path / "dump.pgdump"
+    source.write_bytes(b"PGDMP")
+    real_pipe = os.pipe
+    pipe_fds: list[int] = []
+
+    def _tracking_pipe():
+        fds = real_pipe()
+        pipe_fds.extend(fds)
+        return fds
+
+    with (
+        patch.object(system_ops.os, "pipe", side_effect=_tracking_pipe),
+        patch.object(
+            system_ops.threading.Thread,
+            "start",
+            side_effect=RuntimeError("can't start new thread"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        system_ops._copy_file_to_container(MagicMock(), str(source), "/tmp")
+
+    assert len(pipe_fds) == 2
+    for fd in pipe_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
 
 
 # --------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -1525,32 +1526,81 @@ def _copy_file_to_container(
     archive_name: str | None = None,
     mode: int | None = None,
 ) -> None:
-    """Copy one host file into a container directory.
+    """Stream one host file into a container directory as a tar archive.
 
     The archive carries the host file's mode unless ``mode`` overrides it —
     needed when the host copy is deliberately stricter than what the process
     inside the container (a non-root user) must still be able to read.
+
+    Docker's archive API requires tar input, but materialising that tar in
+    ``tempfile.gettempdir()`` duplicates the whole source file. On hosts where
+    ``/tmp`` is a small tmpfs, importing a multi-gigabyte database therefore
+    failed before Docker received a byte. A pipe keeps only the kernel buffer
+    in memory while ``tarfile`` produces and Docker consumes the archive.
     """
-    import tempfile
 
     def _set_mode(info: tarfile.TarInfo) -> tarfile.TarInfo:
         if mode is not None:
             info.mode = mode
         return info
 
-    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
-        tmp_path = tmp.name
+    read_fd, write_fd = os.pipe()
+    producer_error: list[BaseException] = []
+
+    def _write_archive() -> None:
+        try:
+            with os.fdopen(write_fd, "wb") as pipe:
+                with tarfile.open(fileobj=pipe, mode="w|") as tar:
+                    tar.add(
+                        src_path,
+                        arcname=archive_name or os.path.basename(src_path),
+                        filter=_set_mode,
+                    )
+        except BaseException as exc:
+            producer_error.append(exc)
+
+    producer = threading.Thread(
+        target=_write_archive,
+        name="oduflow-put-archive",
+        daemon=True,
+    )
+    read_pipe = os.fdopen(read_fd, "rb", buffering=0)
     try:
-        with tarfile.open(tmp_path, mode="w") as tar:
-            tar.add(
-                src_path,
-                arcname=archive_name or os.path.basename(src_path),
-                filter=_set_mode,
-            )
-        with open(tmp_path, "rb") as f:
-            container.put_archive(dest_dir, f)
+        try:
+            producer.start()
+        except BaseException:
+            # The thread never ran, so nothing else will close the write end.
+            os.close(write_fd)
+            raise
+        try:
+            # Do not pass the pipe object itself to requests: fstat() reports
+            # a pipe size of zero, which requests can turn into
+            # Content-Length: 0. An iterator has no misleading length and is
+            # sent chunked instead.
+            archive_chunks = iter(lambda: read_pipe.read(1024 * 1024), b"")
+            container.put_archive(dest_dir, archive_chunks)
+        except BaseException as exc:
+            # A producer failure truncates the tar, so Docker usually rejects
+            # it first with an opaque "unexpected EOF". Surface the real cause.
+            # Closing the read end wakes a producer blocked in write(2); the
+            # BrokenPipeError it then records is our doing, not the cause, so
+            # Docker's own error stays on top in that case.
+            read_pipe.close()
+            producer.join()
+            if producer_error and not isinstance(producer_error[0], BrokenPipeError):
+                raise producer_error[0] from exc
+            raise
     finally:
-        os.remove(tmp_path)
+        # Closing the read end also wakes a producer blocked in write(2)
+        # when Docker rejects the request before consuming the whole archive.
+        read_pipe.close()
+        if producer.is_alive():
+            producer.join()
+
+    # Docker accepted the archive. A broken pipe then only means the consumer
+    # stopped reading before the producer's final write — not a lost payload.
+    if producer_error and not isinstance(producer_error[0], BrokenPipeError):
+        raise producer_error[0]
 
 
 def _convert_custom_dump_to_sql_with_helper(
@@ -1799,7 +1849,11 @@ def _pg_exchange_host_dir(settings: Settings) -> str:
 
 
 def _pg_exchange_dirs(
-    client: DockerClient, settings: Settings, team: TeamSettings
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    *,
+    container: docker.models.containers.Container | None = None,
 ) -> tuple[str, str] | None:
     """Host and in-container paths of the team's dump exchange dir, if mounted.
 
@@ -1808,11 +1862,13 @@ def _pg_exchange_dirs(
     behind the operator's back). Callers fall back to streaming the dump out
     through the exec API, so nothing has to be migrated: an installation picks
     up the faster path whenever its PostgreSQL container is next recreated.
+    ``container`` passes an already fetched shared PostgreSQL container.
     """
-    try:
-        container = client.containers.get(settings.shared_db_container)
-    except (docker.errors.NotFound, docker.errors.APIError):
-        return None
+    if container is None:
+        try:
+            container = client.containers.get(settings.shared_db_container)
+        except (docker.errors.NotFound, docker.errors.APIError):
+            return None
     attrs = getattr(container, "attrs", None)
     mounts = attrs.get("Mounts") if isinstance(attrs, dict) else None
     if not isinstance(mounts, list):
@@ -1905,6 +1961,131 @@ def _staged_db_dump(
             os.remove(host_path)
 
 
+@contextlib.contextmanager
+def _expose_file_to_pg(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    db_container: docker.models.containers.Container,
+    host_path: str,
+) -> Iterator[str]:
+    """Yield a path at which the shared PostgreSQL container can read *host_path*.
+
+    Prefers a hardlink in the team's pg_exchange dir: it exposes the existing
+    host file without writing another full-size copy. Older DB containers lack
+    that mount, hardlinks fail across filesystems, and a linked inode keeps its
+    host owner and mode, which a remapped container user may not be able to
+    read — each case falls back to streaming a copy into the container's /tmp.
+    Whatever was staged is removed on exit, however the restore ended.
+
+    The DB container is shared across teams, whose locks do not contend, so
+    every input gets an opaque name: one restore can neither overwrite nor
+    clean up another's.
+    """
+    name = f"oduflow-restore-{uuid.uuid4().hex}"
+    link_path: str | None = None
+    container_tmp_path: str | None = None
+    container_path: str | None = None
+    exchange = _pg_exchange_dirs(client, settings, team, container=db_container)
+    try:
+        if exchange is not None:
+            host_dir, container_dir = exchange
+            candidate = os.path.join(host_dir, name)
+            try:
+                os.makedirs(host_dir, exist_ok=True)
+                os.link(host_path, candidate)
+            except OSError as exc:
+                logger.warning(
+                    "Could not expose %s through pg_exchange (%s); "
+                    "falling back to streamed Docker copy",
+                    host_path,
+                    exc,
+                )
+            else:
+                link_path = candidate
+                exit_code, _ = db_container.exec_run(
+                    ["test", "-r", f"{container_dir}/{name}"]
+                )
+                if exit_code == 0:
+                    container_path = f"{container_dir}/{name}"
+                else:
+                    logger.warning(
+                        "PostgreSQL cannot read %s through pg_exchange; "
+                        "falling back to streamed Docker copy",
+                        host_path,
+                    )
+                    with contextlib.suppress(OSError):
+                        os.remove(link_path)
+                    link_path = None
+
+        if container_path is None:
+            container_tmp_path = f"/tmp/{name}"
+            _copy_file_to_container(db_container, host_path, "/tmp", archive_name=name)
+            container_path = container_tmp_path
+
+        yield container_path
+    finally:
+        if link_path is not None:
+            with contextlib.suppress(OSError):
+                os.remove(link_path)
+        if container_tmp_path is not None:
+            # Each copy is a full-size file in the container's writable layer;
+            # leaving it behind grows oduflow-db without bound.
+            with contextlib.suppress(Exception):
+                db_container.exec_run(["rm", "-f", container_tmp_path])
+
+
+# Inputs staged by _expose_file_to_pg and _staged_db_dump, including incomplete
+# .part files from _stream_exec_to_file. Normal exits clean these up; a process
+# crash can leave either a complete dump or a partial stream behind.
+_PG_EXCHANGE_STAGED_RE = re.compile(
+    r"^(oduflow-restore-[0-9a-f]{32}|.+-[0-9a-f]{32}\.pgdump(?:\.part)?)$"
+)
+# CLI commands such as ``stack apply`` may restore while a server starts, so
+# only files clearly older than any restore are treated as abandoned.
+_PG_EXCHANGE_STALE_SECONDS = 24 * 3600
+
+
+def sweep_pg_exchange(settings: Settings) -> int:
+    """Remove staging files a crashed restore or dump left in pg_exchange.
+
+    A leftover hardlink keeps a full-size dump alive on the host and counts
+    against the team's disk quota until someone deletes it. Age is judged by
+    ``st_ctime``: linking updates it, whereas ``st_mtime`` is the source
+    dump's and may be arbitrarily old. Returns the number of files removed.
+    """
+    removed = 0
+    cutoff = time.time() - _PG_EXCHANGE_STALE_SECONDS
+    exchange_dir = _pg_exchange_host_dir(settings)
+    try:
+        team_dirs = [
+            os.path.join(exchange_dir, leaf)
+            for leaf in os.listdir(exchange_dir)
+            if leaf.startswith("team_")
+        ]
+    except OSError:
+        return 0
+    for team_dir in team_dirs:
+        try:
+            entries = list(os.scandir(team_dir))
+        except OSError:
+            continue
+        for entry in entries:
+            if not _PG_EXCHANGE_STAGED_RE.match(entry.name):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode) or st.st_ctime > cutoff:
+                    continue
+                os.remove(entry.path)
+            except OSError as exc:
+                logger.warning("Could not remove stale %s: %s", entry.path, exc)
+                continue
+            removed += 1
+            logger.info("Removed stale pg_exchange staging file %s", entry.path)
+    return removed
+
+
 def _ensure_pg_container(
     client: DockerClient, settings: Settings, system_labels: dict[str, str]
 ) -> None:
@@ -1920,7 +2101,10 @@ def _ensure_pg_container(
     are staged: writing one there costs a single write to its final filesystem
     instead of a full-size copy through the container's writable layer, and a
     restore can read it in place. It carries no new exposure — a dump is a
-    subset of the cluster this container already serves.
+    subset of the cluster this container already serves. Restore inputs are
+    hardlinked in (see _expose_file_to_pg), so for the duration of a restore
+    the container sees the source file itself — e.g. a template's persisted
+    dump — not a copy; only the cluster superuser can write through the mount.
     """
     tablespaces_dir = _pg_tablespaces_host_dir(settings)
     exchange_dir = _pg_exchange_host_dir(settings)
@@ -2705,26 +2889,13 @@ def reload_template(
     _exec_sql(client, settings, f'CREATE DATABASE "{tpl_db}" TABLESPACE "{ts_name}";')
 
     db_container = client.containers.get(settings.shared_db_container)
-    # Every dump copied into the db container's /tmp for pg_restore/psql is a
-    # full-size file in the container's writable layer. Track each copy and
-    # delete it in the finally below once the restore is done — otherwise every
-    # import/reload/refresh leaves the dump behind and the oduflow-db container
-    # grows without bound (mirrors the prod seed cleanup in production_ops).
-    container_tmp_files: set[str] = set()
 
-    try:
-        # The DB container is shared across teams, whose locks do not contend.
-        # Use an opaque per-restore name so one restore cannot overwrite or
-        # clean up another restore's input file.
+    # Every input staged for PostgreSQL is released when this block exits,
+    # whether the restore succeeded, failed, or raised mid-flight.
+    with contextlib.ExitStack() as staging:
         if container_dump_path is None:
-            container_dump_name = f"oduflow-restore-{uuid.uuid4().hex}"
-            container_dump_path = f"/tmp/{container_dump_name}"
-            container_tmp_files.add(container_dump_path)
-            _copy_file_to_container(
-                db_container,
-                resolved_dump,
-                "/tmp",
-                archive_name=container_dump_name,
+            container_dump_path = staging.enter_context(
+                _expose_file_to_pg(client, settings, team, db_container, resolved_dump)
             )
 
         # pg_restore runs with --no-owner so restored objects are owned by the
@@ -2821,14 +2992,12 @@ def reload_template(
                     exit_code = helper_exit
                     output_str = helper_output
                 else:
-                    helper_container_name = f"oduflow-restore-{uuid.uuid4().hex}"
-                    helper_container_path = f"/tmp/{helper_container_name}"
-                    container_tmp_files.add(helper_container_path)
-                    _copy_file_to_container(
-                        db_container,
-                        helper_sql_path,
-                        "/tmp",
-                        archive_name=helper_container_name,
+                    # The converted SQL is often larger than the archive, so
+                    # it takes the same link-or-copy path as the dump itself.
+                    helper_container_path = staging.enter_context(
+                        _expose_file_to_pg(
+                            client, settings, team, db_container, helper_sql_path
+                        )
                     )
                     psql_cmd = [
                         "psql",
@@ -2938,12 +3107,6 @@ def reload_template(
             "tables": str(num_tables),
             "message": output_str,
         }
-    finally:
-        # Reclaim the container's writable layer regardless of how the restore
-        # exited (success, restore error, or an unexpected failure mid-flight).
-        for _leftover in container_tmp_files:
-            with contextlib.suppress(Exception):
-                db_container.exec_run(["rm", "-f", _leftover])
 
 
 def init_template(
