@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.89.1
+
+### Bug Fixes
+
+- **Large database imports no longer fill the host's `/tmp`** — importing a
+  database used to build a full-size tar archive on the host before uploading
+  it to Docker, which could exhaust a small `/tmp`. The archive is now streamed
+  through a pipe. Where possible, restore inputs are exposed to the container
+  as readable hardlinks in `pg_exchange`, so nothing is copied at all. Older
+  containers, inputs on another filesystem, and unreadable links fall back to
+  streaming the copy. Both paths remove their staged inputs on exit. (#346)
+- **Abandoned staging files are reclaimed at startup** — leftover import
+  staging files, including incomplete production dumps ending in
+  `.pgdump.part`, are cleaned up when the server starts. The cleanup runs
+  before XFS quota setup refreshes inode `ctime`, so old files are still
+  recognised as abandoned. (#346)
+
+### Dashboard
+
+- **Environment actions grouped in a two-level menu** — the environment's long,
+  flat *More* menu now has a root with *Info*, five groups (*Consoles*,
+  *Modules*, *Access*, *Management*, *Data*) and a separate *Delete*. Each
+  submenu has a *Back* control, and *Recreate* is set apart and marked
+  destructive. Confirmations, shared-view restrictions and the
+  stopped/protected/busy availability rules are unchanged. The panel fits the
+  viewport, opens above its trigger when there is no room below, and scrolls
+  in short windows. It supports arrow keys, Home/End, Escape, Tab and focus
+  restoration. Service and production menus are unchanged. (#344)
+
 ## v1.89.0
 
 ### Security
