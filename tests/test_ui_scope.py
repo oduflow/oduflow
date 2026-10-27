@@ -42,6 +42,7 @@ ENV = "feature/scope"
         ("DELETE", f"/api/environments/{ENV}/agent-acp/attachments/abc123"),
         ("WEBSOCKET", f"/api/environments/{ENV}/terminal"),
         ("WEBSOCKET", f"/api/environments/{ENV}/sql"),
+        ("WEBSOCKET", f"/api/environments/{ENV}/agent"),
         ("WEBSOCKET", f"/api/environments/{ENV}/agent-acp"),
     ],
 )
@@ -86,11 +87,13 @@ def test_everything_else_is_denied(method, path):
     assert not ui_scope.is_allowed(method, path, ENV)
 
 
-def test_agent_cli_is_denied_while_agent_chat_is_allowed():
-    """A share link exposes the agent through Chat only, never a raw PTY in
-    the per-team agent container."""
-    assert not ui_scope.is_allowed("WEBSOCKET", f"/api/environments/{ENV}/agent", ENV)
-    assert ui_scope.is_allowed("WEBSOCKET", f"/api/environments/{ENV}/agent-acp", ENV)
+@pytest.mark.parametrize("endpoint", ["agent", "agent-acp"])
+def test_agent_sessions_of_other_environments_are_denied(endpoint):
+    """Agent CLI and Chat run as the addressed environment's uid with its
+    token, so only the visitor's own environment may be addressed."""
+    for other in ("other", "feature/other", f"{ENV}-2"):
+        path = f"/api/environments/{other}/{endpoint}"
+        assert not ui_scope.is_allowed("WEBSOCKET", path, ENV)
 
 
 @pytest.mark.parametrize(

@@ -228,10 +228,22 @@ def test_a_share_link_cannot_manage_its_own_sharing(app):
     assert client.post(f"/api/environments/{_ENV}/share/revoke").status_code == 403
 
 
-def test_agent_cli_websocket_is_refused_for_a_share_link(app):
+def test_agent_cli_websocket_reaches_the_handler_for_a_share_link(app, monkeypatch):
+    monkeypatch.setattr("oduflow.docker_ops.client.get_client", lambda: object())
+    client = _visitor(app, _share_url(app))
+    with client.websocket_connect(f"/api/environments/{_ENV}/agent") as websocket:
+        message = websocket.receive_text()
+        close = websocket.receive()
+    # Past the scope middleware: the handler itself answers, here because the
+    # test team has no coding agent enabled.
+    assert "coding agent is disabled" in message
+    assert close["code"] == 1011
+
+
+def test_agent_cli_websocket_of_another_environment_is_refused(app):
     client = _visitor(app, _share_url(app))
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        with client.websocket_connect(f"/api/environments/{_ENV}/agent"):
+        with client.websocket_connect("/api/environments/other/agent"):
             pass
     # 1008 (policy violation) is the middleware's refusal, not a handler error:
     # the request never reaches the agent container.
