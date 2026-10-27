@@ -23,11 +23,12 @@ extra repos, credentials, productions, host stats) even by typing the URL.
 
 Deliberately denied although the environment is theirs to work in:
 
-- ``WS .../agent`` — **Agent CLI**. It is a PTY in the *per-team* agent
-  container, whose ``/workspace`` holds a checkout of every environment of the
-  team; a shell there is not confined to one environment. Agent Chat
-  (``.../agent-acp``) is exposed instead: same agent, but driven over ACP at
-  this environment's checkout with its scoped MCP token.
+- ``WS .../agent`` — **Agent CLI**, a raw PTY in the *per-team* agent
+  container. Since per-environment uids (ADR 0079) it no longer reaches other
+  environments' checkouts, but it still shares the team's git credentials,
+  provider keys and container network. Agent Chat (``.../agent-acp``) is
+  exposed instead: same agent and same uid, driven over ACP at this
+  environment's checkout with its scoped MCP token.
 - everything that creates, destroys or re-provisions: create, delete, update,
   recreate, switch-branch, protect/unprotect, save-as-template.
 """
