@@ -397,8 +397,9 @@ def test_share_modal_discloses_agent_chat_workspace_access(tmp_path):
     dashboard = _client(tmp_path).get("/")
 
     assert dashboard.status_code == 200
-    assert "Agent Chat runs in the team's shared coder container" in dashboard.text
-    assert "may read other team checkouts and Git credentials" in dashboard.text
+    assert "Agent Chat runs as this environment's own user" in dashboard.text
+    assert "the team's Git credentials and deploy key" in dashboard.text
+    assert "may read other team checkouts" not in dashboard.text
 
 
 def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):

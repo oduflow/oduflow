@@ -87,8 +87,8 @@ def test_everything_else_is_denied(method, path):
 
 
 def test_agent_cli_is_denied_while_agent_chat_is_allowed():
-    """The CLI is a PTY in the per-team agent container, whose workspace holds
-    a checkout of every environment of the team."""
+    """A share link exposes the agent through Chat only, never a raw PTY in
+    the per-team agent container."""
     assert not ui_scope.is_allowed("WEBSOCKET", f"/api/environments/{ENV}/agent", ENV)
     assert ui_scope.is_allowed("WEBSOCKET", f"/api/environments/{ENV}/agent-acp", ENV)
 

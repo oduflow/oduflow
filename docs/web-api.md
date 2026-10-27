@@ -115,12 +115,16 @@ Leaving the shared view (**Logout**) clears the scoped cookie and returns to
 `/env/<name>`, which then explains how to get back in: reopen the full share
 link, or sign in at `/login` if you are an operator who was previewing it.
 
-Agent CLI is excluded because it is a terminal in the *per-team* agent
-container, whose workspace holds a checkout of every environment of the team.
-Agent Chat runs in that same container, so the scope of a shared link is a
-policy boundary on the dashboard — it is not the cryptographic confinement that
-the per-environment token gives on `/mcp/<env>`. Share links with people you
-would let work in the environment.
+Agent Chat runs in the *per-team* agent container as the environment's own
+Linux user, so it reaches only this environment's checkout, conversations and
+scoped MCP token (see [Coding Agent → Security model](agent.md#security-model)).
+It still shares the team's git credentials and deploy key, the team-wide
+provider credentials and the container network, so the scope of a shared link
+is a policy boundary on the dashboard — it is not the cryptographic confinement
+that the per-environment token gives on `/mcp/<env>`. Agent CLI stays excluded:
+a share link is for working with the agent through Chat, not for a raw terminal
+in the team's container. Share links with people you would let work in the
+environment.
 
 ## Environment WebSockets
 

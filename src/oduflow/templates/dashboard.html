@@ -2724,7 +2724,7 @@
       <button class="modal-close" onclick="closeShare()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As and Agent Chat. Other team environments and team-wide pages are unavailable, as is Agent CLI. Important: Agent Chat runs in the team's shared coder container, so the agent may read other team checkouts and Git credentials available there. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
+      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As and Agent Chat. Other team environments and team-wide pages are unavailable, as is Agent CLI. Agent Chat runs as this environment's own user in the team's coder container, so it cannot reach other environments' checkouts or conversations. Important: it still uses the team's Git credentials and deploy key, the team-wide agent provider keys and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
       <div class="form-group" id="share-link-group">
         <label for="share-url">Share link</label>
         <div class="copy-row">

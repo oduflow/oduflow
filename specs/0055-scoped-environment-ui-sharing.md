@@ -102,6 +102,15 @@ power to anyone holding its token.
 
 ## Evolution
 
+- 2026-10-17 — every environment got its own Linux uid inside the team's agent
+  container ([[0079-per-environment-agent-identities]]). Agent Chat behind a
+  share link now reaches only its own environment's checkout, conversations
+  and scoped MCP token, so the "can read other environments' checkouts" caveat
+  above no longer holds. It still shares the team's git credentials and deploy
+  key, the team-wide provider keys and the container network, so the link
+  remains a dashboard boundary, not a sandbox. Agent CLI stays excluded, but
+  the shared workspace is no longer the reason: a share link exposes the agent
+  through Chat, not as a raw terminal in the team's container.
 - 2026-10-18 — the MCP token adopted this registry model (`mcp_tokens.json`),
   and recreate became identity-preserving on every surface: the dashboard
   action and the new `recreate_environment` MCP tool keep both the share secret
@@ -117,3 +126,7 @@ power to anyone holding its token.
   redirects back to `/env/<name>` instead of a 403, and leaving the shared view
   lands on a page that names both ways back in. A revoked share cookie no
   longer suppresses an operator's own sign-out.
+- `70cbae9` (2026-10-17, #327) — per-environment uids in the agent container
+  close other environments' checkouts, conversations and tokens to a shared
+  visitor's Agent Chat; the Share modal, `docs/web-api.md` and the scope
+  rationale were brought in line afterwards.
