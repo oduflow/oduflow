@@ -8621,6 +8621,9 @@ def _run_cli() -> None:
             migrations.run_pending(_settings)
             postgres_migration.upgrade(_settings)
             _ensure_initialized(_settings)
+            # XFS project setup refreshes inode ctime, which the staging sweep
+            # uses to distinguish abandoned files from active restores.
+            system_ops.sweep_pg_exchange(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
                 from oduflow.stack_loader import load_stack, stack_environ
