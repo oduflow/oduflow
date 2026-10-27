@@ -123,6 +123,28 @@ class TestCollectHealth:
         assert result["ok"] is False
         assert result["checks"]["productions"]["unhealthy"] == ["1/erp"]
 
+    def test_unreadable_production_registry_degrades(self, settings):
+        # A corrupt productions.json is exactly the state the check exists to
+        # surface — it must not hide behind "ok". The public detail names the
+        # team only; the exception (which may hold paths) goes to the log.
+        client = _client(
+            {"oduflow-db": True, "oduflow-prod-db": True, "oduflow-traefik": True}
+        )
+        with (
+            patch("oduflow.docker_ops.client.get_client", return_value=client),
+            patch(
+                "oduflow.production_registry.list_productions",
+                side_effect=ValueError("bad json at /team_1/productions.json"),
+            ),
+        ):
+            result = health.collect_health(settings, force=True)
+        assert result["ok"] is False
+        productions = result["checks"]["productions"]
+        assert productions["status"] == "error"
+        assert productions["detail"] == "team 1: production registry unreadable"
+        assert productions["unhealthy"] == []
+        assert "/team_1" not in productions["detail"]
+
     def test_s3_error_degrades(self, settings, tmp_path):
         settings = Settings(
             base_data_dir=settings.base_data_dir,
