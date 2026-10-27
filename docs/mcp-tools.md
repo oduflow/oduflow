@@ -275,7 +275,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Comma-separated extra addon repos **with branches**, e.g. `"enterprise:19.0,custom-themes:main"`. The branch after the colon is mandatory.
 
 `sanitize`
-:   *bool · default `True`* — Run Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets `database.is_neutralized`) plus any custom scripts in the repository's `.oduflow/odoo_sanitize/`. Only applies to environments created from a template.
+:   *bool · default `True`* — Controls database sanitization after provisioning. Project scripts in the repository's `.oduflow/odoo_sanitize/` run for every environment, template or not: they are project wiring (dev mail server, aliases, feature flags), and a from-scratch environment needs them as much as a template copy. Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets `database.is_neutralized`) and the team-level `odoo_sanitize` scripts only apply to environments created from a template.
 
 `auto_install_modules`
 :   *str · default empty* — Comma-separated modules to install right after provisioning (e.g. `"sale,purchase,stock"`). Loaded from template metadata when a template is used and this is empty.

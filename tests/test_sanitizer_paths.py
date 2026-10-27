@@ -54,6 +54,30 @@ def test_managed_checkout_uses_canonical_project_path(tmp_path):
     assert not any("moved to" in line for line in logs)
 
 
+def test_include_team_scripts_false_runs_only_project_scripts(tmp_path):
+    """A from-scratch environment gets the repo wiring, not the team scrub."""
+    settings = _settings()
+    team = _team(tmp_path)
+    client = _client({})
+    managed_repo = tmp_path / "workspaces" / "main" / "repo"
+    canonical = managed_repo / ".oduflow" / "odoo_sanitize"
+    canonical.mkdir(parents=True)
+
+    with patch.object(
+        sanitizer, "_run_scripts_from_dir", side_effect=_recorded_runner
+    ) as run:
+        logs = sanitizer.sanitize_environment(
+            client,
+            settings,
+            team,
+            env_name="main",
+            include_team_scripts=False,
+        )
+
+    assert [call.args[0] for call in run.call_args_list] == [str(canonical)]
+    assert logs == [f"ran:repo:{canonical}"]
+
+
 def test_live_mount_uses_mounted_checkout_and_runs_legacy_first(tmp_path, caplog):
     settings = _settings()
     team = _team(tmp_path)
