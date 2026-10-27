@@ -8,6 +8,7 @@ RUN apt-get update \
         rsync \
         iptables \
         docker.io \
+        tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -20,5 +21,7 @@ RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
-ENTRYPOINT ["oduflow"]
+# tini runs as PID 1 and reaps orphaned children: fuse-overlayfs and detached
+# git maintenance daemonize, and oduflow never waits for them itself.
+ENTRYPOINT ["tini", "--", "oduflow"]
 CMD ["--transport", "http"]
