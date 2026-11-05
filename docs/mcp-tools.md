@@ -1341,7 +1341,7 @@ Use it for an "Open as admin" button in another application. For browser
 automation, use [`connect_as_user`](#connect_as_user), which returns the raw
 cookie instead.
 
-Lock: environment. Requires `routing_mode = "traefik"`.
+Lock: environment. Requires `routing_mode = "traefik"` and the HTTP transport.
 { .odu-tool-meta }
 
 **Parameters**
@@ -1364,9 +1364,9 @@ browser to it as-is. The link is never written to the server log.
     The link works once and expires 120 seconds after it is minted, so mint it
     at click time and redirect the browser to it immediately. Until it is used
     it grants a full Odoo session as `user`: treat the URL as a secret and never
-    log it. In port routing mode the tool fails with a prerequisite error (the
-    link needs the environment's own host) — use
-    [`connect_as_user`](#connect_as_user) there.
+    log it. In port routing mode, or on a server started with the stdio
+    transport (no web UI to redeem the link), the tool fails with a
+    prerequisite error — use [`connect_as_user`](#connect_as_user) there.
 
 ## Translations
 

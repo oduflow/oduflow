@@ -182,7 +182,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `run_db_query` — execute SQL queries against the environment's PostgreSQL database
 - `reset_admin_password` — reset the admin user password (default: "test")
 - `connect_as_user` — mint a passwordless Odoo login session for a user and return the `session_id` cookie + URL (Playwright-ready; skips the login form, supports any role incl. portal)
-- `connect_link` — mint a one-time browser login link (`https://<env-host>/oduflow-connect?token=...`) as a user (default admin); single use, expires in 120 s, Traefik routing only — mint at click time, redirect immediately, never log it
+- `connect_link` — mint a one-time browser login link (`https://<env-host>/oduflow-connect?token=...`) as a user (default admin); single use, expires in 120 s, Traefik routing and HTTP transport only — mint at click time, redirect immediately, never log it
 - `read_output` — read from a cached tool output by ID (paginate, grep, errors, tail)
 - `list_environments` / `get_environment_info` — inspect environments, including current branch, last activity, stopped time/source, protection, Stack ownership and operator notes used for safe slot reuse
 - `create_service` / `delete_service` / `restart_service` / `update_service` / `list_services` / `get_service_info` / `get_service_logs` / `run_service_command` — manage auxiliary services
@@ -6888,7 +6888,7 @@ Use it for an "Open as admin" button in another application. For browser
 automation, use [`connect_as_user`](#connect_as_user), which returns the raw
 cookie instead.
 
-Lock: environment. Requires `routing_mode = "traefik"`.
+Lock: environment. Requires `routing_mode = "traefik"` and the HTTP transport.
 { .odu-tool-meta }
 
 **Parameters**
@@ -6911,9 +6911,9 @@ browser to it as-is. The link is never written to the server log.
     The link works once and expires 120 seconds after it is minted, so mint it
     at click time and redirect the browser to it immediately. Until it is used
     it grants a full Odoo session as `user`: treat the URL as a secret and never
-    log it. In port routing mode the tool fails with a prerequisite error (the
-    link needs the environment's own host) — use
-    [`connect_as_user`](#connect_as_user) there.
+    log it. In port routing mode, or on a server started with the stdio
+    transport (no web UI to redeem the link), the tool fails with a
+    prerequisite error — use [`connect_as_user`](#connect_as_user) there.
 
 ## Translations
 

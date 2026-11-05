@@ -4055,6 +4055,14 @@ def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None)
             "only exists under Traefik routing. In port mode use "
             "connect_as_user and set the returned session_id cookie instead."
         )
+    if _web_bind is None:
+        # Tokens live in this process's memory and are consumed by its web UI
+        # route; a stdio server runs no web UI, so its links could never land.
+        raise PrerequisiteNotMetError(
+            "connect_link needs the HTTP transport: the one-time link is "
+            "redeemed by this server's web UI (/oduflow-connect), which a stdio "
+            "server does not run. Use connect_as_user instead."
+        )
     team = _resolve_team(ctx)
     woke = _wake_for_work(settings, team, env_name)
     if woke:

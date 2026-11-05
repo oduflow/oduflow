@@ -28,8 +28,6 @@ if TYPE_CHECKING:
 # Long enough to survive a couple of redirects and a slow tab open, short enough
 # that a leaked link is useless almost immediately.
 _TTL_SECONDS = 120.0
-# Public, whole-second form for user-facing copy ("expires in 120 s").
-TTL_SECONDS = int(_TTL_SECONDS)
 
 _lock = threading.Lock()
 # token -> (env_host, session_id, expiry_monotonic)

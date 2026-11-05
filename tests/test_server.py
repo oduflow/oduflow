@@ -1914,11 +1914,13 @@ class TestConnectLink:
     }
 
     @pytest.fixture
-    def traefik(self):
+    def traefik(self, monkeypatch):
         import oduflow.server
 
         settings = replace(TEST_SETTINGS, routing_mode="traefik")
         oduflow.server._settings = settings
+        # HTTP transport: the web UI that redeems the link is running.
+        monkeypatch.setattr(oduflow.server, "_web_bind", ("127.0.0.1", 8000))
         return settings
 
     @staticmethod
@@ -2001,6 +2003,18 @@ class TestConnectLink:
         mock_connect.assert_not_called()
 
     @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_stdio_transport_is_a_prerequisite_error(
+        self, mock_connect, traefik, monkeypatch
+    ):
+        import oduflow.server
+
+        # A stdio server runs no web UI, so nothing could redeem the token.
+        monkeypatch.setattr(oduflow.server, "_web_bind", None)
+        with pytest.raises(ToolError, match="HTTP transport"):
+            _get_tool_fn("connect_link")(env_name="feature")
+        mock_connect.assert_not_called()
+
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
     def test_rejects_production_env(self, mock_connect, traefik):
         with pytest.raises(ToolError, match="production"):
             _get_tool_fn("connect_link")(env_name="prod-main")
@@ -2032,6 +2046,36 @@ class TestConnectLink:
             link = _get_tool_fn("connect_link")(env_name="feature")
         token = self._token(link)
         assert token not in caplog.text
+        assert "omitted from server log" in caplog.text
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_rpc.invalidate_sessions")
+    @patch("oduflow.docker_ops.odoo_ops.reset_admin_password")
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    @pytest.mark.parametrize(
+        ("tool", "kwargs", "secret"),
+        [
+            ("connect_as_user", {"user": "admin"}, "cafebabe" * 8),
+            ("reset_admin_password", {"new_password": "s3cr3t-pw"}, "s3cr3t-pw"),
+        ],
+    )
+    def test_sibling_credentials_never_reach_server_log(
+        self,
+        mock_connect,
+        mock_reset,
+        mock_invalidate,
+        mock_ensure,
+        tool,
+        kwargs,
+        secret,
+        caplog,
+    ):
+        mock_connect.return_value = dict(self._RESULT)
+        mock_reset.return_value = {"login": "admin"}
+        with caplog.at_level(logging.INFO, logger="oduflow"):
+            result = _get_tool_fn(tool)(env_name="feature", **kwargs)
+        assert secret in result
+        assert secret not in caplog.text
         assert "omitted from server log" in caplog.text
 
 
