@@ -1352,8 +1352,8 @@ Lock: environment. Requires `routing_mode = "traefik"`.
 `user`
 :   *str · default `"admin"`* — The target user's login (e.g. `"jane@acme.com"`) or numeric id.
 
-**Returns** a short line naming the user, followed on the last line by the
-link itself.
+**Returns** exactly the link and nothing else, so a caller can redirect a
+browser to it as-is. The link is never written to the server log.
 
 **Use it when**
 

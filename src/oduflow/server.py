@@ -391,6 +391,13 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+# Tools whose result IS a credential (a live login link or session cookie, a
+# new password): their result never goes into the server log.
+_SECRET_RESULT_TOOLS = frozenset(
+    {"connect_link", "connect_as_user", "reset_admin_password"}
+)
+
+
 def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
     @functools.wraps(fn)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -406,6 +413,8 @@ def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
                 )
                 if fn.__name__.startswith("production_odoo_"):
                     preview = "OduMCP call completed (business response omitted from server log)"
+                elif fn.__name__ in _SECRET_RESULT_TOOLS:
+                    preview = "result carries a credential (omitted from server log)"
                 logger.info("[%s] -> %s", fn.__name__, preview)
                 # White label: show the brand instead of the product name.
                 return branding.rebrand(result) if isinstance(result, str) else result  # type: ignore[return-value]
@@ -4016,7 +4025,8 @@ def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None)
     Mint a ONE-TIME login link that opens the environment in a person's browser
     already logged in as `user`.
 
-    Returns `https://<env-host>/oduflow-connect?token=...` — the same flow as the
+    Returns exactly one URL and nothing else,
+    `https://<env-host>/oduflow-connect?token=...` — the same flow as the
     dashboard's "Open" button. Opening the link sets the environment's
     `session_id` cookie on its own host and redirects to `/web` authenticated,
     without setting or revealing any password. Use it for an "Open as admin"
@@ -4047,15 +4057,19 @@ def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None)
         )
     team = _resolve_team(ctx)
     woke = _wake_for_work(settings, team, env_name)
+    if woke:
+        logger.info("[connect_link] %s", woke.strip())
     result = odoo_ops.connect_as_user(settings, team, env_name, user)
-    link = connect_tokens.login_link(
-        settings, team, result["cookie_domain"], result["sid"]
+    logger.info(
+        "[connect_link] one-time login link minted for %s (uid %s) in '%s'",
+        result["login"],
+        result["uid"],
+        env_name,
     )
-    return (
-        f"{woke}One-time login link for {result['login']} (uid {result['uid']}) "
-        f"in '{env_name}' — single use, expires in "
-        f"{connect_tokens.TTL_SECONDS} s; open it immediately and treat it as a "
-        f"secret:\n{link}"
+    # The bare URL and nothing else: callers redirect a browser to the result
+    # as-is (no prose to strip), so it must stay exactly one URL.
+    return connect_tokens.login_link(
+        settings, team, result["cookie_domain"], result["sid"]
     )
 
 

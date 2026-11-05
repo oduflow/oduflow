@@ -1937,10 +1937,12 @@ class TestConnectLink:
         mock_connect.return_value = dict(self._RESULT)
         result = _get_tool_fn("connect_link")(env_name="feature")
 
-        link = result.splitlines()[-1]
+        # The result is the bare URL: callers redirect a browser to it as-is.
+        link = result
         scheme = traefik.public_scheme_for(TEST_TEAM)
         assert link.startswith(f"{scheme}://feature.example.com/oduflow-connect?token=")
-        assert "single use" in result and "120 s" in result
+        assert link == link.strip() and not any(ch.isspace() for ch in link)
+        assert len(link) <= 2000
         # The raw session id never appears in the output: only the token does.
         assert self._RESULT["sid"] not in result
         mock_connect.assert_called_once_with(traefik, TEST_TEAM, "feature", "admin")
@@ -1957,7 +1959,7 @@ class TestConnectLink:
     def test_passes_explicit_user(self, mock_connect, mock_ensure, traefik):
         mock_connect.return_value = dict(self._RESULT, login="jane@acme.com")
         result = _get_tool_fn("connect_link")(env_name="feature", user="jane@acme.com")
-        assert "jane@acme.com" in result
+        assert "/oduflow-connect?token=" in result
         mock_connect.assert_called_once_with(
             traefik, TEST_TEAM, "feature", "jane@acme.com"
         )
@@ -2019,6 +2021,18 @@ class TestConnectLink:
         from oduflow.scoped_access import SCOPED_ALLOWLIST
 
         assert "connect_link" in SCOPED_ALLOWLIST
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_link_never_reaches_server_log(
+        self, mock_connect, mock_ensure, traefik, caplog
+    ):
+        mock_connect.return_value = dict(self._RESULT)
+        with caplog.at_level(logging.INFO, logger="oduflow"):
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        token = self._token(link)
+        assert token not in caplog.text
+        assert "omitted from server log" in caplog.text
 
 
 class TestConnectSentinelParsing:
