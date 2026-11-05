@@ -674,6 +674,8 @@ def test_extra_repo_bulk_actions_stay_inside_their_own_picker():
         _js_function(dashboard, name)
         for name in (
             "_extraRepoRows",
+            "splitExtraSpec",
+            "syncPinnedBranchInput",
             "updateExtraRepoStatus",
             "setAllExtraRepos",
             "setExtraRepoActionsEnabled",
@@ -770,6 +772,8 @@ def test_extra_repo_filter_and_default_branch():
             "extraRepoBranchNames",
             "_extraRepoRows",
             "_extraReposByName",
+            "splitExtraSpec",
+            "syncPinnedBranchInput",
             "updateExtraRepoStatus",
             "filterExtraRepos",
             "revealExtraRepos",
@@ -1326,6 +1330,8 @@ def test_long_extra_repo_list_folds_and_filters_without_losing_state():
     functions = "\n".join(
         _js_function(dashboard, name)
         for name in (
+            "splitExtraSpec",
+            "syncPinnedBranchInput",
             "extrasHtml",
             "_extrasQuery",
             "applyExtrasState",
@@ -1979,6 +1985,8 @@ def test_extra_addons_branches_are_guessed_from_the_image_but_never_overwrite_a_
             "_tsetBranchOptions",
             "extraRepoBranchNames",
             "_extraReposByName",
+            "splitExtraSpec",
+            "syncPinnedBranchInput",
             "updateExtraRepoStatus",
             "autofillExtraBranches",
             "markExtraBranchEdited",
@@ -2680,3 +2688,43 @@ console.log(JSON.stringify({ok: true}));
 """
     )
     assert _run_node(harness) == {"ok": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_pinned_extra_addons_are_labelled_in_env_cards():
+    """A repo pinned to a commit (branch@<sha40>) reads as such: short SHA and
+    a PINNED tag, while a plain branch (with or without "@") is unchanged."""
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    sha = "9cbabe940255cc13f6d2187877899231446eaf24"
+    harness = (
+        _js_function(dashboard, "esc")
+        + _js_function(dashboard, "splitExtraSpec")
+        + _js_function(dashboard, "extrasHtml")
+        + r"""
+global.document = {createElement() {
+  return {set textContent(v) { this.innerHTML = String(v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }};
+}};
+const sha = '"""
+        + sha
+        + r"""';
+console.log(JSON.stringify({
+  pinned: splitExtraSpec('18.0@' + sha.toUpperCase()),
+  atBranch: splitExtraSpec('team@feature'),
+  shortSha: splitExtraSpec('18.0@9cbabe9'),
+  plain: splitExtraSpec('18.0'),
+  html: extrasHtml('env', {'oca-web': '18.0@' + sha, 'enterprise': '18.0'}, 0),
+}));
+"""
+    )
+    out = _run_node(harness)
+    assert out["pinned"] == {"branch": "18.0", "sha": sha}
+    assert out["atBranch"] == {"branch": "team@feature", "sha": ""}
+    assert out["shortSha"] == {"branch": "18.0@9cbabe9", "sha": ""}
+    assert out["plain"] == {"branch": "18.0", "sha": ""}
+    html = str(out["html"])
+    assert "(18.0 @ 9cbabe9)" in html
+    assert 'class="extra-pinned-tag tag-neutral">Pinned<' in html
+    assert f"Pinned to commit {sha}" in html
+    assert html.count(">Pinned<") == 1  # enterprise (plain branch) has no tag
+    assert '<span class="extra-branch">(18.0)</span>' in html
