@@ -391,11 +391,17 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-# Tools whose result IS a credential (a live login link or session cookie, a
-# new password): their result never goes into the server log.
-_SECRET_RESULT_TOOLS = frozenset(
-    {"connect_link", "connect_as_user", "reset_admin_password"}
-)
+_SECRET_RESULT_ATTR = "_oduflow_secret_result"
+
+
+def secret_result(fn: Callable[P, R]) -> Callable[P, R]:
+    """Mark a tool whose result IS a credential (login link, session cookie,
+    password, connection string): ``handle_errors`` keeps it out of the server
+    log. Put it directly above the function; ``functools.wraps`` in the outer
+    decorators carries the marker up to ``handle_errors``.
+    """
+    setattr(fn, _SECRET_RESULT_ATTR, True)
+    return fn
 
 
 def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
@@ -413,7 +419,7 @@ def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
                 )
                 if fn.__name__.startswith("production_odoo_"):
                     preview = "OduMCP call completed (business response omitted from server log)"
-                elif fn.__name__ in _SECRET_RESULT_TOOLS:
+                elif getattr(fn, _SECRET_RESULT_ATTR, False):
                     preview = "result carries a credential (omitted from server log)"
                 logger.info("[%s] -> %s", fn.__name__, preview)
                 # White label: show the brand instead of the product name.
@@ -3947,6 +3953,7 @@ def run_odoo_command(
 @mcp.tool()
 @handle_errors
 @with_env_lock
+@secret_result
 def reset_admin_password(
     env_name: str, new_password: str = "test", ctx: Context | None = None
 ) -> str:
@@ -3973,6 +3980,7 @@ def reset_admin_password(
 @mcp.tool()
 @handle_errors
 @with_env_lock
+@secret_result
 def connect_as_user(env_name: str, user: str, ctx: Context | None = None) -> str:
     """
     Mint a passwordless Odoo login session for a user and return its cookie.
@@ -4020,6 +4028,7 @@ def connect_as_user(env_name: str, user: str, ctx: Context | None = None) -> str
 @mcp.tool()
 @handle_errors
 @with_env_lock
+@secret_result
 def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None) -> str:
     """
     Mint a ONE-TIME login link that opens the environment in a person's browser
@@ -4037,10 +4046,13 @@ def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None)
     redirect the browser to it immediately — do not pre-generate, store or
     share it. Until it is consumed it grants a full Odoo session as `user`:
     treat the URL as a secret and never log it. Whoever can call this can
-    already `run_odoo_shell`, so it grants no new privilege.
+    already `run_odoo_shell`, so it grants no new privilege. The Odoo session
+    itself is created only when the link is opened, so an unused link leaves
+    no session behind; `user` is checked now, so an unknown user fails here.
 
-    Requires routing_mode = "traefik" (each environment on its own host); in
-    port mode it fails with a prerequisite error — use `connect_as_user` there.
+    Requires routing_mode = "traefik" (each environment on its own host) and
+    the HTTP transport (the link is redeemed by this server's web UI);
+    otherwise it fails with a prerequisite error — use `connect_as_user` there.
 
     Args:
         env_name: The name of the environment.
@@ -4048,6 +4060,8 @@ def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None)
               Default "admin".
     """
     settings = _get_settings()
+    # routing_mode is a restart-class key: the live overlay never swaps it, so
+    # this is the mode the running route table (/oduflow-connect) was built for.
     if settings.routing_mode != "traefik":
         raise PrerequisiteNotMetError(
             'connect_link requires routing_mode = "traefik": the one-time '
@@ -4064,20 +4078,16 @@ def connect_link(env_name: str, user: str = "admin", ctx: Context | None = None)
             "server does not run. Use connect_as_user instead."
         )
     team = _resolve_team(ctx)
-    woke = _wake_for_work(settings, team, env_name)
-    if woke:
-        logger.info("[connect_link] %s", woke.strip())
-    result = odoo_ops.connect_as_user(settings, team, env_name, user)
-    logger.info(
-        "[connect_link] one-time login link minted for %s (uid %s) in '%s'",
-        result["login"],
-        result["uid"],
-        env_name,
-    )
+    # Start a stopped environment now so the landing is quick; the landing
+    # wakes it again if the reaper stops it in between.
+    _wake_for_work(settings, team, env_name)
+    odoo_ops.resolve_env_login(settings, team, env_name, user)
+    base_url, _cookie_domain = env_ops.get_env_base_url(settings, team, env_name)
     # The bare URL and nothing else: callers redirect a browser to the result
-    # as-is (no prose to strip), so it must stay exactly one URL.
+    # as-is (no prose to strip), so it must stay exactly one URL. No session is
+    # minted here — the grant is redeemed by the /oduflow-connect landing.
     return connect_tokens.login_link(
-        settings, team, result["cookie_domain"], result["sid"]
+        base_url, connect_tokens.LoginGrant(team.team_id, env_name, user)
     )
 
 
@@ -4692,6 +4702,7 @@ def _service_database_connection_text(result: dict[str, Any]) -> str:
 @mcp.tool()
 @handle_errors
 @with_key_lock(service_database_lock_key)
+@secret_result
 def create_service_database(
     name: str, cluster: str = "dev", ctx: Context | None = None
 ) -> str:
@@ -4745,6 +4756,7 @@ def list_service_databases(ctx: Context | None = None) -> str:
 @mcp.tool()
 @handle_errors
 @with_key_lock(service_database_lock_key)
+@secret_result
 def get_service_database(name: str, ctx: Context | None = None) -> str:
     """Get connection credentials for a managed auxiliary-service database.
 
@@ -4760,6 +4772,7 @@ def get_service_database(name: str, ctx: Context | None = None) -> str:
 @mcp.tool()
 @handle_errors
 @with_key_lock(service_database_lock_key)
+@secret_result
 def rotate_service_database_password(name: str, ctx: Context | None = None) -> str:
     """Rotate a service database password and return the new credentials.
 
@@ -9127,6 +9140,8 @@ def _start_http() -> None:
         # Follow --log-level, so its access log is quieted along with ours.
         log_level=logging.getLogger().getEffectiveLevel(),
     )
+    # After Config: its logging setup would otherwise be applied on top.
+    _install_access_log_redaction()
     server = uvicorn.Server(config)
     global _uvicorn_server
     _uvicorn_server = server
@@ -9135,6 +9150,33 @@ def _start_http() -> None:
         _reexec()
     if not server.started:
         sys.exit(3)
+
+
+_TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s\"]+")
+
+
+class _AccessLogTokenRedactor(logging.Filter):
+    """Redact ``token=`` query values from uvicorn's access log.
+
+    One-time links (/oduflow-connect login links, /oduflow-artifact downloads)
+    carry their bearer token in the query string, and uvicorn logs the full
+    request line. The token is usually consumed by then, but a log line is no
+    place for a credential either way.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            if "token=" in args[2]:
+                path = _TOKEN_QUERY_RE.sub(r"\1[redacted]", args[2])
+                record.args = (*args[:2], path, *args[3:])
+        return True
+
+
+def _install_access_log_redaction() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessLogTokenRedactor) for f in access.filters):
+        access.addFilter(_AccessLogTokenRedactor())
 
 
 # The running uvicorn server, so a console restart can stop it gracefully.

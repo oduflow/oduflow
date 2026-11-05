@@ -6332,3 +6332,50 @@ class TestConnectAsUserCredentials:
         assert "test-pw" not in cmd
         assert "-w" not in cmd.split()
         assert shell_call.kwargs["environment"] == {"PGPASSWORD": "test-pw"}
+
+
+class TestResolveEnvLogin:
+    """connect_link's cheap pre-check: same user rule as the mint script."""
+
+    @staticmethod
+    def _db(output: str, exit_code: int = 0) -> MagicMock:
+        db = MagicMock()
+        db.exec_run.return_value = (exit_code, output.encode())
+        return db
+
+    def _run(self, user: str, db: MagicMock) -> str:
+        client = MagicMock()
+        client.containers.get.return_value = db
+        with patch("oduflow.docker_ops.odoo_ops.get_client", return_value=client):
+            return odoo_ops.resolve_env_login(TEST_SETTINGS, TEST_TEAM, "main", user)
+
+    def test_returns_login(self):
+        db = self._db("jane@acme.com\n")
+        assert self._run("jane@acme.com", db) == "jane@acme.com"
+        sql = db.exec_run.call_args.args[0][-1]
+        assert "active" in sql and "login = 'jane@acme.com'" in sql
+        assert "id =" not in sql
+
+    def test_numeric_user_also_matches_id(self):
+        db = self._db("admin\n")
+        assert self._run("2", db) == "admin"
+        sql = db.exec_run.call_args.args[0][-1]
+        assert "login = '2' OR id = 2" in sql
+
+    def test_quotes_are_escaped(self):
+        db = self._db("o'brien\n")
+        self._run("o'brien", db)
+        assert "login = 'o''brien'" in db.exec_run.call_args.args[0][-1]
+
+    def test_missing_user_raises_not_found(self):
+        with pytest.raises(NotFoundError, match="ghost"):
+            self._run("ghost", self._db(""))
+
+    def test_empty_user_means_admin_and_skips_the_query(self):
+        db = self._db("")
+        assert self._run("", db) == ""
+        db.exec_run.assert_not_called()
+
+    def test_psql_failure(self):
+        with pytest.raises(ExternalCommandError):
+            self._run("jane", self._db("boom", exit_code=2))

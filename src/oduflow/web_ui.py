@@ -5369,9 +5369,7 @@ def _build_routes(
                 odoo_ops.connect_as_user, settings, team, branch, user
             )
             if settings.routing_mode == "traefik":
-                landing = connect_tokens.login_link(
-                    settings, team, result["cookie_domain"], result["sid"]
-                )
+                landing = connect_tokens.login_link(result["base_url"], result["sid"])
                 return RedirectResponse(landing, status_code=303)
             response: Response = RedirectResponse(result["url"], status_code=303)
             # Host-only cookie (no domain): scoped to the dashboard's host and,
@@ -5402,6 +5400,28 @@ def _build_routes(
             if lock_acquired:
                 locks.release_env(branch)
 
+    def _redeem_login_grant(grant: connect_tokens.LoginGrant) -> str:
+        """Mint the Odoo session a connect_link grant promised; return its sid.
+
+        Runs under the env lock like every Connect As mint, and starts the
+        environment if it was auto-stopped since the link was issued.
+        """
+        settings = get_settings()
+        team = settings.teams.get(grant.team_id)
+        if team is None:
+            raise NotFoundError("The team this link was issued for no longer exists.")
+        locks.acquire_env(grant.env_name, team.team_id, operation="connect_link")
+        try:
+            activity.touch(team, grant.env_name)
+            if env_ops.ensure_running(settings, grant.env_name, team):
+                activity.mark_started(team, grant.env_name)
+            result = odoo_ops.connect_as_user(
+                settings, team, grant.env_name, grant.user
+            )
+            return str(result["sid"])
+        finally:
+            locks.release_env(grant.env_name)
+
     async def api_connect_land(request: Request) -> Response:
         """Traefik cross-subdomain Connect As landing, served ON the env host.
 
@@ -5413,13 +5433,37 @@ def _build_routes(
         """
         token = request.query_params.get("token") or ""
         env_host = request.url.hostname or ""
-        sid = connect_tokens.consume(token, env_host)
-        if not sid:
+        payload = connect_tokens.consume(token, env_host)
+        if not payload:
+            # Links come from the dashboard and from other apps (connect_link),
+            # so point back to "wherever you got it", not to the dashboard.
             return Response(
-                "Connect link is invalid or expired. Reopen it from the dashboard.",
+                "This login link is invalid, expired or already used. Go back "
+                "and open it again (dashboard Open button, or the app that "
+                "gave you the link) to get a fresh one.",
                 status_code=400,
                 media_type="text/plain",
             )
+        if isinstance(payload, connect_tokens.LoginGrant):
+            # connect_link defers the Odoo session to this moment, so an
+            # unused link never leaves a live session behind.
+            try:
+                sid = await _offload(_redeem_login_grant, payload)
+            except FlowError as e:
+                return Response(
+                    f"Connect failed: {_public_flow_error(e, context='Connect As')}",
+                    status_code=_flow_error_status(e),
+                    media_type="text/plain",
+                )
+            except Exception:
+                logger.exception("Unexpected error redeeming a connect link")
+                return Response(
+                    "Connect failed: Internal server error.",
+                    status_code=500,
+                    media_type="text/plain",
+                )
+        else:
+            sid = payload
         # Same-host redirect: a relative Location keeps whatever scheme and
         # host the browser really reached us on, with no header interpretation
         # — the one-time token is already consumed, so a wrong absolute scheme

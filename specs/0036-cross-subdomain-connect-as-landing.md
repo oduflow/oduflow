@@ -110,3 +110,8 @@ one-click open.
   "Open as admin" buttons in other apps; link building shared with the dashboard
   via `connect_tokens.login_link`. Requires Traefik routing and the HTTP
   transport (the token is redeemed in-process by the web UI).
+  The tool's token carries a grant (team, environment, user), not a session:
+  the landing mints the Odoo session on redemption, under the env lock, so an
+  unused link leaves no live session behind. The user is checked up front via
+  psql. Credential-bearing tool results are marked `@secret_result` and kept out
+  of the server log, and `token=` query values are redacted from the access log.

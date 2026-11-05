@@ -358,3 +358,135 @@ def test_env_users_lists(tmp_path):
     data = resp.json()
     assert data["ok"] is True
     assert data["result"]["users"] == users
+
+
+def test_connect_land_failure_text_is_not_dashboard_only(tmp_path):
+    # Links also come from other apps (connect_link), so the hint must not
+    # send the user to a dashboard they may not have.
+    client = _client(_traefik_settings(tmp_path))
+    r = client.get(
+        "/oduflow-connect",
+        params={"token": "nope"},
+        headers={"host": "180.dev.example.com"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "Reopen it from the dashboard" not in r.text
+    assert "the app that gave you the link" in r.text
+
+
+def _grant_link(user="jane@acme.com"):
+    from urllib.parse import parse_qs, urlparse
+
+    from oduflow import connect_tokens
+
+    link = connect_tokens.login_link(
+        "https://180.dev.example.com",
+        connect_tokens.LoginGrant("1", "feature", user),
+    )
+    return parse_qs(urlparse(link).query)["token"][0]
+
+
+def test_connect_land_redeems_grant_by_minting_then(tmp_path):
+    settings = _traefik_settings(tmp_path)
+    locks = LockManager()
+    client = _client(settings, locks)
+    token = _grant_link()
+    held: list[bool] = []
+
+    def _mint(*args, **kwargs):
+        from oduflow.errors import BusyError
+
+        try:
+            locks.acquire_env("feature", "1")
+        except BusyError:
+            held.append(True)
+        else:
+            locks.release_env("feature")
+            held.append(False)
+        return dict(_MINT_TRAEFIK)
+
+    with (
+        patch("oduflow.web_ui.odoo_ops.connect_as_user", side_effect=_mint) as mint,
+        patch("oduflow.web_ui.env_ops.ensure_running", return_value=False),
+        patch("oduflow.web_ui.activity.touch") as touch,
+    ):
+        r = client.get(
+            "/oduflow-connect",
+            params={"token": token},
+            headers={"host": "180.dev.example.com"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/web"
+    assert "session_id=" + "t" * 80 in r.headers["set-cookie"]
+    mint.assert_called_once_with(
+        settings, settings.teams["1"], "feature", "jane@acme.com"
+    )
+    touch.assert_called_once_with(settings.teams["1"], "feature")
+    assert held == [True]  # minted under the env lock...
+    locks.acquire_env("feature", "1")  # ...and released afterwards
+    locks.release_env("feature")
+
+
+def test_connect_land_grant_wakes_a_stopped_env(tmp_path):
+    client = _client(_traefik_settings(tmp_path))
+    token = _grant_link()
+    with (
+        patch(
+            "oduflow.web_ui.odoo_ops.connect_as_user", return_value=dict(_MINT_TRAEFIK)
+        ),
+        patch("oduflow.web_ui.env_ops.ensure_running", return_value=True) as wake,
+        patch("oduflow.web_ui.activity.touch"),
+        patch("oduflow.web_ui.activity.mark_started") as started,
+    ):
+        r = client.get(
+            "/oduflow-connect",
+            params={"token": token},
+            headers={"host": "180.dev.example.com"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    wake.assert_called_once()
+    started.assert_called_once()
+
+
+def test_connect_land_grant_reports_mint_errors(tmp_path):
+    client = _client(_traefik_settings(tmp_path))
+    token = _grant_link("ghost")
+    with (
+        patch(
+            "oduflow.web_ui.odoo_ops.connect_as_user",
+            side_effect=NotFoundError("User 'ghost' not found."),
+        ),
+        patch("oduflow.web_ui.env_ops.ensure_running", return_value=False),
+        patch("oduflow.web_ui.activity.touch"),
+    ):
+        r = client.get(
+            "/oduflow-connect",
+            params={"token": token},
+            headers={"host": "180.dev.example.com"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 404
+    assert r.text.startswith("Connect failed:")
+    assert "session_id" not in r.headers.get("set-cookie", "")
+
+
+def test_connect_land_grant_busy_env(tmp_path):
+    locks = LockManager()
+    client = _client(_traefik_settings(tmp_path), locks)
+    token = _grant_link()
+    locks.acquire_env("feature", "1")
+    try:
+        with patch("oduflow.web_ui.odoo_ops.connect_as_user") as mint:
+            r = client.get(
+                "/oduflow-connect",
+                params={"token": token},
+                headers={"host": "180.dev.example.com"},
+                follow_redirects=False,
+            )
+    finally:
+        locks.release_env("feature")
+    assert r.status_code == 409
+    mint.assert_not_called()
