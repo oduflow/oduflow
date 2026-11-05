@@ -633,6 +633,13 @@ def _command_from_body(raw: object) -> list[str]:
 
 
 def _parse_extra_addons(raw: str) -> dict[str, str]:
+    """Parse ``"repo:branch,repo2:branch@<sha40>"`` into ``{repo: spec}``.
+
+    A spec is a branch (follow its tip) or ``branch@<sha40>`` (pinned to that
+    exact commit); a malformed pin raises ValueError.
+    """
+    from oduflow.extra_addons import validate_extra_addon_spec
+
     result = {}
     for item in raw.split(","):
         item = item.strip()
@@ -640,7 +647,8 @@ def _parse_extra_addons(raw: str) -> dict[str, str]:
             continue
         if ":" in item:
             name, branch = item.split(":", 1)
-            result[name.strip()] = branch.strip()
+            name = name.strip()
+            result[name] = validate_extra_addon_spec(name, branch.strip())
         else:
             raise ValueError(
                 f"Extra addon '{item}' must include a branch (e.g. '{item}:19.0')."

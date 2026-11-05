@@ -856,6 +856,13 @@ def _format_fetch_summary(summary: dict[str, Any]) -> str:
 
 
 def _parse_extra_addons(raw: str) -> dict[str, str]:
+    """Parse ``"repo:branch,repo2:branch@<sha40>"`` into ``{repo: spec}``.
+
+    A spec is a branch (follow its tip) or ``branch@<sha40>`` (pinned to that
+    exact commit); a malformed pin raises ValueError.
+    """
+    from oduflow.extra_addons import validate_extra_addon_spec
+
     result = {}
     for item in raw.split(","):
         item = item.strip()
@@ -863,7 +870,8 @@ def _parse_extra_addons(raw: str) -> dict[str, str]:
             continue
         if ":" in item:
             name, branch = item.split(":", 1)
-            result[name.strip()] = branch.strip()
+            name = name.strip()
+            result[name] = validate_extra_addon_spec(name, branch.strip())
         else:
             raise ValueError(
                 f"Extra addon '{item}' must include a branch (e.g. '{item}:19.0')."
@@ -1140,7 +1148,7 @@ def create_environment(
         template_name: Name of the template profile to use as database template. Pass "none" to skip template and initialise Odoo from scratch with -i base. When a template is specified, repo_url and odoo_image are loaded from template metadata (but can be overridden). A template saved from a live-mounted environment supplies local_path instead of repo_url and recreates the live-mount when allow_local_path is enabled. Installed modules whose __manifest__.py version in the checkout is higher than the one recorded in the template database are upgraded (-u) before the environment is reported ready; the setup log lists them under [TEMPLATE-UPGRADE].
         repo_url: URL of the git repository to clone. Optional when template_name is specified (loaded from template metadata).
         odoo_image: Full Docker image name with tag (e.g. "odoo:19.0"). Optional when template_name is specified (loaded from template metadata).
-        extra_addons: Comma-separated list of extra addon repo names with branches (e.g. "enterprise:19.0,custom-themes:main"). Each entry must include a branch after a colon.
+        extra_addons: Comma-separated list of extra addon repo names with branches (e.g. "enterprise:19.0,custom-themes:main"). Each entry must include a branch after a colon. To pin a repo to an exact commit instead of the branch tip, append "@" and the full 40-character commit SHA (e.g. "oca-web:19.0@0123456789abcdef0123456789abcdef01234567"); a pinned repo is checked out at that commit (fetched if needed, error if the remote lacks it — never the tip) and update_environment/pull_and_apply never move it.
         sanitize: Sanitize the database after provisioning (default: True). Runs Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets database.is_neutralized) and then any custom scripts from the .oduflow/odoo_sanitize/ folder in the repository. Scripts directly in that folder run for every environment; a subfolder named exactly after the environment (not the branch; a '/' in the name folds to '-') runs after them, for that environment only — subfolders with other names, or starting with '_' or '.', are ignored. Only applies to environments created from a template.
         auto_install_modules: Comma-separated list of Odoo modules to install automatically after the environment is provisioned (e.g. "sale,purchase,stock"). When a template is specified and this is empty, the value is loaded from template metadata.
         env_vars: Comma- or newline-separated KEY=VALUE pairs injected as environment variables into the Odoo container (e.g. "WORKERS=2,LIMIT_TIME_CPU=600"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. These are added on top of the database connection variables (HOST/USER/PASSWORD). When a template records env_vars, the two sets are merged per key and the values passed here win. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
@@ -2786,7 +2794,7 @@ def switch_branch(
         upgrade: Comma-separated modules to upgrade (-u). Leave empty for automatic classification.
         restart: Restart the Odoo container (for Python-only differences).
         strict: Refuse instead of warning when the requested action looks incomplete for the diff.
-        extra_addons: Optional comma-separated extra addon repos with branches (e.g. "enterprise:19.0,custom-themes:main") to switch along with the main repo. Leave empty to keep the current ones.
+        extra_addons: Optional comma-separated extra addon repos with branches (e.g. "enterprise:19.0,custom-themes:main") to switch along with the main repo. Use "repo:branch@<40-char sha>" to pin a repo to an exact commit. Leave empty to keep the current ones.
         new_name: Optional new name for the environment. Leave empty to keep the current name.
     """
     settings = _get_settings()
@@ -5579,7 +5587,8 @@ def create_production(
         odoo_image: Docker image, e.g. "odoo:18.0". Required unless
                 from_environment is given.
         git_user: Optional git username for credential matching.
-        extra_addons: Optional {repo_name: branch} extra addon repos.
+        extra_addons: Optional {repo_name: branch} extra addon repos; a value
+            "branch@<40-char sha>" pins the repo to that exact commit.
         auto_update: Deploy automatically on GitHub push webhooks.
         allow_copy_to_dev_mcp: Allow MCP/agent-initiated copies of this
                 production's data into dev — save_production_as_template and
@@ -6069,7 +6078,8 @@ def reconfigure_production(
                 clear it; omit to leave unchanged.
         env_vars: Full replacement user environment variables, including
                 secret:<name> references. Omit to preserve; {} clears them.
-        extra_addons: New full set of extra addon repos {repo_name: branch};
+        extra_addons: New full set of extra addon repos {repo_name: branch}
+                      (a value "branch@<40-char sha>" pins that exact commit);
                       pass {} to remove all. Omit to leave unchanged.
         server_mode: "workers" (sync: pages on 8069, bus on 8072) or "gevent"
                 (async: everything on 8072). Re-tunes odoo.conf workers and

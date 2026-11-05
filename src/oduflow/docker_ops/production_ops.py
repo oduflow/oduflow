@@ -86,6 +86,7 @@ from oduflow.extra_addons import (
     DB_CONN_CONF_KEYS,
     LISTEN_INTERFACE_ALIASES,
     LISTEN_INTERFACE_CONF,
+    validate_extra_addon_spec,
     validate_extra_repo_name,
 )
 from oduflow.naming import (
@@ -1580,8 +1581,9 @@ def create_production(
                 f"Environment '{from_environment}' has no image label; pass "
                 "odoo_image explicitly."
             )
-    for repo_name in extra_addons or {}:
+    for repo_name, addon_spec in (extra_addons or {}).items():
         validate_extra_repo_name(repo_name)
+        validate_extra_addon_spec(repo_name, str(addon_spec))
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
     container_name = _odoo_container_name(settings, team, name)
@@ -2168,10 +2170,11 @@ def reconfigure_production(
     if git_user is not None and git_user != record.get("git_user", ""):
         updates["git_user"] = git_user
     if extra_addons is not None:
-        for repo_name in extra_addons:
+        for repo_name, addon_spec in extra_addons.items():
             # Keys become path components under the workspace; a ".." or
             # absolute-path key must never reach the rmtree below.
             validate_extra_repo_name(repo_name)
+            validate_extra_addon_spec(repo_name, str(addon_spec))
         if dict(extra_addons) != (record.get("extra_addons") or {}):
             updates["extra_addons"] = dict(extra_addons)
 
