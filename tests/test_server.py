@@ -1900,6 +1900,127 @@ class TestConnectAsUserTool:
         assert "connect_as_user" in SCOPED_ALLOWLIST
 
 
+class TestConnectLink:
+    """connect_link: one-time browser login link (dashboard "Open" flow)."""
+
+    _RESULT = {
+        "sid": "cafebabe" * 8,
+        "login": "admin",
+        "uid": "2",
+        "base_url": "https://feature.example.com",
+        "cookie_domain": "feature.example.com",
+        "url": "https://feature.example.com/web",
+        "expires_at": "2026-07-16T00:00:00Z",
+    }
+
+    @pytest.fixture
+    def traefik(self):
+        import oduflow.server
+
+        settings = replace(TEST_SETTINGS, routing_mode="traefik")
+        oduflow.server._settings = settings
+        return settings
+
+    @staticmethod
+    def _token(link: str) -> str:
+        from urllib.parse import parse_qs, urlparse
+
+        return parse_qs(urlparse(link).query)["token"][0]
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_returns_one_time_link_that_resolves_once(
+        self, mock_connect, mock_ensure, traefik
+    ):
+        from oduflow import connect_tokens
+
+        mock_connect.return_value = dict(self._RESULT)
+        result = _get_tool_fn("connect_link")(env_name="feature")
+
+        link = result.splitlines()[-1]
+        scheme = traefik.public_scheme_for(TEST_TEAM)
+        assert link.startswith(f"{scheme}://feature.example.com/oduflow-connect?token=")
+        assert "single use" in result and "120 s" in result
+        # The raw session id never appears in the output: only the token does.
+        assert self._RESULT["sid"] not in result
+        mock_connect.assert_called_once_with(traefik, TEST_TEAM, "feature", "admin")
+
+        token = self._token(link)
+        assert (
+            connect_tokens.consume(token, "feature.example.com")
+            == (self._RESULT["sid"])
+        )
+        assert connect_tokens.consume(token, "feature.example.com") is None
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_passes_explicit_user(self, mock_connect, mock_ensure, traefik):
+        mock_connect.return_value = dict(self._RESULT, login="jane@acme.com")
+        result = _get_tool_fn("connect_link")(env_name="feature", user="jane@acme.com")
+        assert "jane@acme.com" in result
+        mock_connect.assert_called_once_with(
+            traefik, TEST_TEAM, "feature", "jane@acme.com"
+        )
+
+    @patch("oduflow.server.activity.touch")
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_holds_env_lock_and_touches_activity(
+        self, mock_connect, mock_ensure, mock_touch, traefik
+    ):
+        import oduflow.server
+        from oduflow.errors import BusyError
+
+        locked: list[bool] = []
+
+        def _mint(*args, **kwargs):
+            try:
+                oduflow.server._locks.acquire_env("feature", "1")
+            except BusyError:
+                locked.append(True)
+            else:
+                oduflow.server._locks.release_env("feature")
+                locked.append(False)
+            return dict(self._RESULT)
+
+        mock_connect.side_effect = _mint
+        _get_tool_fn("connect_link")(env_name="feature")
+
+        assert locked == [True]
+        mock_touch.assert_called_once_with(TEST_TEAM, "feature")
+        # Released afterwards.
+        oduflow.server._locks.acquire_env("feature", "1")
+        oduflow.server._locks.release_env("feature")
+
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_port_mode_is_a_prerequisite_error(self, mock_connect):
+        with pytest.raises(ToolError, match="traefik"):
+            _get_tool_fn("connect_link")(env_name="feature")
+        mock_connect.assert_not_called()
+
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_rejects_production_env(self, mock_connect, traefik):
+        with pytest.raises(ToolError, match="production"):
+            _get_tool_fn("connect_link")(env_name="prod-main")
+        mock_connect.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.connect_as_user")
+    def test_user_not_found(self, mock_connect, mock_ensure, traefik):
+        from oduflow.errors import NotFoundError
+
+        mock_connect.side_effect = NotFoundError(
+            "User 'ghost' not found in environment 'feature'."
+        )
+        with pytest.raises(ToolError, match="not found"):
+            _get_tool_fn("connect_link")(env_name="feature", user="ghost")
+
+    def test_in_scoped_allowlist(self):
+        from oduflow.scoped_access import SCOPED_ALLOWLIST
+
+        assert "connect_link" in SCOPED_ALLOWLIST
+
+
 class TestConnectSentinelParsing:
     """The mint script frames values in sentinels because `odoo shell` merges its
     banner/logging with `print()` output; parsing must survive that noise."""

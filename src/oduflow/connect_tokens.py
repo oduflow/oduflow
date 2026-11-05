@@ -18,12 +18,18 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from oduflow.env_tokens import generate_token
+
+if TYPE_CHECKING:
+    from oduflow.settings import Settings, TeamSettings
 
 # Long enough to survive a couple of redirects and a slow tab open, short enough
 # that a leaked link is useless almost immediately.
 _TTL_SECONDS = 120.0
+# Public, whole-second form for user-facing copy ("expires in 120 s").
+TTL_SECONDS = int(_TTL_SECONDS)
 
 _lock = threading.Lock()
 # token -> (env_host, session_id, expiry_monotonic)
@@ -65,3 +71,23 @@ def consume(token: str, env_host: str, *, now: float | None = None) -> str | Non
     if expiry <= ts or stored_host != env_host.lower():
         return None
     return session_id
+
+
+def login_link(
+    settings: Settings, team: TeamSettings, env_host: str, session_id: str
+) -> str:
+    """Stash ``session_id`` behind a one-time token and return the landing URL.
+
+    The URL (``<scheme>://<env_host>/oduflow-connect?token=...``) logs the
+    browser that opens it into the environment: the env host's
+    ``/oduflow-connect`` route consumes the token and sets ``session_id``
+    host-only there. Shared by the dashboard's "Open" button and the
+    ``connect_link`` MCP tool. Traefik routing only — in port mode there is no
+    per-env host serving ``/oduflow-connect``.
+
+    The returned URL is a bearer credential until consumed or expired: never
+    log it.
+    """
+    token = issue(env_host, session_id)
+    scheme = settings.public_scheme_for(team)
+    return f"{scheme}://{env_host}/oduflow-connect?token={token}"

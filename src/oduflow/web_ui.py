@@ -5369,11 +5369,8 @@ def _build_routes(
                 odoo_ops.connect_as_user, settings, team, branch, user
             )
             if settings.routing_mode == "traefik":
-                env_host = result["cookie_domain"]
-                token = connect_tokens.issue(env_host, result["sid"])
-                landing = (
-                    f"{settings.public_scheme_for(team)}://{env_host}"
-                    f"/oduflow-connect?token={token}"
+                landing = connect_tokens.login_link(
+                    settings, team, result["cookie_domain"], result["sid"]
                 )
                 return RedirectResponse(landing, status_code=303)
             response: Response = RedirectResponse(result["url"], status_code=303)
