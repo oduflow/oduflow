@@ -68,7 +68,7 @@ class TestSpecParsing:
     @pytest.mark.parametrize(
         "spec",
         [
-            "19.0@abc123",  # short sha
+            "19.0@abc1234",  # abbreviated sha
             f"19.0@{SHA}0",  # 41 chars
             f"19.0@{SHA[:-1]}g",  # non-hex
             "19.0@",
@@ -77,6 +77,20 @@ class TestSpecParsing:
     def test_validate_rejects_bad_sha(self, spec):
         with pytest.raises(ValueError, match="40-character"):
             validate_extra_addon_spec("oca-web", spec)
+
+    @pytest.mark.parametrize("spec", ["team@feature", "release@2024", "a@b@c"])
+    def test_at_sign_in_a_branch_name_is_still_a_branch(self, spec):
+        assert validate_extra_addon_spec("oca-web", spec) == spec
+        assert split_extra_addon_spec(spec) == (spec, "")
+
+    def test_validate_rejects_git_invalid_at_branch(self):
+        with pytest.raises(ValueError, match="invalid branch name"):
+            validate_extra_addon_spec("oca-web", "x@{y}")
+
+    def test_validate_strips_whitespace(self):
+        assert (
+            validate_extra_addon_spec("oca-web", f"  19.0 @ {SHA}  ") == f"19.0@{SHA}"
+        )
 
     def test_validate_rejects_missing_branch(self):
         with pytest.raises(ValueError, match="needs a branch"):
@@ -125,7 +139,6 @@ class TestPinnedSharedCheckout:
         checkout = ensure_shared_checkout(team, "enterprise", f"18.0@{old}")
 
         assert checkout["revision"] == old
-        assert checkout["pinned"] is True
         assert checkout["branch"] == "18.0"
         assert checkout["path"].endswith(old)
         assert checkout_revision(checkout["path"]) == old
@@ -175,8 +188,29 @@ class TestPinnedSharedCheckout:
         newest = _commit_on(tmp_path, "18.0", "tip moves again")
         moved = ensure_shared_checkout(team, "enterprise", "18.0", current_revision=new)
         assert moved["revision"] == newest
-        assert moved["pinned"] is False
         assert old not in (new, newest)
+
+    def test_server_refusing_fetch_by_sha_falls_back_to_the_branch(
+        self, team, tmp_path
+    ):
+        # Protocol v0 + default upload-pack: the file:// server refuses
+        # fetching a commit that is not advertised (like servers without
+        # uploadpack.allow*SHA1InWant). The pin is the branch tip, so fetching
+        # the branch makes it available.
+        _old, new = _pinned_setup(team, tmp_path)
+        _bare_git(team, "config", "protocol.version", "0")
+
+        checkout = ensure_shared_checkout(team, "enterprise", f"18.0@{new}")
+
+        assert checkout["revision"] == new
+        assert checkout_revision(checkout["path"]) == new
+
+    def test_server_refusal_for_a_non_tip_commit_is_not_found(self, team, tmp_path):
+        old, _new = _pinned_setup(team, tmp_path)
+        _bare_git(team, "config", "protocol.version", "0")
+
+        with pytest.raises(NotFoundError, match="does not allow fetching"):
+            ensure_shared_checkout(team, "enterprise", f"18.0@{old}")
 
     def test_local_repo_missing_commit_is_not_found(self, team, tmp_path):
         src = tmp_path / "local_src"
@@ -270,3 +304,39 @@ def test_pull_environment_keeps_pinned_repo_in_place(tmp_path):
     update.assert_not_called()
     assert not result.get("extra_addons_cache_migrated")
     assert checkout_revision(pinned["path"]) == old
+
+
+# --- stack manifests ---------------------------------------------------------
+
+
+def _stack_with_branch(branch):
+    from oduflow.stack_models import StackSpec
+
+    return StackSpec.model_validate(
+        {
+            "environment": {
+                "name": "acme-dev",
+                "branch": "main",
+                "repoUrl": "https://github.com/acme/addons.git",
+                "odooImage": "odoo:19.0",
+            },
+            "extraRepositories": {
+                "oca-web": {
+                    "repoUrl": "https://github.com/OCA/web.git",
+                    "branch": branch,
+                }
+            },
+        }
+    )
+
+
+def test_stack_pinned_branch_is_validated_and_normalized():
+    spec = _stack_with_branch(f"19.0@{SHA.upper()}")
+    assert spec.extra_repositories["oca-web"].branch == f"19.0@{SHA}"
+
+
+def test_stack_abbreviated_pin_is_rejected():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="40-character"):
+        _stack_with_branch("19.0@abc1234")

@@ -1780,6 +1780,26 @@ class TestReconfigureProduction:
         created = [c.args[1] for c in mocks["create_worktree"].call_args_list]
         assert created == ["billing"]
 
+    def test_pinned_extra_addons_spec_is_normalized(self, settings, team):
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        _seed_prod_record(team, extra_addons={"acme": f"main@{sha}"})
+        workspace = production_ops._workspace(team, "erp")
+        os.makedirs(os.path.join(workspace, "extra", "acme"), exist_ok=True)
+        client = self._client_with_container(settings, team)
+        with _PatchAll(_patch_reconfigure_stack(client)):
+            # Only whitespace and SHA case differ: not a change.
+            result = production_ops.reconfigure_production(
+                settings, team, "erp", extra_addons={"acme": f" main@{sha.upper()} "}
+            )
+            assert result["changed"] == []
+            with pytest.raises(ValueError, match="40-character"):
+                production_ops.reconfigure_production(
+                    settings, team, "erp", extra_addons={"acme": "main@abc1234"}
+                )
+        assert production_registry.get_production(team, "erp")["extra_addons"] == {
+            "acme": f"main@{sha}"
+        }
+
     def test_domain_only_change_does_not_pull_image(self, settings, team):
         _seed_prod_record(team)
         client = self._client_with_container(settings, team)

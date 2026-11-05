@@ -84,6 +84,9 @@ from oduflow.naming import (
     production_template_name,
     redact_url_credentials,
 )
+from oduflow.naming import (
+    parse_extra_addons as _parse_extra_addons,
+)
 from oduflow.odoo_version import major_from_image_reference
 from oduflow.output_cache import CachedOutput, OutputCache
 from oduflow.po_tools import PoEntry
@@ -853,30 +856,6 @@ def _format_fetch_summary(summary: dict[str, Any]) -> str:
     for b in summary["deleted_branches"]:
         parts.append(f"  {b}: deleted")
     return "\n".join(parts)
-
-
-def _parse_extra_addons(raw: str) -> dict[str, str]:
-    """Parse ``"repo:branch,repo2:branch@<sha40>"`` into ``{repo: spec}``.
-
-    A spec is a branch (follow its tip) or ``branch@<sha40>`` (pinned to that
-    exact commit); a malformed pin raises ValueError.
-    """
-    from oduflow.extra_addons import validate_extra_addon_spec
-
-    result = {}
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if ":" in item:
-            name, branch = item.split(":", 1)
-            name = name.strip()
-            result[name] = validate_extra_addon_spec(name, branch.strip())
-        else:
-            raise ValueError(
-                f"Extra addon '{item}' must include a branch (e.g. '{item}:19.0')."
-            )
-    return result
 
 
 def _odoo_guide_reminder(odoo_image: str) -> str:

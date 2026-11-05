@@ -21,26 +21,38 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
     ProtectedError,
 )
-from oduflow.git_ops import RepoAuthError, git_env_for_team
-from oduflow.naming import sanitize_repo_url
+from oduflow.git_ops import RepoAuthError, commit_exists, git_env_for_team
+from oduflow.naming import (
+    parse_extra_addons,
+    sanitize_repo_url,
+    split_extra_addon_spec,
+    validate_extra_addon_spec,
+)
 from oduflow.odoo_version import major_from_image_reference
 from oduflow.settings import Settings, TeamSettings
 
 logger = logging.getLogger("oduflow")
 
+# The spec grammar ("branch" / "branch@<sha40>") lives in naming (pure, no git);
+# re-exported here for the callers that work with extra repos.
+__all__ = [
+    "parse_extra_addons",
+    "split_extra_addon_spec",
+    "validate_extra_addon_spec",
+]
+
 GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,63}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
-# A pinned extra-addons spec is ``branch@<sha>``: a full 40-hex commit id.
-_PINNED_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-# git fetch stderr fragments meaning "the remote has no such commit".
-_MISSING_COMMIT_MARKERS = (
+# git fetch stderr fragments meaning "the remote will not serve that commit":
+# either it does not have it, or it refuses fetches by SHA of commits that are
+# not a branch tip (servers without uploadpack.allow*SHA1InWant).
+_REFUSED_COMMIT_MARKERS = (
     "not our ref",
     "couldn't find remote ref",
     "no such remote ref",
     "unadvertised object",
-    "bad object",
 )
 
 # odoo.conf [options] keys managed via container env vars (HOST, USER, ...).
@@ -163,49 +175,6 @@ def validate_branch_name(branch: str) -> None:
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         raise ValueError(f"Invalid branch name {branch!r}.")
-
-
-def split_extra_addon_spec(spec: str) -> tuple[str, str]:
-    """Split an extra-addons spec into ``(branch, pinned_sha)``.
-
-    ``"19.0"`` -> ``("19.0", "")`` (follow the branch tip, as always);
-    ``"19.0@<sha40>"`` -> ``("19.0", "<sha40>")`` (pinned to that commit).
-    Lenient on purpose: a stored value whose ``@`` suffix is not a full commit
-    id is treated as a plain branch name, so nothing recorded before pinning
-    existed changes meaning. Input is validated by
-    :func:`validate_extra_addon_spec`.
-    """
-    branch, sep, pin = spec.rpartition("@")
-    if sep and _PINNED_SHA_RE.fullmatch(pin.lower()):
-        return branch, pin.lower()
-    return spec, ""
-
-
-def validate_extra_addon_spec(repo_name: str, spec: str) -> str:
-    """Validate a user-supplied ``branch`` / ``branch@<sha40>`` spec.
-
-    Returns the normalized spec (pinned commit id lower-cased). Raises
-    ValueError when the part after ``@`` is not exactly 40 hex characters or
-    the branch is missing.
-    """
-    spec = spec.strip()
-    if "@" not in spec:
-        return spec
-    branch, _sep, pin = spec.rpartition("@")
-    branch = branch.strip()
-    pin = pin.strip().lower()
-    if not _PINNED_SHA_RE.fullmatch(pin):
-        raise ValueError(
-            f"Extra addon '{repo_name}': invalid pinned commit '{pin}' in "
-            f"'{spec}'. Use '{repo_name}:<branch>@<sha>' with the full "
-            "40-character hexadecimal commit id."
-        )
-    if not branch:
-        raise ValueError(
-            f"Extra addon '{repo_name}': a pinned commit needs a branch too "
-            f"(e.g. '{repo_name}:19.0@{pin}')."
-        )
-    return f"{branch}@{pin}"
 
 
 def list_remote_branches(
@@ -1270,36 +1239,8 @@ def untrack_branch(
     }
 
 
-def _commit_exists(repo_path: str, revision: str) -> bool:
-    try:
-        result = subprocess.run(
-            ["git", "-C", repo_path, "cat-file", "-e", f"{revision}^{{commit}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=GIT_ENV,
-        )
-    except subprocess.TimeoutExpired:
-        return False
-    return result.returncode == 0
-
-
-def _origin_url(repo_path: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", repo_path, "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=GIT_ENV,
-        )
-    except subprocess.TimeoutExpired:
-        return ""
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
 def _ensure_pinned_commit_unlocked(
-    team: TeamSettings, repo_name: str, revision: str
+    team: TeamSettings, repo_name: str, branch: str, revision: str
 ) -> str:
     """Make commit *revision* available in the bare repo; never falls back.
 
@@ -1307,11 +1248,13 @@ def _ensure_pinned_commit_unlocked(
     commit is fetched from origin: shallow (``--depth 1``) when the repo is
     already shallow or has nothing downloaded yet, so a pin does not pull a
     big repo's whole history; incrementally in a full clone, so its history
-    stays connected. A commit the remote does not have raises NotFoundError —
-    the branch tip is never substituted for it.
+    stays connected. A server that refuses fetches by SHA gets one more chance:
+    *branch* is fetched and the commit looked up again (it may be the tip).
+    A commit still missing raises NotFoundError — the branch tip is never
+    substituted for it.
     """
     bare_path = os.path.join(team.shared_repos_dir, repo_name)
-    if _commit_exists(bare_path, revision):
+    if commit_exists(bare_path, revision):
         return revision
     if is_local_repo(team, repo_name):
         raise NotFoundError(
@@ -1321,6 +1264,7 @@ def _ensure_pinned_commit_unlocked(
     shallow = os.path.exists(os.path.join(bare_path, "shallow"))
     depth = ["--depth", "1"] if shallow or not _get_branch_refs(bare_path) else []
     label = f"git fetch origin {revision}"
+    refused = False
     try:
         subprocess.run(
             [
@@ -1342,22 +1286,42 @@ def _ensure_pinned_commit_unlocked(
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
-        _raise_if_auth_error(_origin_url(bare_path), stderr)
-        if any(marker in stderr.lower() for marker in _MISSING_COMMIT_MARKERS):
-            raise NotFoundError(
-                f"Pinned commit '{revision}' not found in the remote of extra "
-                f"repo '{repo_name}'."
-            ) from e
-        raise ExternalCommandError(label, e.returncode, stderr)
+        _raise_if_auth_error(_git_config(bare_path, "remote.origin.url"), stderr)
+        if not any(m in stderr.lower() for m in _REFUSED_COMMIT_MARKERS):
+            raise ExternalCommandError(label, e.returncode, stderr)
+        refused = True
     except subprocess.TimeoutExpired:
         raise ExternalCommandError(label, -1, f"Fetch timed out ({_FETCH_TIMEOUT}s).")
-    if not _commit_exists(bare_path, revision):
+    if refused:
+        try:
+            _fetch_extra_repo_unlocked(team, repo_name, branch)
+        except NotFoundError:
+            pass  # no such branch either: report the missing commit below
+    if not commit_exists(bare_path, revision):
         raise NotFoundError(
             f"Pinned commit '{revision}' not found in the remote of extra repo "
-            f"'{repo_name}'."
+            f"'{repo_name}' (or the server does not allow fetching a commit by "
+            f"SHA and it is not the tip of branch '{branch}')."
         )
     logger.info("Extra repo '%s': fetched pinned commit %s", repo_name, revision)
     return revision
+
+
+def _resolve_spec_unlocked(
+    team: TeamSettings, repo_name: str, spec: str
+) -> tuple[str, str]:
+    """Resolve an extra-addons spec to ``(branch, commit)``, downloading as needed.
+
+    ``branch`` fetches that branch and returns its tip; ``branch@<sha40>``
+    returns exactly that commit (see :func:`_ensure_pinned_commit_unlocked`)
+    without looking at the tip. Callers hold the repo lock.
+    """
+    branch, pinned = split_extra_addon_spec(spec)
+    if pinned:
+        return branch, _ensure_pinned_commit_unlocked(team, repo_name, branch, pinned)
+    bare_path = os.path.join(team.shared_repos_dir, repo_name)
+    _fetch_extra_repo_unlocked(team, repo_name, branch)
+    return branch, _resolve_branch_revision(bare_path, repo_name, branch)
 
 
 def ensure_branch_revision(team: TeamSettings, repo_name: str, branch: str) -> str:
@@ -1396,13 +1360,7 @@ def _create_worktree_unlocked(
         raise NotFoundError(f"Extra repo '{repo_name}' not found. Add it first.")
 
     spec = branch
-    branch, pinned = split_extra_addon_spec(spec)
-    if pinned:
-        _ensure_pinned_commit_unlocked(team, repo_name, pinned)
-        ref = pinned
-    else:
-        fetch_extra_repo(team, repo_name, branch=branch)
-        ref = branch
+    _branch, ref = _resolve_spec_unlocked(team, repo_name, spec)
 
     subprocess.run(
         ["git", "-C", bare_path, "worktree", "prune"],
@@ -1603,13 +1561,8 @@ def ensure_shared_checkout(
     if not os.path.isdir(bare_path):
         raise NotFoundError(f"Extra repo '{repo_name}' not found. Add it first.")
 
-    base_branch, pinned = split_extra_addon_spec(branch)
     with _repo_operation_lock(team, repo_name):
-        if pinned:
-            revision = _ensure_pinned_commit_unlocked(team, repo_name, pinned)
-        else:
-            _fetch_extra_repo_unlocked(team, repo_name, base_branch)
-            revision = _resolve_branch_revision(bare_path, repo_name, base_branch)
+        base_branch, revision = _resolve_spec_unlocked(team, repo_name, branch)
         repo_cache_dir = os.path.join(team.shared_extra_checkouts_dir, repo_name)
         checkout_path = os.path.join(repo_cache_dir, revision)
 
@@ -1683,7 +1636,6 @@ def ensure_shared_checkout(
         return {
             "name": repo_name,
             "branch": base_branch,
-            "pinned": bool(pinned),
             "revision": revision,
             "path": checkout_path,
             "changed_files": changed_files,
@@ -1703,13 +1655,7 @@ def _pull_extra_worktree_unlocked(
     to the worktree root.  Returns ``("", [])`` if already up to date.
     """
     spec = branch
-    branch, pinned = split_extra_addon_spec(spec)
-    if pinned:
-        _ensure_pinned_commit_unlocked(team, repo_name, pinned)
-        target = pinned
-    else:
-        fetch_extra_repo(team, repo_name, branch=branch)
-        target = branch
+    _branch, target = _resolve_spec_unlocked(team, repo_name, spec)
 
     old_head = subprocess.run(
         ["git", "-C", worktree_path, "rev-parse", "HEAD"],
