@@ -413,7 +413,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | Key | Default | Description |
 |---|---|---|
 | `[storage].data_dir` | `/srv/oduflow` or `~/.oduflow/data` | Base directory for all data. Team data directories are `team_{ID}` subdirectories inside |
-| `[storage].etc_dir` | directory of the loaded `oduflow.toml` | Config directory: `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, `license.key`, `odoo.conf`. The PostgreSQL and Traefik containers bind-mount files from here, so when Oduflow itself runs in Docker it must be a host path mounted at the same path inside the container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)). Must exist and be writable at startup. Locked: existing containers keep mounting the old path, so move the files, edit it in Raw TOML, then recreate `oduflow-db` and Traefik |
+| `[storage].etc_dir` | directory of the loaded `oduflow.toml` | Config directory: `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, `license.key` (the overridable `odoo.conf` lives in each team's data directory, not here). The PostgreSQL and Traefik containers bind-mount files from here, so when Oduflow itself runs in Docker it must be a host path mounted at the same path inside the container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)). Must exist and be writable at startup. Locked: existing containers keep mounting the old path, so move the files, edit it in Raw TOML, then recreate `oduflow-db` and Traefik |
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
@@ -525,7 +525,8 @@ team_{ID}/
 ### Configuration file overrides
 
 On first startup, Oduflow generates `postgresql.conf` from one host-wide
-resource plan and copies the bundled `odoo.conf` if it does not exist. These
+resource plan into the config directory, and reconciles the bundled `odoo.conf`
+into each team's data directory (`{data_dir}/team_{ID}/odoo.conf`). These
 files take **priority** over the bundled defaults — edit them to customize
 PostgreSQL tuning or Odoo settings globally:
 
@@ -534,7 +535,6 @@ PostgreSQL tuning or Odoo settings globally:
   oduflow.toml            ← main configuration file
   postgresql.conf         ← dev PostgreSQL tuning (used by oduflow-db)
   postgresql-prod.conf    ← production PostgreSQL tuning (created lazily)
-  odoo.conf               ← custom Odoo defaults (used by new environments)
   license.key             ← license file (optional)
   traefik-dynamic/        ← Traefik dynamic configuration (auto-generated + drop-ins)
 ```

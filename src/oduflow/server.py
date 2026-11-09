@@ -189,6 +189,10 @@ def _get_settings() -> Settings:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
+        # Outside the try on purpose: files left in the pre-etc_dir location
+        # are a warning, not a broken config, so they must not be reported as
+        # one.
+        settings_module.warn_if_legacy_etc_dir(settings.etc_dir)
         if _no_telemetry:
             settings = dataclasses.replace(settings, disable_telemetry=True)
         _locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")

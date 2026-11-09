@@ -185,6 +185,66 @@ class TestSchemaAndValidation:
         server = self._server_with_config(monkeypatch, tmp_path, MINIMAL_TOML)
         assert server._get_settings().etc_dir == str(tmp_path)
 
+    def test_console_refuses_a_dir_that_would_brick_startup(self, tmp_path):
+        """The console dry-runs the boot parser, so it must refuse what boot
+        refuses — otherwise Raw TOML can save a config the next start rejects."""
+        from oduflow import config_store
+
+        missing = tmp_path / "nope"
+        with pytest.raises(ConfigError, match="does not exist"):
+            config_store.validate_text(
+                MINIMAL_TOML + f'[storage]\netc_dir = "{missing}"\n',
+                str(tmp_path / "oduflow.toml"),
+                http=False,
+            )
+        missing.mkdir()
+        config_store.validate_text(
+            MINIMAL_TOML + f'[storage]\netc_dir = "{missing}"\n',
+            str(tmp_path / "oduflow.toml"),
+            http=False,
+        )
+
+
+class TestLegacyConfigDirWarning:
+    """The config dir used to be the probe's answer regardless of where the
+    TOML lived, so an ODUFLOW_TOML outside the two standard locations moves it
+    on upgrade — and would silently orphan license.key, branding and tuning."""
+
+    def test_names_the_files_left_behind(self, tmp_path, monkeypatch, caplog):
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        (legacy / "license.key").write_text("x")
+        (legacy / "traefik-dynamic").mkdir()
+        new = tmp_path / "new"
+        new.mkdir()
+        monkeypatch.setattr(settings_mod, "_cached_etc_dir", str(legacy))
+        with caplog.at_level("WARNING", logger="oduflow"):
+            orphaned = settings_mod.warn_if_legacy_etc_dir(str(new))
+        assert orphaned == ["license.key", "traefik-dynamic"]
+        assert str(legacy) in caplog.text
+        assert "[storage].etc_dir" in caplog.text
+
+    def test_silent_when_the_dir_did_not_move(self, tmp_path, monkeypatch, caplog):
+        (tmp_path / "license.key").write_text("x")
+        monkeypatch.setattr(settings_mod, "_cached_etc_dir", str(tmp_path))
+        with caplog.at_level("WARNING", logger="oduflow"):
+            assert settings_mod.warn_if_legacy_etc_dir(str(tmp_path)) == []
+        assert not caplog.records
+
+    def test_silent_when_the_new_dir_already_has_the_file(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        (legacy / "license.key").write_text("old")
+        new = tmp_path / "new"
+        new.mkdir()
+        (new / "license.key").write_text("moved")
+        monkeypatch.setattr(settings_mod, "_cached_etc_dir", str(legacy))
+        with caplog.at_level("WARNING", logger="oduflow"):
+            assert settings_mod.warn_if_legacy_etc_dir(str(new)) == []
+        assert not caplog.records
+
 
 # ---------------------------------------------------------------------------
 # every container mount follows settings.etc_dir

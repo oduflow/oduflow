@@ -1474,6 +1474,57 @@ def validate_etc_dir(etc_dir: str) -> None:
         )
 
 
+# Files and directories the config dir owns. Listed so an upgrade that moves
+# the dir can say what it left behind.
+_ETC_DIR_ARTIFACTS: tuple[str, ...] = (
+    "license.key",
+    "postgresql.conf",
+    "postgresql-prod.conf",
+    "traefik-dynamic",
+    "branding",
+    ".instance_id",
+)
+
+
+def warn_if_legacy_etc_dir(etc_dir: str) -> list[str]:
+    """Warn when the pre-``etc_dir`` location still holds config files.
+
+    Until the config dir became configurable it was *always* the writability
+    probe's answer (``/etc/oduflow`` or ``~/.oduflow/conf``), no matter where
+    ``oduflow.toml`` lived. An installation that points ``ODUFLOW_TOML``
+    elsewhere therefore moves its config dir on upgrade, which would otherwise
+    silently orphan ``license.key`` (the instance reads as unlicensed), the
+    branding assets, the telemetry instance id and any hand-tuned
+    ``postgresql.conf`` or Traefik drop-in. Returns the orphaned names; never
+    raises.
+    """
+    try:
+        legacy = _resolve_etc_dir()
+        if os.path.abspath(legacy) == os.path.abspath(etc_dir):
+            return []
+        orphaned = [
+            name
+            for name in _ETC_DIR_ARTIFACTS
+            if os.path.exists(os.path.join(legacy, name))
+            and not os.path.exists(os.path.join(etc_dir, name))
+        ]
+    except OSError:
+        return []
+    if orphaned:
+        logger.warning(
+            "Config directory is %s, but %s still holds %s from an earlier "
+            "Oduflow version — those files are now ignored (the license reads "
+            "as unlicensed, PostgreSQL/Traefik tuning is regenerated). Move "
+            'them into %s, or set [storage].etc_dir = "%s".',
+            etc_dir,
+            legacy,
+            ", ".join(orphaned),
+            etc_dir,
+            legacy,
+        )
+    return orphaned
+
+
 _cached_etc_dir: str | None = None
 
 

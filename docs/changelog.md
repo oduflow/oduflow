@@ -17,7 +17,12 @@
   while Traefik watched an empty dynamic directory. The key is locked in the
   Server settings console (existing containers keep mounting the old path);
   startup refuses a config dir that does not exist or is not writable with a
-  single actionable line.
+  single actionable line. **Upgrade note:** if your `ODUFLOW_TOML` points
+  outside `/etc/oduflow` and `~/.oduflow/conf`, the config directory moves
+  with it — startup now warns when the old location still holds
+  `license.key`, branding assets, `.instance_id` or tuned
+  `postgresql.conf`/`traefik-dynamic/` files; move them across (or set
+  `[storage].etc_dir` to the old path) or they are silently ignored.
 - **Docker-out-of-Docker mount diagnostic** — when Oduflow runs in a
   container, startup and `GET /healthz` (`self_mounts`, the dashboard's
   `MOUNTS` chip) check that both the data directory and the config directory
