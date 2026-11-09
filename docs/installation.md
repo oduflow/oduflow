@@ -530,8 +530,17 @@ PostgreSQL tuning or Odoo settings globally:
   postgresql-prod.conf    ← production PostgreSQL tuning (created lazily)
   odoo.conf               ← custom Odoo defaults (used by new environments)
   license.key             ← license file (optional)
-  traefik/                ← Traefik dynamic configuration (auto-generated)
+  traefik-dynamic/        ← Traefik dynamic configuration (auto-generated + drop-ins)
 ```
+
+`postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/` are the files
+that get bind-mounted into containers. The containers do not mount them from
+here: Oduflow copies them into `<data_dir>/conf-mirror/` (under `/srv/oduflow`
+by default) on every start and mounts that mirror, because a Docker daemon
+outside the Oduflow process — the
+[Docker-out-of-Docker](docker.md#the-one-rule-the-data-directory-must-be-the-same-path-on-the-host)
+case — can see the data directory but not this one. Edit the originals above;
+the mirror is overwritten and its files say so in their header.
 
 `pg_hba.conf` remains in the PostgreSQL data volume rather than this config
 directory. On every startup Oduflow reads the active file reported by

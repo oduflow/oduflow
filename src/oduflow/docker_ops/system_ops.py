@@ -453,6 +453,170 @@ def _resolve_instance_conf(name: str, data_dir: str) -> pathlib.Path:
     return _PACKAGE_ROOT / "templates" / name
 
 
+# ---------------------------------------------------------------------------
+# Daemon-visible config mirror
+#
+# The operator-facing config files live in ``settings.etc_dir`` (``/etc/oduflow``
+# or ``~/.oduflow/conf``), a path that only exists where the Oduflow *process*
+# runs. A bind mount's source, however, is resolved by the Docker *daemon*: when
+# Oduflow itself runs in a container (Docker-out-of-Docker) the daemon has no
+# ``/etc/oduflow`` and silently auto-creates an empty directory in its place —
+# PostgreSQL then tries to parse a directory as postgresql.conf and crash-loops,
+# and Traefik watches an empty dynamic-config directory. ``base_data_dir`` is
+# already required to be daemon-visible (every environment, tablespace and
+# exchange mount depends on it), so the files that get bind-mounted are copied
+# into a derived mirror under it and the containers mount the mirror. The
+# operator keeps editing the ``etc_dir`` originals; the mirror is refreshed on
+# every path that creates or starts the consuming container and whenever the
+# source is (re)generated. See specs/0083.
+# ---------------------------------------------------------------------------
+
+_CONF_MIRROR_DIRNAME = "conf-mirror"
+_TRAEFIK_DYNAMIC_DIRNAME = "traefik-dynamic"
+_PG_CONF_MOUNT = "/etc/postgresql/postgresql.conf"
+_TRAEFIK_DYNAMIC_MOUNT = "/etc/traefik/dynamic"
+
+
+def _conf_mirror_dir(settings: Settings) -> str:
+    return os.path.join(settings.base_data_dir, _CONF_MIRROR_DIRNAME)
+
+
+def _traefik_dynamic_source_dir(settings: Settings) -> str:
+    """The operator-facing dynamic-config directory (drop-ins live here)."""
+    return os.path.join(settings.etc_dir, _TRAEFIK_DYNAMIC_DIRNAME)
+
+
+def _traefik_dynamic_mirror_dir(settings: Settings) -> str:
+    """The daemon-visible copy Traefik actually mounts."""
+    return os.path.join(_conf_mirror_dir(settings), _TRAEFIK_DYNAMIC_DIRNAME)
+
+
+def _ensure_public_dir(path: str) -> None:
+    """Create *path* and make it world-searchable (container users read it)."""
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o755)
+
+
+def _pg_conf_mirror_header(source: str, container: str) -> str:
+    return (
+        "# GENERATED COPY - DO NOT EDIT.\n"
+        f"# Oduflow mirrors {source} here so the Docker daemon can bind-mount\n"
+        f"# it into {container}; this copy is overwritten whenever Oduflow starts\n"
+        f"# or recreates that container. Edit {source} instead, then restart\n"
+        f"# {container}.\n\n"
+    )
+
+
+def _mirror_pg_conf(settings: Settings, source: str, name: str, container: str) -> str:
+    """Copy *source* to ``<base_data_dir>/conf-mirror/<name>``; return that path.
+
+    The copy carries a header naming the file to edit instead. The mirror is
+    rewritten in place (not replaced) so a container that already has it
+    bind-mounted keeps seeing the current inode, and it is world-readable for
+    the PostgreSQL container user, like every other non-secret mount.
+    """
+    mirror_dir = _conf_mirror_dir(settings)
+    _ensure_public_dir(mirror_dir)
+    with open(source, encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    dest = os.path.join(mirror_dir, name)
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(_pg_conf_mirror_header(source, container))
+        f.write(content)
+    os.chmod(dest, 0o644)
+    return dest
+
+
+def sync_dev_pg_conf_mirror(settings: Settings) -> str:
+    """Refresh the mirror of the shared dev ``postgresql.conf``; return its path.
+
+    The source is ``<etc_dir>/postgresql.conf`` when present, otherwise the
+    bundled default — the same resolution the container mount used to apply
+    directly.
+    """
+    return _mirror_pg_conf(
+        settings,
+        str(_resolve_conf("postgresql.conf")),
+        "postgresql.conf",
+        settings.shared_db_container,
+    )
+
+
+def sync_prod_pg_conf_mirror(settings: Settings) -> str:
+    """Refresh the mirror of ``<etc_dir>/postgresql-prod.conf``; return its path.
+
+    The source must already exist (``_ensure_prod_pg_conf`` generates it).
+    """
+    return _mirror_pg_conf(
+        settings,
+        _prod_pg_conf_path(settings),
+        "postgresql-prod.conf",
+        settings.prod_db_container,
+    )
+
+
+def sync_traefik_dynamic_mirror(settings: Settings) -> str:
+    """Mirror ``<etc_dir>/traefik-dynamic/`` into the daemon-visible copy.
+
+    Copies every regular file — Oduflow's generated ``oduflow.yml`` and any
+    operator drop-in — and removes mirror files whose source is gone, so the
+    mirror is exactly the operator directory as of this call. Traefik watches
+    the mirror; drop-ins are therefore picked up when Oduflow next syncs it
+    (server start), not the instant they are written. Returns the mirror path.
+    """
+    source_dir = _traefik_dynamic_source_dir(settings)
+    mirror_dir = _traefik_dynamic_mirror_dir(settings)
+    _ensure_public_dir(_conf_mirror_dir(settings))
+    _ensure_public_dir(mirror_dir)
+    wanted: set[str] = set()
+    for entry in sorted(os.scandir(source_dir), key=lambda e: e.name):
+        if not entry.is_file(follow_symlinks=True):
+            continue
+        wanted.add(entry.name)
+        dest = os.path.join(mirror_dir, entry.name)
+        with open(entry.path, "rb") as src, open(dest, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        os.chmod(dest, 0o644)
+    for entry in os.scandir(mirror_dir):
+        if entry.name not in wanted and entry.is_file(follow_symlinks=False):
+            os.remove(entry.path)
+    return mirror_dir
+
+
+def _mount_source(container: Any, destination: str) -> str | None:
+    """Host source of the mount at *destination*, or None when there is none.
+
+    Returns None as well when the container's mount list cannot be read, so
+    callers that treat "unknown" and "absent" alike never recreate a container
+    on the strength of a mock or a truncated inspect.
+    """
+    attrs = getattr(container, "attrs", None) or {}
+    mounts = attrs.get("Mounts") if isinstance(attrs, dict) else None
+    if not isinstance(mounts, list):
+        return None
+    for mount in mounts:
+        if isinstance(mount, dict) and mount.get("Destination") == destination:
+            source = mount.get("Source")
+            return str(source) if source else None
+    return None
+
+
+def _mount_source_differs(container: Any, destination: str, wanted: str) -> bool:
+    """True when *container* mounts something other than *wanted* at *destination*.
+
+    A container whose mount list is unreadable is not reported as drifted.
+    Inspect may report the source as given or resolved, so both spellings of
+    *wanted* are accepted.
+    """
+    attrs = getattr(container, "attrs", None) or {}
+    if not isinstance(attrs, dict) or not isinstance(attrs.get("Mounts"), list):
+        return False
+    current = _mount_source(container, destination)
+    if current is None:
+        return True
+    return current != wanted and os.path.realpath(current) != os.path.realpath(wanted)
+
+
 def _trusts_upstream_headers(settings: Settings) -> bool:
     """Whether Traefik's ``web`` entrypoint should trust incoming X-Forwarded-*.
 
@@ -595,19 +759,22 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
             client.volumes.create(settings.traefik_acme_volume, labels=system_labels)
             logger.info("Created volume %s", settings.traefik_acme_volume)
 
-    # Host path for the dynamic config, bind-mounted into the container below.
-    # Use the resolved config dir (``/etc/oduflow`` when writable, else
-    # ``~/.oduflow/conf``) so it works without root on macOS and lands under a
-    # path Docker Desktop shares — same placement as postgresql.conf. We mount a
-    # whole directory (not a single file) so operators can drop their own
-    # ``*.yml`` dynamic-config files alongside Oduflow's generated ``oduflow.yml``
-    # (Traefik watches the directory); Oduflow only ever writes/overwrites
-    # ``oduflow.yml`` and never touches the operator's files.
-    traefik_dynamic_dir = os.path.join(settings.etc_dir, "traefik-dynamic")
-    os.makedirs(traefik_dynamic_dir, exist_ok=True)
+    # The operator-facing dynamic config lives in the resolved config dir
+    # (``/etc/oduflow`` when writable, else ``~/.oduflow/conf``) — same
+    # placement as postgresql.conf. It is a whole directory (not a single
+    # file) so operators can drop their own ``*.yml`` dynamic-config files
+    # alongside Oduflow's generated ``oduflow.yml``; Oduflow only ever
+    # writes/overwrites ``oduflow.yml`` and never touches the operator's files.
+    # What Traefik mounts is the daemon-visible mirror of that directory under
+    # base_data_dir (see sync_traefik_dynamic_mirror): the config dir is a path
+    # of the Oduflow process, which the Docker daemon cannot see when Oduflow
+    # itself runs in a container.
+    traefik_source_dir = _traefik_dynamic_source_dir(settings)
+    os.makedirs(traefik_source_dir, exist_ok=True)
     _write_traefik_dynamic_config(
-        settings, os.path.join(traefik_dynamic_dir, "oduflow.yml")
+        settings, os.path.join(traefik_source_dir, "oduflow.yml")
     )
+    traefik_dynamic_dir = sync_traefik_dynamic_mirror(settings)
 
     try:
         t = client.containers.get(settings.traefik_container)
@@ -634,6 +801,10 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         #     provider. This supersedes a startup migration: it self-heals even
         #     when the container was left over from a prior traefik-mode setup
         #     while the server ran in port mode.
+        #   - dynamic dir mount source: older containers bind the config dir
+        #     itself, which a Docker daemon outside the Oduflow container
+        #     cannot see (it gets an empty auto-created directory and no
+        #     per-team routing ever loads). Recreate onto the mirror.
         cmd = t.attrs.get("Config", {}).get("Cmd") or []
         has_acme = any(
             "certificatesresolvers.letsencrypt.acme." in str(arg) for arg in cmd
@@ -644,16 +815,20 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
         on_dir_provider = any(
             str(arg).startswith("--providers.file.directory=") for arg in cmd
         )
+        stale_dynamic_mount = _mount_source_differs(
+            t, _TRAEFIK_DYNAMIC_MOUNT, traefik_dynamic_dir
+        )
         if (
             has_redirect != settings.routing_tls
             or has_acme != settings.acme_enabled
             or has_forwarded != wants_forwarded
             or not on_dir_provider
+            or stale_dynamic_mount
         ):
             logger.info(
                 "Recreating %s: config drift (tls container=%s wanted=%s, "
                 "forwarded_headers container=%s wanted=%s, on_dir_provider=%s, "
-                "acme container=%s wanted=%s)",
+                "acme container=%s wanted=%s, dynamic_dir_mount_stale=%s)",
                 settings.traefik_container,
                 has_redirect,
                 settings.routing_tls,
@@ -662,6 +837,7 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
                 on_dir_provider,
                 has_acme,
                 settings.acme_enabled,
+                stale_dynamic_mount,
             )
             t.stop()
             t.remove()
@@ -674,13 +850,13 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
 
     volumes = {
         "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
-        traefik_dynamic_dir: {"bind": "/etc/traefik/dynamic", "mode": "ro"},
+        traefik_dynamic_dir: {"bind": _TRAEFIK_DYNAMIC_MOUNT, "mode": "ro"},
     }
     command = [
         "--log.level=INFO",
         "--providers.docker=true",
         "--providers.docker.exposedbydefault=false",
-        "--providers.file.directory=/etc/traefik/dynamic",
+        f"--providers.file.directory={_TRAEFIK_DYNAMIC_MOUNT}",
         "--providers.file.watch=true",
         "--entrypoints.web.address=:80",
     ]
@@ -2105,6 +2281,13 @@ def _ensure_pg_container(
     hardlinked in (see _expose_file_to_pg), so for the duration of a restore
     the container sees the source file itself — e.g. a template's persisted
     dump — not a copy; only the cluster superuser can write through the mount.
+
+    postgresql.conf is mounted from its daemon-visible mirror under
+    base_data_dir, never from the config dir (see sync_dev_pg_conf_mirror). An
+    existing container still bound to the config dir is recreated onto the
+    mirror: all of its state lives in the data volume and the tablespaces
+    mount, so the recreate is a restart, not data loss. The running image is
+    kept — a recreate must never double as a PostgreSQL major upgrade.
     """
     tablespaces_dir = _pg_tablespaces_host_dir(settings)
     exchange_dir = _pg_exchange_host_dir(settings)
@@ -2114,16 +2297,32 @@ def _ensure_pg_container(
         # retain their own ownership and restrictive data permissions. Repair
         # parents created under a restrictive umask even for existing servers.
         os.chmod(mount_parent, 0o755)
+    conf_mirror = sync_dev_pg_conf_mirror(settings)
+    image = settings.postgres_image
     try:
         db_container = client.containers.get(settings.shared_db_container)
-        if db_container.status != "running":
-            db_container.start()
-        return
+        if not _mount_source_differs(db_container, _PG_CONF_MOUNT, conf_mirror):
+            if db_container.status != "running":
+                db_container.start()
+            return
+        image = (db_container.attrs.get("Config") or {}).get("Image") or image
+        logger.warning(
+            "Recreating %s: it mounts %s from %s, which the Docker daemon cannot "
+            "read when Oduflow runs in a container; switching to the mirror %s "
+            "(data volume and tablespaces persist, image %s kept)",
+            settings.shared_db_container,
+            _PG_CONF_MOUNT,
+            _mount_source(db_container, _PG_CONF_MOUNT),
+            conf_mirror,
+            image,
+        )
+        db_container.stop()
+        db_container.remove()
     except docker.errors.NotFound:
         pass
 
     client.containers.run(
-        settings.postgres_image,
+        image,
         name=settings.shared_db_container,
         detach=True,
         network=settings.shared_network,
@@ -2132,14 +2331,11 @@ def _ensure_pg_container(
                 "bind": "/var/lib/postgresql/data",
                 "mode": "rw",
             },
-            str(_resolve_conf("postgresql.conf")): {
-                "bind": "/etc/postgresql/postgresql.conf",
-                "mode": "ro",
-            },
+            conf_mirror: {"bind": _PG_CONF_MOUNT, "mode": "ro"},
             tablespaces_dir: {"bind": _PG_TABLESPACES_MOUNT, "mode": "rw"},
             exchange_dir: {"bind": _PG_EXCHANGE_MOUNT, "mode": "rw"},
         },
-        command=["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"],
+        command=["postgres", "-c", f"config_file={_PG_CONF_MOUNT}"],
         environment={
             "POSTGRES_USER": settings.db_user,
             "POSTGRES_PASSWORD": settings.db_password,
@@ -2238,6 +2434,12 @@ def _ensure_prod_pg_container(
     bind-mounted read-only so backups can be enabled or reconfigured later
     without recreating the container. No ports are published — production
     Odoo containers reach it over the team networks.
+
+    postgresql-prod.conf is mounted from its daemon-visible mirror under
+    base_data_dir (see sync_prod_pg_conf_mirror). Unlike the dev cluster, an
+    existing container still bound to the config dir is *not* recreated here:
+    that would take every production down unannounced. It is logged with the
+    operator step instead.
     """
     from oduflow import walg
     from oduflow.wal_monitor import assert_writable
@@ -2251,11 +2453,29 @@ def _ensure_prod_pg_container(
         conf_path = _prod_pg_conf_path(settings)
         if os.path.isfile(conf_path):
             _warn_stale_prod_pg_conf(settings, conf_path)
+            conf_mirror = sync_prod_pg_conf_mirror(settings)
+            if _mount_source_differs(db_container, _PG_CONF_MOUNT, conf_mirror):
+                logger.warning(
+                    "%s mounts %s from %s, a path the Docker daemon cannot read "
+                    "when Oduflow runs in a container (it sees an empty "
+                    "directory and PostgreSQL fails to start). Not recreating "
+                    "a production cluster automatically: at a maintenance "
+                    "window run `docker stop %s && docker rm %s`, then restart "
+                    "Oduflow to recreate it on the mirror %s (the data volume "
+                    "persists).",
+                    settings.prod_db_container,
+                    _PG_CONF_MOUNT,
+                    _mount_source(db_container, _PG_CONF_MOUNT),
+                    settings.prod_db_container,
+                    settings.prod_db_container,
+                    conf_mirror,
+                )
         return
     except docker.errors.NotFound:
         pass
 
-    conf_path = _ensure_prod_pg_conf(settings)
+    _ensure_prod_pg_conf(settings)
+    conf_path = sync_prod_pg_conf_mirror(settings)
     os.makedirs(walg.bin_host_dir(settings), exist_ok=True)
     os.makedirs(walg.conf_host_dir(settings), exist_ok=True)
     client.containers.run(
@@ -2268,14 +2488,11 @@ def _ensure_prod_pg_container(
                 "bind": "/var/lib/postgresql/data",
                 "mode": "rw",
             },
-            conf_path: {
-                "bind": "/etc/postgresql/postgresql.conf",
-                "mode": "ro",
-            },
+            conf_path: {"bind": _PG_CONF_MOUNT, "mode": "ro"},
             walg.bin_host_dir(settings): {"bind": walg.BIN_MOUNT, "mode": "ro"},
             walg.conf_host_dir(settings): {"bind": walg.CONF_MOUNT, "mode": "ro"},
         },
-        command=["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"],
+        command=["postgres", "-c", f"config_file={_PG_CONF_MOUNT}"],
         environment={
             "POSTGRES_USER": settings.db_user,
             "POSTGRES_PASSWORD": settings.db_password,

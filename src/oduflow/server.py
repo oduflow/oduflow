@@ -6639,6 +6639,12 @@ def _ensure_initialized(settings: Settings) -> None:
     _copy_bundled_configs()
     prereqs.ensure_fuse_overlayfs()
     prereqs.ensure_rsync()
+    # Before any bind mount is handed to the daemon: when Oduflow itself runs in
+    # a container, every mount source below depends on base_data_dir being the
+    # same path on the host.
+    from oduflow import health
+
+    health.warn_if_data_dir_unreachable(settings)
     system_ops.init_system(settings)
 
     # Snapshot-before-deploy hook (no-op while [backup] is unconfigured).
@@ -7175,13 +7181,19 @@ def _run_retune_postgres(
         print(f"Backup: {backup}")
 
     client = get_client() if changed_odoo else None
-    for _profile, path, candidate, container, existing, _status in changed:
+    for profile, path, candidate, container, existing, _status in changed:
         path.parent.mkdir(parents=True, exist_ok=True)
         if existing is not None:
             _backup(path)
         path.write_text(candidate, encoding="utf-8")
         path.chmod(0o644)
         print(f"Updated: {path}")
+        # The container mounts the daemon-visible mirror, not this file: refresh
+        # it now so the `docker restart` printed below picks up the new tuning.
+        if profile == "dev":
+            system_ops.sync_dev_pg_conf_mirror(settings)
+        else:
+            system_ops.sync_prod_pg_conf_mirror(settings)
         pg_restart.append(container)
 
     for team, name, path, candidate, existing in changed_odoo:

@@ -24,6 +24,7 @@ def _traefik_settings(
         routing_tls=tls,
         acme_email="admin@example.com",
         etc_dir=str(tmp_path),
+        base_data_dir=str(tmp_path / "data"),
         teams={"1": team},
         extra_routes=tuple(extra_routes),
         public_scheme_setting=public_scheme,
@@ -155,10 +156,17 @@ class TestEnsureTraefik:
         # Directory provider (not single-file) so operators can drop in *.yml.
         assert "--providers.file.directory=/etc/traefik/dynamic" in cmd
         assert not any(a.startswith("--providers.file.filename=") for a in cmd)
-        dyn = str(tmp_path / "traefik-dynamic")
+        # Traefik mounts the daemon-visible mirror under base_data_dir, not the
+        # operator's config dir (which a Docker daemon outside the Oduflow
+        # container cannot see).
+        dyn = str(tmp_path / "data" / "conf-mirror" / "traefik-dynamic")
         assert kwargs["volumes"][dyn] == {"bind": "/etc/traefik/dynamic", "mode": "ro"}
-        # Oduflow's generated config lands inside that directory.
+        # Oduflow's generated config lands in the operator directory and is
+        # mirrored into the mounted one.
         assert (tmp_path / "traefik-dynamic" / "oduflow.yml").is_file()
+        assert (
+            tmp_path / "data" / "conf-mirror" / "traefik-dynamic" / "oduflow.yml"
+        ).read_bytes() == (tmp_path / "traefik-dynamic" / "oduflow.yml").read_bytes()
 
     def test_no_tls_mode_port_80_only(self, tmp_path):
         client = self._client_no_container()

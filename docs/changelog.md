@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **Mounted configs are now readable when Oduflow itself runs in Docker** —
+  `oduflow-db`, the production PostgreSQL container and Traefik used to
+  bind-mount `postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/`
+  straight from the config directory (`/etc/oduflow`). That path belongs to the
+  Oduflow process; in Docker-out-of-Docker the host daemon resolves the mount
+  source, finds nothing, and auto-creates an empty directory — PostgreSQL then
+  crash-looped with `input in flex scanner failed at file
+  "/etc/postgresql/postgresql.conf"` and Traefik loaded no per-team routes.
+  The files are now copied into `<data_dir>/conf-mirror/` (the data directory
+  is daemon-visible by construction) and the containers mount that mirror.
+  Operators keep editing the originals in the config directory; the mirror is
+  refreshed on every start and by `retune-postgres --apply`, and each copy says
+  which file to edit instead. Existing `oduflow-db` and Traefik containers
+  still bound to the old path are recreated automatically on the running image
+  (data volume and tablespaces persist); the production PostgreSQL container
+  is never bounced automatically — a warning names the stale mount and the
+  `docker stop && docker rm` step to run at a maintenance window.
+- **Traefik drop-in files are picked up on Oduflow restart** — because Traefik
+  now watches the mirrored directory, a new or changed `*.yml` drop-in in
+  `<config-dir>/traefik-dynamic/` takes effect when Oduflow next starts rather
+  than within a second of being written. Files removed from the config
+  directory are removed from the mirror on the same refresh.
+
+### Features
+
+- **Docker-out-of-Docker mount diagnostic** — when Oduflow runs inside a
+  container it checks, at startup and on `GET /healthz` (`self_mounts`), that
+  `[storage].data_dir` is bound from the *same* host path. A named volume, a
+  different host path, or a data directory inside the container's writable
+  layer all make every mount Oduflow creates resolve to an empty host
+  directory; this used to fail silently and now produces a warning naming the
+  mount and the fix (`-v /srv/oduflow:/srv/oduflow`). It is a warning only
+  and never degrades `/healthz` on its own.
+
+### Documentation
+
+- `docs/docker.md` states the rule (the data directory must be a host
+  directory at the same path on both sides), and its run and Compose examples
+  no longer use a named volume for `/srv/oduflow`. `docs/traefik.md` and
+  `docs/installation.md` describe the config mirror.
+
 ## v1.89.1
 
 ### Bug Fixes

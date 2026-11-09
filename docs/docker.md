@@ -2,6 +2,36 @@
 
 Oduflow can run as a Docker container. Since it manages other Docker containers (Odoo environments, PostgreSQL, etc.), it uses the **Docker-out-of-Docker** pattern — the host's Docker socket is mounted into the container.
 
+## The one rule: the data directory must be the same path on the host
+
+Oduflow creates the containers it manages through the host daemon, and every
+bind mount it asks for (PostgreSQL tablespaces, filestores, the mirrored
+`postgresql.conf`, Traefik's dynamic config, …) is a path **under its data
+directory** (`/srv/oduflow` by default, `[storage].data_dir`). The **host
+daemon** resolves those mount sources, not the Oduflow container. If
+`/srv/oduflow` inside the container is a named volume, or is bound from a
+different host path, the daemon looks for `/srv/oduflow/...` on the host, finds
+nothing, and silently auto-creates **empty directories** in its place —
+`oduflow-db` then crash-loops on an empty config, Traefik routes nothing, and
+filestores land in the void.
+
+So mount a **host directory at the same path on both sides**:
+
+```
+-v /srv/oduflow:/srv/oduflow
+```
+
+On Docker Desktop (macOS/Windows) that path must also be under a shared
+location — for example `-v $HOME/oduflow:$HOME/oduflow` together with
+`[storage] data_dir = "/Users/<you>/oduflow"` in `oduflow.toml`. The config
+directory (`/etc/oduflow`) has **no** such requirement: the files that get
+bind-mounted from it are mirrored into `<data_dir>/conf-mirror/` first, so it
+can be a named volume or any host path.
+
+When Oduflow runs in a container it checks this at startup and on
+`GET /healthz` (`self_mounts`): a data directory the daemon cannot see is logged
+as a warning that names the offending mount and the fix.
+
 ## Build
 
 ```bash
@@ -17,7 +47,7 @@ docker run -d \
   --name oduflow \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   oduflow
 ```
 
@@ -29,7 +59,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
@@ -39,8 +69,8 @@ docker run -d \
 | Mount | Purpose |
 |---|---|
 | `/var/run/docker.sock` | **Required.** Gives Oduflow access to the host Docker daemon to manage Odoo containers, PostgreSQL, Traefik, etc. |
-| `/srv/oduflow` | Oduflow data directory. Contains team directories with workspaces, templates, port registry. Use a named volume or a host path to persist data across container restarts. |
-| `/etc/oduflow` | System configuration directory. Contains `oduflow.toml`, license key, `postgresql.conf`, default `odoo.conf`, and other configuration files. Mount to persist configuration across container restarts. |
+| `/srv/oduflow` | Oduflow data directory. Contains team directories with workspaces, templates, port registry, and the `conf-mirror/` copies of the mounted configs. **Must be a host directory bound at the same path** (see the rule above) — not a named volume. |
+| `/etc/oduflow` | System configuration directory. Contains `oduflow.toml`, license key, `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, default `odoo.conf`, and other configuration files. Mount to persist configuration across container restarts; a named volume is fine here. |
 
 ## Networking
 
@@ -50,7 +80,7 @@ The Oduflow container must be on the same Docker network as the containers it cr
 # 1. Start Oduflow (Docker image defaults to HTTP mode)
 docker run -d --name oduflow -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   -v /etc/oduflow:/etc/oduflow \
   oduist/oduflow
 
@@ -116,14 +146,17 @@ services:
       - "8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - oduflow_data:/srv/oduflow
+      # Host directory, same path on both sides: the host daemon resolves
+      # every mount Oduflow creates under it. A named volume here breaks
+      # oduflow-db, Traefik and every environment (see the rule above).
+      - /srv/oduflow:/srv/oduflow
+      # The config dir may be a named volume or a host path.
       - oduflow_etc:/etc/oduflow
     restart: unless-stopped
     networks:
       - oduflow-net
 
 volumes:
-  oduflow_data:
   oduflow_etc:
 
 networks:
@@ -154,7 +187,7 @@ docker run -d \
   --cap-add SYS_ADMIN \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   oduflow
 ```
 

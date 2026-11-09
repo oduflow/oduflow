@@ -1,4 +1,5 @@
-"""System health checks: dev PG, prod PG, Traefik, S3, disk, overlays, productions.
+"""System health checks: dev PG, prod PG, Traefik, S3, disk, overlays, productions,
+and (in Docker-out-of-Docker) whether the daemon can see base_data_dir.
 
 Backs the public ``GET /healthz`` endpoint (uptime-monitor friendly:
 200 all-ok / 503 degraded) and the dashboard's status-bar chips. Results
@@ -11,7 +12,9 @@ not configured). Only ``error`` on a critical check degrades /healthz.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import socket
 import threading
 import time
 from typing import Any
@@ -153,6 +156,129 @@ def _check_overlays(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _own_container(client: Any) -> Any | None:
+    """The container this process runs in, or None when it cannot be identified.
+
+    Docker names a container's hostname after its short ID unless ``--hostname``
+    overrides it; the override is the only case this misses.
+    """
+    import docker
+
+    for name in (os.environ.get("HOSTNAME", ""), socket.gethostname()):
+        if not name:
+            continue
+        try:
+            return client.containers.get(name)
+        except docker.errors.NotFound:
+            continue
+    return None
+
+
+def _self_mount_verdict(client: Any, settings: Settings) -> tuple[str, str, str]:
+    """``(status, public_detail, operator_detail)`` for the self-mount check.
+
+    Every bind mount Oduflow creates names a *host* path that the Docker daemon
+    resolves, not the Oduflow container. A daemon that has no such path
+    silently auto-creates an empty directory — PostgreSQL then parses a
+    directory as its config and crash-loops, Traefik watches an empty dynamic
+    directory, filestores land in the void. So when Oduflow itself runs in a
+    container, ``base_data_dir`` must sit under a bind mount whose host
+    ``Source`` equals its container ``Destination``; a named volume or a
+    differing host path breaks every mount, invisibly. This check makes it
+    visible. It is a warning, never an outage verdict: the server can still
+    serve what it already has. The public detail names no host paths
+    (``/healthz`` is unauthenticated); the operator detail does.
+    """
+    from oduflow.self_update import in_container
+
+    if not in_container():
+        return "off", "not running in a container", ""
+    data_dir = os.path.normpath(settings.base_data_dir or "/")
+    try:
+        me = _own_container(client)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
+        return "off", "cannot inspect own container", str(exc)[:200]
+    if me is None:
+        return "off", "own container not found by hostname; mounts not verified", ""
+    attrs = getattr(me, "attrs", None) or {}
+    mounts = attrs.get("Mounts") if isinstance(attrs, dict) else None
+    if not isinstance(mounts, list):
+        return "off", "own container mounts unreadable", ""
+
+    best: dict[str, Any] | None = None
+    best_dest = ""
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            continue
+        dest = os.path.normpath(str(mount.get("Destination") or ""))
+        if dest in ("", "/"):
+            continue
+        if (data_dir == dest or data_dir.startswith(dest + "/")) and len(dest) > len(
+            best_dest
+        ):
+            best, best_dest = mount, dest
+
+    fix = (
+        f"mount a host directory at the same path (-v {data_dir}:{data_dir}) "
+        "and point [storage].data_dir at it"
+    )
+    if best is None:
+        return (
+            "warn",
+            "data_dir is inside the Oduflow container's writable layer; the "
+            "Docker daemon cannot see it, so every bind mount Oduflow creates "
+            "resolves to an empty host directory",
+            f"data_dir {data_dir} is not under any mount of this container; {fix}",
+        )
+    if best.get("Type") != "bind":
+        return (
+            "warn",
+            f"data_dir is on a Docker {best.get('Type')}, not a host bind mount; "
+            "the Docker daemon resolves Oduflow's mount sources on the host, "
+            "where that path does not exist",
+            f"data_dir {data_dir} is on {best.get('Type')} "
+            f"{best.get('Name') or best.get('Source')} at {best_dest}; {fix}",
+        )
+    source = os.path.normpath(str(best.get("Source") or ""))
+    if source != best_dest:
+        return (
+            "warn",
+            "data_dir is bound from a different host path; the Docker daemon "
+            "resolves Oduflow's mount sources on the host, where the "
+            "container-side path does not exist",
+            f"data_dir {data_dir} is bound from host path {source} at "
+            f"{best_dest}; {fix}",
+        )
+    return "ok", "data_dir is bound from the same host path", ""
+
+
+def _check_self_mounts(client: Any, settings: Settings) -> dict[str, Any]:
+    status, detail, _ = _self_mount_verdict(client, settings)
+    return {"status": status, "detail": detail}
+
+
+def warn_if_data_dir_unreachable(settings: Settings) -> str | None:
+    """Log the self-mount check loudly at startup; never raises.
+
+    Returns the check status, or None when the check could not run.
+    """
+    try:
+        from oduflow.docker_ops.client import get_client
+
+        status, detail, operator_detail = _self_mount_verdict(get_client(), settings)
+    except Exception:  # noqa: BLE001 - a diagnostic must not block startup
+        logger.debug("Could not run the self-mount check", exc_info=True)
+        return None
+    if status == "warn":
+        logger.warning(
+            "Docker-out-of-Docker mount check: %s (%s). The PostgreSQL, Traefik "
+            "and environment containers cannot work until this is fixed.",
+            detail,
+            operator_detail,
+        )
+    return status
+
+
 def _unhealthy_productions(settings: Settings) -> list[str]:
     from oduflow import production_registry
 
@@ -221,6 +347,7 @@ def collect_health(settings: Settings, *, force: bool = False) -> dict[str, Any]
             else {"status": "off", "detail": "production hosting disabled"}
         )
         checks["traefik"] = _check_traefik(client, settings)
+        checks["self_mounts"] = _check_self_mounts(client, settings)
         checks["walg"] = _check_walg(client, settings, checks["prod_pg"])
         if settings.prod_enabled and checks["prod_pg"]["status"] != "off":
             from oduflow import wal_monitor
@@ -248,6 +375,8 @@ def collect_health(settings: Settings, *, force: bool = False) -> dict[str, Any]
     # Critical checks: dev PG always; prod PG only when provisioned; traefik
     # when in traefik mode; S3 when configured; unhealthy productions; broken
     # filestore overlays (stale, unexpectedly absent, or unreadable).
+    # self_mounts only ever warns: it explains *why* dev_pg/traefik fail in a
+    # mis-mounted Docker-out-of-Docker setup, and those already degrade.
     critical = [
         "dev_pg",
         "prod_pg",

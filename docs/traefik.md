@@ -166,6 +166,13 @@ mounts a **dynamic-config directory** that Traefik watches:
   **other** `*.yml`/`*.yaml`/`*.toml` file you place in that directory is loaded
   by Traefik and **never touched by Oduflow** — it survives restarts and
   upgrades.
+- What the Traefik container actually mounts is a **mirror** of that directory,
+  `<data_dir>/conf-mirror/traefik-dynamic/` (under `/srv/oduflow` by default).
+  The config dir is a path of the Oduflow process; when Oduflow itself runs in
+  a container the Docker daemon cannot see it, whereas the data directory is
+  always daemon-visible. Oduflow refreshes the mirror — copying every file and
+  removing files whose original is gone — each time it starts. Do not edit the
+  mirror; edit the files in `<config-dir>/traefik-dynamic/`.
 
 For example, `<config-dir>/traefik-dynamic/custom.yml`:
 
@@ -191,8 +198,12 @@ http:
           - url: "http://host.docker.internal:9000"
 ```
 
-Traefik picks it up within a second (no restart needed). This is the full
-Traefik [file-provider dynamic configuration](https://doc.traefik.io/traefik/providers/file/),
+Traefik loads a new or changed drop-in when Oduflow next refreshes the mirror,
+which happens on every Oduflow start — so **restart Oduflow** after adding,
+changing or removing a drop-in file (Traefik itself does not need a restart; it
+watches the mirror and applies the change within a second of the refresh). This
+is the full Traefik
+[file-provider dynamic configuration](https://doc.traefik.io/traefik/providers/file/),
 so use it when you outgrow the declarative routes above.
 
 ## HTTPS with a self-signed certificate

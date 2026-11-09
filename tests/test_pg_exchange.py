@@ -83,6 +83,7 @@ def test_pg_container_gets_the_exchange_mount(tmp_path):
     client = MagicMock()
     client.containers.get.side_effect = docker.errors.NotFound("absent")
     settings = _settings(tmp_path)
+    (tmp_path / "pg.conf").write_text("# KEEP\n")
 
     with patch.object(system_ops, "_resolve_conf", return_value=tmp_path / "pg.conf"):
         system_ops._ensure_pg_container(client, settings, {})
@@ -107,6 +108,7 @@ def test_pg_mount_parents_are_searchable_without_opening_team_data(
         client.containers.get.return_value.status = "running"
     else:
         client.containers.get.side_effect = docker.errors.NotFound("absent")
+    (tmp_path / "pg.conf").write_text("# KEEP\n")
     previous_umask = os.umask(0o077)
     try:
         children = []

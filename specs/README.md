@@ -103,6 +103,7 @@ precursors).
 | [0080](0080-stable-environment-identity-across-recreate.md) | 2026-10-18 | Stable environment identity across recreate: MCP token registry + `recreate_environment` tool |
 | [0081](0081-cron-owned-template-sync.md) | 2026-10-07 | Host-cron SSH template sync, retained filestores and opt-in environment data refresh |
 | [0082](0082-operator-only-cluster-dr.md) | 2026-10-18 | Cluster WAL control and PITR moved off the team MCP/dashboard surfaces to /admin and the owner CLI |
+| [0083](0083-daemon-visible-config-mirror.md) | 2026-11-09 | Bind-mounted configs served from a daemon-visible mirror under the data dir (Docker-out-of-Docker), with a self-mount diagnostic |
 
 ## Design docs
 
