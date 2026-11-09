@@ -50,7 +50,7 @@ from tomlkit.items import AoT, Comment, InlineTable, Item, Null, Table
 from oduflow import config_schema as schema
 from oduflow.errors import ConfigError, ConflictError, PrerequisiteNotMetError
 from oduflow.fsutil import atomic_write_private_text
-from oduflow.settings import Settings
+from oduflow.settings import Settings, validate_etc_dir
 
 try:
     import tomllib
@@ -417,6 +417,11 @@ def validate_text(
     try:
         settings = Settings.from_raw(raw, path)
         settings.validate()
+        # Same check the boot path runs, for the same reason: the console must
+        # not be able to save an [storage].etc_dir that makes the next startup
+        # refuse the config outright (and leaves the containers mounting a
+        # directory nothing writes into).
+        validate_etc_dir(settings.etc_dir)
         if http:
             check_http_auth(settings)
     except PrerequisiteNotMetError as exc:

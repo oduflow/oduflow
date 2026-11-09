@@ -176,6 +176,10 @@ def _get_settings() -> Settings:
             settings = Settings.from_raw(raw, toml_path)
             settings_module.TRACE = settings.trace
             settings.validate()
+            # The containers mount files Oduflow generates into the config
+            # dir, so an unusable dir is an operator mistake worth one clear
+            # line now rather than a crash-looping oduflow-db later.
+            settings_module.validate_etc_dir(settings.etc_dir)
         # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here
         # too. TypeError/AttributeError/KeyError/OverflowError cover wrong-typed
         # TOML values (a list where an int belongs, a scalar where a table
@@ -185,6 +189,10 @@ def _get_settings() -> Settings:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
+        # Outside the try on purpose: files left in the pre-etc_dir location
+        # are a warning, not a broken config, so they must not be reported as
+        # one.
+        settings_module.warn_if_legacy_etc_dir(settings.etc_dir)
         if _no_telemetry:
             settings = dataclasses.replace(settings, disable_telemetry=True)
         _locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")
@@ -6639,6 +6647,12 @@ def _ensure_initialized(settings: Settings) -> None:
     _copy_bundled_configs()
     prereqs.ensure_fuse_overlayfs()
     prereqs.ensure_rsync()
+    # Before any bind mount is handed to the daemon: when Oduflow itself runs in
+    # a container, every mount source below depends on base_data_dir and
+    # etc_dir being the same path on the host.
+    from oduflow import health
+
+    health.warn_if_dirs_unreachable(settings)
     system_ops.init_system(settings)
 
     # Snapshot-before-deploy hook (no-op while [backup] is unconfigured).

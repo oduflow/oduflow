@@ -46,7 +46,7 @@ Existing perpetual keys have no expiration and remain recognized as perpetual.
 
 **Via CLI:**
 
-Copy the license file to `<config-dir>/license.key`. The config directory is usually `/etc/oduflow`; when that path is not writable, Oduflow uses `~/.oduflow/conf`. Oduflow reads the license automatically on startup.
+Copy the license file to `<config-dir>/license.key`. The config directory is the directory of the loaded `oduflow.toml` — usually `/etc/oduflow`, or `~/.oduflow/conf` on installs without root — unless `[storage].etc_dir` overrides it. Oduflow reads the license automatically on startup.
 
 **Via Web Dashboard:**
 

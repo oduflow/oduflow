@@ -366,6 +366,19 @@ GROUPS: tuple[Group, ...] = (
                 "only after relocating the directory.",
             ),
             Field(
+                "etc_dir",
+                "str",
+                "Config directory",
+                "Where postgresql.conf, postgresql-prod.conf and Traefik's "
+                "dynamic config live; containers bind-mount them from here. "
+                "Default: the directory of the loaded oduflow.toml.",
+                default="",
+                apply=LOCKED,
+                note="Existing containers keep mounting the old path; move the "
+                "files, edit it in Raw TOML, then recreate oduflow-db and "
+                "Traefik.",
+            ),
+            Field(
                 "overlay_threshold_mb",
                 "int",
                 "Overlay threshold (MB)",

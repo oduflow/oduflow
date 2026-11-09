@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Configurable config directory (`[storage].etc_dir`)** — the directory
+  holding `postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/`
+  can now be set explicitly, exactly like `[storage].data_dir`. Its default is
+  the directory of the `oduflow.toml` that actually loaded (unchanged for both
+  standard locations, `/etc/oduflow` and `~/.oduflow/conf`), so pointing
+  `ODUFLOW_TOML` at a file relocates the config directory with it. This is the
+  fix for Docker-out-of-Docker deployments: the host daemon resolves every
+  bind source, so a config dir that existed only inside the Oduflow container
+  was auto-created empty on the host and `oduflow-db` crash-looped with
+  `input in flex scanner failed at file "/etc/postgresql/postgresql.conf"`,
+  while Traefik watched an empty dynamic directory. The key is locked in the
+  Server settings console (existing containers keep mounting the old path);
+  startup refuses a config dir that does not exist or is not writable with a
+  single actionable line. **Upgrade note:** if your `ODUFLOW_TOML` points
+  outside `/etc/oduflow` and `~/.oduflow/conf`, the config directory moves
+  with it — startup now warns when the old location still holds
+  `license.key`, branding assets, `.instance_id` or tuned
+  `postgresql.conf`/`traefik-dynamic/` files; move them across (or set
+  `[storage].etc_dir` to the old path) or they are silently ignored.
+- **Docker-out-of-Docker mount diagnostic** — when Oduflow runs in a
+  container, startup and `GET /healthz` (`self_mounts`, the dashboard's
+  `MOUNTS` chip) check that both the data directory and the config directory
+  sit under a bind mount whose host path equals the container path. A named
+  volume, a differing host path or the container's writable layer is reported
+  as a warning naming the offending mount and the fix; it never degrades
+  `/healthz` on its own, and the public detail names no host paths.
+
+### Documentation
+
+- `docs/docker.md` states the Docker-out-of-Docker rule plainly and its
+  examples (including the Compose file, which used a named `oduflow_etc`
+  volume — exactly the trap) now bind both `/srv/oduflow` and `/etc/oduflow`
+  from the host at the same path.
+
 ## v1.89.1
 
 ### Bug Fixes

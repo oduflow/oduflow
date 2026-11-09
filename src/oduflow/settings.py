@@ -468,7 +468,9 @@ class Settings:
     repo_label: str = "oduflow.repo"
     image_label: str = "oduflow.image"
 
-    # Config location
+    # Config location. etc_dir holds files that containers bind-mount, so like
+    # base_data_dir it must be a path the Docker daemon can see; see
+    # resolve_etc_dir().
     etc_dir: str = ""
     toml_path: str = ""
 
@@ -1015,7 +1017,7 @@ class Settings:
             agent.get("opencode_provider", {}), opencode_model
         )
 
-        etc_dir = _resolve_etc_dir()
+        etc_dir = resolve_etc_dir(str(storage.get("etc_dir", "")).strip(), path)
         base_data_dir = _resolve_data_dir(storage.get("data_dir", ""))
 
         # Parse teams
@@ -1427,11 +1429,113 @@ def find_toml() -> str:
     )
 
 
+def resolve_etc_dir(explicit: str, toml_path: str) -> str:
+    """Resolve the config directory: explicit > directory of the loaded TOML.
+
+    The config dir holds files that get bind-mounted into containers
+    (``postgresql.conf``, ``postgresql-prod.conf``, ``traefik-dynamic/``). The
+    Docker daemon resolves a bind source on the *host*, so when Oduflow runs in
+    a container the dir must be a path the daemon can see too — which is why it
+    is configurable, exactly like ``[storage].data_dir``.
+
+    With nothing configured it is the directory of the ``oduflow.toml`` that
+    actually loaded. For both lookup locations of :func:`find_toml` that is the
+    same answer the old writability probe gave (``/etc/oduflow`` or
+    ``~/.oduflow/conf``), so existing installations are unaffected; and setting
+    ``ODUFLOW_TOML`` to a daemon-visible path relocates the whole config dir on
+    its own. Without a TOML path at all (nothing loaded yet) it falls back to
+    the first-run probe that bootstrap uses to place a new ``oduflow.toml``.
+    """
+    if explicit:
+        return explicit
+    if toml_path:
+        return os.path.dirname(os.path.abspath(toml_path))
+    return _resolve_etc_dir()
+
+
+def validate_etc_dir(etc_dir: str) -> None:
+    """Fail early when the config dir is unusable.
+
+    Oduflow generates ``postgresql.conf`` and Traefik's dynamic config into
+    it, and the containers mount those paths, so a missing or read-only dir
+    would surface much later as a crash-looping ``oduflow-db``. Raises
+    ValueError with the fix spelled out.
+    """
+    if not os.path.isdir(etc_dir):
+        raise ValueError(
+            f"Config directory {etc_dir} does not exist. Create it, or point "
+            "[storage].etc_dir (or ODUFLOW_TOML) at an existing directory."
+        )
+    if not os.access(etc_dir, os.W_OK):
+        raise ValueError(
+            f"Config directory {etc_dir} is not writable by this user. Oduflow "
+            "generates postgresql.conf and Traefik's dynamic config there; fix "
+            "its permissions or set [storage].etc_dir to a writable directory."
+        )
+
+
+# Files and directories the config dir owns. Listed so an upgrade that moves
+# the dir can say what it left behind.
+_ETC_DIR_ARTIFACTS: tuple[str, ...] = (
+    "license.key",
+    "postgresql.conf",
+    "postgresql-prod.conf",
+    "traefik-dynamic",
+    "branding",
+    ".instance_id",
+)
+
+
+def warn_if_legacy_etc_dir(etc_dir: str) -> list[str]:
+    """Warn when the pre-``etc_dir`` location still holds config files.
+
+    Until the config dir became configurable it was *always* the writability
+    probe's answer (``/etc/oduflow`` or ``~/.oduflow/conf``), no matter where
+    ``oduflow.toml`` lived. An installation that points ``ODUFLOW_TOML``
+    elsewhere therefore moves its config dir on upgrade, which would otherwise
+    silently orphan ``license.key`` (the instance reads as unlicensed), the
+    branding assets, the telemetry instance id and any hand-tuned
+    ``postgresql.conf`` or Traefik drop-in. Returns the orphaned names; never
+    raises.
+    """
+    try:
+        legacy = _resolve_etc_dir()
+        if os.path.abspath(legacy) == os.path.abspath(etc_dir):
+            return []
+        orphaned = [
+            name
+            for name in _ETC_DIR_ARTIFACTS
+            if os.path.exists(os.path.join(legacy, name))
+            and not os.path.exists(os.path.join(etc_dir, name))
+        ]
+    except OSError:
+        return []
+    if orphaned:
+        logger.warning(
+            "Config directory is %s, but %s still holds %s from an earlier "
+            "Oduflow version — those files are now ignored (the license reads "
+            "as unlicensed, PostgreSQL/Traefik tuning is regenerated). Move "
+            'them into %s, or set [storage].etc_dir = "%s".',
+            etc_dir,
+            legacy,
+            ", ".join(orphaned),
+            etc_dir,
+            legacy,
+        )
+    return orphaned
+
+
 _cached_etc_dir: str | None = None
 
 
 def _resolve_etc_dir() -> str:
-    """Resolve etc directory: /etc/oduflow or ~/.oduflow/conf (cached)."""
+    """First-run default for the config dir: /etc/oduflow or ~/.oduflow/conf.
+
+    Used only when no ``oduflow.toml`` has been loaded yet — by the bootstrap
+    that writes the first config, and as the last resort of
+    :func:`resolve_etc_dir`. Once a config exists, its own directory is the
+    config dir (cached, probing ``os.access`` once).
+    """
     global _cached_etc_dir
     if _cached_etc_dir is not None:
         return _cached_etc_dir
