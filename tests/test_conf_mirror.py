@@ -131,6 +131,12 @@ class TestTraefikDynamicMirror:
             f.write("http: {}\n")
         with open(os.path.join(source_dir, "custom.yml"), "w") as f:
             f.write("http:\n  routers: {}\n")
+        os.chmod(os.path.join(source_dir, "custom.yml"), 0o644)
+        # A drop-in may carry secrets (basic-auth hashes); it used to be
+        # bind-mounted with its own mode, so the mirror must not widen it.
+        with open(os.path.join(source_dir, "secret.yml"), "w") as f:
+            f.write("http:\n  middlewares: {}\n")
+        os.chmod(os.path.join(source_dir, "secret.yml"), 0o600)
         os.mkdir(os.path.join(source_dir, "notes"))  # directories are skipped
 
         mirror_dir = system_ops.sync_traefik_dynamic_mirror(settings)
@@ -138,18 +144,26 @@ class TestTraefikDynamicMirror:
         assert mirror_dir == os.path.join(
             settings.base_data_dir, "conf-mirror", "traefik-dynamic"
         )
-        assert sorted(os.listdir(mirror_dir)) == ["custom.yml", "oduflow.yml"]
+        assert sorted(os.listdir(mirror_dir)) == [
+            "custom.yml",
+            "oduflow.yml",
+            "secret.yml",
+        ]
         assert open(os.path.join(mirror_dir, "custom.yml")).read() == (
             "http:\n  routers: {}\n"
         )
         assert os.stat(os.path.join(mirror_dir, "custom.yml")).st_mode & 0o777 == (
             0o644
         )
+        assert os.stat(os.path.join(mirror_dir, "secret.yml")).st_mode & 0o777 == (
+            0o600
+        )
 
         # An operator drop-in removed from the source disappears from the
         # mirror on the next sync; nothing lingers to keep routing a deleted
         # host.
         os.remove(os.path.join(source_dir, "custom.yml"))
+        os.remove(os.path.join(source_dir, "secret.yml"))
         system_ops.sync_traefik_dynamic_mirror(settings)
         assert os.listdir(mirror_dir) == ["oduflow.yml"]
 
@@ -207,6 +221,25 @@ class TestDevPgContainer:
         assert kwargs["volumes"][pinned.shared_db_volume]["bind"] == (
             "/var/lib/postgresql/data"
         )
+
+    def test_recreate_reattaches_the_team_networks(self, settings):
+        # A replacement container joins only the shared network, while every
+        # running environment reaches PostgreSQL over its team network. The
+        # repair also fires from paths that do not run init_system afterwards
+        # (init_template via `oduflow init-template`), so it reattaches itself.
+        source = _dev_conf(settings)
+        old = _existing(
+            [{"Destination": PG_MOUNT, "Source": "/etc/oduflow/postgresql.conf"}]
+        )
+        client = MagicMock()
+        client.containers.get.return_value = old
+        with (
+            patch.object(system_ops, "_resolve_conf", return_value=source),
+            patch.object(system_ops, "ensure_team_network") as ensure_net,
+        ):
+            system_ops._ensure_pg_container(client, settings, {})
+
+        assert [call.args[2].team_id for call in ensure_net.call_args_list] == ["1"]
 
     def test_container_on_the_mirror_is_kept(self, settings):
         source = _dev_conf(settings)
@@ -440,6 +473,28 @@ class TestSelfMountCheck:
         result = health._check_self_mounts(client, settings)
         assert result["status"] == "warn"
         assert "writable layer" in result["detail"]
+
+    def test_identifies_itself_by_container_id_when_the_hostname_does_not(
+        self, settings, monkeypatch
+    ):
+        # Compose sets the hostname to the *service* name and names the
+        # container <project>-oduflow-1, so neither resolves to a container.
+        # The ID read from /proc does, which is what keeps the check from
+        # silently going "off" on the deployment the docs recommend.
+        cid = "a" * 64
+        monkeypatch.setenv("HOSTNAME", "oduflow")
+        client = _self_client(
+            [
+                {
+                    "Type": "bind",
+                    "Source": settings.base_data_dir,
+                    "Destination": settings.base_data_dir,
+                }
+            ],
+            hostname=cid,
+        )
+        with patch.object(health, "_own_container_id", return_value=cid):
+            assert health._check_self_mounts(client, settings)["status"] == "ok"
 
     def test_off_when_own_container_is_not_found(self, settings):
         client = _self_client([], hostname="someone-else")

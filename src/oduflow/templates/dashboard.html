@@ -11609,7 +11609,9 @@ async function loadHealth() {
     if (!el || !data.checks) return;
     var labels = {
       dev_pg: 'PG DEV', prod_pg: 'PG PROD', traefik: 'TRAEFIK', s3: 'S3', disk: 'DISK',
-      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK'
+      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK',
+      // Docker-out-of-Docker only: 'off' (and therefore hidden) elsewhere.
+      self_mounts: 'MOUNTS'
     };
     el.innerHTML = Object.keys(labels).map(function(key) {
       var check = data.checks[key];

@@ -29,8 +29,9 @@ bind-mounted from it are mirrored into `<data_dir>/conf-mirror/` first, so it
 can be a named volume or any host path.
 
 When Oduflow runs in a container it checks this at startup and on
-`GET /healthz` (`self_mounts`): a data directory the daemon cannot see is logged
-as a warning that names the offending mount and the fix.
+`GET /healthz` (`self_mounts`, also shown as the dashboard's `MOUNTS` chip): a
+data directory the daemon cannot see is logged as a warning that names the
+offending mount and the fix.
 
 ## Build
 

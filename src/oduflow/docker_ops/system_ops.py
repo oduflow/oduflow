@@ -513,15 +513,18 @@ def _mirror_pg_conf(settings: Settings, source: str, name: str, container: str) 
     The copy carries a header naming the file to edit instead. The mirror is
     rewritten in place (not replaced) so a container that already has it
     bind-mounted keeps seeing the current inode, and it is world-readable for
-    the PostgreSQL container user, like every other non-secret mount.
+    the PostgreSQL container user, like every other non-secret mount. The body
+    is copied byte for byte: PostgreSQL — not Oduflow — is the only reader of
+    this file, so a decode/re-encode round trip must not rewrite anything it
+    would have parsed.
     """
     mirror_dir = _conf_mirror_dir(settings)
     _ensure_public_dir(mirror_dir)
-    with open(source, encoding="utf-8", errors="replace") as f:
+    with open(source, "rb") as f:
         content = f.read()
     dest = os.path.join(mirror_dir, name)
-    with open(dest, "w", encoding="utf-8") as f:
-        f.write(_pg_conf_mirror_header(source, container))
+    with open(dest, "wb") as f:
+        f.write(_pg_conf_mirror_header(source, container).encode("utf-8"))
         f.write(content)
     os.chmod(dest, 0o644)
     return dest
@@ -563,24 +566,49 @@ def sync_traefik_dynamic_mirror(settings: Settings) -> str:
     mirror is exactly the operator directory as of this call. Traefik watches
     the mirror; drop-ins are therefore picked up when Oduflow next syncs it
     (server start), not the instant they are written. Returns the mirror path.
+
+    Each copy keeps its source's permission bits: a drop-in may carry secrets
+    (basic-auth hashes, forward-auth headers) and used to be bind-mounted with
+    its own mode, so the mirror must not publish a 0600 original as 0644.
     """
     source_dir = _traefik_dynamic_source_dir(settings)
     mirror_dir = _traefik_dynamic_mirror_dir(settings)
     _ensure_public_dir(_conf_mirror_dir(settings))
     _ensure_public_dir(mirror_dir)
     wanted: set[str] = set()
-    for entry in sorted(os.scandir(source_dir), key=lambda e: e.name):
-        if not entry.is_file(follow_symlinks=True):
-            continue
+    with os.scandir(source_dir) as entries:
+        sources = sorted(
+            (e for e in entries if e.is_file(follow_symlinks=True)),
+            key=lambda e: e.name,
+        )
+    for entry in sources:
         wanted.add(entry.name)
         dest = os.path.join(mirror_dir, entry.name)
         with open(entry.path, "rb") as src, open(dest, "wb") as dst:
             shutil.copyfileobj(src, dst)
-        os.chmod(dest, 0o644)
-    for entry in os.scandir(mirror_dir):
-        if entry.name not in wanted and entry.is_file(follow_symlinks=False):
-            os.remove(entry.path)
+        os.chmod(dest, stat.S_IMODE(entry.stat().st_mode))
+    with os.scandir(mirror_dir) as entries:
+        stale = [
+            e.path
+            for e in entries
+            if e.name not in wanted and e.is_file(follow_symlinks=False)
+        ]
+    for path in stale:
+        os.remove(path)
     return mirror_dir
+
+
+def _container_mounts(container: Any) -> list[dict[str, Any]] | None:
+    """The container's mount dicts, or None when the list cannot be read.
+
+    "Unreadable" stays distinct from "empty": a caller must never recreate a
+    container on the strength of a mock or a truncated inspect.
+    """
+    attrs = getattr(container, "attrs", None)
+    mounts = attrs.get("Mounts") if isinstance(attrs, dict) else None
+    if not isinstance(mounts, list):
+        return None
+    return [mount for mount in mounts if isinstance(mount, dict)]
 
 
 def _mount_source(container: Any, destination: str) -> str | None:
@@ -590,12 +618,8 @@ def _mount_source(container: Any, destination: str) -> str | None:
     callers that treat "unknown" and "absent" alike never recreate a container
     on the strength of a mock or a truncated inspect.
     """
-    attrs = getattr(container, "attrs", None) or {}
-    mounts = attrs.get("Mounts") if isinstance(attrs, dict) else None
-    if not isinstance(mounts, list):
-        return None
-    for mount in mounts:
-        if isinstance(mount, dict) and mount.get("Destination") == destination:
+    for mount in _container_mounts(container) or ():
+        if mount.get("Destination") == destination:
             source = mount.get("Source")
             return str(source) if source else None
     return None
@@ -608,8 +632,7 @@ def _mount_source_differs(container: Any, destination: str, wanted: str) -> bool
     Inspect may report the source as given or resolved, so both spellings of
     *wanted* are accepted.
     """
-    attrs = getattr(container, "attrs", None) or {}
-    if not isinstance(attrs, dict) or not isinstance(attrs.get("Mounts"), list):
+    if _container_mounts(container) is None:
         return False
     current = _mount_source(container, destination)
     if current is None:
@@ -2299,6 +2322,7 @@ def _ensure_pg_container(
         os.chmod(mount_parent, 0o755)
     conf_mirror = sync_dev_pg_conf_mirror(settings)
     image = settings.postgres_image
+    recreated = False
     try:
         db_container = client.containers.get(settings.shared_db_container)
         if not _mount_source_differs(db_container, _PG_CONF_MOUNT, conf_mirror):
@@ -2306,6 +2330,7 @@ def _ensure_pg_container(
                 db_container.start()
             return
         image = (db_container.attrs.get("Config") or {}).get("Image") or image
+        recreated = True
         logger.warning(
             "Recreating %s: it mounts %s from %s, which the Docker daemon cannot "
             "read when Oduflow runs in a container; switching to the mirror %s "
@@ -2344,6 +2369,22 @@ def _ensure_pg_container(
         restart_policy={"Name": "unless-stopped"},
     )
     logger.info("Created container %s", settings.shared_db_container)
+    if recreated:
+        # A replacement container joins only the shared network, so every team
+        # network attachment made by ensure_team_network is gone — and every
+        # running Odoo environment reaches PostgreSQL over its team network.
+        # init_system reattaches right after, but the mount repair also fires
+        # from paths that do not (init_template via `oduflow init-template`),
+        # so reattach here. Idempotent and cheap.
+        for team in settings.teams.values():
+            try:
+                ensure_team_network(client, settings, team)
+            except Exception:
+                logger.exception(
+                    "Could not reattach %s to the network of team %s",
+                    settings.shared_db_container,
+                    team.team_id,
+                )
 
 
 def _prod_pg_conf_path(settings: Settings) -> str:

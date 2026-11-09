@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import socket
 import threading
@@ -25,6 +26,9 @@ logger = logging.getLogger("oduflow")
 
 _CACHE_TTL_SECONDS = 15
 DISK_WARN_PERCENT = 85
+# Container ID as it appears in this process' own /proc (see _own_container_id).
+_MOUNTINFO_ID_RE = re.compile(r"/containers/([0-9a-f]{64})")
+_CGROUP_ID_RE = re.compile(r"\b([0-9a-f]{64})\b")
 
 _cache_lock = threading.Lock()
 _cache: dict[str, Any] = {"at": 0.0, "result": None}
@@ -156,17 +160,45 @@ def _check_overlays(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _own_container(client: Any) -> Any | None:
-    """The container this process runs in, or None when it cannot be identified.
+def _own_container_id() -> str:
+    """This container's full ID read from ``/proc``, or "" when not found.
 
-    Docker names a container's hostname after its short ID unless ``--hostname``
-    overrides it; the override is the only case this misses.
+    The hostname is only the container ID when nothing overrode it, and
+    Compose always overrides it with the *service* name — which is not the
+    container's name either (``<project>-<service>-1``). So the ID is taken
+    from the runtime's own bookkeeping: the daemon bind-mounts
+    ``/var/lib/docker/containers/<id>/{hostname,hosts,resolv.conf}`` into every
+    container, which shows up in ``/proc/self/mountinfo``; cgroup v1 hosts name
+    the ID in ``/proc/self/cgroup``.
     """
+    for path, pattern in (
+        ("/proc/self/mountinfo", _MOUNTINFO_ID_RE),
+        ("/proc/self/cgroup", _CGROUP_ID_RE),
+    ):
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            continue
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _own_container(client: Any) -> Any | None:
+    """The container this process runs in, or None when it cannot be identified."""
     import docker
 
-    for name in (os.environ.get("HOSTNAME", ""), socket.gethostname()):
-        if not name:
+    seen: set[str] = set()
+    for name in (
+        _own_container_id(),
+        os.environ.get("HOSTNAME", ""),
+        socket.gethostname(),
+    ):
+        if not name or name in seen:
             continue
+        seen.add(name)
         try:
             return client.containers.get(name)
         except docker.errors.NotFound:
@@ -199,7 +231,7 @@ def _self_mount_verdict(client: Any, settings: Settings) -> tuple[str, str, str]
     except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
         return "off", "cannot inspect own container", str(exc)[:200]
     if me is None:
-        return "off", "own container not found by hostname; mounts not verified", ""
+        return "off", "own container could not be identified; mounts not verified", ""
     attrs = getattr(me, "attrs", None) or {}
     mounts = attrs.get("Mounts") if isinstance(attrs, dict) else None
     if not isinstance(mounts, list):
