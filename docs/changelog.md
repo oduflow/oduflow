@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.90.0
 
 ### Features
 
@@ -22,21 +22,42 @@
   with it — startup now warns when the old location still holds
   `license.key`, branding assets, `.instance_id` or tuned
   `postgresql.conf`/`traefik-dynamic/` files; move them across (or set
-  `[storage].etc_dir` to the old path) or they are silently ignored.
+  `[storage].etc_dir` to the old path) or they are silently ignored. (#352)
 - **Docker-out-of-Docker mount diagnostic** — when Oduflow runs in a
   container, startup and `GET /healthz` (`self_mounts`, the dashboard's
   `MOUNTS` chip) check that both the data directory and the config directory
   sit under a bind mount whose host path equals the container path. A named
   volume, a differing host path or the container's writable layer is reported
   as a warning naming the offending mount and the fix; it never degrades
-  `/healthz` on its own, and the public detail names no host paths.
+  `/healthz` on its own, and the public detail names no host paths. (#352)
+- **Environment-scoped sanitize script subfolders** — in both sanitize tiers
+  (team-level `{data_dir}/odoo_sanitize/` and repo-level
+  `.oduflow/odoo_sanitize/`), a subdirectory named after an environment now
+  runs after that tier's top-level scripts, so environments cloned from the
+  same template can be sanitized differently — a staff debugging environment
+  keeping neutralized documents where a contractor environment ships no
+  transaction history at all. Top-level files still run for every
+  environment; directories starting with `_` or `.` never match, so shared
+  assets stay shareable; environment names containing `/` match their
+  dash-folded folder name. (#345)
+
+### Bug Fixes
+
+- **The Docker image no longer accumulates zombie processes** — running as
+  PID 1, Oduflow never reaped children it did not spawn itself, so
+  daemonized `fuse-overlayfs` mount helpers and detached
+  `git maintenance run --auto` processes piled up as zombies (about ten an
+  hour on a live server). The image now starts under `tini`, which reaps
+  orphans and forwards signals. Host and systemd installations were never
+  affected. Takes effect once a container is recreated from the new image.
+  (#348)
 
 ### Documentation
 
 - `docs/docker.md` states the Docker-out-of-Docker rule plainly and its
   examples (including the Compose file, which used a named `oduflow_etc`
   volume — exactly the trap) now bind both `/srv/oduflow` and `/etc/oduflow`
-  from the host at the same path.
+  from the host at the same path. (#352)
 
 ## v1.89.1
 
