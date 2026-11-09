@@ -146,7 +146,7 @@ def plan_production(
         # cannot tell whether the master password comes from the team's base
         # conf chain, so the check belongs where that chain is readable.
         production_ops.validate_db_manager_overrides(
-            team, target.name, desired["odoo_conf"]
+            settings, team, target.name, desired["odoo_conf"]
         )
     except ValueError as exc:
         return [("conflict", str(exc))]

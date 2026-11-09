@@ -176,6 +176,10 @@ def _get_settings() -> Settings:
             settings = Settings.from_raw(raw, toml_path)
             settings_module.TRACE = settings.trace
             settings.validate()
+            # The containers mount files Oduflow generates into the config
+            # dir, so an unusable dir is an operator mistake worth one clear
+            # line now rather than a crash-looping oduflow-db later.
+            settings_module.validate_etc_dir(settings.etc_dir)
         # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here
         # too. TypeError/AttributeError/KeyError/OverflowError cover wrong-typed
         # TOML values (a list where an int belongs, a scalar where a table
@@ -6639,6 +6643,12 @@ def _ensure_initialized(settings: Settings) -> None:
     _copy_bundled_configs()
     prereqs.ensure_fuse_overlayfs()
     prereqs.ensure_rsync()
+    # Before any bind mount is handed to the daemon: when Oduflow itself runs in
+    # a container, every mount source below depends on base_data_dir and
+    # etc_dir being the same path on the host.
+    from oduflow import health
+
+    health.warn_if_dirs_unreachable(settings)
     system_ops.init_system(settings)
 
     # Snapshot-before-deploy hook (no-op while [backup] is unconfigured).

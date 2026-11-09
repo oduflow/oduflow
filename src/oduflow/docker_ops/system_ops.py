@@ -87,12 +87,6 @@ def _get_oduflow_version() -> str:
         return "dev"
 
 
-def _get_etc_dir() -> pathlib.Path:
-    from oduflow.settings import _resolve_etc_dir
-
-    return pathlib.Path(_resolve_etc_dir())
-
-
 def _file_size_mb(path: str) -> float:
     """Return file size in MB, or 0.0 if file does not exist."""
     try:
@@ -436,9 +430,14 @@ def _read_template_manifest_from_db(
     }
 
 
-def _resolve_conf(name: str) -> pathlib.Path:
-    """Return /etc/oduflow/{name} if present, otherwise the bundled copy."""
-    etc_path = _get_etc_dir() / name
+def _resolve_conf(name: str, settings: Settings) -> pathlib.Path:
+    """Return ``{settings.etc_dir}/{name}`` if present, otherwise the bundled copy.
+
+    Always the Settings value, never a module-level guess: this path is handed
+    to the Docker daemon as a bind source, and ``[storage].etc_dir`` is how an
+    operator makes it one the daemon can see.
+    """
+    etc_path = pathlib.Path(settings.etc_dir) / name
     if etc_path.is_file():
         return etc_path
     bundled = _PACKAGE_ROOT / "templates" / name
@@ -596,9 +595,10 @@ def _ensure_traefik(client: DockerClient, settings: Settings) -> None:
             logger.info("Created volume %s", settings.traefik_acme_volume)
 
     # Host path for the dynamic config, bind-mounted into the container below.
-    # Use the resolved config dir (``/etc/oduflow`` when writable, else
-    # ``~/.oduflow/conf``) so it works without root on macOS and lands under a
-    # path Docker Desktop shares — same placement as postgresql.conf. We mount a
+    # Use the config dir (``[storage].etc_dir``, default: the loaded
+    # oduflow.toml's directory) so it works without root on macOS and the
+    # operator can place it where the Docker daemon sees it — same placement
+    # as postgresql.conf. We mount a
     # whole directory (not a single file) so operators can drop their own
     # ``*.yml`` dynamic-config files alongside Oduflow's generated ``oduflow.yml``
     # (Traefik watches the directory); Oduflow only ever writes/overwrites
@@ -2132,7 +2132,7 @@ def _ensure_pg_container(
                 "bind": "/var/lib/postgresql/data",
                 "mode": "rw",
             },
-            str(_resolve_conf("postgresql.conf")): {
+            str(_resolve_conf("postgresql.conf", settings)): {
                 "bind": "/etc/postgresql/postgresql.conf",
                 "mode": "ro",
             },

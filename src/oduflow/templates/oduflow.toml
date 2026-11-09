@@ -68,6 +68,7 @@ image = "postgres:16"
 # ── Storage ───────────────────────────────────────────
 [storage]
 # data_dir = "/srv/oduflow"       # default: /srv/oduflow or ~/.oduflow/data
+# etc_dir = "/etc/oduflow"        # default: the directory of this file
 overlay_threshold_mb = 50         # filestore size limit for overlay vs copy
 
 # ── Lifecycle ─────────────────────────────────────────

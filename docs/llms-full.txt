@@ -885,7 +885,11 @@ All settings are configured via a TOML file. Oduflow searches for `oduflow.toml`
 
 If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
-`~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
+`~/.oduflow/conf/oduflow.toml`. The directory the loaded `oduflow.toml` lives
+in becomes the **config directory** — where `postgresql.conf`,
+`postgresql-prod.conf`, `traefik-dynamic/` and `license.key` live — unless
+`[storage].etc_dir` overrides it. Pointing `ODUFLOW_TOML` at a file therefore
+relocates the whole config directory with it. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`,
 `[team.1].ui_password` and `[admin].password`. The file is created with mode
 `0600` and the generated secrets are never printed to the log — read them from
@@ -947,6 +951,7 @@ image = "postgres:16"       # PostgreSQL Docker image (15-17; a newer major upgr
 # ── Storage ───────────────────────────────────────────
 [storage]
 # data_dir = "/srv/oduflow"         # base directory for all data (default: /srv/oduflow or ~/.oduflow/data)
+# etc_dir = "/etc/oduflow"          # config directory (default: the directory of the loaded oduflow.toml)
 overlay_threshold_mb = 50            # template filestore size threshold (MB) — larger uses fuse-overlayfs, smaller uses copy
 
 # ── Lifecycle ─────────────────────────────────────────
@@ -1069,6 +1074,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | Key | Default | Description |
 |---|---|---|
 | `[storage].data_dir` | `/srv/oduflow` or `~/.oduflow/data` | Base directory for all data. Team data directories are `team_{ID}` subdirectories inside |
+| `[storage].etc_dir` | directory of the loaded `oduflow.toml` | Config directory: `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, `license.key`, `odoo.conf`. The PostgreSQL and Traefik containers bind-mount files from here, so when Oduflow itself runs in Docker it must be a host path mounted at the same path inside the container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)). Must exist and be writable at startup. Locked: existing containers keep mounting the old path, so move the files, edit it in Raw TOML, then recreate `oduflow-db` and Traefik |
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
@@ -1185,14 +1191,21 @@ files take **priority** over the bundled defaults — edit them to customize
 PostgreSQL tuning or Odoo settings globally:
 
 ```
-/etc/oduflow/             (or ~/.oduflow/conf/)
+/etc/oduflow/             (or ~/.oduflow/conf/; see [storage].etc_dir)
   oduflow.toml            ← main configuration file
   postgresql.conf         ← dev PostgreSQL tuning (used by oduflow-db)
   postgresql-prod.conf    ← production PostgreSQL tuning (created lazily)
   odoo.conf               ← custom Odoo defaults (used by new environments)
   license.key             ← license file (optional)
-  traefik/                ← Traefik dynamic configuration (auto-generated)
+  traefik-dynamic/        ← Traefik dynamic configuration (auto-generated + drop-ins)
 ```
+
+`postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/` are
+**bind-mounted** into `oduflow-db`, the production PostgreSQL container and
+Traefik. The Docker daemon resolves a bind source on the host, so this
+directory must be one the daemon can see — on a native install it always is;
+in a Docker-out-of-Docker deployment read
+[the same-path rule](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host).
 
 `pg_hba.conf` remains in the PostgreSQL data volume rather than this config
 directory. On every startup Oduflow reads the active file reported by
@@ -9587,8 +9600,11 @@ For anything the simple `host → url` form can't express — middleware, header
 rewrites, custom TLS options, sticky sessions, multiple services — Oduflow
 mounts a **dynamic-config directory** that Traefik watches:
 
-- On the host it is `<config-dir>/traefik-dynamic/` — `/etc/oduflow/traefik-dynamic/`
-  when writable, otherwise `~/.oduflow/conf/traefik-dynamic/`.
+- On the host it is `<config-dir>/traefik-dynamic/` — the config dir is the
+  directory of the loaded `oduflow.toml` (`/etc/oduflow` or `~/.oduflow/conf`)
+  unless `[storage].etc_dir` says otherwise. When Oduflow itself runs in Docker
+  that directory must be a host path mounted at the same path inside the
+  container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)).
 - Oduflow writes and overwrites only `oduflow.yml` there (its own routers). Any
   **other** `*.yml`/`*.yaml`/`*.toml` file you place in that directory is loaded
   by Traefik and **never touched by Oduflow** — it survives restarts and
@@ -10713,6 +10729,46 @@ console session cookie; every POST must be same-origin.
 
 Oduflow can run as a Docker container. Since it manages other Docker containers (Odoo environments, PostgreSQL, etc.), it uses the **Docker-out-of-Docker** pattern — the host's Docker socket is mounted into the container.
 
+## The one rule: both directories must be the same path on the host
+
+Oduflow creates the containers it manages through the **host** daemon, and
+every bind mount it asks for is resolved by that daemon, on the host — not
+inside the Oduflow container. Two directories are handed out as bind sources:
+
+- the **data directory** (`[storage].data_dir`, default `/srv/oduflow`):
+  PostgreSQL tablespaces, the dump exchange dir, filestores, WAL-G;
+- the **config directory** (`[storage].etc_dir`, default: the directory of
+  the loaded `oduflow.toml`, i.e. `/etc/oduflow`): `postgresql.conf`,
+  `postgresql-prod.conf` and `traefik-dynamic/`.
+
+If either path exists only inside the Oduflow container — a named volume, a
+bind from a different host path, or the container's own writable layer — the
+daemon looks for it on the host, finds nothing, and silently auto-creates an
+**empty directory** in its place. `oduflow-db` then crash-loops with
+`input in flex scanner failed at file "/etc/postgresql/postgresql.conf"`
+(PostgreSQL is parsing a directory), Traefik watches an empty dynamic
+directory and loads no per-team routes, and filestores land in the void.
+
+So mount a **host directory at the same path on both sides**, for both:
+
+```
+-v /srv/oduflow:/srv/oduflow
+-v /etc/oduflow:/etc/oduflow
+```
+
+On Docker Desktop (macOS/Windows) the paths must also be under a shared
+location — for example `-v $HOME/oduflow:$HOME/oduflow` together with
+`[storage] data_dir = "/Users/<you>/oduflow"` and
+`etc_dir = "/Users/<you>/oduflow/etc"` in `oduflow.toml` (or simply
+`ODUFLOW_TOML=/Users/<you>/oduflow/etc/oduflow.toml`, which moves the config
+directory with the file).
+
+When Oduflow runs in a container it checks this at startup and on
+`GET /healthz` (`self_mounts`, shown as the dashboard's `MOUNTS` chip): a
+directory the daemon cannot see is logged as a warning that names the
+offending mount and the fix. The check is informational — it never degrades
+`/healthz` on its own.
+
 ## Build
 
 ```bash
@@ -10728,7 +10784,8 @@ docker run -d \
   --name oduflow \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
+  -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
 
@@ -10740,7 +10797,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
@@ -10750,8 +10807,8 @@ docker run -d \
 | Mount | Purpose |
 |---|---|
 | `/var/run/docker.sock` | **Required.** Gives Oduflow access to the host Docker daemon to manage Odoo containers, PostgreSQL, Traefik, etc. |
-| `/srv/oduflow` | Oduflow data directory. Contains team directories with workspaces, templates, port registry. Use a named volume or a host path to persist data across container restarts. |
-| `/etc/oduflow` | System configuration directory. Contains `oduflow.toml`, license key, `postgresql.conf`, default `odoo.conf`, and other configuration files. Mount to persist configuration across container restarts. |
+| `/srv/oduflow` | Oduflow data directory. Contains team directories with workspaces, templates, port registry. **Must be a host directory bound at the same path** (see the rule above) — not a named volume. |
+| `/etc/oduflow` | Config directory. Contains `oduflow.toml`, license key, `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, default `odoo.conf`. **Must be a host directory bound at the same path** too: `oduflow-db` and Traefik bind-mount files from it. |
 
 ## Networking
 
@@ -10761,7 +10818,7 @@ The Oduflow container must be on the same Docker network as the containers it cr
 # 1. Start Oduflow (Docker image defaults to HTTP mode)
 docker run -d --name oduflow -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   -v /etc/oduflow:/etc/oduflow \
   oduist/oduflow
 
@@ -10792,11 +10849,16 @@ docker exec oduflow oduflow import-template https://my-odoo.example.com master_p
 
 ## Configuration
 
-Oduflow reads its configuration from `oduflow.toml`. When running in Docker, mount the config directory:
+Oduflow reads its configuration from `oduflow.toml`. When running in Docker, mount the config directory from the host, at the same path:
 
 ```bash
 -v /etc/oduflow:/etc/oduflow
 ```
+
+The directory of the loaded `oduflow.toml` is the config directory
+(`[storage].etc_dir` overrides it); `postgresql.conf` and Traefik's dynamic
+config are generated into it and bind-mounted into their containers, which
+is why it has to be a host path and not a named volume.
 
 Key configuration settings in `oduflow.toml`:
 
@@ -10827,15 +10889,14 @@ services:
       - "8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - oduflow_data:/srv/oduflow
-      - oduflow_etc:/etc/oduflow
+      # Host directories, same path on both sides: the host daemon resolves
+      # every mount Oduflow creates under them. Named volumes here break
+      # oduflow-db, Traefik and every environment (see the rule above).
+      - /srv/oduflow:/srv/oduflow
+      - /etc/oduflow:/etc/oduflow
     restart: unless-stopped
     networks:
       - oduflow-net
-
-volumes:
-  oduflow_data:
-  oduflow_etc:
 
 networks:
   oduflow-net:
@@ -10865,7 +10926,8 @@ docker run -d \
   --cap-add SYS_ADMIN \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
+  -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
 
@@ -11728,7 +11790,7 @@ Existing perpetual keys have no expiration and remain recognized as perpetual.
 
 **Via CLI:**
 
-Copy the license file to `<config-dir>/license.key`. The config directory is usually `/etc/oduflow`; when that path is not writable, Oduflow uses `~/.oduflow/conf`. Oduflow reads the license automatically on startup.
+Copy the license file to `<config-dir>/license.key`. The config directory is the directory of the loaded `oduflow.toml` — usually `/etc/oduflow`, or `~/.oduflow/conf` on installs without root — unless `[storage].etc_dir` overrides it. Oduflow reads the license automatically on startup.
 
 **Via Web Dashboard:**
 
