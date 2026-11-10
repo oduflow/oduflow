@@ -66,6 +66,15 @@ class TestAutofillUiPasswords:
         assert "[team.1]" in out and "[team.2]" in out
         assert "# Web UI password" in out
 
+    def test_skips_teams_listed_in_keep(self):
+        from oduflow.server import _autofill_ui_passwords
+
+        src = '[team.1]\nui_password = ""\n[team."acme"]\nui_password = ""\n'
+        out, generated = _autofill_ui_passwords(src, keep={"1"})
+        assert len(generated) == 1
+        assert out.startswith('[team.1]\nui_password = ""\n')
+        assert f'ui_password = "{generated[0]}"' in out
+
     def test_noop_when_already_set(self):
         from oduflow.server import _autofill_ui_passwords
 

@@ -43,6 +43,63 @@ def secret_matches(stored: str, candidate: str) -> bool:
     return hmac.compare_digest(stored.encode("utf-8"), candidate.encode("utf-8"))
 
 
+# Secrets an environment variable may supply instead of oduflow.toml. A
+# non-empty variable wins over the file value; everything that reads or edits
+# the file (the Server settings console, ``oduflow admin``) keeps working on
+# the file and never sees the variable's value.
+_TEAM_ENV_KEYS = ("ui_password", "auth_token", "production_token")
+_GLOBAL_ENV_VARS: dict[tuple[str, ...], str] = {
+    ("admin", "password"): "ODUFLOW_ADMIN_PASSWORD",
+    ("backup", "access_key"): "ODUFLOW_BACKUP_ACCESS_KEY",
+    ("backup", "secret_key"): "ODUFLOW_BACKUP_SECRET_KEY",
+}
+
+# The console password unlocks every team's secrets.
+MIN_ADMIN_PASSWORD = 12
+
+
+def _team_env_slug(team_id: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "_", team_id.upper())
+
+
+def team_env_var(team_id: str, key: str) -> str:
+    """``[team.acme-dev] ui_password`` -> ``ODUFLOW_TEAM_ACME_DEV_UI_PASSWORD``."""
+    return f"ODUFLOW_TEAM_{_team_env_slug(team_id)}_{key.upper()}"
+
+
+def env_var_for(path: tuple[str, ...]) -> str | None:
+    """The variable that may replace the config value at ``path``, if any."""
+    if len(path) == 3 and path[0] == "team" and path[2] in _TEAM_ENV_KEYS:
+        return team_env_var(path[1], path[2])
+    return _GLOBAL_ENV_VARS.get(path)
+
+
+def env_value(path: tuple[str, ...]) -> str:
+    """The stripped value of ``path``'s variable; empty when unset or blank."""
+    var = env_var_for(path)
+    return os.environ.get(var, "").strip() if var else ""
+
+
+def _env_or(path: tuple[str, ...], file_value: object) -> str:
+    return env_value(path) or str(file_value)
+
+
+def env_overrides(raw: dict[str, Any]) -> list[tuple[tuple[str, ...], str]]:
+    """``(config path, variable)`` for each value of ``raw`` taken from the
+    environment. Names only: the values stay with whoever set them."""
+    paths: list[tuple[str, ...]] = []
+    teams = raw.get("team")
+    if isinstance(teams, dict):
+        for team_id in teams:
+            paths.extend(("team", str(team_id), key) for key in _TEAM_ENV_KEYS)
+    for path in _GLOBAL_ENV_VARS:
+        # The keys only ever replace a configured [backup]; they never enable it.
+        if path[0] == "backup" and not raw.get("backup"):
+            continue
+        paths.append(path)
+    return [(path, env_var_for(path) or "") for path in paths if env_value(path)]
+
+
 def _normalize_agent_image(value: object) -> str:
     image = str(value or "").strip() or DEFAULT_AGENT_IMAGE
     if image == _LEGACY_AGENT_IMAGE:
@@ -831,6 +888,24 @@ class Settings:
                     "Set a distinct [team.*] port_range for each team."
                 )
 
+        # Distinct team ids can fold to one variable name (acme-dev, acme_dev):
+        # refuse a variable that would silently apply to several teams.
+        by_slug: dict[str, list[str]] = {}
+        for team_id in self.teams:
+            by_slug.setdefault(_team_env_slug(team_id), []).append(team_id)
+        for ids in by_slug.values():
+            if len(ids) < 2:
+                continue
+            for key in _TEAM_ENV_KEYS:
+                var = team_env_var(ids[0], key)
+                if os.environ.get(var, "").strip():
+                    raise ValueError(
+                        f"{var} is ambiguous: teams "
+                        + ", ".join(f"'{i}'" for i in sorted(ids))
+                        + " all map to it. Rename a team or keep that "
+                        "secret in oduflow.toml."
+                    )
+
         # Validate uniqueness of auth tokens
         tokens = [t.auth_token for t in self.teams.values() if t.auth_token]
         if len(tokens) != len(set(tokens)):
@@ -858,6 +933,16 @@ class Settings:
         passwords = [t.ui_password for t in self.teams.values() if t.ui_password]
         if len(passwords) != len(set(passwords)):
             raise ValueError("Duplicate ui_password values across teams.")
+
+        # The console enforces this for passwords it writes; a variable bypasses
+        # the console, so check it here.
+        if env_value(("admin", "password")) and (
+            len(self.admin_password) < MIN_ADMIN_PASSWORD
+        ):
+            raise ValueError(
+                f"ODUFLOW_ADMIN_PASSWORD must be at least {MIN_ADMIN_PASSWORD} "
+                "characters."
+            )
 
         # The console credential unlocks every team's secrets, so it must never
         # double as a team credential that a team member already knows.
@@ -1083,9 +1168,16 @@ class Settings:
                 team_id=team_id,
                 hostname=hostname,
                 base_domain=base_domain,
-                auth_token=str(team_cfg.get("auth_token", "")),
-                production_token=str(team_cfg.get("production_token", "")),
-                ui_password=str(team_cfg.get("ui_password", "")),
+                auth_token=_env_or(
+                    ("team", team_id, "auth_token"), team_cfg.get("auth_token", "")
+                ),
+                production_token=_env_or(
+                    ("team", team_id, "production_token"),
+                    team_cfg.get("production_token", ""),
+                ),
+                ui_password=_env_or(
+                    ("team", team_id, "ui_password"), team_cfg.get("ui_password", "")
+                ),
                 port_range_start=port_start,
                 port_range_end=port_end,
                 data_dir=team_data_dir,
@@ -1146,7 +1238,9 @@ class Settings:
             agent_feedback=bool(server.get("agent_feedback", False)),
             allow_local_path=bool(server.get("allow_local_path", True)),
             allow_insecure_http=bool(server.get("allow_insecure_http", False)),
-            admin_password=str(admin.get("password", "")).strip(),
+            admin_password=_env_or(
+                ("admin", "password"), admin.get("password", "")
+            ).strip(),
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
             routing_tls=tls is not False,
@@ -1374,8 +1468,12 @@ def _parse_backup_section(backup_raw: dict[str, object]) -> BackupSettings | Non
     if not backup_raw:
         return None
     bucket = str(backup_raw.get("bucket", "")).strip()
-    access_key = str(backup_raw.get("access_key", "")).strip()
-    secret_key = str(backup_raw.get("secret_key", "")).strip()
+    access_key = _env_or(
+        ("backup", "access_key"), backup_raw.get("access_key", "")
+    ).strip()
+    secret_key = _env_or(
+        ("backup", "secret_key"), backup_raw.get("secret_key", "")
+    ).strip()
     if not (bucket and access_key and secret_key):
         raise ValueError(
             "[backup] section requires all of: bucket, access_key, secret_key "

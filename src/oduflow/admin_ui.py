@@ -38,7 +38,14 @@ from oduflow import branding, config_store, feedback, ui_totp
 from oduflow import config_schema as schema
 from oduflow.errors import BusyError, ConfigError, ConflictError, FlowError
 from oduflow.locking import LockManager
-from oduflow.settings import Settings, TeamSettings, secret_matches
+from oduflow.settings import (
+    Settings,
+    TeamSettings,
+    env_overrides,
+    env_value,
+    env_var_for,
+    secret_matches,
+)
 
 logger = logging.getLogger("oduflow")
 
@@ -343,6 +350,11 @@ def build_admin_routes(
             # None when the file does not even parse: the forms would show
             # empty values, so the page sends the admin to Raw TOML instead.
             "values": config_store.mask_raw(file_raw) if file_raw else None,
+            # Keys whose value the running server takes from an environment
+            # variable instead of the file: variable names, never values.
+            "env_overrides": [
+                {"path": list(key), "env": var} for key, var in env_overrides(file_raw)
+            ],
             "file_error": file_error,
             "pending": [c.to_json() for c in pending],
             "unknown": config_store.unknown_keys(file_raw),
@@ -487,6 +499,11 @@ def build_admin_routes(
         key = tuple(path)
         if not schema.is_secret_path(key):
             raise ConfigError("Not a secret.")
+        if env_value(key):
+            # The file value is unused; showing it would pass for the live one.
+            raise ConfigError(
+                f"This value comes from the environment variable {env_var_for(key)}."
+            )
         snapshot = config_store.read_snapshot(config_path())
         value = config_store._get(config_store.parse_text(snapshot.text), key)
         if not isinstance(value, str):

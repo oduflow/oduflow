@@ -232,6 +232,12 @@ class TestValidation:
             cs.validate_text(text, "x")
         cs.validate_text(text, "x", http=False)
 
+    def test_secret_from_the_environment_satisfies_the_checks(self, monkeypatch):
+        text = _apply(BASE, {"path": ["team", "1", "ui_password"], "unset": True})
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "env-password-aaaa")
+        settings, _ = cs.validate_text(text, "x")
+        assert settings.teams["1"].ui_password == "env-password-aaaa"
+
     def test_multi_team_needs_every_token(self):
         text = BASE + '\n[team.2]\nhostname = "b"\nui_password = "pw-two-bbbbbbbbbb"\n'
         text += "port_range = [50100, 50200]\n"
@@ -247,6 +253,21 @@ class TestValidation:
         cs.check_console_policy(old, good)
         with pytest.raises(ConfigError, match="oduflow admin disable"):
             cs.check_console_policy(good, old)
+
+    def test_console_refuses_a_key_the_environment_overrides(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "env-password-aaaa")
+        old = cs.parse_text(BASE)
+        edited = cs.parse_text(
+            _apply(
+                BASE,
+                {"path": ["team", "1", "ui_password"], "value": "new-pw-cccccccccc"},
+            )
+        )
+        with pytest.raises(ConfigError, match="ODUFLOW_TEAM_1_UI_PASSWORD"):
+            cs.check_console_policy(old, edited)
+        # Removing the whole team is still a file edit the console may make.
+        dropped = cs.parse_text(_apply(BASE, {"path": ["team", "1"], "unset": True}))
+        cs.check_console_policy(old, dropped)
 
     def test_admin_password_must_not_reuse_a_team_credential(self):
         text = BASE + '[admin]\npassword = "password-one-aaaa"\n'

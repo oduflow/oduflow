@@ -26,6 +26,19 @@ _TEST_PROD_DB_VOLUME = "oduflowtest-prod-db-data"
 
 
 @pytest.fixture(autouse=True)
+def _no_env_secret_overrides(monkeypatch):
+    """Secrets set in the shell running pytest (a Docker deployment sets
+    ODUFLOW_TEAM_1_UI_PASSWORD, ...) must not replace the files tests write."""
+    for name in list(os.environ):
+        if name.startswith("ODUFLOW_TEAM_") or name in (
+            "ODUFLOW_ADMIN_PASSWORD",
+            "ODUFLOW_BACKUP_ACCESS_KEY",
+            "ODUFLOW_BACKUP_SECRET_KEY",
+        ):
+            monkeypatch.delenv(name)
+
+
+@pytest.fixture(autouse=True)
 def _server_lock_per_test(monkeypatch):
     """A test that starts the server must not leave its lock to the next one."""
     from oduflow import instance_lock

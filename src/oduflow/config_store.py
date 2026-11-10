@@ -50,7 +50,12 @@ from tomlkit.items import AoT, Comment, InlineTable, Item, Null, Table
 from oduflow import config_schema as schema
 from oduflow.errors import ConfigError, ConflictError, PrerequisiteNotMetError
 from oduflow.fsutil import atomic_write_private_text
-from oduflow.settings import Settings, validate_etc_dir
+from oduflow.settings import (
+    MIN_ADMIN_PASSWORD,
+    Settings,
+    env_overrides,
+    validate_etc_dir,
+)
 
 try:
     import tomllib
@@ -70,7 +75,6 @@ _TABLES = (Table, OutOfOrderTableProxy, tomlkit.TOMLDocument)
 HISTORY_DIRNAME = ".oduflow-history"
 HISTORY_KEEP = 50
 MASK = "********"
-MIN_ADMIN_PASSWORD = 12
 
 _write_lock = threading.Lock()
 
@@ -433,6 +437,17 @@ def validate_text(
 
 def check_console_policy(old_raw: dict[str, Any], new_raw: dict[str, Any]) -> None:
     """Rules the console adds on top of the parser for values it writes."""
+    # A key an environment variable overrides is changed by changing the
+    # variable; editing the file would only look like it worked. Dropping the
+    # whole team or [backup] table stays allowed.
+    for path, var in env_overrides(old_raw):
+        if _get(new_raw, path[:-1]) is None:
+            continue
+        if _get(old_raw, path) != _get(new_raw, path):
+            raise ConfigError(
+                f"{'.'.join(path)} is set by the environment variable {var}; "
+                "change or unset the variable instead of the file value."
+            )
     old_pw = _get(old_raw, ("admin", "password"))
     new_pw = _get(new_raw, ("admin", "password"))
     if new_pw != old_pw:

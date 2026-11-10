@@ -239,6 +239,11 @@ sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
   || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
 
+Team passwords and tokens, `[admin].password` and the `[backup]` S3 keys can
+also come from environment variables such as `ODUFLOW_TEAM_1_UI_PASSWORD`,
+which win over the file. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
+
 You do not have to edit this file by hand afterwards: in HTTP mode the
 [Server settings console](admin.md) at `/admin` edits every section and every
 team from the browser, validates each change with the same parser the server
@@ -389,7 +394,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 
 | Key | Default | Description |
 |---|---|---|
-| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable` |
+| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable`. Overridden by `ODUFLOW_ADMIN_PASSWORD` (at least 12 characters) |
 
 ### Routing settings
 
@@ -469,8 +474,8 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | Key | Default | Description |
 |---|---|---|
 | `[backup].bucket` | *(required)* | S3-compatible bucket name |
-| `[backup].access_key` | *(required)* | S3 access key |
-| `[backup].secret_key` | *(required)* | S3 secret key |
+| `[backup].access_key` | *(required)* | S3 access key. Overridden by `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup].secret_key` | *(required)* | S3 secret key. Overridden by `ODUFLOW_BACKUP_SECRET_KEY` |
 | `[backup].endpoint` | *(empty)* | Custom S3 endpoint for MinIO, R2, or another compatible service; enables path-style addressing |
 | `[backup].region` | *(empty)* | S3 region |
 | `[backup].prefix` | `oduflow` | Object-key prefix, normalized without leading or trailing `/` |
@@ -491,9 +496,9 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
-| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token |
-| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
-| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
+| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token. Overridden by `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
 | `port_range` | `[50000, 50100]` | Port range for Odoo containers `[start, end)` — supports up to 100 concurrent environments |
 | `agent_enabled` | `false` | Enable the per-team coding agent (dashboard Agent Chat / Agent CLI). Off by default |
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |

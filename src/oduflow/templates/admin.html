@@ -624,6 +624,11 @@ async function loadState() {
 }
 
 function fileValue(path) { return STATE && STATE.values ? getIn(STATE.values, path) : undefined; }
+// The environment variable that overrides the file value at path, if any.
+function envVar(path) {
+  var hit = ((STATE && STATE.env_overrides) || []).find(function (o) { return pkey(o.path) === pkey(path); });
+  return hit ? hit.env : '';
+}
 function currentValue(path) {
   var d = DRAFT.get(pkey(path));
   if (d) return d.unset ? undefined : d.value;
@@ -768,7 +773,10 @@ function renderField(f, path, opts) {
   var val = currentValue(path);
   var control = '';
   var locked = f.apply === 'locked';
-  if (locked) {
+  var env = envVar(path);
+  if (env) {
+    control = '<div class="readonly-value">Set by the environment variable ' + esc(env) + '. Change or unset the variable, then restart.</div>';
+  } else if (locked) {
     if (f.kind === 'secret') control = secretControl(f, path, val, true);
     else control = '<div class="readonly-value">' + esc(val === undefined ? (defaultText(f) ? defaultText(f) + ' (default)' : '(not set)') : val) + '</div>';
   } else if (f.kind === 'str') {
@@ -811,7 +819,8 @@ function renderField(f, path, opts) {
   }
   return '<div class="field' + (edited ? ' edited' : '') + '">' +
     '<div class="field-label"><label for="' + id + '">' + esc(f.label) + (f.required ? ' <span class="field-key">required</span>' : '') + '</label>' +
-    '<div class="field-meta"><span class="field-key">' + esc(f.key) + '</span>' + applyBadge(f.apply) + '</div></div>' +
+    '<div class="field-meta"><span class="field-key">' + esc(f.key) + '</span>' +
+    (env ? '<span class="badge badge-locked" title="Taken from ' + esc(env) + ', not from the file">Env</span>' : applyBadge(f.apply)) + '</div></div>' +
     '<div class="field-body">' + control +
     (f.help ? '<div class="field-help">' + esc(f.help) + '</div>' : '') +
     (f.note ? '<div class="field-note">' + esc(f.note) + '</div>' : '') + '</div></div>';
@@ -1058,6 +1067,8 @@ function teamIds() {
   return ids;
 }
 function credBadge(path) {
+  var env = envVar(path);
+  if (env) return '<span class="badge badge-ok" title="Set by ' + esc(env) + '">env</span>';
   var v = currentValue(path);
   var set = isSecretVal(v) ? v.set : !!v;
   return '<span class="badge ' + (set ? 'badge-ok' : 'badge-missing') + '">' + (set ? 'set' : 'missing') + '</span>';

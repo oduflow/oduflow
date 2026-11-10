@@ -27,7 +27,7 @@ pip install oduflow
 
 ### Configure
 
-All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`.
+All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`. Secrets can instead come from environment variables that win over the file: `ODUFLOW_TEAM_<ID>_UI_PASSWORD`, `ODUFLOW_TEAM_<ID>_AUTH_TOKEN`, `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, `ODUFLOW_ADMIN_PASSWORD`, `ODUFLOW_BACKUP_ACCESS_KEY` and `ODUFLOW_BACKUP_SECRET_KEY` (`<ID>` is the team id upper-cased, non-alphanumerics replaced by `_`).
 
 Minimal configuration:
 
@@ -900,6 +900,11 @@ sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
   || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
 
+Team passwords and tokens, `[admin].password` and the `[backup]` S3 keys can
+also come from environment variables such as `ODUFLOW_TEAM_1_UI_PASSWORD`,
+which win over the file. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
+
 You do not have to edit this file by hand afterwards: in HTTP mode the
 [Server settings console](admin.md) at `/admin` edits every section and every
 team from the browser, validates each change with the same parser the server
@@ -1050,7 +1055,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 
 | Key | Default | Description |
 |---|---|---|
-| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable` |
+| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable`. Overridden by `ODUFLOW_ADMIN_PASSWORD` (at least 12 characters) |
 
 ### Routing settings
 
@@ -1130,8 +1135,8 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | Key | Default | Description |
 |---|---|---|
 | `[backup].bucket` | *(required)* | S3-compatible bucket name |
-| `[backup].access_key` | *(required)* | S3 access key |
-| `[backup].secret_key` | *(required)* | S3 secret key |
+| `[backup].access_key` | *(required)* | S3 access key. Overridden by `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup].secret_key` | *(required)* | S3 secret key. Overridden by `ODUFLOW_BACKUP_SECRET_KEY` |
 | `[backup].endpoint` | *(empty)* | Custom S3 endpoint for MinIO, R2, or another compatible service; enables path-style addressing |
 | `[backup].region` | *(empty)* | S3 region |
 | `[backup].prefix` | `oduflow` | Object-key prefix, normalized without leading or trailing `/` |
@@ -1152,9 +1157,9 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
-| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token |
-| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
-| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
+| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token. Overridden by `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
 | `port_range` | `[50000, 50100]` | Port range for Odoo containers `[start, end)` — supports up to 100 concurrent environments |
 | `agent_enabled` | `false` | Enable the per-team coding agent (dashboard Agent Chat / Agent CLI). Off by default |
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
@@ -9049,6 +9054,11 @@ oduflow ui-2fa reset --admin
 as the console. Restart Oduflow afterwards so the running server picks the
 password up.
 
+While `ODUFLOW_ADMIN_PASSWORD` is set, both refuse to run and exit with an
+error: the variable overrides the file, so a file edit would have no effect.
+Change or unset the variable and restart instead (see
+[Credentials from environment variables](security.md#credentials-from-environment-variables)).
+
 ## Declarative Stack Commands
 
 ```bash
@@ -10024,6 +10034,47 @@ team credentials; a console session does not open a team dashboard either.
 While the password is empty, `/admin` answers 404. Secrets reach the browser
 only through an explicit, logged **Reveal**.
 
+## Credentials from environment variables
+
+Any of these secrets can come from an environment variable of the Oduflow
+process instead of `oduflow.toml`. A non-empty variable wins; the value in the
+file is then ignored. An empty variable counts as unset.
+
+| `oduflow.toml` key | Environment variable |
+|---|---|
+| `[team.<id>] ui_password` | `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
+| `[team.<id>] auth_token` | `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `[team.<id>] production_token` | `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `[admin] password` | `ODUFLOW_ADMIN_PASSWORD` |
+| `[backup] access_key` | `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup] secret_key` | `ODUFLOW_BACKUP_SECRET_KEY` |
+
+`<ID>` is the team id upper-cased, with every character other than a letter or
+digit replaced by `_`: `[team.1]` → `ODUFLOW_TEAM_1_UI_PASSWORD`,
+`[team.acme-dev]` → `ODUFLOW_TEAM_ACME_DEV_UI_PASSWORD`.
+
+Leading and trailing whitespace is stripped, so a `.env` file with CRLF line
+endings works. Team ids that differ only in case or punctuation (`acme-dev`
+and `acme_dev`) map to the same name; Oduflow refuses to start while such a
+shared variable is set, so keep those teams' secrets in the file.
+
+The variables only replace values: backups are still enabled by a `[backup]`
+section with a `bucket` in the file. Every validation rule (token length,
+uniqueness, the HTTP fail-closed checks) applies to the value from the
+variable, and `ODUFLOW_ADMIN_PASSWORD` must be at least 12 characters, the
+same minimum the console enforces.
+
+A changed variable takes effect on the next restart. After changing
+`ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, also run `sync_production_mcp` for each
+of that team's productions: they keep the key they were configured with until
+then, and production calls fail in the meantime.
+
+The [Server settings console](admin.md) shows a key taken from a variable as
+read-only, names the variable and never sees its value; it refuses to change
+or reveal the unused file value. `oduflow admin enable|disable` refuses to run
+while `ODUFLOW_ADMIN_PASSWORD` is set. On upgrade, a team whose `ui_password`
+comes from a variable does not get a generated one in the file.
+
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
 
 Oduflow can act as its own OAuth 2.1 Authorization Server, so MCP clients that require an OAuth flow (e.g. Claude.ai Remote MCP, MCP Inspector) can connect without any external identity provider.
@@ -10566,6 +10617,11 @@ oduflow admin enable          # prints the generated password once
 sudo systemctl restart oduflow
 ```
 
+If the password comes from the `ODUFLOW_ADMIN_PASSWORD` environment variable
+instead (at least 12 characters), `oduflow admin` refuses to run; set, change or
+unset the variable and restart. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
+
 Open `/admin` on any hostname the server answers on, for example
 `https://dev.example.com/admin` (Traefik) or `http://server:8000/admin`
 (port mode). While `[admin] password` is empty the console does not exist:
@@ -10657,6 +10713,13 @@ keep the stored value, or press **Generate** for a new random one. Diffs and
 history show `********` instead of values, plus `(changed)` where a secret
 changed.
 
+A secret set by an [environment variable](security.md#credentials-from-environment-variables)
+overrides the file. The console shows such a key as read-only with an **Env**
+badge and the variable's name; it refuses to change or reveal the file value,
+which stays unused while the variable is set. Change or unset the variable and
+restart instead. The variable's value never reaches the console, and the state
+API (`env_overrides`) only names the variable.
+
 ## Cluster disaster recovery
 
 The **Cluster DR** section operates on the shared production PostgreSQL
@@ -10696,7 +10759,8 @@ on a fresh install — see [CLI](cli.md#cluster-disaster-recovery) and
   configuration.
 
 To turn the console off, run `oduflow admin disable` on the server and
-restart.
+restart. If the password comes from `ODUFLOW_ADMIN_PASSWORD`, unset the
+variable instead (and clear `[admin] password` in the file, if set).
 
 ## REST API
 
@@ -10705,7 +10769,7 @@ console session cookie; every POST must be same-origin.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/admin/api/state` | Schema, current values with secrets masked, revision, pending changes |
+| GET | `/admin/api/state` | Schema, current values with secrets masked, revision, pending changes, keys overridden by environment variables (`env_overrides`, names only) |
 | POST | `/admin/api/preview` | Validate a candidate and return changes, apply classes and the masked diff |
 | POST | `/admin/api/apply` | Save a candidate if `revision` still matches; apply live values |
 | POST | `/admin/api/reload` | Apply live values from the file on disk (after a hand edit) |
@@ -10904,6 +10968,24 @@ networks:
 ```
 
 After `docker compose up -d`, Oduflow initializes shared infrastructure automatically.
+
+### Credentials from environment variables
+
+Team passwords and tokens, the `[admin]` password and the `[backup]` S3 keys
+can be passed as environment variables instead of being stored in
+`oduflow.toml`; a set variable wins over the file:
+
+```yaml
+services:
+  oduflow:
+    environment:
+      ODUFLOW_TEAM_1_UI_PASSWORD: ${TEAM_1_UI_PASSWORD}
+      ODUFLOW_TEAM_1_AUTH_TOKEN: ${TEAM_1_AUTH_TOKEN}
+      ODUFLOW_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+```
+
+See [Credentials from environment variables](security.md#credentials-from-environment-variables)
+for the full list of variables.
 
 ## Security Notes
 
