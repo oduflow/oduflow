@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.91.0
+
+### Features
+
+- **Secrets from environment variables** — team credentials, the console
+  password and the backup S3 keys can now come from the Oduflow process's
+  environment instead of `oduflow.toml`, so container deployments keep them out
+  of the config file: `ODUFLOW_TEAM_<ID>_UI_PASSWORD`,
+  `ODUFLOW_TEAM_<ID>_AUTH_TOKEN`, `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`,
+  `ODUFLOW_ADMIN_PASSWORD`, `ODUFLOW_BACKUP_ACCESS_KEY` and
+  `ODUFLOW_BACKUP_SECRET_KEY` (`<ID>` is the team id upper-cased, with
+  non-alphanumerics replaced by `_`). A non-empty variable wins over the file;
+  values are trimmed, so `.env` files with CRLF line endings work. Every
+  existing validation rule applies to them, `ODUFLOW_ADMIN_PASSWORD` must be at
+  least 12 characters like a console-set password, and startup refuses a
+  variable that two team ids would share (`acme-dev` and `acme_dev`). The
+  variables only replace values: backups are still enabled by a `[backup]`
+  section in the file. On upgrade, a team whose `ui_password` comes from the
+  environment no longer gets a generated one written to the file. (#353)
+- **The Server settings console respects environment overrides** — a key taken
+  from a variable is shown read-only with an **Env** badge and the variable's
+  name; the console refuses to change or reveal the unused file value (from the
+  forms, Raw TOML or a history revert), and its state API names the variable,
+  never its value. `oduflow admin enable|disable` refuses to run while
+  `ODUFLOW_ADMIN_PASSWORD` is set, instead of reporting a change that would
+  have no effect. (#353)
+
+### Documentation
+
+- New "Credentials from environment variables" section in
+  `docs/security.md`, with a Compose example in `docs/docker.md` and the
+  variable names in the configuration reference. Rotating
+  `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` needs a restart **and**
+  `sync_production_mcp` for each of the team's productions. (#353)
+
 ## v1.90.0
 
 ### Features
