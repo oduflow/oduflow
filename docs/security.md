@@ -38,6 +38,47 @@ team credentials; a console session does not open a team dashboard either.
 While the password is empty, `/admin` answers 404. Secrets reach the browser
 only through an explicit, logged **Reveal**.
 
+## Credentials from environment variables
+
+Any of these secrets can come from an environment variable of the Oduflow
+process instead of `oduflow.toml`. A non-empty variable wins; the value in the
+file is then ignored. An empty variable counts as unset.
+
+| `oduflow.toml` key | Environment variable |
+|---|---|
+| `[team.<id>] ui_password` | `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
+| `[team.<id>] auth_token` | `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `[team.<id>] production_token` | `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `[admin] password` | `ODUFLOW_ADMIN_PASSWORD` |
+| `[backup] access_key` | `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup] secret_key` | `ODUFLOW_BACKUP_SECRET_KEY` |
+
+`<ID>` is the team id upper-cased, with every character other than a letter or
+digit replaced by `_`: `[team.1]` → `ODUFLOW_TEAM_1_UI_PASSWORD`,
+`[team.acme-dev]` → `ODUFLOW_TEAM_ACME_DEV_UI_PASSWORD`.
+
+Leading and trailing whitespace is stripped, so a `.env` file with CRLF line
+endings works. Team ids that differ only in case or punctuation (`acme-dev`
+and `acme_dev`) map to the same name; Oduflow refuses to start while such a
+shared variable is set, so keep those teams' secrets in the file.
+
+The variables only replace values: backups are still enabled by a `[backup]`
+section with a `bucket` in the file. Every validation rule (token length,
+uniqueness, the HTTP fail-closed checks) applies to the value from the
+variable, and `ODUFLOW_ADMIN_PASSWORD` must be at least 12 characters, the
+same minimum the console enforces.
+
+A changed variable takes effect on the next restart. After changing
+`ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, also run `sync_production_mcp` for each
+of that team's productions: they keep the key they were configured with until
+then, and production calls fail in the meantime.
+
+The [Server settings console](admin.md) shows a key taken from a variable as
+read-only, names the variable and never sees its value; it refuses to change
+or reveal the unused file value. `oduflow admin enable|disable` refuses to run
+while `ODUFLOW_ADMIN_PASSWORD` is set. On upgrade, a team whose `ui_password`
+comes from a variable does not get a generated one in the file.
+
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
 
 Oduflow can act as its own OAuth 2.1 Authorization Server, so MCP clients that require an OAuth flow (e.g. Claude.ai Remote MCP, MCP Inspector) can connect without any external identity provider.

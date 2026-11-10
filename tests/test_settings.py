@@ -1442,3 +1442,117 @@ def test_invalid_tls_value_rejected(tmp_path, value):
     config.write_text(f"[routing]\ntls = {value}\n")
     with pytest.raises(ValueError, match="must be true, false, or"):
         Settings.from_toml(str(config))
+
+
+class TestEnvSecretOverrides:
+    """A non-empty environment variable replaces a secret from oduflow.toml."""
+
+    RAW = {
+        "admin": {"password": "file-admin-password"},
+        "backup": {
+            "bucket": "b",
+            "access_key": "file-access",
+            "secret_key": "file-secret",
+        },
+        "team": {
+            "1": {
+                "hostname": "one",
+                "auth_token": "file-token-aaaaaaaaaaaa",
+                "ui_password": "file-password",
+                "production_token": "p" * 32,
+            },
+            "acme-dev": {"hostname": "acme", "port_range": [50100, 50200]},
+        },
+    }
+
+    def test_variable_names(self):
+        from oduflow.settings import team_env_var
+
+        assert team_env_var("1", "ui_password") == "ODUFLOW_TEAM_1_UI_PASSWORD"
+        assert (
+            team_env_var("acme-dev", "production_token")
+            == "ODUFLOW_TEAM_ACME_DEV_PRODUCTION_TOKEN"
+        )
+
+    def test_file_values_without_variables(self):
+        s = Settings.from_raw(self.RAW, "x")
+        assert s.teams["1"].ui_password == "file-password"
+        assert s.admin_password == "file-admin-password"
+        assert s.backup is not None and s.backup.secret_key == "file-secret"
+
+    def test_variables_win_over_the_file(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "env-password")
+        monkeypatch.setenv("ODUFLOW_TEAM_1_AUTH_TOKEN", "env-token-aaaaaaaaaaaa")
+        monkeypatch.setenv("ODUFLOW_TEAM_ACME_DEV_PRODUCTION_TOKEN", "e" * 32)
+        monkeypatch.setenv("ODUFLOW_ADMIN_PASSWORD", "env-admin-password")
+        monkeypatch.setenv("ODUFLOW_BACKUP_ACCESS_KEY", "env-access")
+        monkeypatch.setenv("ODUFLOW_BACKUP_SECRET_KEY", "env-secret")
+
+        s = Settings.from_raw(self.RAW, "x")
+
+        assert s.teams["1"].ui_password == "env-password"
+        assert s.teams["1"].auth_token == "env-token-aaaaaaaaaaaa"
+        assert s.teams["1"].production_token == "p" * 32
+        assert s.teams["acme-dev"].production_token == "e" * 32
+        assert s.admin_password == "env-admin-password"
+        assert s.backup is not None
+        assert (s.backup.access_key, s.backup.secret_key) == (
+            "env-access",
+            "env-secret",
+        )
+
+    def test_empty_variable_is_unset(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "")
+        assert Settings.from_raw(self.RAW, "x").teams["1"].ui_password == (
+            "file-password"
+        )
+
+    def test_backup_keys_do_not_enable_backups(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_BACKUP_ACCESS_KEY", "env-access")
+        monkeypatch.setenv("ODUFLOW_BACKUP_SECRET_KEY", "env-secret")
+        raw = {k: v for k, v in self.RAW.items() if k != "backup"}
+        assert Settings.from_raw(raw, "x").backup is None
+
+    def test_validation_sees_the_variable(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_PRODUCTION_TOKEN", "too-short")
+        with pytest.raises(ValueError, match="production_token must be 32"):
+            Settings.from_raw(self.RAW, "x").validate()
+
+    def test_env_overrides_lists_names_only(self, monkeypatch):
+        from oduflow.settings import env_overrides
+
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "env-password")
+        monkeypatch.setenv("ODUFLOW_TEAM_9_UI_PASSWORD", "no such team")
+        monkeypatch.setenv("ODUFLOW_BACKUP_SECRET_KEY", "env-secret")
+
+        assert env_overrides(self.RAW) == [
+            (("team", "1", "ui_password"), "ODUFLOW_TEAM_1_UI_PASSWORD"),
+            (("backup", "secret_key"), "ODUFLOW_BACKUP_SECRET_KEY"),
+        ]
+        no_backup = {k: v for k, v in self.RAW.items() if k != "backup"}
+        assert env_overrides(no_backup) == [
+            (("team", "1", "ui_password"), "ODUFLOW_TEAM_1_UI_PASSWORD"),
+        ]
+
+    def test_variable_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", " env-password\r\n")
+        assert Settings.from_raw(self.RAW, "x").teams["1"].ui_password == (
+            "env-password"
+        )
+
+    def test_short_admin_password_from_variable_is_refused(self, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_ADMIN_PASSWORD", "admin")
+        with pytest.raises(ValueError, match="at least 12"):
+            Settings.from_raw(self.RAW, "x").validate()
+
+    def test_variable_shared_by_two_teams_is_refused(self, monkeypatch):
+        raw = {
+            "team": {
+                "acme-dev": {"hostname": "a"},
+                "acme_dev": {"hostname": "b", "port_range": [50100, 50200]},
+            }
+        }
+        Settings.from_raw(raw, "x").validate()
+        monkeypatch.setenv("ODUFLOW_TEAM_ACME_DEV_AUTH_TOKEN", "t" * 24)
+        with pytest.raises(ValueError, match="ODUFLOW_TEAM_ACME_DEV_AUTH_TOKEN"):
+            Settings.from_raw(raw, "x").validate()

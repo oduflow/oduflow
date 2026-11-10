@@ -14,7 +14,7 @@ import shlex
 import sys
 import threading
 import warnings
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Any, ParamSpec, TypeVar, cast
 
 # Suppress a third-party deprecation warning emitted at import time by fastmcp's
@@ -7329,18 +7329,26 @@ def _inject_admin_password(toml_text: str, password: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def _autofill_ui_passwords(toml_text: str) -> tuple[str, list[str]]:
-    """Fill EVERY empty ``ui_password = ""`` in an existing oduflow.toml with a
-    freshly generated password (one distinct password per team). Used to upgrade
-    older configs that predate the secure-by-default bootstrap without leaving
-    the dashboard open. Returns the rewritten text and the list of generated
-    passwords (empty if there was nothing to fill)."""
+def _autofill_ui_passwords(
+    toml_text: str, keep: Collection[str] = ()
+) -> tuple[str, list[str]]:
+    """Fill every empty ``ui_password = ""`` in an existing oduflow.toml with a
+    freshly generated password (one distinct password per team), except in the
+    ``[team.<id>]`` tables listed in ``keep`` (teams whose password comes from
+    elsewhere). Used to upgrade older configs that predate the secure-by-default
+    bootstrap without leaving the dashboard open. Returns the rewritten text and
+    the list of generated passwords (empty if there was nothing to fill)."""
     import secrets
 
     out: list[str] = []
     generated: list[str] = []
+    team: str | None = None
     for raw in toml_text.splitlines():
-        if raw.split("#", 1)[0].strip() == 'ui_password = ""':
+        stripped = raw.split("#", 1)[0].strip()
+        if stripped.startswith("["):
+            header = re.fullmatch(r'\[\s*team\s*\.\s*"?([^"\]]+?)"?\s*\]', stripped)
+            team = header.group(1) if header else None
+        if stripped == 'ui_password = ""' and team not in keep:
             password = secrets.token_urlsafe(18)
             generated.append(password)
             indent = raw[: len(raw) - len(raw.lstrip())]
@@ -7380,7 +7388,12 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
         cfg_path = find_toml()
         # Follow a config symlink without replacing the symlink itself.
         cfg = pathlib.Path(cfg_path).resolve(strict=True)
-        updated, generated = _autofill_ui_passwords(cfg.read_text(encoding="utf-8"))
+        # A team whose password comes from an environment variable keeps its
+        # empty file value: a generated one would never be used.
+        has_password = [t.team_id for t in settings.teams.values() if t.ui_password]
+        updated, generated = _autofill_ui_passwords(
+            cfg.read_text(encoding="utf-8"), keep=has_password
+        )
         if not generated:
             return settings
         # Staged privately and swapped in, keeping owner and mode. If
@@ -8025,6 +8038,16 @@ def _admin_cli(action: str, *, reset: bool = False) -> None:
 
     from oduflow import config_store
 
+    if os.environ.get("ODUFLOW_ADMIN_PASSWORD", "").strip():
+        # The variable wins over the file, so any edit here would be a no-op
+        # that reports success.
+        print(
+            "The Server settings console password is set by the "
+            "ODUFLOW_ADMIN_PASSWORD environment variable. Change or unset the "
+            "variable and restart Oduflow instead.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     settings = _get_settings()
     path = settings.toml_path
     snapshot = config_store.read_snapshot(path)

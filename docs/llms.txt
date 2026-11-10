@@ -27,7 +27,7 @@ pip install oduflow
 
 ### Configure
 
-All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`.
+All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`. Secrets can instead come from environment variables that win over the file: `ODUFLOW_TEAM_<ID>_UI_PASSWORD`, `ODUFLOW_TEAM_<ID>_AUTH_TOKEN`, `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, `ODUFLOW_ADMIN_PASSWORD`, `ODUFLOW_BACKUP_ACCESS_KEY` and `ODUFLOW_BACKUP_SECRET_KEY` (`<ID>` is the team id upper-cased, non-alphanumerics replaced by `_`).
 
 Minimal configuration:
 

@@ -178,6 +178,24 @@ networks:
 
 After `docker compose up -d`, Oduflow initializes shared infrastructure automatically.
 
+### Credentials from environment variables
+
+Team passwords and tokens, the `[admin]` password and the `[backup]` S3 keys
+can be passed as environment variables instead of being stored in
+`oduflow.toml`; a set variable wins over the file:
+
+```yaml
+services:
+  oduflow:
+    environment:
+      ODUFLOW_TEAM_1_UI_PASSWORD: ${TEAM_1_UI_PASSWORD}
+      ODUFLOW_TEAM_1_AUTH_TOKEN: ${TEAM_1_AUTH_TOKEN}
+      ODUFLOW_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+```
+
+See [Credentials from environment variables](security.md#credentials-from-environment-variables)
+for the full list of variables.
+
 ## Security Notes
 
 - Mounting the Docker socket gives the container **full control** over the host Docker daemon. This is equivalent to root access on the host. Only run Oduflow in trusted environments.

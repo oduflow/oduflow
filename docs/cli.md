@@ -129,6 +129,11 @@ oduflow ui-2fa reset --admin
 as the console. Restart Oduflow afterwards so the running server picks the
 password up.
 
+While `ODUFLOW_ADMIN_PASSWORD` is set, both refuse to run and exit with an
+error: the variable overrides the file, so a file edit would have no effect.
+Change or unset the variable and restart instead (see
+[Credentials from environment variables](security.md#credentials-from-environment-variables)).
+
 ## Declarative Stack Commands
 
 ```bash
