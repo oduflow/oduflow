@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Docker-Required-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/Protocol-MCP-green" alt="MCP">
   <img src="https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-blue" alt="PolyForm Noncommercial 1.0.0">
-  <img src="https://img.shields.io/badge/Odoo-15.0--19.0-714B67?logo=odoo&logoColor=white" alt="Odoo">
+  <img src="https://img.shields.io/badge/Odoo-15.0--20.0-714B67?logo=odoo&logoColor=white" alt="Odoo">
 </p>
 
 # Oduflow
