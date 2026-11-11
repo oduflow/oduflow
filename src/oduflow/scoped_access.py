@@ -80,6 +80,7 @@ SCOPED_ALLOWLIST = frozenset(
         "odoo_schema",
         "reset_admin_password",
         "connect_as_user",
+        "connect_link",
         "write_file_in_odoo",
         "read_file_in_odoo",
         "search_in_odoo",

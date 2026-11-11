@@ -83,7 +83,8 @@ end to end.
     [`run_odoo_shell`](#run_odoo_shell)&nbsp;·
     [`http_request_to_odoo`](#http_request_to_odoo)&nbsp;·
     [`reset_admin_password`](#reset_admin_password)&nbsp;·
-    [`connect_as_user`](#connect_as_user)
+    [`connect_as_user`](#connect_as_user)&nbsp;·
+    [`connect_link`](#connect_link)
 
 -   __[Translations](#translations)__
 
@@ -1326,6 +1327,57 @@ Lock: environment.
     It is shown in the tool's output (and therefore in the transcript) — treat
     it like a password. The tool grants no new privilege: whoever can call it
     can already [`run_odoo_shell`](#run_odoo_shell).
+
+### `connect_link`
+
+Mint a **one-time login link** that opens the environment in a person's browser
+already logged in as `user`, and return it:
+`https://<env-host>/oduflow-connect?token=...`. It is the same flow as the
+dashboard's **Open** button: opening the link sets the environment's
+`session_id` cookie on its own host and redirects to `/web`, without setting or
+revealing any password.
+
+Use it for an "Open as admin" button in another application. For browser
+automation, use [`connect_as_user`](#connect_as_user), which returns the raw
+cookie instead.
+
+Lock: environment. Requires `routing_mode = "traefik"` and the HTTP transport.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`env_name`
+:   *str · required* — The environment.
+
+`user`
+:   *str · default `"admin"`* — The target user's login (e.g. `"jane@acme.com"`) or numeric id.
+
+**Returns** exactly the link and nothing else, so a caller can redirect a
+browser to it as-is.
+
+The tool checks that `user` exists (an unknown user fails right away) but does
+**not** create the Odoo session yet: the session is minted when the browser
+opens the link, so a link that is never opened leaves no session behind. If the
+environment is busy at that moment, or the user was removed in between, the
+browser gets a short error page; mint a new link and try again.
+
+Oduflow keeps the link out of its own logs: the tool result is omitted from the
+server log, and `token=` values are redacted from the HTTP access log. A
+reverse-proxy access log you enable yourself (e.g. Traefik's) may still record
+the request line, by which time the token is already used.
+
+**Use it when**
+
+- Another app needs to drop a human into the environment as admin (or any
+  user) with one click, without resetting or showing a password.
+
+!!! warning "Single use, 120 seconds — and a secret"
+    The link works once and expires 120 seconds after it is minted, so mint it
+    at click time and redirect the browser to it immediately. Until it is used
+    it grants a full Odoo session as `user`: treat the URL as a secret and never
+    log it. In port routing mode, or on a server started with the stdio
+    transport (no web UI to redeem the link), the tool fails with a
+    prerequisite error — use [`connect_as_user`](#connect_as_user) there.
 
 ## Translations
 

@@ -1900,6 +1900,278 @@ class TestConnectAsUserTool:
         assert "connect_as_user" in SCOPED_ALLOWLIST
 
 
+class TestConnectLink:
+    """connect_link: one-time browser login link (dashboard "Open" flow).
+
+    The tool only validates the user and issues a grant; the Odoo session is
+    minted when the link is opened (see test_web_ui_connect_as.py).
+    """
+
+    _BASE = ("https://feature.example.com", "feature.example.com")
+
+    @pytest.fixture
+    def traefik(self, monkeypatch):
+        import oduflow.server
+
+        settings = replace(TEST_SETTINGS, routing_mode="traefik")
+        oduflow.server._settings = settings
+        # HTTP transport: the web UI that redeems the link is running.
+        monkeypatch.setattr(oduflow.server, "_web_bind", ("127.0.0.1", 8000))
+        return settings
+
+    @pytest.fixture
+    def env(self):
+        """A running env whose user exists; yields the patched helpers."""
+        with (
+            patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False),
+            patch(
+                "oduflow.docker_ops.env_ops.get_env_base_url", return_value=self._BASE
+            ) as base,
+            patch(
+                "oduflow.docker_ops.odoo_ops.resolve_env_login", return_value="admin"
+            ) as resolve,
+            patch("oduflow.docker_ops.odoo_ops.connect_as_user") as mint,
+        ):
+            yield {"base": base, "resolve": resolve, "mint": mint}
+
+    @staticmethod
+    def _token(link: str) -> str:
+        from urllib.parse import parse_qs, urlparse
+
+        return parse_qs(urlparse(link).query)["token"][0]
+
+    def test_returns_one_time_link_that_resolves_once(self, traefik, env):
+        from oduflow import connect_tokens
+
+        link = _get_tool_fn("connect_link")(env_name="feature")
+
+        # The result is the bare URL: callers redirect a browser to it as-is.
+        assert link.startswith("https://feature.example.com/oduflow-connect?token=")
+        assert link == link.strip() and not any(ch.isspace() for ch in link)
+        env["resolve"].assert_called_once_with(traefik, TEST_TEAM, "feature", "admin")
+        env["base"].assert_called_once_with(traefik, TEST_TEAM, "feature")
+
+        token = self._token(link)
+        assert connect_tokens.consume(token, "feature.example.com") == (
+            connect_tokens.LoginGrant(TEST_TEAM.team_id, "feature", "admin")
+        )
+        assert connect_tokens.consume(token, "feature.example.com") is None
+
+    def test_mints_no_session_until_the_link_is_opened(self, traefik, env):
+        _get_tool_fn("connect_link")(env_name="feature")
+        env["mint"].assert_not_called()
+
+    def test_passes_explicit_user(self, traefik, env):
+        from oduflow import connect_tokens
+
+        link = _get_tool_fn("connect_link")(env_name="feature", user="jane@acme.com")
+        env["resolve"].assert_called_once_with(
+            traefik, TEST_TEAM, "feature", "jane@acme.com"
+        )
+        grant = connect_tokens.consume(self._token(link), "feature.example.com")
+        assert grant == connect_tokens.LoginGrant(
+            TEST_TEAM.team_id, "feature", "jane@acme.com"
+        )
+
+    @patch("oduflow.server.activity.touch")
+    def test_holds_env_lock_and_touches_activity(self, mock_touch, traefik, env):
+        import oduflow.server
+        from oduflow.errors import BusyError
+
+        locked: list[bool] = []
+
+        def _resolve(*args, **kwargs):
+            try:
+                oduflow.server._locks.acquire_env("feature", "1")
+            except BusyError:
+                locked.append(True)
+            else:
+                oduflow.server._locks.release_env("feature")
+                locked.append(False)
+            return "admin"
+
+        env["resolve"].side_effect = _resolve
+        _get_tool_fn("connect_link")(env_name="feature")
+
+        assert locked == [True]
+        mock_touch.assert_called_once_with(TEST_TEAM, "feature")
+        # Released afterwards.
+        oduflow.server._locks.acquire_env("feature", "1")
+        oduflow.server._locks.release_env("feature")
+
+    def test_port_mode_is_a_prerequisite_error(self, env):
+        with pytest.raises(ToolError, match="traefik"):
+            _get_tool_fn("connect_link")(env_name="feature")
+        env["resolve"].assert_not_called()
+
+    def test_stdio_transport_is_a_prerequisite_error(self, traefik, env, monkeypatch):
+        import oduflow.server
+
+        # A stdio server runs no web UI, so nothing could redeem the token.
+        monkeypatch.setattr(oduflow.server, "_web_bind", None)
+        with pytest.raises(ToolError, match="HTTP transport"):
+            _get_tool_fn("connect_link")(env_name="feature")
+        env["resolve"].assert_not_called()
+
+    def test_rejects_production_env(self, traefik, env):
+        with pytest.raises(ToolError, match="production"):
+            _get_tool_fn("connect_link")(env_name="prod-main")
+        env["resolve"].assert_not_called()
+
+    def test_user_not_found_fails_before_issuing(self, traefik, env):
+        from oduflow import connect_tokens
+        from oduflow.errors import NotFoundError
+
+        env["resolve"].side_effect = NotFoundError(
+            "User 'ghost' not found in environment 'feature'."
+        )
+        before = len(connect_tokens._store)
+        with pytest.raises(ToolError, match="not found"):
+            _get_tool_fn("connect_link")(env_name="feature", user="ghost")
+        assert len(connect_tokens._store) == before
+
+    def test_in_scoped_allowlist(self):
+        from oduflow.scoped_access import SCOPED_ALLOWLIST
+
+        assert "connect_link" in SCOPED_ALLOWLIST
+
+    def test_link_never_reaches_server_log(self, traefik, env, caplog):
+        with caplog.at_level(logging.INFO, logger="oduflow"):
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        assert self._token(link) not in caplog.text
+        # One log line per call: the generic "omitted" preview, nothing else
+        # naming the tool.
+        lines = [r for r in caplog.records if "[connect_link]" in r.getMessage()]
+        assert len(lines) == 1
+        assert "omitted from server log" in lines[0].getMessage()
+
+
+class TestSecretResultTools:
+    """@secret_result keeps credential-bearing tool results out of the log."""
+
+    _MINT = {
+        "sid": "cafebabe" * 8,
+        "login": "admin",
+        "uid": "2",
+        "base_url": "https://feature.example.com",
+        "cookie_domain": "feature.example.com",
+        "url": "https://feature.example.com/web",
+        "expires_at": "2026-07-16T00:00:00Z",
+    }
+    _DB = {
+        "name": "db",
+        "status": "ready",
+        "cluster": "dev",
+        "protected": False,
+        "host": "pg",
+        "port": 5432,
+        "database": "svc_db",
+        "username": "svc_db",
+        "password": "s3cr3t-db-pw",
+        "url": "postgresql://svc_db:s3cr3t-db-pw@pg:5432/svc_db",
+    }
+
+    @pytest.mark.parametrize(
+        ("tool", "kwargs", "secret"),
+        [
+            ("connect_as_user", {"env_name": "feature", "user": "admin"}, "cafebabe"),
+            (
+                "reset_admin_password",
+                {"env_name": "feature", "new_password": "s3cr3t-pw"},
+                "s3cr3t-pw",
+            ),
+            ("create_service_database", {"name": "db"}, "s3cr3t-db-pw"),
+            ("get_service_database", {"name": "db"}, "s3cr3t-db-pw"),
+            ("rotate_service_database_password", {"name": "db"}, "s3cr3t-db-pw"),
+        ],
+    )
+    def test_credentials_never_reach_server_log(self, tool, kwargs, secret, caplog):
+        with (
+            patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False),
+            patch("oduflow.docker_ops.odoo_rpc.invalidate_sessions"),
+            patch(
+                "oduflow.docker_ops.odoo_ops.reset_admin_password",
+                return_value={"login": "admin"},
+            ),
+            patch(
+                "oduflow.docker_ops.odoo_ops.connect_as_user",
+                return_value=dict(self._MINT),
+            ),
+            patch(
+                "oduflow.docker_ops.service_database_ops.create_database",
+                return_value=dict(self._DB),
+            ),
+            patch(
+                "oduflow.docker_ops.service_database_ops.get_database",
+                return_value=dict(self._DB),
+            ),
+            patch(
+                "oduflow.docker_ops.service_database_ops.rotate_password",
+                return_value=dict(self._DB),
+            ),
+            caplog.at_level(logging.INFO, logger="oduflow"),
+        ):
+            result = _get_tool_fn(tool)(**kwargs)
+        assert secret in result
+        assert secret not in caplog.text
+        assert "omitted from server log" in caplog.text
+
+    @patch("oduflow.docker_ops.service_database_ops.list_databases", return_value=[])
+    def test_ordinary_tools_still_log_a_preview(self, mock_list, caplog):
+        with caplog.at_level(logging.INFO, logger="oduflow"):
+            _get_tool_fn("list_service_databases")()
+        assert "[list_service_databases] -> No service databases found." in (
+            caplog.text
+        )
+
+
+class TestAccessLogRedaction:
+    def _record(self, path: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            __file__,
+            1,
+            '%s - "%s %s HTTP/%s" %d',
+            ("1.2.3.4:5", "GET", path, "1.1", 303),
+            None,
+        )
+
+    def test_token_query_value_is_redacted(self):
+        from oduflow.server import _AccessLogTokenRedactor
+
+        record = self._record("/oduflow-connect?token=abc_DEF-123&x=1")
+        assert _AccessLogTokenRedactor().filter(record) is True
+        message = record.getMessage()
+        assert "abc_DEF-123" not in message
+        assert "/oduflow-connect?token=[redacted]&x=1" in message
+
+    def test_other_paths_untouched(self):
+        from oduflow.server import _AccessLogTokenRedactor
+
+        record = self._record("/web?debug=1")
+        _AccessLogTokenRedactor().filter(record)
+        assert "/web?debug=1" in record.getMessage()
+
+    def test_installed_once(self):
+        from oduflow.server import (
+            _AccessLogTokenRedactor,
+            _install_access_log_redaction,
+        )
+
+        access = logging.getLogger("uvicorn.access")
+        _install_access_log_redaction()
+        _install_access_log_redaction()
+        try:
+            assert (
+                sum(isinstance(f, _AccessLogTokenRedactor) for f in access.filters) == 1
+            )
+        finally:
+            for f in list(access.filters):
+                if isinstance(f, _AccessLogTokenRedactor):
+                    access.removeFilter(f)
+
+
 class TestConnectSentinelParsing:
     """The mint script frames values in sentinels because `odoo shell` merges its
     banner/logging with `print()` output; parsing must survive that noise."""

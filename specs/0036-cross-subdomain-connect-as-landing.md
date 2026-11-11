@@ -105,3 +105,13 @@ one-click open.
   `oduflow-connect` high-priority PathPrefix router, and the simplified
   single-click Connect As dialog. Realises the token-URL form deferred in
   [[0031-connect-as-user-impersonation]].
+- `feat/mcp-connect-link` (2026-11-05) — the same landing exposed to MCP clients
+  as `connect_link(env_name, user="admin")`, returning the bare one-time URL for
+  "Open as admin" buttons in other apps; link building shared with the dashboard
+  via `connect_tokens.login_link`. Requires Traefik routing and the HTTP
+  transport (the token is redeemed in-process by the web UI).
+  The tool's token carries a grant (team, environment, user), not a session:
+  the landing mints the Odoo session on redemption, under the env lock, so an
+  unused link leaves no live session behind. The user is checked up front via
+  psql. Credential-bearing tool results are marked `@secret_result` and kept out
+  of the server log, and `token=` query values are redacted from the access log.

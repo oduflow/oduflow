@@ -1166,6 +1166,50 @@ def connect_as_user(
         container.exec_run(["rm", "-f", script_path])
 
 
+def resolve_env_login(
+    settings: Settings, team: TeamSettings, env_name: str, user: str
+) -> str:
+    """Return the login :func:`connect_as_user` would pick for *user*.
+
+    Same rule as the mint script — an active user whose login is *user*, else
+    (for a numeric *user*) the active user with that id — but read directly via
+    psql on the shared DB container, so it is cheap and creates no session. An
+    empty *user* means the database's admin (``base.user_admin``) and is
+    returned as is. Raises NotFoundError when no such user exists.
+    """
+    if not user:
+        return ""
+    client = get_client()
+    env_db = get_db_name(env_name, team.team_id)
+    try:
+        db_container = client.containers.get(settings.shared_db_container)
+    except docker.errors.NotFound:
+        raise NotFoundError(
+            f"Database container '{settings.shared_db_container}' is not running. "
+            "System not initialized. Restart Oduflow."
+        )
+    login = user.replace("'", "''")
+    where = f"login = '{login}'"
+    if user.isdigit():
+        where = f"({where} OR id = {int(user)})"
+    sql = (
+        f"SELECT login FROM res_users WHERE active AND {where} "
+        f"ORDER BY (login = '{login}') DESC LIMIT 1"
+    )
+    exit_code, output = db_container.exec_run(
+        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
+    )
+    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
+    if exit_code != 0:
+        raise ExternalCommandError("psql", exit_code, out)
+    if not out:
+        raise NotFoundError(
+            f"User '{user}' not found in environment '{env_name}'. "
+            "Pass an existing login or numeric user id."
+        )
+    return out
+
+
 def list_env_users(
     settings: Settings, team: TeamSettings, env_name: str
 ) -> list[dict[str, Any]]:
