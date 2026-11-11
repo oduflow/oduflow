@@ -587,3 +587,84 @@ def redact_url_credentials(text: str) -> str:
     if not text:
         return text
     return _URL_CREDS_RE.sub(r"\1***@", text)
+
+
+# --- Extra-addons specs: "branch" or "branch@<sha40>" -------------------------
+
+# A pinned extra-addons spec is ``branch@<sha>`` with the full 40-hex commit id.
+_PINNED_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+# A hex run of 7+ characters after "@" (abbreviated or overlong) is a pin
+# attempt, not a branch name.
+_SHA_LIKE_RE = re.compile(r"^[0-9a-fA-F]{7,}$")
+
+
+def split_extra_addon_spec(spec: str) -> tuple[str, str]:
+    """Split an extra-addons spec into ``(branch, pinned_sha)``.
+
+    ``"19.0"`` -> ``("19.0", "")`` (follow the branch tip, as always);
+    ``"19.0@<sha40>"`` -> ``("19.0", "<sha40>")`` (pinned to that commit).
+    Anything else after ``@`` is part of the branch name (git allows ``@`` in
+    branch names), so values stored before pinning existed keep their meaning.
+    Input is checked by :func:`validate_extra_addon_spec`.
+    """
+    branch, sep, pin = spec.rpartition("@")
+    if sep and branch and _PINNED_SHA_RE.fullmatch(pin):
+        return branch, pin.lower()
+    return spec, ""
+
+
+def validate_extra_addon_spec(repo_name: str, spec: str) -> str:
+    """Validate a user-supplied ``branch`` / ``branch@<sha40>`` spec.
+
+    Returns the normalized spec (stripped, pinned commit id lower-cased) — store
+    that, not the raw input. Raises ValueError for a missing branch, a
+    missing or abbreviated commit id after ``@``, or a branch name git refuses
+    because of its ``@`` (``@{`` or a bare ``@``). Other ``@`` uses are plain
+    branch names, e.g. ``team@feature``.
+    """
+    spec = spec.strip()
+    if not spec:
+        raise ValueError(
+            f"Extra addon '{repo_name}' requires a branch (e.g. '{repo_name}:19.0')."
+        )
+    branch, sep, pin = spec.rpartition("@")
+    if not sep:
+        return spec
+    branch = branch.strip()
+    pin = pin.strip()
+    if _PINNED_SHA_RE.fullmatch(pin):
+        if not branch:
+            raise ValueError(
+                f"Extra addon '{repo_name}': a pinned commit needs a branch too "
+                f"(e.g. '{repo_name}:19.0@{pin.lower()}')."
+            )
+        return f"{branch}@{pin.lower()}"
+    if not pin or len(pin) == 40 or _SHA_LIKE_RE.fullmatch(pin):
+        raise ValueError(
+            f"Extra addon '{repo_name}': invalid pinned commit '{pin}' in "
+            f"'{spec}'. Use '{repo_name}:<branch>@<sha>' with the full "
+            "40-character hexadecimal commit id."
+        )
+    if "@{" in spec or spec == "@" or "/@/" in f"/{spec}/":
+        raise ValueError(f"Extra addon '{repo_name}': invalid branch name {spec!r}.")
+    return spec
+
+
+def parse_extra_addons(raw: str) -> dict[str, str]:
+    """Parse ``"repo:branch,repo2:branch@<sha40>"`` into ``{repo: spec}``.
+
+    Each spec is validated and normalized by :func:`validate_extra_addon_spec`.
+    """
+    result = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(
+                f"Extra addon '{item}' must include a branch (e.g. '{item}:19.0')."
+            )
+        name, branch = item.split(":", 1)
+        name = name.strip()
+        result[name] = validate_extra_addon_spec(name, branch)
+    return result

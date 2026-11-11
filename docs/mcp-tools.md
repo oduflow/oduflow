@@ -272,7 +272,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Full Docker image with tag (e.g. `odoo:19.0`). Optional when `template_name` supplies it.
 
 `extra_addons`
-:   *str · default empty* — Comma-separated extra addon repos **with branches**, e.g. `"enterprise:19.0,custom-themes:main"`. The branch after the colon is mandatory.
+:   *str · default empty* — Comma-separated extra addon repos **with branches**, e.g. `"enterprise:19.0,custom-themes:main"`. The branch after the colon is mandatory. Append `@<sha>` (the full 40-character commit id) to pin a repo to an exact commit instead of the branch tip, e.g. `"oca-web:19.0@0123456789abcdef0123456789abcdef01234567"`: the checkout is made at that commit (fetched if missing; an error if the remote does not have it — never the tip), and `pull_and_apply` / `update_environment` never move it.
 
 `sanitize`
 :   *bool · default `True`* — Run Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets `database.is_neutralized`) plus any custom scripts in the repository's `.oduflow/odoo_sanitize/` (top-level scripts for every environment, then an optional subfolder named exactly after the environment, a `/` in the name folding to `-`). Only applies to environments created from a template.

@@ -423,6 +423,13 @@
   }
   .extra-item[hidden] { display: none; }
   .extra-branch { color: var(--text-dim); font-weight: 400; }
+  /* A repo pinned to an exact commit ("branch@<sha40>"): the short SHA plus a
+     PINNED tag, so the state reads in words, not only in the value. */
+  .extra-pinned-tag {
+    display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 12px;
+    font-family: var(--font-sans); font-size: var(--text-2xs); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; vertical-align: 1px;
+  }
   .extras-controls { display: none; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
   .env-extras.has-overflow .extras-controls { display: flex; }
   .extras-filter {
@@ -1364,6 +1371,25 @@
   /* A branch read off the Odoo image is marked in its own row, not only
      counted under the list: the value alone looks exactly like a saved one.
      Only ticked rows carry the mark, since only they are mounted. */
+  /* A pinned spec (branch@<sha40>) is a commit id, not a branch: the field
+     takes the row's free space (the repo URL steps aside, the name stays on
+     one line), switches to the mono voice, and the row says PINNED. */
+  .form-group .check-item:has(> .branch-input[data-pinned]) { white-space: nowrap; }
+  .form-group .check-item:has(> .branch-input[data-pinned]) > .hint { display: none; }
+  .form-group input.branch-input[data-pinned] { flex: 1 1 auto; width: auto; min-width: 0; font-family: var(--font-mono); }
+  .form-group .check-item:has(> .branch-input[data-pinned])::after {
+    content: "pinned";
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--text-dim) 24%, transparent);
+    background: color-mix(in oklab, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
   .form-group .check-item:has(> input[type="checkbox"]:checked):has(> .branch-input[data-autofilled])::after {
     content: "guessed";
     flex: 0 0 auto;
@@ -1744,7 +1770,7 @@
         <div id="cr-extra-addons-checkboxes" class="check-list" onchange="updateExtraRepoStatus('cr-extra')"
              oninput="markExtraBranchEdited(event)"></div>
         <div class="hint" id="cr-extra-status" hidden></div>
-        <div class="hint">Select repos to mount in this environment. Branches are filled in from the Odoo image wherever a repo carries one; picking a branch fills it into every repo that has it.</div>
+        <div class="hint">Select repos to mount in this environment. Branches are filled in from the Odoo image wherever a repo carries one; picking a branch fills it into every repo that has it. To pin a repo to an exact commit instead of following its branch, type <code>branch@&lt;full 40-character SHA&gt;</code>.</div>
       </div>
       <div class="form-group">
         <label for="cr-auto-install">Auto-install modules</label>
@@ -3544,6 +3570,32 @@ var _extrasOpen = Object.create(null);    // branch -> true while unfolded
 var _extrasFilter = Object.create(null);  // branch -> filter text
 var _extrasObserver = null;
 
+// Mirrors naming.split_extra_addon_spec() on the server: only a full 40-hex
+// commit id after the last "@" pins the repo ("18.0@<sha40>"); anything else
+// is a branch name, "@" included (team@feature).
+function splitExtraSpec(spec) {
+  var value = String(spec || '');
+  var at = value.lastIndexOf('@');
+  var sha = at > 0 ? value.slice(at + 1) : '';
+  if (/^[0-9a-fA-F]{40}$/.test(sha)) {
+    return { branch: value.slice(0, at), sha: sha.toLowerCase() };
+  }
+  return { branch: value, sha: '' };
+}
+
+// Marks the branch fields holding a pinned spec (see the data-pinned CSS).
+function syncPinnedBranchInput(input) {
+  if (!input) return;
+  var sha = splitExtraSpec(input.value.trim()).sha;
+  if (sha) {
+    input.setAttribute('data-pinned', '');
+    input.title = 'Pinned to commit ' + sha + '; updates never move it';
+  } else if (input.hasAttribute('data-pinned')) {
+    input.removeAttribute('data-pinned');
+    input.removeAttribute('title');
+  }
+}
+
 function extrasHtml(branch, extras, idx) {
   var names = Object.keys(extras);
   if (!names.length) return '';
@@ -3551,10 +3603,19 @@ function extrasHtml(branch, extras, idx) {
   // is looked up by name, but "which repos are still on 16.0?" is just as
   // natural a question, and a filter that silently ignored the branch would
   // answer it with a wrong "not included".
+  // A pinned repo shows its branch and short SHA with a PINNED tag; the full
+  // SHA is in the tooltip and, with "pinned", in the searchable label.
   var items = names.map(function(name) {
-    var label = name + ' (' + extras[name] + ')';
-    return '<span class="extra-item" data-search="' + esc(label.toLowerCase()) + '">' + esc(name) +
-      ' <span class="extra-branch">(' + esc(extras[name]) + ')</span></span>';
+    var spec = splitExtraSpec(extras[name]);
+    var label = name + ' (' + extras[name] + ')' + (spec.sha ? ' pinned' : '');
+    if (!spec.sha) {
+      return '<span class="extra-item" data-search="' + esc(label.toLowerCase()) + '">' + esc(name) +
+        ' <span class="extra-branch">(' + esc(extras[name]) + ')</span></span>';
+    }
+    return '<span class="extra-item" data-search="' + esc(label.toLowerCase()) + '"' +
+      ' title="Pinned to commit ' + esc(spec.sha) + '; updates never move it">' + esc(name) +
+      ' <span class="extra-branch">(' + esc(spec.branch) + ' @ ' + esc(spec.sha.slice(0, 7)) + ')</span>' +
+      '<span class="extra-pinned-tag tag-neutral">Pinned</span></span>';
   }).join('');
   return '<div class="env-extras" data-extras-for="' + esc(branch) + '">' +
     '<div class="extras-list" id="extras-list-' + idx + '">' +
@@ -5993,6 +6054,7 @@ function _extraReposByName() {
 // list that in fact still carries repos.
 function updateExtraRepoStatus(prefix) {
   var rows = _extraRepoRows(prefix);
+  rows.forEach(function(row) { syncPinnedBranchInput(row.querySelector('.branch-input')); });
   var hiddenRows = rows.filter(function(row) { return row.hidden; });
   var hiddenChecked = hiddenRows.filter(function(row) {
     var cb = row.querySelector('input[type="checkbox"]');
@@ -6203,6 +6265,7 @@ function markExtraBranchEdited(event) {
   if (input && input.classList && input.classList.contains('branch-input')) {
     input.removeAttribute('data-autofilled');
     input.setAttribute('data-edited', '');
+    syncPinnedBranchInput(input);
   }
 }
 

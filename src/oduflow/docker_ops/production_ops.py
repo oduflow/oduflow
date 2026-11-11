@@ -86,6 +86,7 @@ from oduflow.extra_addons import (
     DB_CONN_CONF_KEYS,
     LISTEN_INTERFACE_ALIASES,
     LISTEN_INTERFACE_CONF,
+    validate_extra_addon_spec,
     validate_extra_repo_name,
 )
 from oduflow.naming import (
@@ -1584,6 +1585,12 @@ def create_production(
             )
     for repo_name in extra_addons or {}:
         validate_extra_repo_name(repo_name)
+    if extra_addons:
+        # Store the normalized spec (stripped, pinned SHA lower-cased).
+        extra_addons = {
+            name: validate_extra_addon_spec(name, str(spec))
+            for name, spec in extra_addons.items()
+        }
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
     container_name = _odoo_container_name(settings, team, name)
@@ -2174,6 +2181,12 @@ def reconfigure_production(
             # Keys become path components under the workspace; a ".." or
             # absolute-path key must never reach the rmtree below.
             validate_extra_repo_name(repo_name)
+        # Compare and store the normalized spec, so whitespace or SHA case
+        # alone is not a change that recreates the container.
+        extra_addons = {
+            name: validate_extra_addon_spec(name, str(spec))
+            for name, spec in extra_addons.items()
+        }
         if dict(extra_addons) != (record.get("extra_addons") or {}):
             updates["extra_addons"] = dict(extra_addons)
 

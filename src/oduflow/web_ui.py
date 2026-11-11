@@ -110,7 +110,11 @@ from oduflow.naming import (
     slugify_branch,
     validate_env_hostname,
     validate_env_name,
+    validate_extra_addon_spec,
     validate_template_name,
+)
+from oduflow.naming import (
+    parse_extra_addons as _parse_extra_addons,
 )
 from oduflow.settings import OpenCodeProviderSettings, Settings, TeamSettings
 
@@ -630,22 +634,6 @@ def _command_from_body(raw: object) -> list[str]:
     if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
         return list(raw)
     raise ValueError("command must be a shell-quoted string or an array of strings")
-
-
-def _parse_extra_addons(raw: str) -> dict[str, str]:
-    result = {}
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if ":" in item:
-            name, branch = item.split(":", 1)
-            result[name.strip()] = branch.strip()
-        else:
-            raise ValueError(
-                f"Extra addon '{item}' must include a branch (e.g. '{item}:19.0')."
-            )
-    return result
 
 
 def _guide_title(filepath: str) -> str:
@@ -2088,7 +2076,10 @@ def _build_routes(
             settings = get_settings()
             extra_dict = None
             if isinstance(extra_addons_raw, dict):
-                extra_dict = extra_addons_raw or None
+                extra_dict = {
+                    str(name): validate_extra_addon_spec(str(name), str(spec))
+                    for name, spec in extra_addons_raw.items()
+                } or None
             elif isinstance(extra_addons_raw, str) and extra_addons_raw.strip():
                 extra_dict = _parse_extra_addons(extra_addons_raw.strip()) or None
             local_path_from_meta = ""

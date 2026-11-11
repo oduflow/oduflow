@@ -20,6 +20,7 @@ from oduflow.naming import (
     validate_domain,
     validate_env_hostname,
     validate_env_name,
+    validate_extra_addon_spec,
     validate_prod_name,
     validate_template_name,
 )
@@ -368,6 +369,16 @@ class StackSpec(StackModel):
     databases: dict[ServiceDatabaseName, ServiceDatabase] = Field(default_factory=dict)
     files: list[VolumeFile] = Field(default_factory=list)
     services: dict[ResourceName, Service] = Field(default_factory=dict)
+
+    @field_validator("extra_repositories")
+    @classmethod
+    def extra_repository_branches(
+        cls, value: dict[str, ExtraRepository]
+    ) -> dict[str, ExtraRepository]:
+        # "branch" or "branch@<sha40>" (pinned commit), normalized.
+        for name, repo in value.items():
+            repo.branch = validate_extra_addon_spec(name, repo.branch)
+        return value
 
     @model_validator(mode="after")
     def references_exist(self) -> StackSpec:

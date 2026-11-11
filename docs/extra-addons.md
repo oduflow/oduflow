@@ -135,7 +135,35 @@ oduflow call create_environment feature-x "" default https://github.com/company/
 
 # Mount multiple extra repos
 oduflow call create_environment feature-x "" default https://github.com/company/addons.git odoo:19.0 "enterprise:19.0,custom-themes:main"
+
+# Pin a repo to an exact commit instead of the branch tip
+oduflow call create_environment feature-x "" default https://github.com/company/addons.git odoo:19.0 "oca-web:19.0@0123456789abcdef0123456789abcdef01234567"
 ```
+
+A pinned entry (`repo:branch@<sha>`, with the full 40-character commit id) is
+checked out at exactly that commit. The commit is fetched from the remote if it
+is not downloaded yet; if the remote does not have it, the operation fails —
+it never falls back to the branch tip. Updating the environment
+(`pull_and_apply`) never moves a pinned repo; the commit shows in
+`get_environment_info` under `extra_addons_revisions`. Without `@`, the repo
+follows its branch tip as usual.
+
+Notes on pinned entries:
+
+- **The branch is a label, the commit is what runs.** Oduflow does not check
+  that the commit belongs to the branch you named (in a shallow download the
+  branch history is not there to check against). The branch still counts as
+  "in use", so it cannot be removed while a pinned environment references it.
+- **Fetching by SHA** works on GitHub and most hosts. If a self-hosted server
+  refuses it, Oduflow fetches the named branch and uses the commit only if it
+  arrived that way (typically: it is the branch tip); otherwise the operation
+  fails with an explanation.
+- **A pinned commit is not kept forever.** Once no environment or production
+  uses it and no downloaded branch contains it, removing a branch may
+  garbage-collect it; the next use simply downloads it again from the remote.
+- **`@` in branch names** still works: only a 40-character commit id after the
+  last `@` is a pin (`team@feature` is a branch). A hex run of 7+ characters
+  after `@` is rejected as an abbreviated commit id.
 
 In the dashboard, the branch next to each repo is filled in from the **Odoo
 image** of the environment being created (`odoo:19.0` → `19.0`), for every repo
