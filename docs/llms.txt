@@ -197,7 +197,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `setup_repo_auth` — cache git credentials for private repositories
 - `add_extra_repo` / `list_extra_repos` / `update_extra_repo` / `delete_extra_repo` — manage extra addons repositories
 - `get_agent_instructions` — load the compact Oduflow agent workflow once at session start
-- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–19)
+- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–20)
 - `report_issue` — build a prefilled GitHub issue link so the user can report an Oduflow bug, request a feature, or send feedback from their own account
 
 ## Production Hosting

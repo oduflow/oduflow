@@ -113,6 +113,7 @@ src/oduflow/
       odoo_17_guide.md    # Odoo 17 development standards
       odoo_18_guide.md    # Odoo 18 development standards
       odoo_19_guide.md    # Odoo 19 development standards
+      odoo_20_guide.md    # Odoo 20 development standards
 
 tests/                  # Unit and integration tests (pytest)
 ```

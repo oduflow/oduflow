@@ -3307,7 +3307,7 @@ Load the compact Oduflow agent workflow and the active code-delivery mode.
 ### `get_odoo_development_guide`
 
 Get the Odoo development standards and constraints guide for a specific Odoo
-version (15–19).
+version (15–20).
 
 **Parameters**
 

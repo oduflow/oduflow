@@ -17,10 +17,10 @@ process. Because the session belongs to a real user, ACLs and record rules are
 enforced exactly as they are for that user in the UI.
 
 The route, the JSON-RPC envelope and the error payload shape are stable across
-the Odoo versions Oduflow supports (15-19). Odoo 19 renamed the route's
+the Odoo versions Oduflow supports (15-20). Odoo 19 renamed the route's
 ``type='json'`` to ``type='jsonrpc'``, but that declaration never crosses the
 wire. ``/jsonrpc`` and ``/xmlrpc/2`` are deliberately *not* used: they are
-deprecated in 19, scheduled for removal in 20, and each call logs a warning into
+deprecated in 19, scheduled for removal in 22, and each call logs a warning into
 the very environment log an agent reads while debugging.
 """
 
