@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6,7 +7,7 @@ import pytest
 from oduflow.errors import ConflictError, ExternalCommandError
 from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import StackValidationError, load_stack, resolve_env_values
-from oduflow.stack_models import ServiceDatabase, ServiceRoute, ValueFrom
+from oduflow.stack_models import ServiceDatabase, ServiceRoute, StackManifest, ValueFrom
 from oduflow.stack_ops import (
     PlanAction,
     StackPlan,
@@ -15,6 +16,7 @@ from oduflow.stack_ops import (
     _resource_hash,
     apply_stack,
     build_plan,
+    format_plan,
 )
 
 MANIFEST = """\
@@ -240,6 +242,7 @@ def test_plan_updates_a_service_whose_database_is_being_recreated(
         "routes": [],
         "stack": "acme",
         "stack_resource": "services.fs",
+        "status": "running",
         # Unchanged: the manifest did not move, only the database vanished.
         "stack_spec_hash": _resource_hash(service),
     }
@@ -479,6 +482,7 @@ def test_plan_ignores_service_image_environment_defaults(
         "routes": [],
         "stack": "acme",
         "stack_resource": "services.fs",
+        "status": "running",
         "stack_spec_hash": _resource_hash(service),
     }
 
@@ -535,6 +539,7 @@ def test_plan_reports_service_command_drift(
         "routes": [],
         "stack": "acme",
         "stack_resource": "services.fs",
+        "status": "running",
         "stack_spec_hash": _resource_hash(service),
     }
 
@@ -598,7 +603,7 @@ def test_apply_creates_resources_and_persists_non_secret_state(stack_fixture):
             PlanAction("create", "environment"),
             PlanAction("write", "files.fs-data:config/fs.conf"),
             PlanAction("create", "services.fs"),
-            PlanAction("install", "modules", "acme_base"),
+            PlanAction("install", "modules", modules=("acme_base",)),
         ),
     )
     events = []
@@ -809,7 +814,7 @@ def test_stack_update_dependency_failure_preserves_actionable_error(stack_fixtur
         (
             PlanAction("update", "environment"),
             PlanAction("create", "services.fs"),
-            PlanAction("install", "modules", "acme_base"),
+            PlanAction("install", "modules", modules=("acme_base",)),
         ),
     )
     with (
@@ -835,3 +840,180 @@ def test_stack_update_dependency_failure_preserves_actionable_error(stack_fixtur
     service.assert_not_called()
     install.assert_not_called()
     save.assert_not_called()
+
+
+def test_service_database_cluster_compatibility_and_conflicts(stack_fixture):
+    settings, team, _, path = stack_fixture
+
+    manifest = StackManifest.model_validate(
+        {"metadata": {"name": "acme"}, "spec": {"databases": {"app": {}}}}
+    )
+    # Legacy databases were hashed as {} and may have no cluster field.
+    live = {
+        "name": "app",
+        "stack": "acme",
+        "stack_resource": "databases.app",
+        "status": "ready",
+        "stack_spec_hash": _resource_hash({}),
+    }
+    with (
+        patch(
+            "oduflow.stack_ops.service_database_ops.list_databases", return_value=[live]
+        ),
+        patch("oduflow.stack_ops.volume_ops.list_volumes", return_value=[]),
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=[]),
+        patch("oduflow.stack_ops.service_database_ops.create_database") as create,
+    ):
+        assert not apply_stack(settings, team, manifest, path).actions
+        manifest.spec.databases["app"].cluster = "prod"
+        with pytest.raises(ConflictError, match="production.enabled"):
+            apply_stack(settings, team, manifest, path)
+        settings = replace(settings, prod_enabled=True)
+        with pytest.raises(ConflictError, match="explicit migration"):
+            apply_stack(settings, team, manifest, path)
+        create.assert_not_called()
+
+
+def test_plan_reports_consumer_conflicts_alongside_database_conflicts(stack_fixture):
+    """A service whose database is in conflict is still checked: hiding its own
+    foreign ownership would surface it only after the operator fixed the
+    database and ran apply again."""
+    settings, team, _, path = stack_fixture
+    manifest = StackManifest.model_validate(
+        {
+            "metadata": {"name": "acme"},
+            "spec": {
+                "databases": {"app": {}},
+                "services": {
+                    "api": {
+                        "image": "example/api:1",
+                        "port": 8080,
+                        "env": {
+                            "DATABASE_URL": {"database": "app", "databaseField": "url"}
+                        },
+                    }
+                },
+            },
+        }
+    )
+    foreign_database = {
+        "name": "app",
+        "status": "ready",
+        "stack": "other",
+        "stack_resource": "databases.app",
+        "stack_spec_hash": "",
+    }
+    foreign_service = {
+        "name": "api",
+        "status": "running",
+        "stack": "other",
+        "stack_resource": "services.api",
+    }
+    with (
+        patch(
+            "oduflow.stack_ops.service_database_ops.list_databases",
+            return_value=[foreign_database],
+        ),
+        patch("oduflow.stack_ops.service_database_ops.get_database") as get_database,
+        patch(
+            "oduflow.stack_ops.service_ops.list_services",
+            return_value=[foreign_service],
+        ),
+    ):
+        plan = build_plan(settings, team, manifest, path)
+
+    assert [(item.operation, item.resource) for item in plan.actions] == [
+        ("conflict", "databases.app"),
+        ("conflict", "services.api"),
+    ]
+    get_database.assert_not_called()
+
+
+def test_plan_inspects_declared_databases_once(stack_fixture):
+    """Every inspection waits for PostgreSQL and probes it: the plan asks for
+    the declared databases by name and reuses those records for every
+    consuming service instead of scanning the team and probing again."""
+    settings, team, _, path = stack_fixture
+    manifest = StackManifest.model_validate(
+        {
+            "metadata": {"name": "acme"},
+            "spec": {
+                "databases": {"app": {}},
+                "services": {
+                    name: {
+                        "image": "example/api:1",
+                        "port": 8080,
+                        "env": {
+                            "DATABASE_URL": {"database": "app", "databaseField": "url"}
+                        },
+                    }
+                    for name in ("api", "worker")
+                },
+            },
+        }
+    )
+    database = {
+        "name": "app",
+        "status": "ready",
+        "stack": "acme",
+        "stack_resource": "databases.app",
+        "stack_spec_hash": _resource_hash(manifest.spec.databases["app"]),
+        "url": "postgresql://svc:secret@oduflow-db/app",
+    }
+    services = [
+        {
+            "name": name,
+            "status": "running",
+            "image": "example/api:1",
+            "port": 8080,
+            "hostname": None,
+            "env_vars": {"DATABASE_URL": database["url"]},
+            "image_env_vars": {},
+            "host_mode": False,
+            "volumes": [],
+            "cap_add": [],
+            "privileged": False,
+            "routes": [],
+            "stack": "acme",
+            "stack_resource": f"services.{name}",
+            "stack_spec_hash": _resource_hash(spec),
+        }
+        for name, spec in manifest.spec.services.items()
+    ]
+    with (
+        patch(
+            "oduflow.stack_ops.service_database_ops.list_databases",
+            return_value=[database],
+        ) as list_databases,
+        patch("oduflow.stack_ops.service_database_ops.get_database") as get_database,
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=services),
+    ):
+        assert build_plan(settings, team, manifest, path).actions == ()
+        list_databases.assert_called_once_with(
+            settings, team, manifest.spec.databases, reveal_password=True
+        )
+
+        # A database in conflict cannot be resolved, yet its consumers are
+        # still compared field by field and not flagged as env drift.
+        database.update(status="credentials-error", stack="", stack_resource="")
+        plan = build_plan(settings, team, manifest, path)
+
+    assert [(item.operation, item.resource) for item in plan.actions] == [
+        ("conflict", "databases.app")
+    ]
+    get_database.assert_not_called()
+
+
+def test_format_plan_renders_every_operation():
+    plan = StackPlan(
+        "acme",
+        (
+            PlanAction("start", "services.fs", "exited"),
+            PlanAction("install", "modules", "a, b", modules=("a", "b")),
+        ),
+    )
+
+    assert format_plan(plan).splitlines()[1:] == [
+        "  ^ start services.fs — exited",
+        "  + install modules — a, b",
+    ]

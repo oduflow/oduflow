@@ -33,7 +33,7 @@ from oduflow.stack_loader import (
     read_stack_file,
     resolve_env_values,
 )
-from oduflow.stack_models import Service, StackManifest
+from oduflow.stack_models import Service, ServiceDatabase, StackManifest
 from oduflow.stack_state import load_state, save_state
 
 STACK_LABEL = "oduflow.stack"
@@ -48,6 +48,7 @@ class PlanAction:
     operation: str
     resource: str
     detail: str = ""
+    modules: tuple[str, ...] = ()
 
     @property
     def conflict(self) -> bool:
@@ -69,8 +70,13 @@ class StackPlan:
 
 
 def _resource_hash(value: BaseModel | dict[str, Any] | list[Any]) -> str:
+    # Default service databases retain the hash of the original empty spec.
     raw = (
-        value.model_dump(mode="json", by_alias=True)
+        value.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_defaults=isinstance(value, ServiceDatabase),
+        )
         if isinstance(value, BaseModel)
         else value
     )
@@ -253,17 +259,21 @@ def build_plan(
     spec = manifest.spec
     desired_env = spec.environment
     target = desired_env or spec.production
-    assert target is not None
     if desired_env is not None:
         validate_env_name(desired_env.name)
-    git_ops.validate_repo_url(target.repo_url)
+    if target is not None:
+        git_ops.validate_repo_url(target.repo_url)
     for desired_repo in spec.extra_repositories.values():
         git_ops.validate_repo_url(desired_repo.repo_url)
     actions: list[PlanAction] = []
 
     from oduflow import extra_addons
 
-    repos = {item["name"]: item for item in extra_addons.list_extra_repos(team)}
+    repos = (
+        {item["name"]: item for item in extra_addons.list_extra_repos(team)}
+        if spec.extra_repositories
+        else {}
+    )
     for name, desired_repo in spec.extra_repositories.items():
         actual = repos.get(name)
         if actual is None:
@@ -281,7 +291,11 @@ def build_plan(
                 )
             )
 
-    volumes = {item["name"]: item for item in volume_ops.list_volumes(settings, team)}
+    volumes = (
+        {item["name"]: item for item in volume_ops.list_volumes(settings, team)}
+        if spec.volumes
+        else {}
+    )
     for name, desired_volume in spec.volumes.items():
         actual = volumes.get(name)
         resource = f"volumes.{name}"
@@ -302,52 +316,45 @@ def build_plan(
                 )
             )
 
-    service_databases: dict[str, dict[str, Any]] = {}
-    if spec.databases:
-        service_databases = {
-            item["name"]: item
-            for item in service_database_ops.list_databases(settings, team)
-        }
+    # Only the declared databases, with credentials: each inspection probes
+    # PostgreSQL, and the records also feed service env resolution below.
+    service_databases = {
+        item["name"]: item
+        for item in service_database_ops.list_databases(
+            settings, team, spec.databases, reveal_password=True
+        )
+    }
     pending_databases: set[str] = set()
+    blocked_databases: set[str] = set()
     for name, desired_database in spec.databases.items():
         resource = f"databases.{name}"
         actual = service_databases.get(name)
-        if actual is None:
+        if desired_database.cluster == "prod" and not settings.prod_enabled:
+            conflict = "production.enabled must be true for cluster prod"
+        elif actual is None:
             pending_databases.add(name)
-            actions.append(PlanAction("create", resource))
+            actions.append(
+                PlanAction("create", resource, f"cluster {desired_database.cluster}")
+            )
+            continue
         elif actual.get("status") == "credentials-error":
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "stored credentials for this database cannot be read",
-                )
-            )
+            conflict = "stored credentials for this database cannot be read"
         elif not _owned_by(actual, stack, resource):
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "existing database is not owned by this stack",
-                )
-            )
+            conflict = "existing database is not owned by this stack"
+        elif service_database_ops.record_cluster(actual) != desired_database.cluster:
+            conflict = "changing the database cluster requires an explicit migration"
+        elif actual.get("status") == "unavailable":
+            conflict = "the database cluster is unavailable"
         elif actual.get("status") != "ready":
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "managed PostgreSQL database or role is missing",
-                )
-            )
+            conflict = "managed PostgreSQL database or role is missing"
         elif actual.get("stack_spec_hash") != _resource_hash(desired_database):
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "database metadata is inconsistent with the manifest",
-                )
-            )
+            conflict = "database metadata is inconsistent with the manifest"
+        else:
+            continue
+        blocked_databases.add(name)
+        actions.append(PlanAction("conflict", resource, conflict))
 
+    target_needs_create = False
     if desired_env is not None:
         desired_env_vars = resolve_env_values(
             desired_env.env,
@@ -362,7 +369,7 @@ def build_plan(
         }
         actual_env = environments.get(desired_env.name)
         env_resource = "environment"
-        env_needs_create = actual_env is None
+        target_needs_create = actual_env is None
         if actual_env is None:
             actions.append(PlanAction("create", env_resource, desired_env.name))
             if desired_env.template is not None:
@@ -443,7 +450,7 @@ def build_plan(
                     PlanAction("update", env_resource, ", ".join(mutable_drift))
                 )
 
-    else:
+    elif spec.production is not None:
         production_actions = stack_production.plan_production(
             settings, team, manifest, environ
         )
@@ -451,7 +458,7 @@ def build_plan(
             PlanAction(operation, "production", detail)
             for operation, detail in production_actions
         )
-        env_needs_create = any(
+        target_needs_create = any(
             operation == "create" for operation, _ in production_actions
         )
 
@@ -463,9 +470,11 @@ def build_plan(
         ):
             actions.append(PlanAction("write", resource, item.source))
 
-    services = {
-        item["name"]: item for item in service_ops.list_services(settings, team)
-    }
+    services = (
+        {item["name"]: item for item in service_ops.list_services(settings, team)}
+        if spec.services
+        else {}
+    )
     for name, desired_service in spec.services.items():
         resource = f"services.{name}"
         if desired_service.routes and settings.routing_mode != "traefik":
@@ -523,14 +532,19 @@ def build_plan(
             getattr(value, "database", None) in pending_databases
             for value in desired_service.env.values()
         )
+        has_blocked_database_value = any(
+            getattr(value, "database", None) in blocked_databases
+            for value in desired_service.env.values()
+        )
         deferred_env = (
-            env_needs_create and has_environment_value
+            target_needs_create and has_environment_value
         ) or has_pending_database_value
-        if deferred_env:
-            # A generated input this service consumes does not exist yet, so
-            # its value cannot be compared against the running container. Still
-            # validate every host-env source now; apply resolves the generated
-            # values after creating the Odoo environment and the databases.
+        if deferred_env or has_blocked_database_value:
+            # A generated input this service consumes does not exist yet (or
+            # is in conflict), so its value cannot be compared against the
+            # running container. Still validate every host-env source now;
+            # apply resolves the generated values after creating the Odoo
+            # environment and the databases.
             for key, value in desired_service.env.items():
                 if getattr(value, "from_env", None) is not None:
                     resolve_env_values({key: value}, environ=environ)
@@ -540,8 +554,12 @@ def build_plan(
                 desired_service.env,
                 settings=settings,
                 team=team,
-                env_name=target.name if desired_env is not None else "",
-                production_name=target.name if spec.production is not None else "",
+                env_name=desired_env.name if desired_env is not None else "",
+                production_name=spec.production.name
+                if spec.production is not None
+                else "",
+                production_domain=spec.production.domain if spec.production else "",
+                database_records=service_databases,
                 environ=environ,
             )
         desired_caps = (
@@ -610,17 +628,26 @@ def build_plan(
             actions.append(
                 PlanAction("update", resource, ", ".join(drift) or "metadata")
             )
+        elif actual.get("status") != "running":
+            # Services run under restart_policy unless-stopped, so a container
+            # that is not running was stopped by hand. The manifest declares it
+            # running; converge like production does for a stopped container.
+            actions.append(PlanAction("start", resource, str(actual.get("status"))))
 
     modules = list(desired_env.modules.install) if desired_env is not None else []
     if modules and desired_env is not None:
         installed = (
             set()
-            if env_needs_create
+            if target_needs_create
             else _installed_modules(settings, team, desired_env.name, modules)
         )
         missing = [module for module in modules if module not in installed]
         if missing:
-            actions.append(PlanAction("install", "modules", ", ".join(missing)))
+            actions.append(
+                PlanAction(
+                    "install", "modules", ", ".join(missing), modules=tuple(missing)
+                )
+            )
 
     return StackPlan(stack=stack, actions=tuple(actions))
 
@@ -633,6 +660,7 @@ def format_plan(plan: StackPlan) -> str:
         "install": "+",
         "conflict": "!",
         "adopt": "=",
+        "start": "^",
     }
     lines = [f"Stack {plan.stack}:"]
     if not plan.actions:
@@ -661,6 +689,9 @@ def _service_kwargs(
         team=team,
         env_name=manifest.spec.environment.name if manifest.spec.environment else "",
         production_name=manifest.spec.production.name
+        if manifest.spec.production
+        else "",
+        production_domain=manifest.spec.production.domain
         if manifest.spec.production
         else "",
         environ=environ,
@@ -746,6 +777,7 @@ def apply_stack(
                     settings,
                     team,
                     name,
+                    cluster=desired_database.cluster,
                     stack_labels=_stack_labels(stack, resource, desired_database),
                 )
 
@@ -797,7 +829,7 @@ def apply_stack(
                         "stack apply.\n" + "\n".join(updated.get("setup_logs", [])),
                     )
 
-        else:
+        elif spec.production is not None:
             for operation in ("create", "adopt", "update"):
                 if (operation, "production") in operations:
                     stack_production.apply_production(
@@ -819,6 +851,9 @@ def apply_stack(
             resource = f"services.{name}"
             create_service = ("create", resource) in operations
             update_service = ("update", resource) in operations
+            if ("start", resource) in operations:
+                service_ops.restart_service(settings, team, name)
+                continue
             if not create_service and not update_service:
                 continue
             kwargs = _service_kwargs(
@@ -847,9 +882,8 @@ def apply_stack(
 
         module_action = operations.get(("install", "modules"))
         if module_action and desired_env is not None:
-            modules = [item.strip() for item in module_action.detail.split(",")]
             result = odoo_ops.install_odoo_modules(
-                settings, team, desired_env.name, *modules
+                settings, team, desired_env.name, *module_action.modules
             )
             if int(result.get("exit_code", 1)) != 0:
                 raise ConflictError(
@@ -858,16 +892,17 @@ def apply_stack(
                 )
             env_ops.restart_environment(settings, desired_env.name, team)
 
+        target_resource = {}
+        if desired_env is not None:
+            target_resource["environment"] = desired_env.name
+        elif spec.production is not None:
+            target_resource["production"] = spec.production.name
         save_state(
             team,
             stack,
             manifest_hash(manifest),
             {
-                **(
-                    {"environment": desired_env.name}
-                    if desired_env is not None
-                    else {"production": spec.production.name if spec.production else ""}
-                ),
+                **target_resource,
                 "extraRepositories": sorted(spec.extra_repositories),
                 "volumes": sorted(spec.volumes),
                 "databases": sorted(spec.databases),

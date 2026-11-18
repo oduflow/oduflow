@@ -233,3 +233,50 @@ def test_shipped_json_schema_matches_models():
     shipped = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert shipped == StackManifest.model_json_schema(by_alias=True)
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        (
+            {
+                "extraRepositories": {
+                    "addons": {
+                        "repoUrl": "https://github.com/acme/app",
+                        "branch": "main",
+                    }
+                }
+            },
+            "extraRepositories requires",
+        ),
+        (
+            {
+                "services": {
+                    "api": {
+                        "image": "api",
+                        "port": 80,
+                        "env": {"URL": {"environmentField": "url"}},
+                    }
+                }
+            },
+            "environmentField requires",
+        ),
+        (
+            {
+                "services": {
+                    "api": {
+                        "image": "api",
+                        "port": 80,
+                        "env": {"URL": {"productionField": "url"}},
+                    }
+                }
+            },
+            "productionField requires",
+        ),
+        ({"databases": {"app": {"cluster": "primary"}}}, "cluster"),
+        ({}, "at least one resource"),
+    ],
+)
+def test_service_stack_rejects_invalid_spec(spec, message):
+    with pytest.raises(ValidationError, match=message):
+        StackManifest.model_validate({"metadata": {"name": "app"}, "spec": spec})
