@@ -3406,3 +3406,76 @@ class TestStagingImageServices:
         container.stop.assert_not_called()
         container.remove.assert_not_called()
         mock_docker_client.containers.run.assert_not_called()
+
+
+class TestConfiguredSystemEnv:
+    """A system-looking key the operator sets (HOSTNAME, PATH, ...) stays visible,
+    so a Stack that declares it can match the running container."""
+
+    def test_create_labels_configured_system_keys(self, mock_docker_client, tmp_path):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(
+            TEST_SETTINGS,
+            team,
+            "web",
+            "example/web:1",
+            3000,
+            env_vars={"HOSTNAME": "0.0.0.0", "API_URL": "https://api.example.com"},
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        assert json.loads(labels["oduflow.system_env"]) == ["HOSTNAME"]
+
+    def test_create_without_system_keys_adds_no_label(
+        self, mock_docker_client, tmp_path
+    ):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        service_ops.create_service(
+            TEST_SETTINGS, team, "web", "example/web:1", 3000, env_vars={"A": "1"}
+        )
+
+        labels = mock_docker_client.containers.run.call_args[1]["labels"]
+        assert "oduflow.system_env" not in labels
+
+    def test_configured_system_key_is_kept_and_image_noise_hidden(self):
+        container = MagicMock()
+        container.labels = {"oduflow.system_env": json.dumps(["HOSTNAME"])}
+        container.attrs = {
+            "Config": {
+                "Env": ["HOSTNAME=0.0.0.0", "PATH=/usr/bin", "API_URL=https://api"]
+            }
+        }
+
+        assert service_ops._container_env_vars(container) == {
+            "HOSTNAME": "0.0.0.0",
+            "API_URL": "https://api",
+        }
+
+    def test_unlabelled_container_keeps_filtering_system_keys(self):
+        container = MagicMock()
+        container.labels = {}
+        container.attrs = {"Config": {"Env": ["HOSTNAME=0.0.0.0", "API_URL=x"]}}
+
+        assert service_ops._container_env_vars(container) == {"API_URL": "x"}
+
+    def test_stack_env_matches_declared_hostname(self):
+        from oduflow.stack_ops import _service_env_matches
+
+        container = MagicMock()
+        container.labels = {"oduflow.system_env": json.dumps(["HOSTNAME"])}
+        container.attrs = {"Config": {"Env": ["HOSTNAME=0.0.0.0", "PORT=3000"]}}
+        container.image.attrs = {"Config": {"Env": ["HOSTNAME=0.0.0.0", "PORT=3000"]}}
+        actual = {
+            "env_vars": service_ops._container_env_vars(container),
+            "image_env_vars": service_ops._image_env_vars(container),
+        }
+
+        assert _service_env_matches(actual, {"HOSTNAME": "0.0.0.0"})
+        # Dropping the declaration is drift: the container still carries it.
+        assert not _service_env_matches(actual, {})
