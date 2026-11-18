@@ -347,7 +347,17 @@
     "ServiceDatabase": {
       "additionalProperties": false,
       "description": "An empty managed PostgreSQL database; credentials are generated at apply.",
-      "properties": {},
+      "properties": {
+        "cluster": {
+          "default": "dev",
+          "enum": [
+            "dev",
+            "prod"
+          ],
+          "title": "Cluster",
+          "type": "string"
+        }
+      },
       "title": "ServiceDatabase",
       "type": "object"
     },
@@ -467,6 +477,19 @@
     "StackSpec": {
       "additionalProperties": false,
       "oneOf": [
+        {
+          "properties": {
+            "environment": {
+              "type": "null"
+            },
+            "production": {
+              "type": "null"
+            },
+            "extraRepositories": {
+              "maxProperties": 0
+            }
+          }
+        },
         {
           "properties": {
             "environment": {

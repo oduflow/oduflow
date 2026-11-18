@@ -194,6 +194,40 @@ def test_get_masks_password_by_default_and_reports_live_state(database_fixture):
     assert "url" not in result
 
 
+def test_list_by_name_skips_unknown_and_reveals_on_request(database_fixture):
+    """A caller interested in a few databases names them: nothing else on the
+    team is probed, an undeclared name is simply absent, and the records can
+    carry the credentials a consumer needs."""
+    settings, team = database_fixture
+    save_record(
+        team,
+        "events",
+        {
+            "name": "events",
+            "database": "oduflow_service_1_events",
+            "username": "svc_1_events",
+            "password": "generated-password",
+            "created_at": "2026-08-29T00:00:00+00:00",
+        },
+    )
+    with (
+        patch("oduflow.docker_ops.service_database_ops.get_client"),
+        patch("oduflow.docker_ops.service_database_ops._wait_pg_ready"),
+        patch(
+            "oduflow.docker_ops.service_database_ops._catalog_exists", return_value=True
+        ),
+        patch("oduflow.docker_ops.service_database_ops._exec_sql", return_value="0"),
+        patch("oduflow.docker_ops.service_database_ops.list_names") as list_names,
+    ):
+        rows = service_database_ops.list_databases(
+            settings, team, ["missing", "events"], reveal_password=True
+        )
+
+    list_names.assert_not_called()
+    assert [row["name"] for row in rows] == ["events"]
+    assert rows[0]["password"] == "generated-password"
+
+
 def test_rotate_rolls_postgres_back_when_credentials_write_fails(database_fixture):
     settings, team = database_fixture
     record = {

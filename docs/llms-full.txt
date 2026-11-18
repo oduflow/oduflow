@@ -4914,7 +4914,8 @@ depends on it.
 # Declarative Stacks
 
 An Oduflow Stack is a versioned YAML manifest describing the complete desired
-state of one development environment or production and its supporting resources.
+state of services, PostgreSQL databases, named volumes and configuration files.
+A Stack can also manage one Odoo development environment or one production.
 It keeps the host-level `oduflow.toml` separate from project configuration: teams, routing,
 authentication, quotas, and backups remain operator settings, while the Stack
 file can live beside the project's code and move between Oduflow installations.
@@ -4932,7 +4933,10 @@ oduflow stack status oduflow.yaml --team 1
 live state without changing it. `apply` validates and plans again under the
 team lock, refuses all conflicts before creating anything, and then converges
 resources in dependency order. `status` emits JSON containing the current plan
-and last successful apply record. `plan`, `apply`, and `status` also accept
+and last successful apply record; `inSync` is true exactly when that plan is
+empty. A declared service whose container is not running is drift: the plan
+shows `start services.<name>` and `apply` starts it again, as it does for a
+stopped production container. `plan`, `apply`, and `status` also accept
 `--env-file` to supply `fromEnv` values from a dotenv file; see
 [Secrets from a `.env` file](#secrets-from-a-env-file).
 
@@ -5026,8 +5030,52 @@ spec:
 
 The generated JSON Schema is shipped at
 `oduflow/schemas/oduflow-stack-v1alpha1.json`. Unknown fields, duplicate YAML
-keys, undeclared volume references, invalid names, and unsafe file paths are
-rejected.
+keys, undeclared volume references, invalid names, unsafe file paths, and a
+`spec` that declares no resource at all are rejected.
+
+## Service-only Stacks
+
+Omit both Odoo targets to deploy services on their own. This example uses
+placeholder Web and API images. Replace them with the images for your application.
+
+```yaml
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: multica
+spec:
+  volumes:
+    attachments: {}
+  databases:
+    multica:
+      cluster: prod
+  services:
+    web:
+      image: example/multica-web:1
+      port: 3000
+    api:
+      image: example/multica-api:1
+      port: 8080
+      env:
+        DATABASE_URL:
+          database: multica
+          databaseField: url
+      volumes:
+        - source: attachments
+          target: /data/attachments
+```
+
+Choose the database cluster at creation. The default is `dev`, including for
+existing manifests that specify `{}`. The `prod` cluster requires production
+hosting to be enabled and participates in cluster-wide WAL-G backups when
+configured. Those backups cover PostgreSQL data. Attachment volumes need their
+own backup. Changing the cluster of an existing database requires a migration.
+
+To add Odoo later, keep the Stack name and resource names and add either
+`spec.environment` or `spec.production`. If the existing resources match their
+declarations, the next apply adds Odoo and leaves those resources in place.
+`extraRepositories` requires an Odoo target. Service variables may use
+`environmentField` or `productionField` only with the corresponding target.
 
 ## Value sources
 
@@ -5133,7 +5181,7 @@ The V1 apply order is:
 1. extra-addon repositories;
 2. named volumes;
 3. managed PostgreSQL databases;
-4. the Odoo environment;
+4. the Odoo target, when declared;
 5. text files in volumes;
 6. auxiliary services;
 7. missing Odoo modules.
@@ -5156,8 +5204,7 @@ Changing an existing environment's `repoUrl`, `branch`, `template`, or
 descriptions are also immutable in V1. There is no automatic deletion or
 `prune`: removing something from YAML does not destroy persisted data.
 
-V1 supports one development environment per manifest. Production stacks,
-portable database artifacts, binary volume files, lockfiles, lifecycle shell
+Portable database artifacts, binary volume files, lockfiles, lifecycle shell
 hooks, dashboard controls, and OCI distribution are intentionally deferred.
 
 Service definitions also accept the explicit [`runtime` lifecycle mapping](services.md#container-lifecycle-settings).
@@ -5166,11 +5213,9 @@ Stack planning detects changes to it and replacement preserves the declared sett
 ## Production targets
 
 Use `spec.production` instead of `spec.environment` for a long-lived production.
-Exactly one target is required. The host must have `[production] enabled = true`
-and Traefik routing. Production databases use the dedicated production cluster;
-auxiliary `spec.databases` still use the shared development service database
-cluster (the `cluster` option of `create_service_database` is not yet available
-in Stack specs).
+An Odoo production target requires `[production] enabled = true` and Traefik
+routing. Its Odoo database uses the dedicated production cluster. Each service
+database uses its own declared cluster.
 
 ```yaml
 apiVersion: oduflow.dev/v1alpha1
