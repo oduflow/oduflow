@@ -19,7 +19,7 @@ logger = logging.getLogger("oduflow")
 
 TRACE: bool = False
 
-DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.4.0"
+DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.4.1"
 DEFAULT_POSTGRES_IMAGE = "postgres:16"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 # Retired keys already reported: settings are re-parsed for every console
@@ -121,18 +121,21 @@ _REGISTRY_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]+)?$"
 
 @dataclass(frozen=True)
 class ImageRegistrySettings:
-    """Container registry configuration ([team.X.image_registry] TOML section).
+    """Image build limits and registry ([team.X.image_registry] TOML section).
 
-    Presence of the section enables the image build/publish MCP tools for the
-    team; teams without it are refused with a clear prerequisite error. The
-    agent can publish only below ``repository_prefix`` on ``host`` — that prefix
-    is the authorization boundary. Credentials are optional: when ``username``
-    and ``token`` are set, pushes send request-scoped auth to the Docker API;
-    otherwise the host Docker daemon's ambient credentials (``docker login``)
-    are used.
+    Building needs no configuration: a team without the section builds with
+    these defaults. The section tunes the limits, lets an operator switch
+    building off (``builds_enabled = false``) and, through
+    ``repository_prefix``, enables publication — the agent can publish only
+    below that prefix on ``host``, which makes it the authorization boundary.
+    Credentials are optional: when ``username`` and ``token`` are set, pushes
+    send request-scoped auth to the Docker API; otherwise the host Docker
+    daemon's ambient credentials (``docker login``) are used.
     """
 
-    repository_prefix: str  # e.g. "acme" — namespace all published repos live under
+    # e.g. "acme" — namespace all published repos live under. Empty: the team
+    # builds and runs images locally but cannot publish them.
+    repository_prefix: str = ""
     host: str = "docker.io"
     username: str = ""
     # Registry token/password from the Oduflow config. It is sent only as
@@ -145,6 +148,9 @@ class ImageRegistrySettings:
     # Local staging images kept per team (oduflow-build/team-<id>:<build-id>);
     # older ones are untagged after each successful build. 0 disables pruning.
     keep_images: int = 10
+    # Operator switch: false refuses every new build for the team — the MCP
+    # tool on both endpoints and `build` on a Stack service.
+    builds_enabled: bool = True
 
 
 ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -235,8 +241,8 @@ class TeamSettings:
     agent_enabled: bool = False
     agent_default: str = "claude"  # which agent consoles/chats open by default
     agent_env: dict[str, str] = field(default_factory=dict)
-    # Container image building ([team.X.image_registry]); None = the image
-    # build/publish MCP tools are unavailable for this team.
+    # Image build limits + registry ([team.X.image_registry]); None = builds
+    # use the default limits and publishing is unavailable for this team.
     image_registry: ImageRegistrySettings | None = None
     # Raw per-team ``public_scheme`` override; empty falls back to the global
     # [routing] value. Read the resolved scheme via
@@ -353,8 +359,9 @@ class BackupSettings:
     basebackup_time: str = "03:30"
     # Snapshot retention: "interval_days:older_than_days" pairs, duplicacy
     # -keep style, largest age first. Default: keep everything younger than
-    # 7 days, one per day up to 30 days, one per week up to a year, one per
-    # month beyond that is not kept (0:365 would drop older ones entirely).
+    # 7 days, one per day up to 30 days, one per week up to 180 days, and one
+    # per 30 days beyond that, indefinitely (add "0:365" to drop snapshots
+    # older than a year entirely).
     keep: tuple[str, ...] = ("30:180", "7:30", "1:7")
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
@@ -1298,20 +1305,16 @@ def _parse_image_registry_section(
 ) -> ImageRegistrySettings | None:
     """Parse a [team.X.image_registry] TOML section.
 
-    Absent/empty section → None (image building disabled for the team). A
-    present section must be complete and valid — misconfigured image publishing
-    should fail at startup, not at the first agent build.
+    Absent/empty section → None (builds use the default limits and nothing can
+    be published). A present section must be valid — misconfigured image
+    publishing should fail at startup, not at the first agent build. Without
+    ``repository_prefix`` the section only tunes the build limits or, with
+    ``builds_enabled = false``, switches building off.
     """
     if not raw:
         return None
     prefix = str(raw.get("repository_prefix", "")).strip().strip("/")
-    if not prefix:
-        raise ValueError(
-            f"Team '{team_id}': [team.{team_id}.image_registry] requires "
-            "repository_prefix (the registry namespace published images live "
-            "under, e.g. 'acme'). Remove the section to disable image building."
-        )
-    if not _OCI_REPO_RE.match(prefix):
+    if prefix and not _OCI_REPO_RE.match(prefix):
         raise ValueError(
             f"Team '{team_id}': image_registry repository_prefix {prefix!r} is "
             "not a valid lowercase OCI repository namespace."
@@ -1330,11 +1333,22 @@ def _parse_image_registry_section(
             "set together (explicit credentials) or both omitted (use the host "
             "Docker daemon's own `docker login` credentials)."
         )
+    if username and not prefix:
+        raise ValueError(
+            f"Team '{team_id}': image_registry credentials need "
+            "repository_prefix (the registry namespace published images live "
+            "under, e.g. 'acme'). Remove them to build without publishing."
+        )
     timeout = int(str(raw.get("build_timeout_seconds", 1800)))
     max_context_mb = int(str(raw.get("max_context_mb", 512)))
     max_log_mb = int(str(raw.get("max_log_mb", 16)))
     max_concurrent_builds = int(str(raw.get("max_concurrent_builds", 2)))
     keep_images = int(str(raw.get("keep_images", 10)))
+    builds_enabled = raw.get("builds_enabled", True)
+    if not isinstance(builds_enabled, bool):
+        raise ValueError(
+            f"Team '{team_id}': image_registry builds_enabled must be true or false"
+        )
     if timeout <= 0:
         raise ValueError(
             f"Team '{team_id}': image_registry build_timeout_seconds must be > 0"
@@ -1362,6 +1376,7 @@ def _parse_image_registry_section(
         max_log_mb=max_log_mb,
         max_concurrent_builds=max_concurrent_builds,
         keep_images=keep_images,
+        builds_enabled=builds_enabled,
     )
 
 

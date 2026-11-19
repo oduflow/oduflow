@@ -101,7 +101,7 @@ one-click open.
 ## Evolution
 
 The landing later gained a second kind of token for links issued over MCP
-([[0085-mcp-connect-link]]). Such a link is relayed to a person by another
+([[0086-mcp-connect-link]]). Such a link is relayed to a person by another
 application, so its token carries only *who to sign in as*: a GET of the
 landing shows a page and changes nothing, and the session is minted in the POST
 that page makes. The dashboard's token described above is unchanged — minted up

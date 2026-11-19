@@ -74,6 +74,7 @@ from oduflow.docker_ops.stats import (
     get_system_stats,
     read_storage_cache,
     refresh_env_storage,
+    refresh_prod_storage,
     refresh_team_storage,
 )
 from oduflow.errors import (
@@ -580,7 +581,14 @@ _EXTERNAL_COMMAND_UI_ERROR = "Operation failed. Check server logs for details."
 
 # Result groups of system_ops.cleanup_orphans that Confirm may name.
 _CLEANUP_ORPHAN_KEYS = frozenset(
-    {"orphan_databases", "orphan_workspaces", "orphan_ports", "orphan_roles"}
+    {
+        "orphan_databases",
+        "orphan_workspaces",
+        "orphan_ports",
+        "orphan_roles",
+        "orphan_extra_checkouts",
+        "orphan_build_jobs",
+    }
 )
 
 
@@ -2330,6 +2338,19 @@ def _build_routes(
                 {"ok": False, "error": "orphans must list reviewed names by group."},
                 status_code=400,
             )
+        # Opt-in like the images, and independent of them. A preview never
+        # prunes, so the flag without force is refused, not ignored.
+        build_cache = body.get("build_cache", False)
+        if type(build_cache) is not bool:
+            return JSONResponse(
+                {"ok": False, "error": "build_cache must be a boolean."},
+                status_code=400,
+            )
+        if build_cache and not force:
+            return JSONResponse(
+                {"ok": False, "error": "build_cache requires force."},
+                status_code=400,
+            )
 
         def run() -> dict[str, Any]:
             settings = get_settings()
@@ -2339,12 +2360,14 @@ def _build_routes(
                 # fails on nor blocks the team's environment operations.
                 result = system_ops.cleanup_orphans(settings, team, dry_run=True)
                 result["images"] = image_cleanup.list_unused_images()
+                result["build_cache"] = image_cleanup.build_cache_usage()
                 return result
             # Hold locks in the worker so disconnects cannot unlock live work,
             # and take them all before deleting anything.
             with contextlib.ExitStack() as stack:
-                if image_ids:
-                    # One image cleanup at a time across all dashboard teams.
+                if image_ids or build_cache:
+                    # One image or build cache cleanup at a time across all
+                    # dashboard teams.
                     stack.enter_context(
                         locks.env_lock(image_cleanup_lock_key(), operation="cleanup")
                     )
@@ -2356,6 +2379,11 @@ def _build_routes(
                     image_cleanup.remove_unused_images(image_ids)
                     if image_ids
                     else {"removed": [], "skipped": [], "errors": []}
+                )
+                # After the images, under the same server-wide lock: the cache
+                # belongs to the daemon, not to this team.
+                result["build_cache"] = (
+                    image_cleanup.prune_build_cache() if build_cache else None
                 )
             return result
 
@@ -6756,6 +6784,21 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    def api_production_storage_refresh(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        try:
+            team = _get_ui_team(request)
+            production_registry.get_production(team, name)
+            entry = refresh_prod_storage(get_settings(), team, name)
+            return JSONResponse({"ok": True, "storage": entry})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_production_storage_refresh")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
     def api_production_update(request: Request) -> JSONResponse:
         """Deploy in a background thread: deploys can run for minutes and
         would time browsers out; the dashboard polls status instead."""
@@ -7292,6 +7335,11 @@ def _build_routes(
                 methods=["GET"],
             ),
             Route("/api/productions/{name}", api_production_info, methods=["GET"]),
+            Route(
+                "/api/productions/{name}/storage/refresh",
+                api_production_storage_refresh,
+                methods=["POST"],
+            ),
             Route(
                 "/api/productions/{name}/start",
                 api_production_start,

@@ -248,6 +248,73 @@ Docker can expose container environment values to host administrators through
 `docker inspect`; Stack value sources do not change that existing Docker trust
 boundary. Configure private Git credentials separately with `setup_repo_auth`.
 
+## Building a service image
+
+A service can build its image from a git repository instead of naming one.
+Declare `build` in place of `image`:
+
+```yaml
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: gateway
+spec:
+  volumes:
+    gateway-home: {}
+  services:
+    gateway:
+      build:
+        repoUrl: https://github.com/acme/gateway.git
+        ref: main                    # branch, tag or full commit SHA
+        dockerfile: docker/Dockerfile
+        # context: .                 # directory inside the repository
+        # target: runtime            # multi-stage target
+        # args: { APP_VERSION: "1.4.0" }
+        # gitUser: acme-ci           # account whose stored token to use
+      port: 8080
+      volumes:
+        - source: gateway-home
+          target: /home/app
+```
+
+The repository needs no Odoo code and the Stack needs no Odoo target. Every
+plan resolves `ref` to a commit with one `git ls-remote`:
+
+- no finished build of that commit and those build inputs exists yet — apply
+  builds it first, then creates or updates the service with the result;
+- the service already runs that build — nothing to do;
+- the branch moved — the next apply builds the new commit and recreates the
+  service on it. Pin a tag or a commit SHA to keep the image fixed.
+
+Builds run before any other change, so a failing Dockerfile leaves the Stack
+untouched; the error carries the build ID and the tail of the build log. A
+build can take as long as the team's `build_timeout_seconds`, and apply waits
+for it. That wait happens before apply takes the team lock, so the team's
+environment tools keep working while an image builds; if the lock is busy once
+the builds are done, run apply again — it reuses them. An operator can refuse
+builds for a team with `builds_enabled = false` in `[team.X.image_registry]`;
+the plan then reports the service as a conflict.
+
+A build started by `oduflow stack apply` belongs to that command:
+[`get_image_build`](mcp-tools.md#get_image_build) shows its progress, and
+interrupting the command is how to cancel it.
+
+The image stays in the host's Docker daemon as a staging tag
+(`oduflow-build/team-<id>:<build-id>`), which the running service keeps alive.
+No registry is involved; publish a build with
+[`publish_image_build`](mcp-tools.md#publish_image_build) when it has to reach
+another host. Private repositories use the team's stored git credentials or SSH
+deploy key — `repoUrl` itself must not contain a token. Build `args` are not
+secret: they end up in the image history.
+
+A Stack's builds run one after another. Each build leaves a record (status and
+log) in the team's data directory. `oduflow cleanup` and the dashboard's
+**Cleanup** remove the records of failed, cancelled and interrupted builds
+(including one whose `stack apply` process died), and of succeeded builds whose
+staging image is gone; a running build and a build whose image still exists
+are kept, so a re-apply keeps reusing it. See
+[Maintenance Commands](cli.md#maintenance-commands).
+
 ## Reconciliation and ownership
 
 Resources created by a Stack carry these Docker labels:
@@ -282,8 +349,8 @@ uninstalls a module.
 V1 can reconcile these changes in place:
 
 - Odoo image and Odoo container environment variables;
-- service image, environment, port/routes, hostname, volumes, host mode, and
-  capabilities;
+- service image (including a rebuild of a `build` source whose ref moved),
+  environment, port/routes, hostname, volumes, host mode, and capabilities;
 - new extra repositories, volumes, databases, files, services, and modules.
 
 Changing an existing environment's `repoUrl`, `branch`, `template`, or

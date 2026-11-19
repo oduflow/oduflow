@@ -8,8 +8,15 @@ RUN apt-get update \
         rsync \
         iptables \
         docker.io \
+        docker-cli \
         tini \
     && rm -rf /var/lib/apt/lists/*
+
+# BuildKit for the image build tools (start_image_build, Stack `build:`):
+# docker-cli above plus its buildx plugin. Without them Oduflow falls back to
+# the Docker Engine's legacy builder, which cannot run Dockerfiles that use
+# $BUILDPLATFORM, RUN --mount or COPY --link.
+COPY --from=docker/buildx-bin:0.38.2 /buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 
 WORKDIR /app
 

@@ -89,14 +89,23 @@ SCOPED_ALLOWLIST = frozenset(
         "http_request_to_odoo",
         "list_installed_modules",
         "restart_environment",
-        # Image builds: available only when the team has [team.X.image_registry]
-        # configured; otherwise the tools raise a prerequisite error.
+        # Image builds from the environment's own checkout. Publishing needs
+        # [team.X.image_registry]; without it that tool raises a prerequisite
+        # error.
         "start_image_build",
         "get_image_build",
         "publish_image_build",
         "cancel_image_build",
     }
 )
+
+
+# Parameters that reach beyond the environment and are therefore neither
+# listed nor accepted on the scoped endpoint. A scoped agent builds its own
+# checkout; choosing an arbitrary repository is a team-level capability.
+SCOPED_HIDDEN_PARAMS: dict[str, frozenset[str]] = {
+    "start_image_build": frozenset({"repo_url", "ref"}),
+}
 
 
 # -- Pure helpers (unit-tested directly) --
@@ -133,6 +142,37 @@ def strip_env_name(parameters: dict[str, Any]) -> dict[str, Any]:
     if isinstance(required, list):
         params["required"] = [r for r in required if r != "env_name"]
     return params
+
+
+def strip_hidden_params(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    """Return a tool's JSON schema without its scoped-hidden parameters."""
+    hidden = SCOPED_HIDDEN_PARAMS.get(tool_name)
+    if not hidden:
+        return parameters
+    params = copy.deepcopy(parameters)
+    props = params.get("properties")
+    if isinstance(props, dict):
+        for key in hidden:
+            props.pop(key, None)
+    required = params.get("required")
+    if isinstance(required, list):
+        params["required"] = [r for r in required if r not in hidden]
+    return params
+
+
+def reject_hidden_params(tool_name: str, arguments: dict[str, Any]) -> None:
+    """Refuse a scoped call that supplies a scoped-hidden parameter."""
+    supplied = sorted(
+        key
+        for key in SCOPED_HIDDEN_PARAMS.get(tool_name, ())
+        if arguments.get(key) not in (None, "")
+    )
+    if supplied:
+        raise ToolError(
+            f"Tool '{tool_name}' does not accept {', '.join(supplied)} on this "
+            "single-environment MCP endpoint; it operates on this environment "
+            "only."
+        )
 
 
 def build_env_param_tools(mcp: Any) -> set[str]:
@@ -350,6 +390,12 @@ class ScopedAccessMiddleware(Middleware):
                 tool = tool.model_copy(
                     update={"parameters": strip_env_name(tool.parameters)}
                 )
+            if tool.name in SCOPED_HIDDEN_PARAMS:
+                tool = tool.model_copy(
+                    update={
+                        "parameters": strip_hidden_params(tool.name, tool.parameters)
+                    }
+                )
             out.append(tool)
         return out
 
@@ -365,6 +411,7 @@ class ScopedAccessMiddleware(Middleware):
                 f"Tool '{name}' is not available on this single-environment "
                 "MCP endpoint."
             )
+        reject_hidden_params(name, dict(context.message.arguments or {}))
         if name in self._env_param:
             args = dict(context.message.arguments or {})
             args["env_name"] = env

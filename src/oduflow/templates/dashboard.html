@@ -2568,13 +2568,17 @@
       <button class="modal-close" id="cleanup-close" aria-label="Close" onclick="closeCleanupModal()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Orphaned resources belong to this team. Docker images are shared across the server.</p>
+      <p class="modal-note">Orphaned resources belong to this team. Docker images and the build cache are shared across the server.</p>
       <pre id="cleanup-output" tabindex="-1" aria-live="polite"></pre>
       <div class="form-group check-row">
         <input type="checkbox" id="cleanup-images" onchange="updateCleanupConfirm()" disabled>
         <label for="cleanup-images">Remove unused Docker images</label>
       </div>
-      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed.</p>
+      <div class="form-group check-row">
+        <input type="checkbox" id="cleanup-build-cache" onchange="updateCleanupConfirm()" disabled>
+        <label for="cleanup-build-cache">Remove Docker build cache (shared by all teams)</label>
+      </div>
+      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed. Build cache in use by a running build is kept; the next build of each image runs without cache.</p>
       <div class="form-actions">
         <button class="btn" id="cleanup-cancel" onclick="closeCleanupModal()">Cancel</button>
         <button class="btn" id="cleanup-scan" onclick="scanCleanup()">Scan again</button>
@@ -3124,6 +3128,10 @@ let containerStatsMap = {};
 // per-card refresh button (walking a filestore is too slow for the poll loop).
 let envStorageMap = {};
 let storageRefreshing = {};
+// Same for productions (DB lives on the production cluster, filestore is a
+// plain directory in the prod workspace).
+let prodStorageMap = {};
+let prodStorageRefreshing = {};
 let cachedTemplates = [];
 let cachedEnvs = [];
 let cachedServices = [];
@@ -3503,17 +3511,25 @@ function applyStats() {
   });
   document.querySelectorAll('[data-storage-for]').forEach(function(el) {
     var branch = el.getAttribute('data-storage-for');
-    var s = envStorageMap[branch];
-    var btn = storageRefreshing[branch]
-      ? '<span class="spinner" aria-hidden="true"></span>'
-      : '<button class="stat-refresh" onclick="refreshStorage(\'' + escAttr(branch) + '\')" ' +
-          'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
-          'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
-    el.innerHTML =
-      '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
-      '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
-      btn;
+    el.innerHTML = _storageHtml(
+      envStorageMap[branch], storageRefreshing[branch], 'refreshStorage', branch);
   });
+  document.querySelectorAll('[data-prod-storage-for]').forEach(function(el) {
+    var name = el.getAttribute('data-prod-storage-for');
+    el.innerHTML = _storageHtml(
+      prodStorageMap[name], prodStorageRefreshing[name], 'refreshProdStorage', name);
+  });
+}
+
+function _storageHtml(s, refreshing, fnName, key) {
+  var btn = refreshing
+    ? '<span class="spinner" aria-hidden="true"></span>'
+    : '<button class="stat-refresh" onclick="' + fnName + '(\'' + escAttr(key) + '\')" ' +
+        'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
+        'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
+  return '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
+    '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
+    btn;
 }
 
 async function refreshStorage(branch) {
@@ -3532,6 +3548,25 @@ async function refreshStorage(branch) {
     showToast('Failed to measure usage: ' + e, true);
   }
   delete storageRefreshing[branch];
+  applyStats();
+}
+
+async function refreshProdStorage(name) {
+  if (prodStorageRefreshing[name]) return;
+  prodStorageRefreshing[name] = true;
+  applyStats();
+  try {
+    const r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/storage/refresh', { method: 'POST' });
+    const data = await readResult(r);
+    if (data.ok) {
+      prodStorageMap[name] = data.storage;
+    } else {
+      showToast(data.error || 'Failed to measure usage', true);
+    }
+  } catch (e) {
+    showToast('Failed to measure usage: ' + e, true);
+  }
+  delete prodStorageRefreshing[name];
   applyStats();
 }
 
@@ -4629,7 +4664,9 @@ var cleanupGroups = [
   ['orphan_databases', 'Databases'],
   ['orphan_workspaces', 'Workspaces'],
   ['orphan_ports', 'Port registry entries'],
-  ['orphan_roles', 'PostgreSQL roles']
+  ['orphan_roles', 'PostgreSQL roles'],
+  ['orphan_extra_checkouts', 'Extra-addons checkouts'],
+  ['orphan_build_jobs', 'Image build jobs']
 ];
 
 function cleanupCount(result) {
@@ -4638,9 +4675,13 @@ function cleanupCount(result) {
 
 function updateCleanupConfirm() {
   var images = document.getElementById('cleanup-images');
+  var buildCache = document.getElementById('cleanup-build-cache');
   images.disabled = cleanupBusy || !cleanupPreview || !cleanupPreview.images.length;
+  var cacheOffered = !!cleanupPreview && (cleanupPreview.build_cache || {}).reclaimable_bytes > 0;
+  if (!cacheOffered) buildCache.checked = false;
+  buildCache.disabled = cleanupBusy || !cacheOffered;
   document.getElementById('cleanup-confirm').disabled = cleanupBusy || !cleanupPreview ||
-    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length));
+    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length) || buildCache.checked);
 }
 
 function setCleanupBusy(busy, applying) {
@@ -4656,12 +4697,19 @@ function setCleanupBusy(busy, applying) {
 
 function renderCleanup(result) {
   var lines = [result.dry_run ? '[DRY RUN] Orphaned resources:' : '[CLEANUP] Removed resources:'];
+  var checkoutSizes = result.orphan_extra_checkout_sizes || {};
   cleanupGroups.forEach(function(group) {
     var names = result[group[0]] || [];
     if (!names.length) return;
     lines.push('  ' + group[1] + ' (' + names.length + '):');
-    names.forEach(function(name) { lines.push('    - ' + name); });
+    names.forEach(function(name) {
+      var size = checkoutSizes[name];
+      lines.push('    - ' + name + (size !== undefined ? ' — ' + fmtBytes(size) : ''));
+    });
   });
+  if (typeof result.extra_checkouts_freed_bytes === 'number' && result.extra_checkouts_freed_bytes > 0) {
+    lines.push('  Extra-addons checkouts freed ' + fmtBytes(result.extra_checkouts_freed_bytes) + '.');
+  }
   var count = cleanupCount(result);
   lines.push(count ? '\n' + count + ' resource(s) ' + (result.dry_run ? 'would be removed.' : 'removed.') :
     (result.dry_run ? 'No orphaned resources found.' : 'No orphaned resources removed.'));
@@ -4673,11 +4721,23 @@ function renderCleanup(result) {
     });
     if (!result.images.length) lines.push('  No unused images found.');
     else lines.push('Select "Remove unused Docker images" to include these images.');
+    var cache = result.build_cache || {};
+    if (cache.error) lines.push('\nDocker build cache: ' + cache.error);
+    else if (!cache.size_bytes) lines.push('\nDocker build cache: none found.');
+    else {
+      lines.push('\nDocker build cache: ' + fmtBytes(cache.size_bytes) + ' total, ' +
+        fmtBytes(cache.reclaimable_bytes) + ' reclaimable.');
+      if (cache.reclaimable_bytes > 0) lines.push('Select "Remove Docker build cache" to include it.');
+    }
   } else {
     lines.push('\nDocker images removed (' + result.images.removed.length + '):');
     result.images.removed.forEach(function(id) { lines.push('  ' + id); });
     result.images.skipped.forEach(function(item) { lines.push('Skipped ' + item.id + ': ' + item.reason); });
     result.images.errors.forEach(function(item) { lines.push('Error ' + item.id + ': ' + item.reason); });
+    if (result.build_cache) {
+      lines.push(result.build_cache.error ? '\nError Docker build cache: ' + result.build_cache.error :
+        '\nDocker build cache removed: ' + fmtBytes(result.build_cache.reclaimed_bytes) + ' reclaimed.');
+    }
   }
   (result.errors || []).forEach(function(error) { lines.push('Error: ' + error); });
   document.getElementById('cleanup-output').textContent = lines.join('\n');
@@ -4699,8 +4759,9 @@ async function scanCleanup() {
   if (cleanupBusy) return;
   cleanupPreview = null;
   document.getElementById('cleanup-images').checked = false;
+  document.getElementById('cleanup-build-cache').checked = false;
   document.getElementById('cleanup-cancel').textContent = 'Cancel';
-  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources and unused Docker images…';
+  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources, unused Docker images and the build cache…';
   setCleanupBusy(true, false);
   try {
     var response = await fetch('/api/cleanup', {
@@ -4720,6 +4781,7 @@ async function scanCleanup() {
 async function confirmCleanup() {
   if (cleanupBusy || !cleanupPreview || document.getElementById('cleanup-confirm').disabled) return;
   var imageIds = document.getElementById('cleanup-images').checked ? cleanupPreview.images.map(function(image) { return image.id; }) : [];
+  var buildCache = document.getElementById('cleanup-build-cache').checked;
   // Send the reviewed names: the server removes only these, and only if still orphaned.
   var orphans = {};
   cleanupGroups.forEach(function(group) { orphans[group[0]] = cleanupPreview[group[0]] || []; });
@@ -4727,7 +4789,7 @@ async function confirmCleanup() {
   try {
     var response = await fetch('/api/cleanup', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds })
+      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds, build_cache: buildCache })
     });
     var data = await readResult(response);
     if (!data.ok) throw new Error(data.error || 'Cleanup failed.');
@@ -4752,6 +4814,7 @@ async function loadStats() {
     containerStatsMap = {};
     (data.containers || []).forEach(c => { containerStatsMap[c.name] = c; });
     envStorageMap = (data.storage && data.storage.envs) || {};
+    prodStorageMap = (data.storage && data.storage.productions) || {};
 
     const sys = data.system;
     document.getElementById('sys-cpu').innerHTML =
@@ -10973,9 +11036,15 @@ function renderProductions() {
         lastHtml +
         snapHtml +
       '</div>' +
+      // DB/disk usage: cached, recomputed only via the per-card refresh
+      // button (filled in by applyStats, same as environment cards).
+      '<div class="containers">' +
+        '<span class="container-stats env-storage" data-prod-storage-for="' + esc(p.name) + '"></span>' +
+      '</div>' +
       (open ? '<div class="prod-section" id="prod-section-' + esc(p.name) + '">Loading…</div>' : '') +
     '</div>';
   }).join('');
+  applyStats();
   Object.keys(_prodOpen).forEach(function(name) {
     if (_prodOpen[name]) _loadProdSection(name, _prodOpen[name]);
   });

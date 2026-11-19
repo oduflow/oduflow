@@ -554,6 +554,40 @@ element was replaced (`updated` is the inverse). For example, an update returns:
 Recreate consumers with `update_service` / `update_environment` to apply the
 updated value to their containers.
 
+## Backup data in S3
+
+Production backups ([Production Hosting → Backups](production.md#backups))
+contain **unsanitized production data**: complete database dumps, every
+attachment, and the WAL stream. Protect the bucket as you would the
+production database.
+
+- **No client-side encryption.** Dumps (`pg_dump -Fc`, compressed but not
+  encrypted), filestore chunks (zstd) and WAL-G objects are stored as plain
+  data. Enable default server-side encryption on the bucket (SSE-S3 or
+  SSE-KMS, or the equivalent on MinIO/R2), and restrict access to the
+  credentials Oduflow uses. A format flag for client-side encryption is
+  reserved but not implemented. That is deliberate: losing a client-side key
+  would make every backup unrestorable.
+- **Object names reveal nothing.** Chunk object names are keyed hashes of
+  keyed content hashes, so a bucket listing does not reveal or confirm file
+  contents. The keys live in the chunkstore's `config` object in the same
+  bucket, so whoever can read the bucket can read the backups.
+- **One credential set for the whole server.** Teams are separated by path
+  (`snapshots/<team>/`, `filestore/<team>/`), not by credentials, and the
+  `[backup]` keys can read and delete every team's backups and the cluster
+  archive. Use a dedicated bucket, or at least a dedicated prefix and IAM user,
+  limited to the [permissions Oduflow needs](production.md#bucket-permissions).
+- **Where the keys are stored.** They are in `oduflow.toml`, and in
+  `<base_data_dir>/walg/walg.json` (mode `0600`, regenerated at every startup)
+  for WAL-G inside the production PostgreSQL container. They are never passed
+  as container environment variables, so `docker inspect` does not show them.
+  To rotate them, edit `[backup]` and restart Oduflow. PostgreSQL does not need
+  to be recreated.
+- **Versioning.** Bucket versioning protects against deletion through leaked
+  credentials. Prune deletes objects routinely, so pair versioning with a
+  lifecycle rule that expires noncurrent versions, or storage will keep
+  growing.
+
 ## iptables rule
 
 On startup, an `iptables ACCEPT` rule is automatically added for the `oduflow-net` Docker bridge interface. This ensures that containers on the shared network can communicate with the host (required for Traefik `host.docker.internal` routing and PostgreSQL access). If `iptables` is not available, the rule is skipped with a warning.

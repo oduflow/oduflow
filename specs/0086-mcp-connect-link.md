@@ -1,4 +1,4 @@
-# 0085 — One-time browser sign-in links over MCP (`connect_link`)
+# 0086 — One-time browser sign-in links over MCP (`connect_link`)
 
 **Status:** Adopted
 **Type:** MCP capability / Routing / Security
