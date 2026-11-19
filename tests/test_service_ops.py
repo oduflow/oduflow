@@ -35,6 +35,26 @@ TEST_SETTINGS = Settings(
 )
 
 
+def _service_labels(name: str = "redis", team_id: str = "1") -> dict[str, str]:
+    """Labels of a service container.
+
+    Operations on an existing service resolve it through
+    ``find_service_container``, which trusts these labels and never the
+    container name alone.
+    """
+    return {
+        "oduflow.managed": "true",
+        "oduflow.team": team_id,
+        "oduflow.service": name,
+    }
+
+
+def _service_container(name: str = "redis", team_id: str = "1") -> MagicMock:
+    container = MagicMock()
+    container.labels = _service_labels(name, team_id)
+    return container
+
+
 class TestRoutesWithUrls:
     ROUTES = [{"path": "/api", "port": 3000}]
 
@@ -188,9 +208,8 @@ class TestCreateService:
     def test_port_conflict_is_actionable_flow_error(self, mock_docker_client):
         # First lookup: no service yet. Second lookup: the container the SDK
         # created before the failed start, which must be removed for the retry.
-        stale = MagicMock()
+        stale = _service_container("hindsight-bankname")
         stale.status = "created"
-        stale.labels = {"oduflow.managed": "true"}
         mock_docker_client.containers.get.side_effect = [
             docker.errors.NotFound("nf"),
             stale,
@@ -226,7 +245,7 @@ class TestCreateService:
         Docker's 409 would quote the container name and ID; the stopped
         service must also survive the attempt untouched.
         """
-        stopped = MagicMock()
+        stopped = _service_container()
         stopped.status = "exited"
         mock_docker_client.containers.get.return_value = stopped
 
@@ -246,31 +265,82 @@ class TestCreateService:
         self, mock_docker_client
     ):
         """_remove_stale_service_container leaves non-`created` containers alone."""
-        stopped = MagicMock()
+
+        def remove_stale(container):
+            mock_docker_client.containers.get.return_value = container
+            service_ops._remove_stale_service_container(
+                mock_docker_client, TEST_SETTINGS, TEST_TEAM, "redis"
+            )
+
+        stopped = _service_container()
         stopped.status = "exited"
-        mock_docker_client.containers.get.return_value = stopped
-        service_ops._remove_stale_service_container(
-            mock_docker_client, "c", "oduflow.managed"
-        )
+        remove_stale(stopped)
         stopped.remove.assert_not_called()
 
         foreign = MagicMock()
         foreign.status = "created"
         foreign.labels = {}
-        mock_docker_client.containers.get.return_value = foreign
-        service_ops._remove_stale_service_container(
-            mock_docker_client, "c", "oduflow.managed"
-        )
+        remove_stale(foreign)
         foreign.remove.assert_not_called()
 
-        created = MagicMock()
+        unmanaged = _service_container()
+        unmanaged.status = "created"
+        del unmanaged.labels["oduflow.managed"]
+        remove_stale(unmanaged)
+        unmanaged.remove.assert_not_called()
+
+        created = _service_container()
         created.status = "created"
-        created.labels = {"oduflow.managed": "true"}
-        mock_docker_client.containers.get.return_value = created
-        service_ops._remove_stale_service_container(
-            mock_docker_client, "c", "oduflow.managed"
-        )
+        remove_stale(created)
         created.remove.assert_called_once_with(force=True)
+
+    @pytest.mark.parametrize(
+        "labels",
+        [
+            pytest.param(
+                {
+                    "oduflow.managed": "true",
+                    "oduflow.team": "1-svc-b",
+                    "oduflow.service": "redis",
+                },
+                id="another-team",
+            ),
+            pytest.param(
+                {
+                    "oduflow.managed": "true",
+                    "oduflow.team": "1",
+                    "oduflow.branch": "svc",
+                },
+                id="environment",
+            ),
+        ],
+    )
+    def test_failed_start_never_removes_a_container_it_does_not_own(
+        self, mock_docker_client, labels
+    ):
+        """A failed ``run`` may be the name conflict itself.
+
+        Team ``1-svc-b`` creating ``redis`` and team ``1`` creating
+        ``b-svc-redis`` race for one container name; the loser must not clean
+        up the winner's container, which is still ``created`` at that moment.
+        """
+        winner = MagicMock()
+        winner.status = "created"
+        winner.labels = labels
+        mock_docker_client.containers.get.side_effect = [
+            docker.errors.NotFound("nf"),
+            winner,
+        ]
+        mock_docker_client.containers.run.side_effect = docker.errors.APIError(
+            "409 Conflict", explanation="The container name is already in use"
+        )
+
+        with pytest.raises(FlowError):
+            service_ops.create_service(
+                TEST_SETTINGS, TEST_TEAM, "b-svc-redis", "redis:7", 6379
+            )
+
+        winner.remove.assert_not_called()
 
     def test_service_labels_follow_settings(self, mock_docker_client):
         """Services carry the configured managed/team labels, not literals.
@@ -286,7 +356,11 @@ class TestCreateService:
         )
         stale = MagicMock()
         stale.status = "created"
-        stale.labels = {"oduflowtest-x.managed": "true"}
+        stale.labels = {
+            "oduflowtest-x.managed": "true",
+            "oduflowtest-x.team": "1",
+            "oduflow.service": "redis",
+        }
         mock_docker_client.containers.get.side_effect = [
             docker.errors.NotFound("nf"),
             stale,
@@ -303,7 +377,7 @@ class TestCreateService:
         assert labels["oduflowtest-x.team"] == "1"
         assert "oduflow.managed" not in labels
         assert "oduflow.team" not in labels
-        # The failed start's leftover is recognized by the same label.
+        # The failed start's leftover is recognized by the same labels.
         stale.remove.assert_called_once_with(force=True)
 
     def test_start_failure_scrubs_container_ids(self, mock_docker_client):
@@ -829,7 +903,7 @@ class TestCreateService:
 
     def test_create_conflict(self, mock_docker_client):
         mock_docker_client.networks.get.return_value = MagicMock()
-        existing = MagicMock()
+        existing = _service_container()
         existing.status = "running"
         mock_docker_client.containers.get.return_value = existing
 
@@ -861,7 +935,7 @@ class TestDeleteService:
         """A service created before presets existed: config lives on the container."""
         container = MagicMock()
         container.name = "oduflow-1-svc-redis"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        container.labels = _service_labels()
         container.image.tags = ["redis:7"]
         container.image.attrs = {"Config": {"Cmd": ["redis-server"]}}
         container.attrs = {
@@ -873,7 +947,7 @@ class TestDeleteService:
         return container
 
     def test_delete(self, mock_docker_client):
-        container = MagicMock()
+        container = _service_container()
         mock_docker_client.containers.get.return_value = container
 
         get_preset, delete_preset, save_preset = self._presets()
@@ -892,7 +966,7 @@ class TestDeleteService:
             service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, "redis")
 
     def test_delete_keeps_an_existing_preset_untouched(self, mock_docker_client):
-        mock_docker_client.containers.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = _service_container()
         get_preset, delete_preset, save_preset = self._presets()
 
         with get_preset, delete_preset as delete_mock, save_preset as save_mock:
@@ -917,7 +991,7 @@ class TestDeleteService:
         assert result["preset_kept"] is False
 
     def test_delete_without_save_preset_removes_it(self, mock_docker_client):
-        mock_docker_client.containers.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = _service_container()
         get_preset, delete_preset, save_preset = self._presets()
 
         with get_preset, delete_preset as delete_mock, save_preset as save_mock:
@@ -932,7 +1006,7 @@ class TestDeleteService:
     def test_delete_without_save_preset_tolerates_a_missing_one(
         self, mock_docker_client
     ):
-        container = MagicMock()
+        container = _service_container()
         mock_docker_client.containers.get.return_value = container
         get_preset, delete_preset, save_preset = self._presets(
             delete_preset={"side_effect": NotFoundError("no preset")}
@@ -950,7 +1024,7 @@ class TestDeleteService:
         self, mock_docker_client
     ):
         """The result states what is on disk, not what was asked for."""
-        mock_docker_client.containers.get.return_value = MagicMock()
+        mock_docker_client.containers.get.return_value = _service_container()
         get_preset, delete_preset, save_preset = self._presets(
             delete_preset={"side_effect": OSError("read-only store")}
         )
@@ -1245,7 +1319,7 @@ class TestRestartService:
         )
 
     def test_restart_port_conflict_names_preset_port(self, mock_docker_client):
-        container = MagicMock()
+        container = _service_container()
         container.restart.side_effect = self._conflict(6379)
         mock_docker_client.containers.get.return_value = container
 
@@ -1268,7 +1342,7 @@ class TestRestartService:
     def test_restart_without_preset_still_reports_conflict(self, mock_docker_client):
         from oduflow.errors import NotFoundError
 
-        container = MagicMock()
+        container = _service_container()
         container.restart.side_effect = self._conflict(6379)
         mock_docker_client.containers.get.return_value = container
 
@@ -1284,7 +1358,7 @@ class TestRestartService:
         assert "host port is already allocated" in str(exc_info.value)
 
     def test_restart_other_failure_is_flow_error(self, mock_docker_client):
-        container = MagicMock()
+        container = _service_container()
         container.restart.side_effect = docker.errors.APIError(
             "500 Server Error for http+docker://localhost/containers/id/restart",
             explanation='OCI runtime create failed: exec: "serve": not found',
@@ -1317,7 +1391,7 @@ class TestUpdateService:
     def _make_container(self, image_tags, labels, attrs):
         container = MagicMock()
         container.image.tags = image_tags
-        container.labels = labels
+        container.labels = {"oduflow.team": "1", **labels}
         container.attrs = attrs
         return container
 
@@ -2497,7 +2571,10 @@ class TestGetServiceInfo:
         container.name = labels.get("__name") or "oduflow-1-svc-redis"
         container.image.tags = image_tags
         container.image.id = image_id
-        container.labels = {k: v for k, v in labels.items() if k != "__name"}
+        container.labels = {
+            "oduflow.team": "1",
+            **{k: v for k, v in labels.items() if k != "__name"},
+        }
         container.attrs = attrs
         container.status = status
         return container
@@ -2653,10 +2730,24 @@ class TestGetServiceInfo:
         with pytest.raises(NotFoundError, match="Service 'redis' not found"):
             service_ops.get_service_info(TEST_SETTINGS, TEST_TEAM, "redis")
 
+    def test_get_service_info_of_another_team(self, mock_docker_client):
+        """Team ids and service names may both contain ``-svc-``: the name
+        alone can be another team's container."""
+        container = self._make_container(
+            image_tags=["redis:7"],
+            image_id="sha256:abc",
+            labels={"oduflow.team": "1-svc-b", "oduflow.service": "redis"},
+            attrs={},
+        )
+        mock_docker_client.containers.get.return_value = container
+
+        with pytest.raises(NotFoundError, match="Service 'b-svc-redis' not found"):
+            service_ops.get_service_info(TEST_SETTINGS, TEST_TEAM, "b-svc-redis")
+
 
 class TestGetServiceLogs:
     def test_logs(self, mock_docker_client):
-        container = MagicMock()
+        container = _service_container()
         container.logs.return_value = (
             b"2025-01-01T00:00:00Z log line 1\n2025-01-01T00:00:01Z log line 2"
         )
@@ -2669,7 +2760,7 @@ class TestGetServiceLogs:
         container.logs.assert_called_with(tail=50, timestamps=True)
 
     def test_logs_default_lines(self, mock_docker_client):
-        container = MagicMock()
+        container = _service_container()
         container.logs.return_value = b"line"
         mock_docker_client.containers.get.return_value = container
 
@@ -2682,6 +2773,211 @@ class TestGetServiceLogs:
 
         with pytest.raises(NotFoundError, match="Service 'redis' not found"):
             service_ops.get_service_logs(TEST_SETTINGS, TEST_TEAM, "redis")
+
+
+class TestRunCommandInService:
+    def test_runs_through_a_shell_by_default(self, mock_docker_client):
+        container = _service_container()
+        container.exec_run.return_value = (0, b"PONG\n")
+        mock_docker_client.containers.get.return_value = container
+
+        result = service_ops.run_command_in_service(
+            TEST_SETTINGS, TEST_TEAM, "redis", "redis-cli ping"
+        )
+
+        assert result == {"exit_code": 0, "output": "PONG\n"}
+        mock_docker_client.containers.get.assert_called_once_with("oduflow-1-svc-redis")
+        container.exec_run.assert_called_once_with(
+            ["sh", "-c", "redis-cli ping"], user="root"
+        )
+
+    def test_not_found(self, mock_docker_client):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with pytest.raises(NotFoundError, match="Service 'redis' not found"):
+            service_ops.run_command_in_service(TEST_SETTINGS, TEST_TEAM, "redis", "id")
+
+
+# Two ways a service name resolves to a container that is not this team's
+# service. ``<prefix><team>-svc-<name>`` is not unique: hyphens are allowed in
+# team ids, service names and branch names alike.
+_FOREIGN_CONTAINERS = [
+    pytest.param(
+        # Team "1" asks for "b-svc-redis" -> oduflow-1-svc-b-svc-redis, which is
+        # service "redis" of team "1-svc-b".
+        "b-svc-redis",
+        "oduflow-1-svc-b-svc-redis",
+        {
+            "oduflow.managed": "true",
+            "oduflow.team": "1-svc-b",
+            "oduflow.service": "redis",
+        },
+        id="another-team-service",
+    ),
+    pytest.param(
+        # Team "1" asks for "odoo" -> oduflow-1-svc-odoo, which is the Odoo
+        # container of the team's own environment "svc".
+        "odoo",
+        "oduflow-1-svc-odoo",
+        {"oduflow.managed": "true", "oduflow.team": "1", "oduflow.branch": "svc"},
+        id="environment-container",
+    ),
+]
+
+_SERVICE_OPERATIONS = [
+    pytest.param(
+        lambda name: service_ops.restart_service(TEST_SETTINGS, TEST_TEAM, name),
+        id="restart",
+    ),
+    pytest.param(
+        lambda name: service_ops.delete_service(TEST_SETTINGS, TEST_TEAM, name),
+        id="delete",
+    ),
+    pytest.param(
+        lambda name: service_ops.delete_service(
+            TEST_SETTINGS, TEST_TEAM, name, save_preset=False
+        ),
+        id="delete-with-preset",
+    ),
+    pytest.param(
+        lambda name: service_ops.update_service(TEST_SETTINGS, TEST_TEAM, name),
+        id="update",
+    ),
+    pytest.param(
+        lambda name: service_ops.update_service(
+            TEST_SETTINGS, TEST_TEAM, name, env_override={"KEY": "value"}
+        ),
+        id="update-with-override",
+    ),
+    pytest.param(
+        lambda name: service_ops.get_service_logs(TEST_SETTINGS, TEST_TEAM, name),
+        id="logs",
+    ),
+    pytest.param(
+        lambda name: service_ops.run_command_in_service(
+            TEST_SETTINGS, TEST_TEAM, name, "env"
+        ),
+        id="run-command",
+    ),
+]
+
+
+class TestServiceContainerOwnership:
+    """A container name alone never proves the service belongs to the team.
+
+    Every operation on an existing service must treat a container of another
+    team, or one that is no service at all, exactly like a missing service --
+    and leave it untouched.
+    """
+
+    @pytest.mark.parametrize("operation", _SERVICE_OPERATIONS)
+    @pytest.mark.parametrize("name, container_name, labels", _FOREIGN_CONTAINERS)
+    def test_operation_reports_a_foreign_container_as_missing(
+        self, mock_docker_client, operation, name, container_name, labels
+    ):
+        foreign = MagicMock()
+        foreign.name = container_name
+        foreign.status = "running"
+        foreign.labels = labels
+        foreign.image.tags = ["redis:7"]
+        foreign.attrs = {"Config": {"Env": ["SECRET=theirs"]}}
+        foreign.logs.return_value = b"their logs"
+        foreign.exec_run.return_value = (0, b"SECRET=theirs")
+        mock_docker_client.containers.get.return_value = foreign
+
+        with (
+            patch.object(service_ops.service_presets, "get_preset") as get_preset,
+            patch.object(service_ops.service_presets, "delete_preset") as delete_preset,
+            pytest.raises(NotFoundError) as exc_info,
+        ):
+            get_preset.side_effect = NotFoundError("no preset")
+            operation(name)
+
+        # Same words as for a service that does not exist: no oracle.
+        assert str(exc_info.value) == f"Service '{name}' not found"
+        mock_docker_client.containers.get.assert_called_once_with(container_name)
+        for touched in (
+            foreign.restart,
+            foreign.stop,
+            foreign.remove,
+            foreign.logs,
+            foreign.exec_run,
+        ):
+            touched.assert_not_called()
+        # Nor is the team's own preset dropped for a container it never owned.
+        delete_preset.assert_not_called()
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+
+    @pytest.mark.parametrize("name, container_name, labels", _FOREIGN_CONTAINERS)
+    @pytest.mark.parametrize("status", ["running", "exited"])
+    def test_create_reports_a_taken_name_without_pointing_at_the_container(
+        self, mock_docker_client, name, container_name, labels, status
+    ):
+        """The name cannot be used, but nothing here can act on its holder.
+
+        The "already exists" wording recommends restart/update/delete_service,
+        none of which resolve a container this team does not own.
+        """
+        foreign = MagicMock()
+        foreign.status = status
+        foreign.labels = labels
+        mock_docker_client.containers.get.return_value = foreign
+
+        with pytest.raises(ConflictError) as exc_info:
+            service_ops.create_service(TEST_SETTINGS, TEST_TEAM, name, "redis:7", 6379)
+
+        message = str(exc_info.value)
+        assert f"Service name '{name}' is not available" in message
+        assert "Choose a different service name" in message
+        assert "already exists" not in message
+        assert "update_service" not in message
+        # Neither the holder's state nor its container name leaks.
+        assert status not in message
+        assert container_name not in message
+        mock_docker_client.images.pull.assert_not_called()
+        mock_docker_client.containers.run.assert_not_called()
+        foreign.remove.assert_not_called()
+
+    def test_update_recreates_with_the_team_and_service_labels(
+        self, mock_docker_client
+    ):
+        """The replacement container must pass the same ownership check."""
+        container = _service_container()
+        container.image.tags = ["redis:7"]
+        container.attrs = {"Config": {"Env": []}}
+        pulled_image = MagicMock()
+        pulled_image.id = container.image.id
+        mock_docker_client.images.pull.return_value = pulled_image
+        mock_docker_client.containers.get.side_effect = [
+            container,
+            docker.errors.NotFound("nf"),
+        ]
+
+        with patch.object(
+            service_ops.service_presets,
+            "get_preset",
+            return_value={"name": "redis", "image": "redis:7", "port": 6379},
+        ):
+            service_ops.update_service(
+                TEST_SETTINGS, TEST_TEAM, "redis", env_override={"KEY": "value"}
+            )
+
+        container.remove.assert_called_once_with(v=True)
+        run_kwargs = mock_docker_client.containers.run.call_args[1]
+        assert run_kwargs["name"] == "oduflow-1-svc-redis"
+        recreated = MagicMock()
+        recreated.labels = run_kwargs["labels"]
+        assert recreated.labels["oduflow.team"] == "1"
+        assert recreated.labels["oduflow.service"] == "redis"
+        mock_docker_client.containers.get.side_effect = None
+        mock_docker_client.containers.get.return_value = recreated
+        assert (
+            service_ops.find_service_container(
+                mock_docker_client, TEST_SETTINGS, TEST_TEAM, "redis"
+            )
+            is recreated
+        )
 
 
 class TestDestroyBlockedByServices:
@@ -2771,7 +3067,7 @@ class TestServiceSecrets:
     ):
         team = self._team(tmp_path)
         container = MagicMock()
-        container.labels = {"oduflow.service": "meili"}
+        container.labels = _service_labels("meili")
         container.image.tags = ["getmeili/meilisearch:v1.6"]
         mock_docker_client.containers.get.return_value = container
 
@@ -2806,7 +3102,7 @@ class TestServiceSecrets:
         team = self._team(tmp_path)
         secret_store.set_secret(team, "master-key", "new-value")
         container = MagicMock()
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "meili"}
+        container.labels = _service_labels("meili")
         container.image.tags = ["getmeili/meilisearch:v1.6"]
         container.image.id = "sha256:same"
         container.attrs = {"Config": {"Env": ["KEY=old-value"]}}
@@ -2844,7 +3140,7 @@ class TestServiceSecrets:
         team = self._team(tmp_path)
         secret_store.set_secret(team, "master-key", "same-value")
         container = MagicMock()
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "meili"}
+        container.labels = _service_labels("meili")
         container.image.tags = ["getmeili/meilisearch:v1.6"]
         container.image.id = "sha256:same"
         container.attrs = {"Config": {"Env": ["KEY=same-value"]}}
@@ -2940,7 +3236,7 @@ class TestServiceHostnamesUnderATeamZone:
         container = MagicMock()
         container.image.tags = ["redis:7"]
         container.image.id = "sha256:same"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        container.labels = _service_labels()
         container.attrs = {"Config": {"Env": []}}
         mock_docker_client.containers.get.return_value = container
         new_image = MagicMock()
@@ -3041,7 +3337,11 @@ class TestServiceProtection:
 
     def _live_container(self):
         container = MagicMock()
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "redis"}
+        container.labels = {
+            "oduflow.managed": "true",
+            "oduflow.team": "1",
+            "oduflow.service": "redis",
+        }
         return container
 
     def test_protect_requires_an_existing_service(self, mock_docker_client, tmp_path):
@@ -3125,7 +3425,7 @@ class TestStagingImageServices:
         client = mock_docker_client
         container = MagicMock()
         container.image.id = "sha256:old"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.labels = _service_labels("fs")
         container.attrs = {"Config": {"Image": "redis:7", "Env": []}}
         if operation == "update_config":
             container.attrs["Config"]["Image"] = self.OWN_TAG
@@ -3234,7 +3534,7 @@ class TestStagingImageServices:
         client = mock_docker_client
         container = MagicMock()
         container.image.id = "sha256:old"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.labels = _service_labels("fs")
         container.attrs = {"Config": {"Image": "redis:7", "Env": []}}
         client.containers.get.return_value = container
         client.images.get.side_effect = [
@@ -3311,7 +3611,7 @@ class TestStagingImageServices:
         container = MagicMock()
         container.image.tags = ["oduist/freeswitch:latest"]
         container.image.id = "sha256:old"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.labels = _service_labels("fs")
         container.attrs = {"Config": {"Env": []}}
         local_image = MagicMock()
         local_image.id = "sha256:built"
@@ -3348,7 +3648,7 @@ class TestStagingImageServices:
         container = MagicMock()
         container.image.tags = [self.OWN_TAG]
         container.image.id = "sha256:built"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.labels = _service_labels("fs")
         container.attrs = {"Config": {"Env": []}}
         local_image = MagicMock()
         local_image.id = "sha256:built"
@@ -3378,7 +3678,7 @@ class TestStagingImageServices:
         container = MagicMock()
         container.image.tags = ["oduist/freeswitch:latest"]
         container.image.id = "sha256:old"
-        container.labels = {"oduflow.managed": "true", "oduflow.service": "fs"}
+        container.labels = _service_labels("fs")
         container.attrs = {"Config": {"Env": []}}
         mock_docker_client.containers.get.return_value = container
         preset = {

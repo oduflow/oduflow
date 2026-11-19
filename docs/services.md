@@ -197,7 +197,8 @@ inside the running container — the equivalent of
 `docker exec -it <container> sh`. The shell runs as the image's default user,
 and the window can be minimized to the dock without ending the session.
 Closing the window ends the shell and its foreground job, so an abandoned
-terminal does not leave them running in the container. Jobs the shell put in
+terminal does not leave them running in the container; so does reloading the
+page or losing the connection. Jobs the shell put in
 the background (`worker &`, `nohup ...`) are not stopped, the same as after
 leaving a `docker exec` session; stop them yourself before closing. The
 button is disabled while the service is not running, and an image that ships no

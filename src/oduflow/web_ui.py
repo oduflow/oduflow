@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import codecs
+import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
@@ -106,7 +108,6 @@ from oduflow.locking import (
 )
 from oduflow.naming import (
     PROD_ENV_PREFIX,
-    get_service_container_name,
     parse_env_vars,
     parse_service_command,
     slugify_branch,
@@ -614,6 +615,150 @@ def _end_lingering_exec(
         logger.debug("Could not end lingering exec %s", exec_id, exc_info=True)
 
 
+# PTY relays get threads of their own. Every open terminal keeps one blocked
+# in recv() for as long as it lives, so on the event loop's default executor
+# (min(32, CPUs + 4) threads) a dozen terminals would starve each other's
+# keystrokes — and everything else that offloads work there.
+_PTY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=128, thread_name_prefix="oduflow-pty"
+)
+
+# How long a closed terminal waits for its exec to report the PID.
+_PID_LINE_WAIT = 10.0
+# How long interpreter exit waits for the cleanups still under way.
+_CLEANUP_EXIT_GRACE = 5.0
+
+_cleanup_threads: set[threading.Thread] = set()
+_cleanup_threads_lock = threading.Lock()
+
+
+def _start_cleanup(target: Callable[[], None]) -> None:
+    """Run *target* on a thread that interpreter exit waits for, briefly.
+
+    Detached from the event loop, so a cancelled handler cannot skip the
+    cleanup or cut it short. A daemon thread, so a Docker daemon that stopped
+    answering cannot hold a shutdown up: :func:`_finish_cleanups` grants the
+    threads a bounded grace instead.
+    """
+
+    def run() -> None:
+        try:
+            target()
+        finally:
+            with _cleanup_threads_lock:
+                _cleanup_threads.discard(threading.current_thread())
+
+    thread = threading.Thread(target=run, name="oduflow-shell-cleanup", daemon=True)
+    with _cleanup_threads_lock:
+        _cleanup_threads.add(thread)
+    thread.start()
+
+
+@atexit.register
+def _finish_cleanups() -> None:
+    """Let terminals closed by a shutdown still end their processes."""
+    deadline = time.monotonic() + _CLEANUP_EXIT_GRACE
+    with _cleanup_threads_lock:
+        threads = list(_cleanup_threads)
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+
+class _ExecSession:
+    """A started TTY exec, the socket attached to it, and its PID once read.
+
+    The methods block; call them off the event loop.
+    """
+
+    def __init__(
+        self, client: Any, container: Any, exec_id: str, sock: Any, user: str
+    ) -> None:
+        self.client = client
+        self.container = container
+        self.exec_id = exec_id
+        self.sock = sock
+        self.raw_sock = sock._sock
+        self.user = user
+        self.pid: int | None = None
+        self._pid_lock = threading.Lock()
+        self._pid_read_started = False
+        self._pid_read_done = threading.Event()
+
+    def read_pid_line(self) -> bytes:
+        """Consume the PID line; return whatever else arrived with it."""
+        with self._pid_lock:
+            if self._pid_read_started:
+                return b""
+            self._pid_read_started = True
+        buf = b""
+        try:
+            while b"\n" not in buf and len(buf) < 32:
+                data = self.raw_sock.recv(4096)
+                if not data:
+                    break
+                buf += data
+            line, newline, rest = buf.partition(b"\n")
+            if newline and line.strip().isdigit():
+                self.pid = int(line.strip())
+                return rest
+            # Not a PID (an image without `sh` answers with the exec error):
+            # show it as is.
+            return buf
+        finally:
+            self._pid_read_done.set()
+
+    def close_socket(self) -> None:
+        # shutdown() reliably wakes a thread blocked in recv (a bare close()
+        # need not).
+        for close in (
+            lambda: self.raw_sock.shutdown(socket.SHUT_RDWR),
+            self.raw_sock.close,
+            self.sock.close,
+        ):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def end(self) -> None:
+        """Close the socket and end the process, whatever state it is in.
+
+        A terminal closed right after it was opened — or a handler cancelled
+        while the exec was starting — has not seen the PID line yet, although
+        the process is about to run. The line is waited for here, so that
+        process is ended like any other.
+        """
+        with self._pid_lock:
+            unread = not self._pid_read_started
+        if unread:
+            threading.Thread(
+                target=self._read_pid_line_quietly,
+                name="oduflow-shell-pid",
+                daemon=True,
+            ).start()
+        self._pid_read_done.wait(_PID_LINE_WAIT)
+        self.close_socket()
+        # A reader that got the line just as the wait ran out.
+        self._pid_read_done.wait(1.0)
+        if self.pid is not None:
+            _end_lingering_exec(
+                self.client, self.container, self.exec_id, self.pid, self.user
+            )
+
+    def _read_pid_line_quietly(self) -> None:
+        try:
+            self.read_pid_line()
+        except Exception:
+            pass
+
+
+def _end_abandoned_exec(starting: concurrent.futures.Future[_ExecSession]) -> None:
+    """Done-callback for an exec start whose handler was cancelled meanwhile."""
+    if starting.cancelled() or starting.exception() is not None:
+        return
+    _start_cleanup(starting.result().end)
+
+
 async def _run_exec_pty(
     websocket: WebSocket,
     client: Any,
@@ -635,9 +780,12 @@ async def _run_exec_pty(
     :func:`_end_lingering_exec`). Docker calls run off the event loop, so a
     slow daemon stalls this terminal only.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    def start() -> tuple[str, Any]:
+    def offload(func: Callable[..., Any], *args: Any) -> asyncio.Future[Any]:
+        return loop.run_in_executor(_PTY_EXECUTOR, func, *args)
+
+    def start() -> _ExecSession:
         exec_id = client.api.exec_create(
             container.id,
             _pid_reporting_argv(argv),
@@ -647,15 +795,25 @@ async def _run_exec_pty(
             stderr=True,
             **exec_options,
         )["Id"]
-        return exec_id, client.api.exec_start(
-            exec_id, detach=False, tty=True, socket=True
+        sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
+        return _ExecSession(
+            client, container, exec_id, sock, exec_options.get("user") or ""
         )
 
-    exec_id, sock = await loop.run_in_executor(None, start)
-    raw_sock = sock._sock
+    # Submitted directly rather than through run_in_executor: a cancellation
+    # of this handler must not lose track of an exec that is already starting.
+    starting = _PTY_EXECUTOR.submit(start)
+    started = asyncio.wrap_future(starting)
+    try:
+        session: _ExecSession = await asyncio.shield(started)
+    except asyncio.CancelledError:
+        starting.add_done_callback(_end_abandoned_exec)
+        # Nobody awaits it any more: mark a failed start as seen.
+        started.add_done_callback(lambda f: f.cancelled() or f.exception())
+        raise
+    exec_id, raw_sock = session.exec_id, session.raw_sock
 
     closed = asyncio.Event()
-    shell_pid: int | None = None
     # A character cut in two by the 4096-byte reads must survive the cut.
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     # The PTY echoes input at once, so keystrokes that reached it before the
@@ -669,42 +827,31 @@ async def _run_exec_pty(
             if held_input is not None:
                 held_input.append(data)
             else:
-                await loop.run_in_executor(None, raw_sock.sendall, data)
+                await offload(raw_sock.sendall, data)
 
     async def release_input() -> None:
         nonlocal held_input
         async with input_lock:
             held, held_input = held_input or [], None
             for data in held:
-                await loop.run_in_executor(None, raw_sock.sendall, data)
-
-    async def read_pid_line() -> bytes:
-        """Consume the PID line; return whatever else arrived with it."""
-        nonlocal shell_pid
-        buf = b""
-        while b"\n" not in buf and len(buf) < 32:
-            data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-            if not data:
-                break
-            buf += data
-        line, newline, rest = buf.partition(b"\n")
-        if newline and line.strip().isdigit():
-            shell_pid = int(line.strip())
-            return rest
-        # Not a PID (an image without `sh` answers with the exec error):
-        # show it as is.
-        return buf
+                await offload(raw_sock.sendall, data)
 
     async def docker_to_browser() -> None:
         try:
-            data = await read_pid_line()
+            data = await offload(session.read_pid_line)
             await release_input()
-            while not closed.is_set():
+            while True:
                 text = decoder.decode(data)
                 if text:
                     await websocket.send_text(text)
-                data = await loop.run_in_executor(None, raw_sock.recv, 4096)
+                if closed.is_set():
+                    break
+                data = await offload(raw_sock.recv, 4096)
                 if not data:
+                    # A character the stream ended in the middle of.
+                    text = decoder.decode(b"", final=True)
+                    if text:
+                        await websocket.send_text(text)
                     break
         except Exception:
             pass
@@ -720,11 +867,10 @@ async def _run_exec_pty(
                 elif msg.get("type") == "resize":
                     rows, cols = msg.get("rows", 24), msg.get("cols", 80)
                     try:
-                        await loop.run_in_executor(
-                            None,
+                        await offload(
                             lambda: client.api.exec_resize(
                                 exec_id, height=rows, width=cols
-                            ),
+                            )
                         )
                     except Exception:
                         pass
@@ -744,32 +890,11 @@ async def _run_exec_pty(
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         closed.set()
-        # shutdown() reliably wakes a thread blocked in recv (a bare close()
-        # need not).
-        for close in (
-            lambda: raw_sock.shutdown(socket.SHUT_RDWR),
-            raw_sock.close,
-            sock.close,
-        ):
-            try:
-                close()
-            except Exception:
-                pass
-        if shell_pid is not None:
-            # Detached, and started before the awaits below: the cleanup must
-            # not be skipped or cut short when this handler is cancelled.
-            threading.Thread(
-                target=_end_lingering_exec,
-                args=(
-                    client,
-                    container,
-                    exec_id,
-                    shell_pid,
-                    exec_options.get("user") or "",
-                ),
-                name="oduflow-shell-cleanup",
-                daemon=True,
-            ).start()
+        if session.pid is not None:
+            # Nothing left to wait for: wake the relay's recv() right away.
+            session.close_socket()
+        # Started before the awaits below, which a cancellation would skip.
+        _start_cleanup(session.end)
         try:
             await websocket.close()
         except Exception:
@@ -5743,64 +5868,38 @@ def _build_routes(
                 pass
 
     async def ws_sql_terminal(websocket: WebSocket) -> None:
+        """Interactive ``psql`` on the environment's database.
+
+        ``psql`` runs in the environment's own Odoo container, never in the
+        shared PostgreSQL one: there its ``\\!`` would be a root shell beside
+        every team's data and its ``\\c`` a trust-authenticated way into the
+        cluster superuser (see ``odoo_ops.ScopedPsql``).
+        """
         branch = websocket.path_params["branch"]
         await websocket.accept()
         try:
-            import docker as _docker
             from oduflow.docker_ops.client import get_client as _get_client
-            from oduflow.naming import get_db_name, validate_env_name
-
-            # Validate before deriving DB/credential paths, matching the REST
-            # create handler: a name like ".." would otherwise resolve
-            # get_workspace_path one level above the workspaces dir when loading
-            # scoped credentials. Reject it explicitly instead of failing opaquely.
-            try:
-                validate_env_name(branch)
-            except ValueError as e:
-                await websocket.send_text(_term_error(e))
-                await websocket.close(code=1008)
-                return
 
             settings = get_settings()
             team = _get_ui_team(websocket)
             client = _get_client()
-            db_name = get_db_name(branch, team.team_id)
+
+            def resolve() -> odoo_ops.ScopedPsql:
+                target = odoo_ops.scoped_psql(client, settings, team, branch)
+                odoo_ops.require_psql_client(target, branch)
+                return target
 
             try:
-                db_container = await run_in_threadpool(
-                    client.containers.get, settings.shared_db_container
-                )
-            except _docker.errors.NotFound:
-                await websocket.send_text(
-                    "\x1b[31mError: database container not found\x1b[0m\r\n"
-                )
-                await websocket.close(code=1011)
+                target = await run_in_threadpool(resolve)
+            except ValueError as e:
+                # An invalid name (it would otherwise reach the credential
+                # path lookup) or a production: rejected before any lookup.
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1008)
                 return
-
-            if db_container.status != "running":
-                await websocket.send_text(
-                    "\x1b[31mError: database container is not running\x1b[0m\r\n"
-                )
-                await websocket.close(code=1011)
-                return
-
-            from oduflow.env_credentials import (
-                MissingCredentialsError,
-                load_credentials,
-            )
-
-            # Never open an interactive psql as the cluster superuser: that would
-            # allow \c into another team's database and COPY ... FROM PROGRAM
-            # (RCE). Require the environment's scoped role.
-            try:
-                creds = load_credentials(
-                    branch,
-                    team.workspaces_dir,
-                    settings.db_user,
-                    settings.db_password,
-                    allow_fallback=False,
-                )
-            except MissingCredentialsError as e:
+            except FlowError as e:
+                # No such environment, not running, no scoped role (the
+                # cluster superuser is never used here) or no psql client.
                 await websocket.send_text(_term_error(e))
                 await websocket.close(code=1011)
                 return
@@ -5808,8 +5907,10 @@ def _build_routes(
             await _run_exec_pty(
                 websocket,
                 client,
-                db_container,
-                ["psql", "-U", creds["pg_user"], "-d", db_name],
+                target.container,
+                list(target.argv),
+                user=target.user,
+                environment=target.environment,
             )
 
         except Exception as e:
@@ -5830,33 +5931,22 @@ def _build_routes(
         name = websocket.path_params["name"]
         await websocket.accept()
         try:
-            import docker as _docker
             from oduflow.docker_ops.client import get_client as _get_client
 
             settings = get_settings()
             team = _get_ui_team(websocket)
-            # Validates the name, and the team prefix keeps the lookup inside
-            # this session's team: another team's service is simply not found.
-            try:
-                container_name = get_service_container_name(
-                    name, settings.prefix, team.team_id
-                )
-            except ValueError as e:
-                await websocket.send_text(_term_error(e))
-                await websocket.close(code=1008)
-                return
-
             client = _get_client()
             try:
                 container = await run_in_threadpool(
-                    client.containers.get, container_name
+                    service_ops.find_service_container, client, settings, team, name
                 )
-            except _docker.errors.NotFound:
-                container = None
-            # The label, as in every service_ops lookup: an environment named
-            # `svc` owns `<prefix><team>-svc-odoo` too, and that container is
-            # not a service.
-            if container is None or not container.labels.get("oduflow.service"):
+            except ValueError as e:  # an invalid name
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1008)
+                return
+            except NotFoundError:
+                # Covers another team's service and a container that is not a
+                # service at all; see find_service_container.
                 await websocket.send_text("\x1b[31mError: service not found\x1b[0m\r\n")
                 await websocket.close(code=1011)
                 return

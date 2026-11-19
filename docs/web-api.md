@@ -127,7 +127,7 @@ would let work in the environment.
 | Protocol | Endpoint | Description |
 |---|---|---|
 | `WebSocket` | `/api/environments/{branch}/terminal` | Interactive `odoo shell` terminal |
-| `WebSocket` | `/api/environments/{branch}/sql` | Interactive `psql` terminal using the environment-scoped DB role |
+| `WebSocket` | `/api/environments/{branch}/sql` | Interactive `psql` terminal using the environment-scoped DB role. `psql` runs in the environment's Odoo container (which must be running and ship `psql`), never in the shared PostgreSQL container — see [Direct SQL](environments.md#direct-sql) |
 | `WebSocket` | `/api/environments/{branch}/agent` | Hosted Agent CLI PTY |
 | `WebSocket` | `/api/environments/{branch}/agent-acp` | Hosted Agent Chat ACP relay |
 

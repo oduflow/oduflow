@@ -34,7 +34,7 @@ def _docker_client(status="running", labels=None):
     ours, theirs = socket.socketpair()
     client = MagicMock()
     if labels is None:
-        labels = {"oduflow.service": "redis"}
+        labels = {"oduflow.team": "1", "oduflow.service": "redis"}
     client.containers.get.return_value = MagicMock(
         id="cid", status=status, labels=labels
     )
@@ -173,6 +173,19 @@ def test_a_character_split_across_reads_is_not_mangled(tmp_path):
     exec_end.close()
 
 
+def test_a_character_cut_off_by_the_end_of_the_stream_is_marked(tmp_path):
+    client, _ = _client(tmp_path)
+    docker_client, exec_end = _docker_client()
+
+    with patch("oduflow.docker_ops.client.get_client", return_value=docker_client):
+        with client.websocket_connect("/api/services/redis/shell") as ws:
+            exec_end.sendall(b"7\r\ncaf\xc3")
+            assert ws.receive_text() == "caf"
+            exec_end.close()
+            assert ws.receive_text() == "\ufffd"
+            assert ws.receive()["type"] == "websocket.close"
+
+
 def test_no_cleanup_when_the_shell_never_reported_a_pid(tmp_path):
     client, _ = _client(tmp_path)
     docker_client, exec_end = _docker_client()
@@ -218,6 +231,28 @@ def test_a_container_that_is_not_a_service_is_not_found(tmp_path):
             assert ws.receive()["type"] == "websocket.close"
 
     docker_client.containers.get.assert_called_once_with(f"{settings.prefix}1-svc-odoo")
+    docker_client.api.exec_create.assert_not_called()
+
+
+def test_another_teams_service_is_not_found(tmp_path):
+    """Team ``a``'s name ``b-svc-x`` is the container of team ``a-svc-b``'s ``x``."""
+    team = TeamSettings(team_id="a", data_dir=str(tmp_path / "team"))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"a": team})
+    app = Starlette()
+    mount_web_ui(app, lambda: settings, LockManager())
+    docker_client, exec_end = _docker_client(
+        labels={"oduflow.team": "a-svc-b", "oduflow.service": "x"}
+    )
+    exec_end.close()
+
+    with patch("oduflow.docker_ops.client.get_client", return_value=docker_client):
+        with TestClient(app).websocket_connect("/api/services/b-svc-x/shell") as ws:
+            assert "service not found" in ws.receive_text()
+            assert ws.receive()["type"] == "websocket.close"
+
+    docker_client.containers.get.assert_called_once_with(
+        f"{settings.prefix}a-svc-b-svc-x"
+    )
     docker_client.api.exec_create.assert_not_called()
 
 

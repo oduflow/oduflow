@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+from dataclasses import dataclass, field
 from typing import Any
 
 import docker
@@ -662,6 +663,129 @@ def reset_admin_password(
     return {"status": "ok", "login": "admin", "psql_output": output_str}
 
 
+# PostgreSQL listens on its default port inside the Docker network; the Odoo
+# container reaches it the same way (HOST=<db container>, default port).
+_PG_PORT = "5432"
+# The unprivileged user of the Odoo image, as for run_odoo_shell.
+_PSQL_CLIENT_USER = "odoo"
+
+
+@dataclass(frozen=True)
+class ScopedPsql:
+    """Where and how to run ``psql`` for one environment's caller-supplied SQL.
+
+    ``psql`` is a client program: its ``\\!`` opens a shell in the container
+    it runs in, and its ``\\c`` reconnects from there. Inside the shared
+    PostgreSQL container that means a root shell next to every team's data
+    files, and a local socket whose trust auth admits any role name — the
+    cluster superuser included, whichever scoped role the session began
+    with. So caller-supplied SQL (the dashboard SQL console, ``run_db_query``)
+    never runs there. It runs in the environment's own Odoo container, as the
+    image's unprivileged user, and reaches PostgreSQL over the Docker network
+    like Odoo does: every connection is password-authenticated, the only
+    password supplied is the scoped role's, and ``\\!`` lands in a container
+    the caller already has a shell in (``run_odoo_command``, the console).
+
+    The password travels in ``environment`` (``PGPASSWORD``), never in
+    ``argv``; it is left out of the repr so it cannot reach a log line.
+    """
+
+    container: Any
+    argv: tuple[str, ...]
+    user: str
+    environment: dict[str, str] = field(repr=False)
+
+
+def scoped_psql(
+    client: Any, settings: Settings, team: TeamSettings, env_name: str
+) -> ScopedPsql:
+    """Resolve the :class:`ScopedPsql` for a dev environment.
+
+    There is deliberately no fallback to the shared PostgreSQL container: an
+    environment without scoped credentials, without a running Odoo container
+    or (see :func:`psql_client_missing`) without a ``psql`` client is refused
+    with the reason instead.
+    """
+    validate_env_name(env_name)
+    if slugify_branch(env_name).startswith(PROD_ENV_PREFIX):
+        # The host below is the dev cluster, and nothing here may exec inside
+        # a production's container.
+        raise ValueError(
+            f"'{env_name}' is a production environment. Direct SQL access is "
+            "available for dev environments only."
+        )
+    missing = NotFoundError(
+        f"Environment '{env_name}' does not exist. Use create_environment first."
+    )
+    try:
+        container = client.containers.get(
+            get_resource_name(env_name, "odoo", settings.prefix, team.team_id)
+        )
+    except docker.errors.NotFound:
+        raise missing from None
+    # Defence in depth on top of team-scoped names (issue #39).
+    label = container.labels.get(settings.team_label)
+    if label is not None and label != team.team_id:
+        raise missing
+    # allow_fallback=False: the fallback is the cluster superuser, whose
+    # password must never enter a tenant's container.
+    creds = load_credentials(
+        env_name,
+        team.workspaces_dir,
+        settings.db_user,
+        settings.db_password,
+        allow_fallback=False,
+    )
+    if container.status != "running":
+        raise PrerequisiteNotMetError(
+            f"Environment '{env_name}' is not running. SQL runs through psql in "
+            "the environment's own Odoo container, so start the environment "
+            "first."
+        )
+    return ScopedPsql(
+        container=container,
+        argv=(
+            "psql",
+            "-h",
+            settings.shared_db_container,
+            "-p",
+            _PG_PORT,
+            "-U",
+            creds["pg_user"],
+            "-d",
+            get_db_name(env_name, team.team_id),
+        ),
+        user=_PSQL_CLIENT_USER,
+        environment={"PGPASSWORD": creds["pg_password"]},
+    )
+
+
+def psql_client_missing(env_name: str, detail: str = "") -> PrerequisiteNotMetError:
+    """The error for an Odoo image that cannot run ``psql``."""
+    detail = detail.strip()
+    return PrerequisiteNotMetError(
+        f"Environment '{env_name}': the Odoo container cannot run psql"
+        + (f" ({detail})" if detail else "")
+        + ". SQL access runs the psql client from the environment's own Odoo "
+        "container, never inside the shared PostgreSQL container. The official "
+        "Odoo images ship it; for a custom image, install the postgresql-client "
+        "package (in the image, or through .oduflow/apt_packages.txt)."
+    )
+
+
+def require_psql_client(target: ScopedPsql, env_name: str) -> None:
+    """Fail with the reason when the Odoo image ships no ``psql``.
+
+    For the interactive console, whose PTY would otherwise just show the
+    shell's ``psql: not found`` and close.
+    """
+    exit_code, output = target.container.exec_run(
+        ["sh", "-c", "command -v psql"], user=target.user
+    )
+    if exit_code != 0:
+        raise psql_client_missing(env_name, _decode(output))
+
+
 def _execute_db_query(
     settings: Settings,
     team: TeamSettings,
@@ -671,7 +795,21 @@ def _execute_db_query(
     *,
     allow_fallback: bool,
 ) -> dict[str, Any]:
-    """Execute SQL; legacy fallback is only safe for fixed internal queries."""
+    """Execute server-built SQL with ``psql`` inside the PostgreSQL container.
+
+    For queries this server composes from fixed text and validated values
+    only — never for SQL text a caller supplies: ``psql`` in that container
+    is a root shell and a trust-authenticated socket away from the whole
+    cluster (see :class:`ScopedPsql`; arbitrary SQL goes through
+    :func:`run_db_query`). What it offers in return is independence from the
+    environment's Odoo container, so these checks work on a stopped
+    environment, and — with ``allow_fallback`` — on a legacy one whose only
+    credential is the cluster's own, which must not enter a tenant container.
+    """
+    if query[:1] == "\\":
+        # ``psql -c`` treats a string that starts with a backslash as a
+        # meta-command, which would run inside the PostgreSQL container.
+        raise ValueError("psql meta-commands are not allowed in internal queries.")
     client = get_client()
     env_db = get_db_name(env_name, team.team_id)
 
@@ -711,6 +849,18 @@ def _execute_db_query(
     }
 
 
+def run_internal_db_query(
+    settings: Settings, team: TeamSettings, env_name: str, query: str
+) -> dict[str, Any]:
+    """Run server-built SQL as the environment's scoped role; CSV output.
+
+    Works on a stopped environment (see :func:`_execute_db_query`). The query
+    must be composed by the server — fixed text plus validated or quoted
+    values. SQL a caller wrote goes through :func:`run_db_query`.
+    """
+    return _execute_db_query(settings, team, env_name, query, allow_fallback=False)
+
+
 def run_db_query(
     settings: Settings,
     team: TeamSettings,
@@ -718,15 +868,39 @@ def run_db_query(
     query: str,
     output_format: str = "csv",
 ) -> dict[str, Any]:
-    """Run arbitrary SQL using only the environment's scoped credentials."""
-    return _execute_db_query(
-        settings,
-        team,
-        env_name,
-        query,
-        output_format,
-        allow_fallback=False,
+    """Run arbitrary SQL as the environment's scoped role.
+
+    ``psql`` runs in the environment's own Odoo container, not in the shared
+    PostgreSQL one (see :class:`ScopedPsql`), so the environment must be
+    running.
+    """
+    target = scoped_psql(get_client(), settings, team, env_name)
+    # -X: the unprivileged user's ~/.psqlrc must not reshape the output.
+    # -w: never wait at a password prompt nobody can answer.
+    cmd = [*target.argv, "-X", "-w"]
+    if output_format != "human":
+        cmd.append("--csv")
+    cmd += ["-c", query]
+
+    logger.info(
+        "Running DB query",
+        extra={"env_name": env_name, "format": output_format},
     )
+    exit_code, output = target.container.exec_run(
+        cmd, user=target.user, environment=target.environment
+    )
+    output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
+
+    # psql itself exits with 0-3; 126/127 is the runtime failing to start it.
+    if exit_code in (126, 127):
+        raise psql_client_missing(env_name, output_str)
+    if exit_code != 0:
+        raise ExternalCommandError("psql", exit_code, output_str)
+
+    return {
+        "exit_code": exit_code,
+        "output": output_str,
+    }
 
 
 def list_installed_module_records(
@@ -1401,7 +1575,7 @@ def _require_installed_module(
     """
     # `module` has already passed _validate_module_names ([A-Za-z0-9_]), so it
     # cannot break out of the literal.
-    result = run_db_query(
+    result = run_internal_db_query(
         settings,
         team,
         env_name,
@@ -1423,7 +1597,7 @@ def _require_installed_module(
 
 def _active_langs(settings: Settings, team: TeamSettings, env_name: str) -> list[str]:
     """Language codes activated in the environment's database."""
-    result = run_db_query(
+    result = run_internal_db_query(
         settings, team, env_name, "SELECT code FROM res_lang WHERE active"
     )
     return _csv_column(result["output"])

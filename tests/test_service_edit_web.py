@@ -52,7 +52,7 @@ PRESET = {
 
 def _container():
     container = MagicMock()
-    container.labels = {"oduflow.service": "meili"}
+    container.labels = {"oduflow.team": "1", "oduflow.service": "meili"}
     container.image.tags = ["getmeili/meilisearch:v1.6"]
     container.attrs = {"Config": {"Env": ["PATH=/usr/bin"]}}
     return container

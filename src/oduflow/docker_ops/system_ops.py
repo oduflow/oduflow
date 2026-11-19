@@ -858,8 +858,10 @@ def _exec_sql(
     # ``user`` runs the statement as a specific PostgreSQL role instead of the
     # shared-cluster superuser (settings.db_user). Repo-controlled sanitize SQL
     # must run as the environment's scoped, non-superuser role so it cannot
-    # ``COPY ... TO PROGRAM`` (RCE) or reach another team's database — same local
-    # -socket, scoped-role transport that run_db_query already relies on.
+    # ``COPY ... TO PROGRAM`` (RCE) or reach another team's database. The role
+    # confines SQL only: psql runs here inside the PostgreSQL container, so the
+    # caller must keep psql meta-commands out of ``sql`` (the sanitizer rejects
+    # them; caller-written SQL goes through odoo_ops.run_db_query instead).
     container = client.containers.get(container_name or settings.shared_db_container)
     exit_code, output = container.exec_run(
         ["psql", "-U", user or settings.db_user, "-d", db, "-tAc", sql]

@@ -1051,10 +1051,19 @@ model-level (`@api.model`) methods.
 
 ### `run_db_query`
 
-Execute SQL directly against the environment's PostgreSQL database.
+Execute SQL directly against the environment's PostgreSQL database, as the
+environment's own database role.
 
 Lock: environment.
 { .odu-tool-meta }
+
+The query is run by `psql` inside the environment's Odoo container (as the
+unprivileged `odoo` user, over the Docker network), not inside the shared
+PostgreSQL container — see
+[Direct SQL](environments.md#direct-sql). A stopped environment is started
+first and the response says so. The Odoo image must ship `psql`
+(`postgresql-client`; the official images do), and the environment must have
+its own database role.
 
 **Parameters**
 

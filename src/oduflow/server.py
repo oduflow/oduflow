@@ -3895,7 +3895,9 @@ def list_installed_modules(
     _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
-    result = odoo_ops.run_db_query(settings, team, env_name, query, "csv")
+    # Built here from validated filters only, so it may run next to PostgreSQL
+    # and does not need the environment's Odoo container to be running.
+    result = odoo_ops.run_internal_db_query(settings, team, env_name, query)
     return cast(str, result["output"])
 
 
@@ -4028,6 +4030,9 @@ def run_db_query(
     """
     Execute a SQL query against the environment's PostgreSQL database.
 
+    The query runs as the environment's own database role, through `psql` in
+    the environment's Odoo container (a stopped environment is started first).
+
     Args:
         env_name: The name of the environment.
         query: SQL query to execute (e.g. "SELECT id, name FROM res_partner LIMIT 10").
@@ -4038,6 +4043,9 @@ def run_db_query(
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
+    # psql runs in the environment's Odoo container, never in the shared
+    # PostgreSQL one, so this is a container-level tool like run_odoo_shell.
+    woke = _wake_for_work(settings, team, env_name)
     result = odoo_ops.run_db_query(settings, team, env_name, query, output_format)
     output = result["output"]
 
@@ -4050,7 +4058,7 @@ def run_db_query(
         truncated.append(f"... ({remaining} more rows, add LIMIT to your query)")
         output = "\n".join(truncated)
 
-    return _maybe_cache(output, "", "run_db_query", f"env={env_name}")
+    return _maybe_cache(output, woke.rstrip("\n"), "run_db_query", f"env={env_name}")
 
 
 # =============================================================================

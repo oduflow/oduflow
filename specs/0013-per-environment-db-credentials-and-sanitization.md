@@ -122,6 +122,39 @@ needed for admin operations:
   compatible. The matching admin connections rely on local trust auth inside the
   container, so they were unaffected by the change.
 
+The per-env role confines **SQL**; it does not confine the **client** that sends
+it, and that turned out to be the weaker half of the boundary:
+
+- (2026-11-19) — **caller-written SQL no longer runs `psql` inside the shared
+  PostgreSQL container.** The dashboard SQL console and `run_db_query` both
+  picked the scoped role correctly, but executed `psql` via `docker exec` in the
+  shared DB container, as root. `psql` is a client program: `\!` there is a root
+  shell beside every team's data files, and the container's local socket uses
+  trust auth, so `\c <db> <superuser>` (or `\! psql -U <superuser>`) reached the
+  whole cluster regardless of the role the session started with. Filtering
+  meta-commands was rejected as the fix — it is a denylist over a client with
+  many ways to shell out, and it would not help an interactive session at all.
+  Instead the client moved to where the caller is already trusted: both surfaces
+  now run `psql` in the **environment's own Odoo container**, as the image's
+  unprivileged `odoo` user, connecting over the Docker network like Odoo does,
+  with the scoped role's password in `PGPASSWORD` (never argv). There every
+  connection is password-authenticated, so `\c` to another role needs a password
+  the caller does not have, and `\!` lands in a container they already have a
+  shell in. The costs were accepted knowingly: the environment must be running
+  (`run_db_query` now wakes a stopped one, like the other container-level
+  tools), and the Odoo image must ship `psql` (the official ones do). An
+  ephemeral client container was considered as a fallback for those two cases
+  and not taken — it would add a second, rarely exercised transport plus image
+  and cleanup concerns for something a clear error handles; there is
+  deliberately **no** fallback to the DB container. Queries the server composes
+  itself from fixed text and validated values (module-state checks, the
+  module listing, Stack plans) keep running next to PostgreSQL, so they still
+  work on a stopped or legacy environment; that path refuses a leading
+  backslash and is not reachable with caller-written text. What the boundary
+  rests on from here is the superuser's **password** (network auth is always
+  password-based): an install initialised before `#74` with the published
+  default should rotate it, since any tenant container can reach the server.
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -172,3 +205,7 @@ native neutralization, rather than re-implementing what Odoo already ships:
 - (2026-07-07) — **native neutralization baseline:** `neutralize_environment` runs
   `odoo-bin neutralize` inside the serving container as the first step of the
   sanitize gate, ahead of the team/repo custom-script tiers (see Evolution).
+- (2026-11-19) — **SQL console and `run_db_query` run `psql` in the environment's
+  Odoo container** (`odoo_ops.ScopedPsql`), not in the shared PostgreSQL
+  container, closing the `\!` / `\c` escalation to cluster superuser (see
+  Evolution).

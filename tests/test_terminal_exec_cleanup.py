@@ -7,6 +7,7 @@ PID up front and are ended once the terminal is gone.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import threading
 from unittest.mock import MagicMock, patch
@@ -17,7 +18,14 @@ from starlette.testclient import TestClient
 
 from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings
-from oduflow.web_ui import _end_lingering_exec, _pid_reporting_argv, mount_web_ui
+from oduflow.web_ui import (
+    _end_lingering_exec,
+    _finish_cleanups,
+    _pid_reporting_argv,
+    _run_exec_pty,
+    _start_cleanup,
+    mount_web_ui,
+)
 
 _WRAPPER = ["sh", "-c", 'echo $$; exec "$@"', "sh"]
 
@@ -49,24 +57,30 @@ def test_wrapper_keeps_the_command_and_its_arguments_intact():
 
 
 @pytest.mark.parametrize(
-    "endpoint,command",
+    "endpoint,command,user",
     [
-        ("terminal", ["/entrypoint.sh", "odoo", "shell"]),
-        ("sql", ["psql", "-U", "env_role"]),
+        ("terminal", ["/entrypoint.sh", "odoo", "shell"], ""),
+        # psql runs in the Odoo container as its unprivileged user, which is
+        # therefore also the one that has to end it.
+        ("sql", ["psql", "-h", "oduflow-db", "-p", "5432", "-U", "env_role"], "odoo"),
     ],
 )
 def test_environment_terminals_hand_their_process_over_for_cleanup(
-    tmp_path, endpoint, command
+    tmp_path, endpoint, command, user
 ):
     client = _client(tmp_path)
     docker_client, exec_end = _docker_client()
+    container = docker_client.containers.get.return_value
+    container.labels = {}
+    # The SQL console first checks that the image ships psql.
+    container.exec_run.return_value = (0, b"/usr/bin/psql\n")
     scheduled = threading.Event()
 
     with (
         patch("oduflow.docker_ops.client.get_client", return_value=docker_client),
         patch(
-            "oduflow.env_credentials.load_credentials",
-            return_value={"pg_user": "env_role"},
+            "oduflow.docker_ops.odoo_ops.load_credentials",
+            return_value={"pg_user": "env_role", "pg_password": "env-pw"},
         ),
         patch(
             "oduflow.web_ui._end_lingering_exec",
@@ -83,8 +97,7 @@ def test_environment_terminals_hand_their_process_over_for_cleanup(
     argv = docker_client.api.exec_create.call_args.args[1]
     assert argv[: len(_WRAPPER)] == _WRAPPER
     assert argv[len(_WRAPPER) :][: len(command)] == command
-    container = docker_client.containers.get.return_value
-    end_exec.assert_called_once_with(docker_client, container, "exec-1", 42, "")
+    end_exec.assert_called_once_with(docker_client, container, "exec-1", 42, user)
 
 
 def test_agent_cli_hands_its_process_over_for_cleanup(tmp_path):
@@ -172,3 +185,127 @@ def test_cleanup_leaves_an_exited_process_alone():
     _end_lingering_exec(client, container, "exec-1", 7)
 
     assert _kills(container) == []
+
+
+def test_terminal_closed_before_the_pid_line_still_ends_its_process(tmp_path):
+    """Opened and closed at once: the exec is still starting, and will run."""
+    client = _client(tmp_path)
+    docker_client, exec_end = _docker_client()
+    scheduled = threading.Event()
+
+    with (
+        patch("oduflow.docker_ops.client.get_client", return_value=docker_client),
+        patch(
+            "oduflow.web_ui._end_lingering_exec",
+            side_effect=lambda *a: scheduled.set(),
+        ) as end_exec,
+    ):
+        with client.websocket_connect("/api/environments/main/terminal"):
+            pass
+        assert not scheduled.wait(0.2)
+        exec_end.sendall(b"42\r\n>>> ")
+        assert scheduled.wait(5)
+        # Only then is the exec socket let go of.
+        exec_end.settimeout(5)
+        assert exec_end.recv(16) == b""
+    exec_end.close()
+
+    container = docker_client.containers.get.return_value
+    end_exec.assert_called_once_with(docker_client, container, "exec-1", 42, "")
+
+
+def test_terminal_closed_early_gives_up_on_a_pid_that_never_comes(tmp_path):
+    client = _client(tmp_path)
+    docker_client, exec_end = _docker_client()
+
+    with (
+        patch("oduflow.docker_ops.client.get_client", return_value=docker_client),
+        patch("oduflow.web_ui._PID_LINE_WAIT", 0.05),
+        patch("oduflow.web_ui._end_lingering_exec") as end_exec,
+    ):
+        with client.websocket_connect("/api/environments/main/terminal"):
+            pass
+        exec_end.settimeout(5)
+        assert exec_end.recv(16) == b""  # the socket is closed all the same
+    exec_end.close()
+
+    end_exec.assert_not_called()
+
+
+def test_handler_cancelled_while_the_exec_starts_still_ends_it():
+    """The exec is created by then; nothing else would close or end it."""
+    docker_client, exec_end = _docker_client()
+    container = docker_client.containers.get.return_value
+    starting, proceed, scheduled = (threading.Event() for _ in range(3))
+
+    def exec_start(*args, **kwargs):
+        starting.set()
+        assert proceed.wait(5)
+        return MagicMock(_sock=docker_client.sock)
+
+    docker_client.sock = docker_client.api.exec_start.return_value._sock
+    docker_client.api.exec_start.side_effect = exec_start
+
+    async def scenario():
+        task = asyncio.ensure_future(
+            _run_exec_pty(MagicMock(), docker_client, container, ["sh"], user="7:7")
+        )
+        await asyncio.get_running_loop().run_in_executor(None, starting.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proceed.set()
+
+    with patch(
+        "oduflow.web_ui._end_lingering_exec",
+        side_effect=lambda *a: scheduled.set(),
+    ) as end_exec:
+        asyncio.run(scenario())
+        exec_end.sendall(b"42\r\n")
+        assert scheduled.wait(5)
+    exec_end.close()
+
+    end_exec.assert_called_once_with(docker_client, container, "exec-1", 42, "7:7")
+
+
+def test_relay_keeps_off_the_shared_default_executor(tmp_path):
+    """Each terminal blocks a thread in recv() for as long as it is open."""
+    client = _client(tmp_path)
+    docker_client, exec_end = _docker_client()
+    docker_client.api.exec_inspect.return_value = {"Running": False}
+    threads = []
+    docker_client.api.exec_create.side_effect = lambda *a, **k: (
+        threads.append(threading.current_thread().name) or {"Id": "exec-1"}
+    )
+
+    with patch("oduflow.docker_ops.client.get_client", return_value=docker_client):
+        with client.websocket_connect("/api/environments/main/terminal") as ws:
+            exec_end.sendall(b"42\r\n>>> ")
+            assert ws.receive_text() == ">>> "
+    exec_end.close()
+
+    assert len(threads) == 1 and threads[0].startswith("oduflow-pty")
+
+
+def test_interpreter_exit_waits_for_a_cleanup_under_way():
+    release, finished = threading.Event(), threading.Event()
+
+    def cleanup():
+        assert release.wait(5)
+        finished.set()
+
+    _start_cleanup(cleanup)
+    threading.Timer(0.05, release.set).start()
+    _finish_cleanups()
+
+    assert finished.is_set()
+
+
+def test_interpreter_exit_does_not_wait_for_a_stuck_cleanup():
+    release = threading.Event()
+    _start_cleanup(lambda: release.wait(5) and None)
+
+    with patch("oduflow.web_ui._CLEANUP_EXIT_GRACE", 0.05):
+        _finish_cleanups()
+
+    release.set()

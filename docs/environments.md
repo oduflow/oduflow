@@ -492,13 +492,14 @@ from deletion, since only stopped environments are ever deleted.
 automatically and prepend a short note to the response
 (`Note: environment was stopped; started it ...`): `pull_and_apply`, module
 installs/upgrades, `run_odoo_tests`, `run_odoo_shell`, `run_odoo_command`,
-the ORM tools (`odoo_search_read`, `odoo_create`, `odoo_write`, `odoo_unlink`,
-`odoo_call`, `odoo_schema`), file tools (`read/write/search_in_odoo`),
-`http_request_to_odoo` and `reset_admin_password`. Read-only and diagnostic
-tools never wake an
-environment: `run_db_query` and `list_installed_modules` go to the shared
-PostgreSQL, and `get_environment_logs` reads logs of stopped containers —
-useful when diagnosing why something died.
+`run_db_query` (its `psql` runs in the environment's Odoo container, see
+[Direct SQL](#direct-sql)), the ORM tools (`odoo_search_read`, `odoo_create`,
+`odoo_write`, `odoo_unlink`, `odoo_call`, `odoo_schema`), file tools
+(`read/write/search_in_odoo`), `http_request_to_odoo` and
+`reset_admin_password`. Read-only and diagnostic tools never wake an
+environment: `list_installed_modules` asks the shared PostgreSQL directly,
+and `get_environment_logs` reads logs of stopped containers — useful when
+diagnosing why something died.
 
 The dashboard shows each environment's last activity (`Active: 2h ago`) and,
 for stopped ones, when and how it stopped (`Stopped: 1d ago (auto)`). Every
@@ -692,8 +693,39 @@ Odoo process has restarted.
 Use `run_odoo_shell` when you need a fresh registry, `sudo()`, private methods,
 or a multi-step transaction. Successful shell writes are committed by default;
 pass `auto_commit=false` for a dry run whose transaction is left uncommitted.
-Use `run_db_query` for direct SQL; it supports CSV (default) or JSON output and
-returns at most 100 rows by default (`max_rows` changes the cap).
+Use `run_db_query` for direct SQL; it returns CSV (default) or a human-readable
+table, at most 100 rows by default (`max_rows` changes the cap).
+
+### Direct SQL
+
+`run_db_query` and the dashboard's **SQL console** both run `psql` **inside the
+environment's own Odoo container**, as the image's unprivileged `odoo` user.
+`psql` connects to the shared PostgreSQL over the Docker network — the way Odoo
+itself does — as the environment's own database role, whose password is handed
+to that one process in `PGPASSWORD` (never on its command line).
+
+It does not run inside the shared PostgreSQL container, and that is deliberate.
+`psql` is a client program: `\!` opens a shell where `psql` runs, and `\c`
+reconnects from there. Next to PostgreSQL that would be a root shell beside
+every team's data files and a local socket that accepts any role name without a
+password. From the Odoo container the same commands stay inside your own
+environment: `\!` is the shell `run_odoo_command` already gives you, and `\c`
+to another role or database is asked for a password like any network
+connection.
+
+What follows from running there:
+
+- **The environment has to be running.** `run_db_query` starts a stopped one
+  first (and says so); the SQL console is offered for a running environment
+  only.
+- **The Odoo image has to ship `psql`.** The official Odoo images do. For a
+  custom image that does not, both surfaces fail with an error that says so —
+  add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
+  is no fallback to the PostgreSQL container.
+- **The environment needs its own database role.** One created before
+  per-environment credentials existed is refused until it is recreated or
+  updated; the cluster's own credential is never used for caller-written SQL.
+- **Productions are not reachable** through either surface.
 
 ## Interactive Terminal
 
@@ -710,11 +742,16 @@ The WebSocket endpoint is `ws://<host>:<port>/api/environments/{branch}/terminal
 !!! note
     The terminal requires the environment container to be running. If the container is stopped, the terminal will display an error message.
 
+The **SQL console** next to it is an interactive `psql` on the environment's
+database (`ws://<host>:<port>/api/environments/{branch}/sql`). It runs in the
+same Odoo container and has the same requirement — see [Direct SQL](#direct-sql).
+
 Closing the terminal window ends its process: Docker itself leaves a TTY
 `docker exec` running after the client disconnects, so the dashboard hangs up
 the `odoo shell` (and the SQL console's `psql`) and kills one that does not
 exit. Uncommitted work in the shell is rolled back, and no idle process or
-database connection is left behind. Minimizing the window keeps the session. A
+database connection is left behind. Minimizing the window keeps the session;
+reloading the page or losing the connection ends it like closing does. A
 query that is still executing when a SQL console is closed runs to completion
 on the server before its connection goes away.
 

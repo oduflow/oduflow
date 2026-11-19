@@ -13,6 +13,7 @@ from oduflow.stack_ops import (
     StackPlan,
     _environment_hash_with_sanitize,
     _file_matches,
+    _installed_modules,
     _resource_hash,
     apply_stack,
     build_plan,
@@ -1017,3 +1018,27 @@ def test_format_plan_renders_every_operation():
         "  ^ start services.fs — exited",
         "  + install modules — a, b",
     ]
+
+
+def test_module_check_is_a_server_built_query_that_needs_no_running_odoo(tmp_path):
+    """A plan stays read-only: it does not go through run_db_query, whose psql
+    runs in the environment's Odoo container."""
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+    settings = Settings(base_data_dir=str(tmp_path), teams={"1": team})
+
+    with (
+        patch(
+            "oduflow.stack_ops.odoo_ops.run_internal_db_query",
+            return_value={"exit_code": 0, "output": "name\nacme_base\n"},
+        ) as internal,
+        patch("oduflow.stack_ops.odoo_ops.run_db_query") as arbitrary,
+    ):
+        installed = _installed_modules(
+            settings, team, "acme-dev", ["acme_base", "o'brien"]
+        )
+
+    assert installed == {"acme_base"}
+    query = internal.call_args.args[-1]
+    assert query.startswith("SELECT name FROM ir_module_module ")
+    assert "IN ('acme_base','o''brien')" in query
+    arbitrary.assert_not_called()
