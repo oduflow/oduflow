@@ -74,6 +74,7 @@ from oduflow.docker_ops.stats import (
     get_system_stats,
     read_storage_cache,
     refresh_env_storage,
+    refresh_prod_storage,
     refresh_team_storage,
 )
 from oduflow.errors import (
@@ -6524,6 +6525,21 @@ def _build_routes(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
 
+    def api_production_storage_refresh(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        try:
+            team = _get_ui_team(request)
+            production_registry.get_production(team, name)
+            entry = refresh_prod_storage(get_settings(), team, name)
+            return JSONResponse({"ok": True, "storage": entry})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_production_storage_refresh")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
     def api_production_update(request: Request) -> JSONResponse:
         """Deploy in a background thread: deploys can run for minutes and
         would time browsers out; the dashboard polls status instead."""
@@ -7060,6 +7076,11 @@ def _build_routes(
                 methods=["GET"],
             ),
             Route("/api/productions/{name}", api_production_info, methods=["GET"]),
+            Route(
+                "/api/productions/{name}/storage/refresh",
+                api_production_storage_refresh,
+                methods=["POST"],
+            ),
             Route(
                 "/api/productions/{name}/start",
                 api_production_start,

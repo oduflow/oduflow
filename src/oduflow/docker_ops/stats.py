@@ -6,12 +6,14 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
 from oduflow.docker_ops.client import get_client
+from oduflow.locking import keyed_mutex, storage_stats_lock_key
 from oduflow.naming import get_db_name, get_filestore_paths, get_workspace_path
 from oduflow.settings import Settings, TeamSettings
 
@@ -311,29 +313,70 @@ def _storage_cache_path(team: TeamSettings) -> str:
 
 
 def read_storage_cache(team: TeamSettings) -> dict[str, Any]:
-    """Return the cached storage stats: {"envs": {name: entry}, "team": entry|None}."""
+    """Return the cached storage stats:
+    {"envs": {name: entry}, "productions": {name: entry}, "team": entry|None}."""
     try:
         with open(_storage_cache_path(team)) as f:
             data = json.load(f)
         if isinstance(data, dict):
-            return {"envs": data.get("envs", {}), "team": data.get("team")}
+            # A section of the wrong shape (``null`` from a hand-edit or a
+            # foreign writer) reads as empty, so callers can index into it.
+            envs = data.get("envs")
+            productions = data.get("productions")
+            team_entry = data.get("team")
+            return {
+                "envs": envs if isinstance(envs, dict) else {},
+                "productions": productions if isinstance(productions, dict) else {},
+                "team": team_entry if isinstance(team_entry, dict) else None,
+            }
     except FileNotFoundError:
         pass
     except Exception:
         logger.debug("Unreadable storage stats cache", exc_info=True)
-    return {"envs": {}, "team": None}
+    return {"envs": {}, "productions": {}, "team": None}
 
 
 def _write_storage_cache(team: TeamSettings, cache: dict[str, Any]) -> None:
+    """Atomically replace the cache file. Callers hold the team's
+    ``storage_stats_lock_key`` mutex.
+
+    The temp file name is unique per write (same reason as ports.json): a
+    fixed ``.tmp`` path lets two writers rename each other's file away.
+    """
     path = _storage_cache_path(team)
     os.makedirs(team.data_dir, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cache, f, indent=2)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(
+        prefix="storage_stats.", suffix=".tmp", dir=team.data_dir
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(cache, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _store_storage_entry(
+    team: TeamSettings, section: str, name: str, entry: dict[str, Any]
+) -> None:
+    """Merge one freshly measured entry into the cache.
+
+    Refresh handlers run on parallel threadpool threads, so the
+    read-modify-write is serialised per team; the (slow) measuring itself
+    stays outside the mutex.
+    """
+    with keyed_mutex(storage_stats_lock_key(team.team_id)):
+        cache = read_storage_cache(team)
+        cache[section][name] = entry
+        _write_storage_cache(team, cache)
 
 
 def _dir_size_bytes(path: str, skip_dirs: set[str] | None = None) -> int:
@@ -368,17 +411,23 @@ def _env_merged_filestore_skip(env_name: str, team: TeamSettings) -> set[str]:
     return set()
 
 
-def _env_db_size_bytes(settings: Settings, team: TeamSettings, env_name: str) -> int:
+def _db_size_bytes(
+    settings: Settings, db_name: str, container_name: str | None = None
+) -> int:
     from oduflow.docker_ops.system_ops import _exec_sql
 
-    db_name = get_db_name(env_name, team.team_id)
     out = _exec_sql(
         get_client(),
         settings,
         "SELECT COALESCE((SELECT pg_database_size(datname) FROM pg_database "
         f"WHERE datname = '{db_name}'), 0);",
+        container_name=container_name,
     )
     return int(out) if out.strip().isdigit() else 0
+
+
+def _env_db_size_bytes(settings: Settings, team: TeamSettings, env_name: str) -> int:
+    return _db_size_bytes(settings, get_db_name(env_name, team.team_id))
 
 
 def compute_env_storage(
@@ -402,38 +451,126 @@ def refresh_env_storage(
 ) -> dict[str, Any]:
     """Recompute one environment's storage entry and persist it in the cache."""
     entry = compute_env_storage(settings, team, env_name)
-    cache = read_storage_cache(team)
-    cache["envs"][env_name] = entry
-    _write_storage_cache(team, cache)
+    _store_storage_entry(team, "envs", env_name, entry)
+    return entry
+
+
+def _prod_disk_bytes(team: TeamSettings, name: str) -> int:
+    from oduflow.docker_ops.production_ops import _workspace
+
+    workspace = _workspace(team, name)
+    return _dir_size_bytes(workspace) if os.path.isdir(workspace) else 0
+
+
+def _prod_db_sizes(
+    settings: Settings, team: TeamSettings, names: list[str]
+) -> dict[str, int] | None:
+    """Database size of each named production, from one catalog query on the
+    production cluster (same query the shared-cluster team total uses).
+
+    Returns None when the cluster cannot be queried (stopped, recreating,
+    under PITR): the sizes are then unknown, and that must not take the rest
+    of a team refresh down with it.
+    """
+    from oduflow.docker_ops.production_ops import prod_db_name
+    from oduflow.docker_ops.system_ops import _exec_sql
+
+    try:
+        rows = _exec_sql(
+            get_client(),
+            settings,
+            "SELECT datname, pg_database_size(datname) FROM pg_database "
+            "WHERE NOT datistemplate;",
+            container_name=settings.prod_db_container,
+        )
+    except Exception:
+        logger.warning(
+            "Production cluster unavailable; production DB sizes not measured",
+            exc_info=True,
+        )
+        return None
+    by_db: dict[str, int] = {}
+    for line in rows.splitlines():
+        db, _, size = line.partition("|")
+        if size.strip().isdigit():
+            by_db[db] = int(size)
+    return {name: by_db.get(prod_db_name(team, name), 0) for name in names}
+
+
+def compute_prod_storage(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, Any]:
+    """Measure one production: database size (one catalog query on the
+    production cluster) and workspace disk size (filestore, repo, sessions —
+    a full walk, hence the cache). Productions use a plain filestore
+    directory, so there is no overlay merged view to skip."""
+    from oduflow.docker_ops.production_ops import prod_db_name
+
+    return {
+        "db_bytes": _db_size_bytes(
+            settings, prod_db_name(team, name), settings.prod_db_container
+        ),
+        "disk_bytes": _prod_disk_bytes(team, name),
+        "computed_at": _utcnow_iso(),
+    }
+
+
+def refresh_prod_storage(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, Any]:
+    """Recompute one production's storage entry and persist it in the cache."""
+    entry = compute_prod_storage(settings, team, name)
+    _store_storage_entry(team, "productions", name, entry)
     return entry
 
 
 def refresh_team_storage(settings: Settings, team: TeamSettings) -> dict[str, Any]:
-    """Recompute storage for every environment plus team totals.
+    """Recompute storage for every environment and production plus team totals.
 
-    The team disk total covers the whole team data dir (workspaces, templates,
-    shared repos, dumps) minus overlay merged views; the team DB total is the
-    same single pg_database catalog query the quota check uses. This is the
-    entry point external billing tooling calls per team.
+    The team disk total covers the whole team data dir (workspaces — production
+    ones included — templates, shared repos, dumps) minus overlay merged views;
+    the team DB total is the same single pg_database catalog query the quota
+    check uses, so it covers the shared dev cluster only. Production databases
+    live on the production cluster, outside that quota, and are totalled
+    separately as ``prod_db_bytes``. This is the entry point external billing
+    tooling calls per team.
+
+    A production cluster that cannot be queried leaves the production DB sizes
+    (per production and the total) as None instead of failing the refresh.
     """
+    from oduflow import production_registry
     from oduflow.docker_ops import env_ops
     from oduflow.docker_ops.system_ops import get_team_db_usage_bytes
 
     env_names = [e["env_name"] for e in env_ops.list_environments(settings, team)]
     envs = {name: compute_env_storage(settings, team, name) for name in env_names}
+    prod_names = list(production_registry.list_productions(team))
+    # No productions, no query: such a team may have no production cluster.
+    prod_db = _prod_db_sizes(settings, team, prod_names) if prod_names else {}
+    prods = {
+        name: {
+            "db_bytes": None if prod_db is None else prod_db[name],
+            "disk_bytes": _prod_disk_bytes(team, name),
+            "computed_at": _utcnow_iso(),
+        }
+        for name in prod_names
+    }
 
     skip: set[str] = set()
     for name in env_names:
         skip |= _env_merged_filestore_skip(name, team)
     cache = {
         "envs": envs,
+        "productions": prods,
         "team": {
             "db_bytes": get_team_db_usage_bytes(get_client(), settings, team),
+            "prod_db_bytes": None if prod_db is None else sum(prod_db.values()),
             "disk_bytes": _dir_size_bytes(team.data_dir, skip),
             "computed_at": _utcnow_iso(),
         },
     }
-    _write_storage_cache(team, cache)
+    with keyed_mutex(storage_stats_lock_key(team.team_id)):
+        _write_storage_cache(team, cache)
     return cache
 
 
