@@ -168,6 +168,15 @@ _SESSION_MAX_AGE = 7 * 24 * 3600  # 7 days
 # How long a dashboard deploy queues behind another operation on the
 # production before it gives up (and says so in the deploy history).
 _UI_DEPLOY_WAIT_SECONDS = 300
+# The connect_link landing (/oduflow-connect). A person's browser continues from
+# the landing page by itself after a beat; a page that found the environment
+# busy retries on this interval; and a redemption that had to start a stopped
+# environment waits this long for Odoo to answer before redirecting into it.
+_CONNECT_AUTO_MS = 300
+_CONNECT_RETRY_MS = 5000
+_CONNECT_READY_WAIT_SECONDS = 60
+# Upper bound on a form body read by an unauthenticated endpoint.
+_MAX_PUBLIC_FORM_BYTES = 8192
 _SECRET_FILENAME = ".ui_session_secret"
 
 # Cached per data dir (process-wide; the server runs against a single one).
@@ -484,6 +493,67 @@ def _render_login(error: str = "") -> str:
     # user-influenced text (today's callers pass static literals).
     banner = f'<div class="error">{html.escape(error)}</div>' if error else ""
     return _apply_branding(page.replace("<!--ERROR-->", banner))
+
+
+def _render_connect_page(
+    heading: str,
+    paragraphs: list[str],
+    *,
+    fine_print: str = "",
+    token: str = "",
+    button: str = "",
+    auto_ms: int | None = None,
+) -> str:
+    """Render the ``/oduflow-connect`` landing page.
+
+    *paragraphs* and *fine_print* are HTML fragments: callers escape whatever
+    they interpolate. With *token*, the page carries a form that POSTs it back
+    (the redemption step) behind a *button*; *auto_ms* makes a person's browser
+    press it by itself after that many milliseconds.
+
+    The template is self-contained by necessity. The page is served on an
+    ENVIRONMENT host, where Traefik routes only ``/oduflow-connect`` to this
+    server: every other path (``/static/…``, ``/logo.png``, ``/favicon.ico``)
+    reaches the environment's Odoo. So it loads no font, logo or script file,
+    and its theme follows the OS rather than the dashboard's stored choice
+    (``localStorage`` is per origin).
+    """
+    # Brand the template before the dynamic parts go in, so a login that
+    # happens to contain a placeholder is never substituted.
+    page = _apply_branding((_TEMPLATE_DIR / "connect.html").read_text(encoding="utf-8"))
+    body = [f"<p>{text}</p>" for text in paragraphs]
+    if token:
+        auto = f' data-auto-ms="{int(auto_ms)}"' if auto_ms is not None else ""
+        body.append(
+            '<form id="connect-form" method="post" action="/oduflow-connect" '
+            f'data-busy-label="Signing in…"{auto}>'
+            '<input type="hidden" name="token" '
+            f'value="{html.escape(token, quote=True)}">'
+            f'<button type="submit">{html.escape(button)}</button></form>'
+        )
+    if fine_print:
+        body.append(f'<p class="dim">{fine_print}</p>')
+    return page.replace("__HEADING__", html.escape(heading)).replace(
+        "<!--CONTENT-->", "\n    ".join(body)
+    )
+
+
+async def _read_form_field(request: Request, name: str) -> str:
+    """One field of a small urlencoded form body, without a multipart dependency.
+
+    For public endpoints: the body is read only up to a few kilobytes, so an
+    unauthenticated client cannot make the server buffer an arbitrary upload.
+    An oversized body reads as an empty field.
+    """
+    import urllib.parse
+
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > _MAX_PUBLIC_FORM_BYTES:
+            return ""
+    parsed = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+    return (parsed.get(name, [""])[0]).strip()
 
 
 async def _read_login_credentials(request: Request) -> tuple[str, str]:
@@ -5433,30 +5503,41 @@ def _build_routes(
             if lock_acquired:
                 locks.release_env(branch)
 
-    async def api_connect_land(request: Request) -> Response:
-        """Traefik cross-subdomain Connect As landing, served ON the env host.
+    def _connect_page(
+        status_code: int, heading: str, paragraphs: list[str], **form: Any
+    ) -> Response:
+        return HTMLResponse(
+            _render_connect_page(heading, paragraphs, **form),
+            status_code=status_code,
+            # The URL (and, on a retry page, the body) holds a bearer token.
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
 
-        Consumes the one-time token minted by :func:`api_connect_open`, sets the
-        env's ``session_id`` cookie HOST-ONLY (no ``Domain`` → scoped to this env
-        host, so it overrides any stale host-only cookie Odoo left here), and
-        303-redirects to ``/web`` already authenticated. No dashboard session is
-        required or present on this host; the token is the sole credential.
-        """
-        token = request.query_params.get("token") or ""
-        env_host = request.url.hostname or ""
-        sid = connect_tokens.consume(token, env_host)
-        if not sid:
-            return Response(
-                "Connect link is invalid or expired. Reopen it from the dashboard.",
-                status_code=400,
-                media_type="text/plain",
-            )
+    def _connect_invalid() -> Response:
+        # Read by people who were handed the link by another application, not
+        # only by dashboard users: say what happened and what to do without
+        # assuming they know where the link came from.
+        return _connect_page(
+            400,
+            "This sign-in link is no longer valid",
+            [
+                "A sign-in link works once and only for a few minutes after it "
+                "is created. This one has already been used, has expired, or "
+                "was opened on a different address than the one it was made "
+                "for.",
+                "To sign in, go back to where you got the link and ask for a new one.",
+            ],
+        )
+
+    def _connect_signed_in(request: Request, sid: str) -> Response:
         # Same-host redirect: a relative Location keeps whatever scheme and
         # host the browser really reached us on, with no header interpretation
         # — the one-time token is already consumed, so a wrong absolute scheme
         # (e.g. a terminator that doesn't send X-Forwarded-Proto) would leave
         # the user with a dead link.
         response: Response = RedirectResponse("/web", status_code=303)
+        # HOST-ONLY (no Domain → scoped to this env host), so it overrides any
+        # stale host-only cookie Odoo left here.
         response.set_cookie(
             "session_id",
             sid,
@@ -5466,6 +5547,157 @@ def _build_routes(
             secure=_is_secure_request(request),
         )
         return response
+
+    def _mint_for_link(
+        settings: Settings,
+        team: TeamSettings,
+        grant: connect_tokens.LinkGrant,
+        token: str,
+    ) -> str:
+        """Blocking half of a link redemption: wake, mint, wait. Returns the sid."""
+        env_name = grant.env_name
+        with contextlib.suppress(Exception):  # activity tracking is best-effort
+            activity.touch(team, env_name)
+        # Stopped is a routine state under auto-stop, and the link may be opened
+        # minutes after it was issued: start the environment instead of failing.
+        woke = env_ops.ensure_running(settings, env_name, team)
+        if woke:
+            activity.mark_started(team, env_name)
+        result = odoo_ops.connect_as_user(settings, team, env_name, grant.user)
+        # A session now exists, so the link is spent — here, not after the wait
+        # below, so that nothing which interrupts the wait can leave a token
+        # able to mint a second one.
+        connect_tokens.discard(token)
+        if woke:
+            # The container is up but Odoo's HTTP server is still booting;
+            # redirecting now would land the person on a gateway error. Past the
+            # bound, send them anyway — a reload fixes it and they are signed in.
+            env_ops.wait_for_odoo_ready(
+                settings, team, env_name, timeout=_CONNECT_READY_WAIT_SECONDS
+            )
+        return str(result["sid"])
+
+    async def _connect_redeem(request: Request, env_host: str) -> Response:
+        """POST: turn a ``connect_link`` token into a signed-in browser.
+
+        The token is spent only when the sign-in succeeds. A busy environment or
+        a failed start leaves it valid and offers a retry, so a transient
+        condition does not cost the person their link.
+        """
+        token = await _read_form_field(request, "token")
+        settings = get_settings()
+        grant = connect_tokens.peek_link(token, env_host)
+        team = settings.teams.get(grant.team_id) if grant else None
+        if grant is None or team is None:
+            return _connect_invalid()
+        try:
+            locks.acquire_env(grant.env_name, team.team_id, operation="connect_link")
+        except BusyError:
+            return _connect_page(
+                409,
+                "The environment is busy",
+                [
+                    "Another operation is running on this environment right "
+                    "now, so you cannot be signed in yet.",
+                    "Your link has not been used up. This page tries again "
+                    "every few seconds until the link expires; you can also try "
+                    "now.",
+                ],
+                token=token,
+                button="Try again",
+                auto_ms=_CONNECT_RETRY_MS,
+            )
+        try:
+            # Every redemption of this token holds this lock, so re-reading it
+            # here makes the link single-use: a second tab that waited for the
+            # lock finds it gone.
+            if connect_tokens.peek_link(token, env_host) is None:
+                return _connect_invalid()
+            sid = await _offload(_mint_for_link, settings, team, grant, token)
+            return _connect_signed_in(request, sid)
+        except NotFoundError:
+            # Not transient: the environment or the user is gone.
+            connect_tokens.discard(token)
+            return _connect_page(
+                404,
+                "This sign-in link can no longer be used",
+                [
+                    "The environment or the user this link was created for no "
+                    "longer exists.",
+                    "Go back to where you got the link and ask for a new one.",
+                ],
+            )
+        except FlowError as e:
+            # Whoever holds the link reads this page, with no dashboard login
+            # behind them. A failed start or mint explains itself in operator
+            # terms — host paths, container names, the text of the underlying
+            # exception — so the message goes to the log and the page says only
+            # what its reader can act on.
+            logger.error("Connect link for '%s' failed: %s", grant.env_name, e)
+            return _connect_page(
+                _flow_error_status(e),
+                "You could not be signed in",
+                [
+                    "The environment could not sign you in right now.",
+                    "Your link has not been used up — you can try again. If it "
+                    "keeps failing, tell whoever gave you the link.",
+                ],
+                token=token,
+                button="Try again",
+            )
+        except Exception:
+            logger.exception("Unexpected error redeeming a connect link")
+            return _connect_page(
+                500,
+                "You could not be signed in",
+                [
+                    "The server ran into an unexpected problem.",
+                    "Your link has not been used up — you can try again.",
+                ],
+                token=token,
+                button="Try again",
+            )
+        finally:
+            locks.release_env(grant.env_name)
+
+    async def api_connect_land(request: Request) -> Response:
+        """Connect As landing, served ON the env host (Traefik routes it here).
+
+        No dashboard session is required or present on this host; the one-time
+        token is the sole credential. It is one of two kinds (see
+        :mod:`oduflow.connect_tokens`):
+
+        - A **session token** from :func:`api_connect_open` (the dashboard's
+          Open button). The session is already minted; this GET consumes the
+          token, sets the cookie and 303-redirects to ``/web``.
+        - A **link token** from the ``connect_link`` MCP tool. A GET only shows
+          a page — it changes nothing, so a link preview or scanner that fetches
+          the URL does not spend the link and no session exists yet. The page
+          POSTs the token back, and :func:`_connect_redeem` mints the session
+          then.
+        """
+        env_host = request.url.hostname or ""
+        if request.method == "POST":
+            return await _connect_redeem(request, env_host)
+        token = request.query_params.get("token") or ""
+        grant = connect_tokens.peek_link(token, env_host)
+        if grant is not None:
+            return _connect_page(
+                200,
+                "Signing you in",
+                [
+                    f"You are being signed in to <code>{html.escape(env_host)}</code> "
+                    f"as <code>{html.escape(grant.login)}</code>.",
+                ],
+                fine_print="If nothing happens, press Continue. This link works once.",
+                token=token,
+                button="Continue",
+                auto_ms=_CONNECT_AUTO_MS,
+            )
+        sid = connect_tokens.consume(token, env_host)
+        if not sid:
+            return _connect_invalid()
+        return _connect_signed_in(request, sid)
 
     async def api_artifact_download(request: Request) -> Response:
         """Serve a file an MCP tool generated inside an environment, once.
@@ -7354,8 +7586,9 @@ def _build_routes(
             methods=["GET"],
         ),
         # Served on an env host (routed here by Traefik's PathPrefix router);
-        # public + token-authenticated. See api_connect_land.
-        Route("/oduflow-connect", api_connect_land, methods=["GET"]),
+        # public + token-authenticated. See api_connect_land. POST redeems a
+        # connect_link token (the GET only shows its page).
+        Route("/oduflow-connect", api_connect_land, methods=["GET", "POST"]),
         Route("/oduflow-artifact", api_artifact_download, methods=["GET"]),
         Route("/api/environments/{branch:path}/update", api_update, methods=["POST"]),
         Route(

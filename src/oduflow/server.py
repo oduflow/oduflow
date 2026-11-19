@@ -14,7 +14,7 @@ import shlex
 import sys
 import threading
 import warnings
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, ParamSpec, TypeVar, cast
 
 # Suppress a third-party deprecation warning emitted at import time by fastmcp's
@@ -36,8 +36,10 @@ from oduflow import (
     artifact_tokens,
     branding,
     bundled_upgrade,
+    connect_tokens,
     git_ops,
     image_builds,
+    log_redaction,
     migrations,
     po_tools,
     production_registry,
@@ -370,6 +372,22 @@ def _compact_pull_result(
     return "; ".join(parts)
 
 
+# Wrap every credential a tool puts in its result — a session id, a password, a
+# DATABASE_URL, a one-time link token — so handle_errors keeps it out of the log.
+_secret = log_redaction.secret
+
+
+def _env_pairs(env_vars: Mapping[str, object]) -> str:
+    """``K=V, K2=V2`` for a tool result, kept out of the log as one credential.
+
+    Literal env-var values routinely are API keys and passwords
+    (``MEILI_MASTER_KEY=…``). The listing is marked whole rather than value by
+    value: scrubbing is plain substring replacement, and marking a value such as
+    ``2`` or ``false`` would mask every other occurrence of it in the log line.
+    """
+    return _secret(", ".join(f"{k}={v}" for k, v in env_vars.items()))
+
+
 def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | None:
     """Public URL for a one-time artifact download, or None if unavailable.
 
@@ -389,7 +407,7 @@ def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | N
             "localhost" if bind_host in ("0.0.0.0", "::") else bind_host
         )
         base = f"{settings.public_scheme_for(team)}://{host}:{port}"
-    return f"{base}/oduflow-artifact?token={token}"
+    return f"{base}/oduflow-artifact?token={_secret(token)}"
 
 
 # -- Decorators --
@@ -404,30 +422,45 @@ def handle_errors(fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
         import anyio
 
         def _run() -> R:
-            try:
-                result = fn(*args, **kwargs)
-                preview = (
-                    (result[:200] + "...")
-                    if isinstance(result, str) and len(result) > 200
-                    else result
-                )
-                if fn.__name__.startswith("production_odoo_"):
-                    preview = "OduMCP call completed (business response omitted from server log)"
-                logger.info("[%s] -> %s", fn.__name__, preview)
-                # White label: show the brand instead of the product name.
-                return branding.rebrand(result) if isinstance(result, str) else result  # type: ignore[return-value]
-            except ToolError as e:
-                raise ToolError(branding.rebrand(str(e))) from e
-            except FlowError as e:
-                logger.error("[%s] Error: %s", fn.__name__, e)
-                raise ToolError(branding.rebrand(str(e)))
-            except ValueError as e:
-                # Intentional, developer-authored input validation (invalid
-                # env/module/template names, bad request path, …). These messages
-                # are safe to surface and helpful; every OTHER exception stays
-                # masked by mask_error_details=True so internal detail never leaks.
-                logger.error("[%s] Invalid input: %s", fn.__name__, e)
-                raise ToolError(branding.rebrand(str(e)))
+            # Everything this wrapper logs about the call goes through scrub():
+            # a tool marks each credential it returns with _secret(), and the
+            # marks live exactly as long as the call.
+            with log_redaction.collecting():
+                try:
+                    result = fn(*args, **kwargs)
+                    if fn.__name__.startswith("production_odoo_"):
+                        preview = "OduMCP call completed (business response omitted from server log)"
+                    else:
+                        # Scrub BEFORE truncating: a credential cut in half by
+                        # the 200-character limit would no longer match, and
+                        # its head would reach the log.
+                        preview = log_redaction.scrub(str(result))
+                        if len(preview) > 200:
+                            preview = preview[:200] + "..."
+                    logger.info("[%s] -> %s", fn.__name__, preview)
+                    if isinstance(result, str):
+                        # White label: show the brand, not the product name.
+                        return branding.rebrand(result)  # type: ignore[return-value]
+                    return result
+                except ToolError as e:
+                    raise ToolError(branding.rebrand(str(e))) from e
+                except FlowError as e:
+                    logger.error(
+                        "[%s] Error: %s", fn.__name__, log_redaction.scrub(str(e))
+                    )
+                    raise ToolError(branding.rebrand(str(e)))
+                except ValueError as e:
+                    # Intentional, developer-authored input validation (invalid
+                    # env/module/template names, bad request path, …). These
+                    # messages are safe to surface and helpful; every OTHER
+                    # exception stays masked by mask_error_details=True so
+                    # internal detail never leaks.
+                    logger.error(
+                        "[%s] Invalid input: %s",
+                        fn.__name__,
+                        log_redaction.scrub(str(e)),
+                    )
+                    raise ToolError(branding.rebrand(str(e)))
 
         return await anyio.to_thread.run_sync(_run)
 
@@ -1356,9 +1389,7 @@ def create_environment(
         if auto_install_list:
             lines.append(f"Auto-install modules: {', '.join(auto_install_list)}")
         if parsed_env:
-            lines.append(
-                "Env vars: " + ", ".join(f"{k}={v}" for k, v in parsed_env.items())
-            )
+            lines.append(f"Env vars: {_env_pairs(parsed_env)}")
         lineage = result.get("template_lineage") or {}
         if lineage.get("message"):
             label = (
@@ -2484,9 +2515,7 @@ def update_environment(
     ]
     env_result = result.get("env_vars") or {}
     if env_result:
-        lines.append(
-            "Env vars: " + ", ".join(f"{k}={v}" for k, v in env_result.items())
-        )
+        lines.append(f"Env vars: {_env_pairs(env_result)}")
     if renamed_from:
         lines.append(
             f"Use env_name='{final_env_name}' from now on; its scoped MCP endpoint "
@@ -2559,8 +2588,7 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
         addons = ", ".join(f"{k}:{v}" for k, v in info["extra_addons"].items())
         lines.append(f"Extra addons: {addons}")
     if info.get("env_vars"):
-        env_display = ", ".join(f"{k}={v}" for k, v in info["env_vars"].items())
-        lines.append(f"Env vars: {env_display}")
+        lines.append(f"Env vars: {_env_pairs(info['env_vars'])}")
     if info.get("workspace"):
         lines.append(f"Workspace: {info['workspace']}")
     for key in ("odoo", "db"):
@@ -4082,7 +4110,10 @@ def reset_admin_password(
     # Odoo derives a session's token from the user's password hash, so every
     # cached session for this environment is now rejected server-side.
     odoo_rpc.invalidate_sessions(team.team_id, env_name)
-    return f"{woke}Admin password has been reset successfully.\nLogin: {result['login']}\nNew password: {new_password}"
+    return (
+        f"{woke}Admin password has been reset successfully.\n"
+        f"Login: {result['login']}\nNew password: {_secret(new_password)}"
+    )
 
 
 @mcp.tool()
@@ -4114,7 +4145,7 @@ def connect_as_user(env_name: str, user: str, ctx: Context | None = None) -> str
     team = _resolve_team(ctx)
     woke = _wake_for_work(settings, team, env_name)
     result = odoo_ops.connect_as_user(settings, team, env_name, user)
-    sid = result["sid"]
+    sid = _secret(result["sid"])
     domain = result["cookie_domain"]
     return (
         f"{woke}Connected as {result['login']} (uid {result['uid']}) in "
@@ -4129,6 +4160,113 @@ def connect_as_user(env_name: str, user: str, ctx: Context | None = None) -> str
         f"Playwright: context.add_cookies([{{'name': 'session_id', "
         f"'value': '{sid}', 'domain': '{domain}', 'path': '/'}}]) "
         f"then page.goto('{result['url']}')"
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class ConnectLink:
+    """What :func:`connect_link` returns (MCP structured content)."""
+
+    url: str
+    env_name: str
+    login: str
+    uid: int
+    expires_in: int
+    note: str = ""
+
+
+@mcp.tool()
+@handle_errors
+@with_env_lock
+def connect_link(
+    env_name: str, user: str = "", ctx: Context | None = None
+) -> ConnectLink:
+    """
+    Create a one-time browser sign-in link for an environment.
+
+    Returns a URL on the environment's own host. Redirect a person's browser to
+    it (or hand it to them to click) and they land in Odoo already signed in as
+    `user`, with no password and no cookie handling on your side. Use this for a
+    human; for browser automation that can set cookies itself, use
+    `connect_as_user`.
+
+    The result is an object: `url` is the redirect target; `login` and `uid` are
+    the user it signs in as; `expires_in` is its lifetime in seconds; `note` is
+    empty unless something needs saying (the environment had to be started).
+
+    The link works once, only on that environment's host, and expires after
+    `expires_in` seconds. Nothing is minted until a browser actually redeems it,
+    so a link that is never opened leaves no Odoo session behind, and a link
+    preview or scanner that merely fetches the URL does not use it up. That
+    protection stops at fetching: the page the URL shows continues by itself
+    unless the browser reports itself as automated, so a scanner that opens
+    links in a full browser hiding that fact does use the link up. Until it is
+    redeemed or expires it is a bearer credential for that user — pass it only
+    to the person it is for.
+
+    Requires Traefik routing and the HTTP transport; it fails with an
+    explanation otherwise. `user` is checked now, so an unknown user fails here
+    rather than in the person's browser — and before a stopped environment is
+    started for the link.
+
+    Args:
+        env_name: The name of the environment.
+        user: The user to sign in as: a login (e.g. "jane@acme.com") or a
+            numeric id. Leave empty (the default) for the database's
+            administrator, found through its `base.user_admin` record — this
+            keeps working when the administrator's login is no longer "admin".
+    """
+    settings = _get_settings()
+    team = _resolve_team(ctx)
+    # The link is redeemed by this process's web UI on the environment's host,
+    # so both have to exist. _web_bind is the precise test for the first: it is
+    # set only once the HTTP transport has mounted the web UI, and stays None
+    # under stdio and for a one-off `oduflow call`, whose token store nothing
+    # would ever read.
+    if _web_bind is None:
+        raise PrerequisiteNotMetError(
+            "connect_link needs the Oduflow server running with the HTTP "
+            "transport (oduflow --transport http): the link is redeemed by that "
+            "server's web UI, which the stdio transport and `oduflow call` do "
+            "not run. Use connect_as_user to get a session cookie instead."
+        )
+    if settings.routing_mode != "traefik":
+        raise PrerequisiteNotMetError(
+            "connect_link requires Traefik routing ([routing] mode = "
+            '"traefik"): in port mode an environment has no host of its own to '
+            "serve the sign-in landing. Use connect_as_user to get a session "
+            "cookie instead."
+        )
+    # Everything that can refuse the call comes before the wake: a mistyped
+    # user must not start an auto-stopped environment (and reset its idle
+    # clock) only to fail. Neither check needs Odoo running — the URL comes
+    # from the container's labels and doubles as the "environment exists"
+    # check, and the user lookup runs on the shared DB container.
+    base_url, env_host = env_ops.get_env_base_url(settings, team, env_name)
+    who = odoo_ops.resolve_env_user(settings, team, env_name, user)
+    woke = _wake_for_work(settings, team, env_name, "so the link opens right away")
+    note = woke.strip()
+    if woke and not env_ops.wait_for_odoo_ready(settings, team, env_name):
+        note += (
+            " Odoo did not become ready within 120 seconds; the link may land "
+            "on an error page until it does. Check get_environment_logs."
+        )
+    token = connect_tokens.issue_link(
+        env_host,
+        connect_tokens.LinkGrant(
+            team_id=team.team_id,
+            env_name=env_name,
+            user=user.strip(),
+            login=who["login"],
+        ),
+    )
+    return ConnectLink(
+        url=f"{base_url}/oduflow-connect?token={_secret(token)}",
+        env_name=env_name,
+        login=who["login"],
+        uid=who["uid"],
+        expires_in=int(connect_tokens.LINK_TTL_SECONDS),
+        note=note,
     )
 
 
@@ -4725,6 +4863,9 @@ def _service_database_connection_text(result: dict[str, Any]) -> str:
         f"Username: {result['username']}",
     ]
     if result.get("password"):
+        # The URL embeds the password, possibly percent-encoded: mark both.
+        _secret(str(result["password"]))
+        _secret(str(result["url"]))
         lines.extend(
             [
                 f"Password: {result['password']}",
@@ -5187,8 +5328,7 @@ def get_service_info(name: str, ctx: Context | None = None) -> str:
         )
         lines.append(f"System mounts: {system_str} (implicit; do not pass as volumes)")
     if info.get("env_vars"):
-        env_str = ", ".join(f"{k}={v}" for k, v in info["env_vars"].items())
-        lines.append(f"Env: {env_str}")
+        lines.append(f"Env: {_env_pairs(info['env_vars'])}")
     if info.get("started_at"):
         lines.append(
             f"Started: {info['started_at']} (restart_count={info.get('restart_count', 0)})"
@@ -5207,11 +5347,7 @@ def list_service_presets(ctx: Context | None = None) -> str:
         return "No service presets saved."
     output = "Saved Service Presets:\n"
     for p in presets:
-        env_str = (
-            ", ".join(f"{k}={v}" for k, v in p["env_vars"].items())
-            if p.get("env_vars")
-            else ""
-        )
+        env_str = _env_pairs(p["env_vars"]) if p.get("env_vars") else ""
         output += f"- {p['name']}: image={p['image']}"
         if not p.get("routes"):
             output += f", port={p['port']}"
@@ -5372,8 +5508,7 @@ def list_services(ctx: Context | None = None) -> str:
             for route in svc["routes"]:
                 output += f"  Route: {route['path']} -> {route['port']}\n"
         if svc.get("env_vars"):
-            env_str = ", ".join(f"{k}={v}" for k, v in svc["env_vars"].items())
-            output += f"  Env: {env_str}\n"
+            output += f"  Env: {_env_pairs(svc['env_vars'])}\n"
     return output
 
 
@@ -9219,6 +9354,10 @@ def _start_http() -> None:
     # as an ERROR "Stateless session crashed" traceback. Quiet those; the
     # operation itself still completes server-side.
     install_stateless_disconnect_filter()
+    # The access log records each request line with its query string, which is
+    # where one-time links (/oduflow-connect, /oduflow-artifact) carry their
+    # token and a share link its key. Mask those values before they are written.
+    log_redaction.install_access_log_filter()
 
     # Outermost shim so /mcp/<env> routes to the canonical /mcp route.
     from oduflow.production_access import ProductionASGI

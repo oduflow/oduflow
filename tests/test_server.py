@@ -1900,6 +1900,308 @@ class TestConnectAsUserTool:
         assert "connect_as_user" in SCOPED_ALLOWLIST
 
 
+class TestConnectLinkTool:
+    """connect_link: a one-time browser sign-in link, minted lazily.
+
+    The tool validates and issues; it must NOT mint an Odoo session — that
+    happens when a browser redeems the link (tests/test_web_ui_connect_link.py).
+    """
+
+    _TEAM = replace(TEST_TEAM, hostname="dev.example.com")
+    _SETTINGS = replace(TEST_SETTINGS, routing_mode="traefik", teams={"1": _TEAM})
+    _BASE = ("https://feature.dev.example.com", "feature.dev.example.com")
+
+    @pytest.fixture(autouse=True)
+    def _http_traefik_server(self):
+        """The one configuration the link works in: HTTP transport + Traefik."""
+        import oduflow.server
+
+        oduflow.server._settings = self._SETTINGS
+        oduflow.server._web_bind = ("0.0.0.0", 8000)
+        with (
+            patch("oduflow.server._resolve_team", return_value=self._TEAM),
+            patch(
+                "oduflow.docker_ops.env_ops.get_env_base_url", return_value=self._BASE
+            ),
+            patch("oduflow.docker_ops.odoo_ops.connect_as_user") as mint,
+        ):
+            self.mint = mint
+            yield
+        oduflow.server._web_bind = None
+
+    @staticmethod
+    def _token(link) -> str:
+        prefix = "https://feature.dev.example.com/oduflow-connect?token="
+        assert link.url.startswith(prefix)
+        return link.url[len(prefix) :]
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_returns_a_redirect_target_on_the_env_host(self, mock_resolve, mock_ensure):
+        from oduflow import connect_tokens
+
+        mock_resolve.return_value = {"uid": 7, "login": "jane@acme.com"}
+        link = _get_tool_fn("connect_link")(env_name="feature", user="jane@acme.com")
+
+        # A program needs exactly one field to redirect a browser.
+        token = self._token(link)
+        assert (link.login, link.uid, link.env_name) == ("jane@acme.com", 7, "feature")
+        assert link.expires_in == int(connect_tokens.LINK_TTL_SECONDS)
+        assert link.note == ""
+        mock_resolve.assert_called_once_with(
+            self._SETTINGS, self._TEAM, "feature", "jane@acme.com"
+        )
+        # The token is a deferred grant bound to that host: who, not a session.
+        grant = connect_tokens.peek_link(token, "feature.dev.example.com")
+        assert grant == connect_tokens.LinkGrant(
+            team_id="1", env_name="feature", user="jane@acme.com", login="jane@acme.com"
+        )
+        assert connect_tokens.peek_link(token, "other.dev.example.com") is None
+        # A link nobody opens must leave no live Odoo session behind.
+        self.mint.assert_not_called()
+
+    def test_result_is_structured_for_programs(self):
+        """Over MCP the result arrives as an object with a declared schema."""
+        import asyncio
+        import json
+
+        from fastmcp import Client
+
+        from oduflow.server import mcp
+
+        tool = mcp._tool_manager._tools["connect_link"]
+        assert set(tool.output_schema["required"]) >= {"url", "login", "uid"}
+        assert tool.output_schema["properties"]["url"]["type"] == "string"
+
+        async def call():
+            async with Client(mcp) as client:
+                return await client.call_tool("connect_link", {"env_name": "feature"})
+
+        with (
+            patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False),
+            patch(
+                "oduflow.docker_ops.odoo_ops.resolve_env_user",
+                return_value={"uid": 2, "login": "admin"},
+            ),
+        ):
+            result = asyncio.run(call())
+        prefix = "https://feature.dev.example.com/oduflow-connect?token="
+        assert result.structured_content["url"].startswith(prefix)
+        assert result.structured_content["login"] == "admin"
+        # Clients that only read text content get the same object as JSON.
+        assert json.loads(result.content[0].text)["url"].startswith(prefix)
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_default_user_is_the_admin_record_not_the_admin_login(
+        self, mock_resolve, mock_ensure
+    ):
+        from oduflow import connect_tokens
+
+        # The admin's login was changed to an email address.
+        mock_resolve.return_value = {"uid": 2, "login": "boss@acme.com"}
+        link = _get_tool_fn("connect_link")(env_name="feature")
+
+        # "" selects base.user_admin in both the resolver and the mint script;
+        # a literal 'admin' would look up a login that no longer exists.
+        assert mock_resolve.call_args.args[3] == ""
+        grant = connect_tokens.peek_link(self._token(link), self._BASE[1])
+        assert grant.user == ""
+        assert (link.login, link.uid) == ("boss@acme.com", 2)
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_unknown_user_fails_at_call_time(self, mock_resolve, mock_ensure):
+        from oduflow.errors import NotFoundError
+
+        mock_resolve.side_effect = NotFoundError(
+            "User 'ghost' not found in environment 'feature'."
+        )
+        with (
+            patch("oduflow.connect_tokens.issue_link") as issue,
+            pytest.raises(ToolError, match="'ghost' not found"),
+        ):
+            _get_tool_fn("connect_link")(env_name="feature", user="ghost")
+        issue.assert_not_called()
+        self.mint.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.wait_for_odoo_ready", return_value=True)
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=True)
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_stopped_environment_is_woken_and_waited_for(
+        self, mock_resolve, mock_ensure, mock_ready
+    ):
+        mock_resolve.return_value = {"uid": 2, "login": "admin"}
+        with patch("oduflow.server.activity.mark_started") as started:
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        started.assert_called_once_with(self._TEAM, "feature")
+        # The link is handed out once Odoo answers, so it opens on a live page.
+        mock_ready.assert_called_once_with(self._SETTINGS, self._TEAM, "feature")
+        assert "environment was stopped; started it" in link.note
+        assert "did not become ready" not in link.note
+
+    @patch("oduflow.docker_ops.env_ops.wait_for_odoo_ready", return_value=False)
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=True)
+    @patch(
+        "oduflow.docker_ops.odoo_ops.resolve_env_user",
+        return_value={"uid": 2, "login": "admin"},
+    )
+    def test_slow_start_is_reported_but_still_yields_a_link(
+        self, mock_resolve, mock_ensure, mock_ready
+    ):
+        with patch("oduflow.server.activity.mark_started"):
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        assert link.url
+        assert "did not become ready within 120 seconds" in link.note
+
+    @patch("oduflow.docker_ops.env_ops.wait_for_odoo_ready")
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=True)
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_bad_user_does_not_wake_a_stopped_environment(
+        self, mock_resolve, mock_ensure, mock_ready
+    ):
+        """The user check needs only the shared DB container, so a mistyped
+        user must not start an auto-stopped environment and reset its idle
+        clock on the way to failing."""
+        from oduflow.errors import NotFoundError
+
+        mock_resolve.side_effect = NotFoundError("User 'ghost' not found")
+        with (
+            patch("oduflow.server.activity.mark_started") as started,
+            pytest.raises(ToolError, match="not found"),
+        ):
+            _get_tool_fn("connect_link")(env_name="feature", user="ghost")
+        mock_ensure.assert_not_called()
+        started.assert_not_called()
+        mock_ready.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.wait_for_odoo_ready", return_value=True)
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_user_is_checked_before_the_environment_is_started(
+        self, mock_resolve, mock_ensure, mock_ready
+    ):
+        order = []
+        mock_resolve.side_effect = lambda *a: (
+            order.append("resolve") or {"uid": 2, "login": "admin"}
+        )
+        mock_ensure.side_effect = lambda *a: order.append("wake") or True
+        with patch("oduflow.server.activity.mark_started"):
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        assert order == ["resolve", "wake"]
+        assert "environment was stopped; started it" in link.note
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_missing_environment_is_reported_as_such(self, mock_resolve, mock_ensure):
+        """With the user check ahead of the wake, a missing environment must
+        still read "does not exist" — not as a psql error about its database."""
+        from oduflow.errors import NotFoundError
+
+        missing = NotFoundError(
+            "Environment 'ghost-env' does not exist. Use create_environment first."
+        )
+        with (
+            patch("oduflow.docker_ops.env_ops.get_env_base_url", side_effect=missing),
+            pytest.raises(ToolError, match="'ghost-env' does not exist"),
+        ):
+            _get_tool_fn("connect_link")(env_name="ghost-env")
+        mock_resolve.assert_not_called()
+        mock_ensure.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_port_routing_fails_clearly(self, mock_resolve, mock_ensure):
+        import oduflow.server
+
+        oduflow.server._settings = replace(self._SETTINGS, routing_mode="port")
+        with pytest.raises(ToolError) as exc:
+            _get_tool_fn("connect_link")(env_name="feature")
+        message = str(exc.value)
+        assert "requires Traefik routing" in message
+        assert "connect_as_user" in message  # what to use instead
+        # Refused before anything is started, resolved or issued.
+        mock_ensure.assert_not_called()
+        mock_resolve.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_stdio_transport_fails_clearly(self, mock_resolve, mock_ensure):
+        import oduflow.server
+
+        # No HTTP transport started, hence no web UI to redeem the token —
+        # also the state `oduflow call connect_link` runs in.
+        oduflow.server._web_bind = None
+        with pytest.raises(ToolError) as exc:
+            _get_tool_fn("connect_link")(env_name="feature")
+        message = str(exc.value)
+        assert "HTTP transport" in message
+        assert "connect_as_user" in message
+        mock_ensure.assert_not_called()
+        mock_resolve.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_production_names_are_rejected(self, mock_resolve, mock_ensure):
+        with pytest.raises(ToolError, match="is a production environment"):
+            _get_tool_fn("connect_link")(env_name="prod-shop")
+        mock_ensure.assert_not_called()
+        mock_resolve.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch(
+        "oduflow.docker_ops.odoo_ops.resolve_env_user",
+        return_value={"uid": 2, "login": "admin"},
+    )
+    def test_takes_the_environment_lock_and_records_activity(
+        self, mock_resolve, mock_ensure
+    ):
+        import oduflow.server
+
+        locks = oduflow.server._locks
+        with patch("oduflow.server.activity.touch") as touch:
+            _get_tool_fn("connect_link")(env_name="feature")
+            touch.assert_called_once_with(self._TEAM, "feature")
+
+            # Busy environment: refused like any neighbouring env tool.
+            locks.acquire_env("feature", "1", operation="update_environment")
+            try:
+                with pytest.raises(ToolError, match="update_environment"):
+                    _get_tool_fn("connect_link")(env_name="feature")
+            finally:
+                locks.release_env("feature")
+        # ...and its own lock was released after the first call.
+        locks.acquire_env("feature", "1", operation="probe")
+        locks.release_env("feature")
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch(
+        "oduflow.docker_ops.odoo_ops.resolve_env_user",
+        return_value={"uid": 2, "login": "admin"},
+    )
+    def test_link_token_is_kept_out_of_the_server_log(
+        self, mock_resolve, mock_ensure, caplog
+    ):
+        with caplog.at_level(logging.INFO, logger="oduflow"):
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        token = self._token(link)
+        assert "[connect_link] ->" in caplog.text
+        assert token not in caplog.text
+        # The rest of the line stays useful to an operator.
+        assert "feature.dev.example.com/oduflow-connect?token=[redacted]" in caplog.text
+
+    def test_in_scoped_allowlist(self):
+        from oduflow.scoped_access import SCOPED_ALLOWLIST, build_env_param_tools
+        from oduflow.server import mcp
+
+        # Same reasoning as connect_as_user: a scoped token already reaches any
+        # user's session in its own environment; this hands it out as a link.
+        assert "connect_link" in SCOPED_ALLOWLIST
+        # ...and the scoped endpoint injects the env, so it cannot be aimed at
+        # another environment.
+        assert "connect_link" in build_env_param_tools(mcp)
+
+
 class TestConnectSentinelParsing:
     """The mint script frames values in sentinels because `odoo shell` merges its
     banner/logging with `print()` output; parsing must survive that noise."""

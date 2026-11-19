@@ -1166,6 +1166,98 @@ def connect_as_user(
         container.exec_run(["rm", "-f", script_path])
 
 
+def _psql_on_env_db(
+    settings: Settings, team: TeamSettings, env_name: str, sql: str
+) -> str:
+    """Run one query on an environment's database and return its bare output.
+
+    ``psql -tAX`` on the shared DB container as the cluster superuser: tuples
+    only, unaligned, no psqlrc. It needs only that container, so it answers
+    whether or not the environment's Odoo is running. For fixed internal
+    queries — *sql* is passed as written.
+    """
+    client = get_client()
+    env_db = get_db_name(env_name, team.team_id)
+    try:
+        db_container = client.containers.get(settings.shared_db_container)
+    except docker.errors.NotFound:
+        raise NotFoundError(
+            f"Database container '{settings.shared_db_container}' is not running. "
+            "System not initialized. Restart Oduflow."
+        )
+    exit_code, output = db_container.exec_run(
+        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
+    )
+    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
+    if exit_code != 0:
+        raise ExternalCommandError("psql", exit_code, out)
+    return out
+
+
+def resolve_env_user(
+    settings: Settings, team: TeamSettings, env_name: str, user: str
+) -> dict[str, Any]:
+    """Resolve *user* to ``{"uid", "login"}`` without minting a session.
+
+    Answers "would :func:`connect_as_user` find this user?" with one ``psql``
+    query on the shared DB container instead of booting an Odoo registry, so a
+    caller that defers the mint (the ``connect_link`` tool) can still reject a
+    bad selector straight away. The rule mirrors the mint script's exactly:
+
+    - ``""`` — the database's admin through the ``base.user_admin`` xml-id, which
+      keeps pointing at the right record after the admin's login is changed to an
+      email address (a literal ``login = 'admin'`` lookup does not);
+    - otherwise an active user with that login, else — for an all-digit
+      selector — an active user with that id.
+
+    Raises :class:`NotFoundError` when nothing matches.
+    """
+    import json
+
+    selector = user.strip()
+    not_found = NotFoundError(
+        f"User '{(selector or 'admin (base.user_admin)')[:200]}' not found in "
+        f"environment '{env_name}'. Pass an existing login or numeric user id."
+    )
+    # Nothing this long, or holding a NUL, can be a login: refuse it before it
+    # becomes a command line.
+    if len(selector) > 512 or "\x00" in selector:
+        raise not_found
+    if not selector:
+        sql = (
+            "SELECT json_build_object('uid', u.id, 'login', u.login) "
+            "FROM ir_model_data d JOIN res_users u ON u.id = d.res_id "
+            "WHERE d.module = 'base' AND d.name = 'user_admin' "
+            "AND d.model = 'res.users' LIMIT 1"
+        )
+    else:
+        # The selector is caller-supplied text. It reaches SQL only as hex
+        # digits, decoded server-side, so no quoting rule has to hold.
+        login = (
+            f"convert_from(decode('{selector.encode('utf-8').hex()}', 'hex'), 'UTF8')"
+        )
+        # isascii() + isdecimal(): only plain 0-9 may be spliced in as a number.
+        by_id = (
+            f" OR u.id = {int(selector)}"
+            if selector.isascii() and selector.isdecimal()
+            else ""
+        )
+        sql = (
+            "SELECT json_build_object('uid', u.id, 'login', u.login) "
+            f"FROM res_users u WHERE u.active AND (u.login = {login}{by_id}) "
+            f"ORDER BY (u.login = {login}) DESC LIMIT 1"
+        )
+
+    out = _psql_on_env_db(settings, team, env_name, sql)
+    try:
+        row = json.loads(out) if out else None
+    except json.JSONDecodeError:
+        raise ExternalCommandError("psql", 0, out)
+    if not isinstance(row, dict) or not row.get("uid"):
+        raise not_found
+    return {"uid": int(row["uid"]), "login": str(row.get("login") or "")}
+
+
 def list_env_users(
     settings: Settings, team: TeamSettings, env_name: str
 ) -> list[dict[str, Any]]:
@@ -1181,15 +1273,6 @@ def list_env_users(
     """
     import json
 
-    client = get_client()
-    env_db = get_db_name(env_name, team.team_id)
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
     # json_agg → a single JSON array so the value parses cleanly without CSV
     # quoting concerns (partner names may contain commas).
     # ``portal`` = membership in the base.group_portal user-type group, resolved
@@ -1207,12 +1290,7 @@ def list_env_users(
         "FROM res_users u JOIN res_partner p ON p.id = u.partner_id "
         "WHERE u.active AND u.login IS NOT NULL AND u.login <> '__system__'"
     )
-    exit_code, output = db_container.exec_run(
-        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    )
-    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, out)
+    out = _psql_on_env_db(settings, team, env_name, sql)
     try:
         rows: list[dict[str, Any]] = json.loads(out or "[]")
         return rows

@@ -39,9 +39,14 @@ own security model:
 - Odoo.sh import ingest routes require a short-lived Bearer import token. The
   token-minting endpoint remains UI-authenticated.
 
-`/oduflow-connect` is a one-time, token-authenticated browser redirect rather
-than a JSON API. Production routes are registered only when
-`[production].enabled = true`.
+`/oduflow-connect` is a one-time, token-authenticated browser landing rather
+than a JSON API. It is served on each environment's own host and redeems two
+kinds of token: the dashboard's Connect As redirect (session already minted;
+the `GET` signs in), and a link from the
+[`connect_link`](mcp-tools.md#connect_link) MCP tool (the `GET` only shows a
+page and changes nothing; the `POST` that page makes mints the session and
+signs in). The access log records both with the token masked. Production routes
+are registered only when `[production].enabled = true`.
 
 ## Environment endpoints
 
@@ -308,5 +313,5 @@ semantics.
 | `GET` | `/` | Dashboard application |
 | `GET`, `POST` | `/login` | UI login form |
 | `POST` | `/logout` | Clear the UI session |
-| `GET` | `/oduflow-connect?token=` | One-time environment-host login handoff; sets Odoo `session_id` and redirects to `/web` |
+| `GET`, `POST` | `/oduflow-connect?token=` | One-time environment-host login handoff; sets Odoo `session_id` and redirects to `/web`. A `connect_link` token is redeemed by the `POST` (token in the form body) that the `GET` page makes |
 | `GET` | `/favicon.ico`, `/logo.png`, `/static/{filename}` | Packaged dashboard assets |
