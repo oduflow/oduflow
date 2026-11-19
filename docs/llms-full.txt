@@ -5123,9 +5123,14 @@ environment's read-only mount, and performs the required install, upgrade, or
 restart. Other environments continue using their previous checkout.
 
 Cached checkouts are deliberately not reference-counted or removed with an
-environment. Deleting the extra repository removes its bare repo and every
-cached revision after Oduflow verifies that no environment or production still
-depends on it.
+environment, so checkouts of older commits accumulate as a branch moves.
+`oduflow cleanup` and the dashboard's **Cleanup** button list and remove the
+ones nothing uses any more: no container (running or stopped) mounts or pins
+them, they are not the current tip of a downloaded branch, and they were last
+handed out more than six hours ago. Removing a downloaded branch drops its
+unused checkouts too. Deleting the extra repository removes its bare repo and
+every cached revision after Oduflow verifies that no environment or production
+still depends on it.
 
 ---
 
@@ -5750,7 +5755,7 @@ supported because the cluster is not published on a host port.
 | `GET` | `/api/stats` | Container/system metrics plus cached environment and production storage |
 | `GET` | `/api/usage` | Cached storage and quotas: `usage.envs` and `usage.productions` (per name: `db_bytes`, `disk_bytes`, `computed_at`) plus `usage.team` totals. `team.db_bytes` is the shared development cluster total, the figure `db_quota_gb` applies to; production databases live on the production cluster and are totalled separately in `team.prod_db_bytes`. `team.disk_bytes` covers the whole team data directory, production workspaces included |
 | `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive. When the production cluster cannot be queried the refresh still succeeds: each production's `db_bytes` and `team.prod_db_bytes` are `null` (unknown), everything else is measured |
-| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries and PostgreSQL roles, plus server-wide unused Docker images (`id`, `tags`, `size_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. Failures are listed in `errors` and `images.errors` |
+| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries, PostgreSQL roles and unused extra-addons checkouts (named `<repo>/<revision>`, with sizes in `orphan_extra_checkout_sizes`), plus server-wide unused Docker images (`id`, `tags`, `size_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. Failures are listed in `errors` and `images.errors` |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
 | `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
@@ -9579,8 +9584,10 @@ The `cleanup` command detects and removes resources that no longer have a corres
 - **Orphan databases** — PostgreSQL databases with the `oduflow_` prefix that have no matching environment container
 - **Orphan workspaces** — workspace directories on disk that have no matching environment container
 - **Orphan port entries** — entries in `ports.json` that have no matching environment container
+- **Orphan PostgreSQL roles** — per-environment login roles that have no matching environment container
+- **Unused extra-addons checkouts** — per-commit shared checkouts under `shared_extra_checkouts/` that no container (running or stopped) mounts or pins, that are not the current tip of a downloaded branch, and that were last handed out more than 6 hours ago. These accumulate as upstream branches move; the dry run lists each one with its size. A repository whose branches cannot be read, or that another operation (such as a long fetch) is using, is skipped with an `Error:` line and keeps all its checkouts
 
-By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images.
+By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. `--force` takes the team lock that a running server also honours: it waits up to five minutes for the team's environment operations to finish and fails with a busy error if they do not. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images.
 
 ## Systemd Service
 

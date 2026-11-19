@@ -7705,13 +7705,33 @@ def _run_list_service_databases(settings: Settings, team: TeamSettings) -> None:
         )
 
 
+def _format_size(size: int) -> str:
+    """Bytes as KB/MB/GB, scaled like the dashboard's fmtBytes."""
+    if size >= 1024**3:
+        return f"{size / 1024**3:.1f} GB"
+    if size >= 1024**2:
+        return f"{size / 1024**2:.1f} MB"
+    return f"{round(size / 1024)} KB"
+
+
 def _run_cleanup(
     settings: Settings,
     team: TeamSettings,
     dry_run: bool = True,
     purge_deleted_productions: bool = False,
 ) -> None:
-    result = system_ops.cleanup_orphans(settings, team, dry_run=dry_run)
+    if dry_run:
+        result = system_ops.cleanup_orphans(settings, team, dry_run=True)
+    else:
+        # Same team lock as the dashboard's Confirm, in the file lock space the
+        # server shares: nothing is deleted while an environment operation of
+        # the team runs in any process (a container being recreated pins no
+        # checkout, database or workspace for a moment). Wait a while for such
+        # an operation to finish instead of failing at once.
+        with _cli_locks(settings).team_lock_blocking(
+            team.team_id, ATTACH_SWAP_LOCK_TIMEOUT, operation="cleanup"
+        ):
+            result = system_ops.cleanup_orphans(settings, team, dry_run=False)
     mode = "DRY RUN" if result["dry_run"] else "CLEANUP"
 
     if purge_deleted_productions:
@@ -7735,11 +7755,14 @@ def _run_cleanup(
     workspaces = result["orphan_workspaces"]
     ports = result["orphan_ports"]
     roles = result["orphan_roles"]
+    checkouts = result.get("orphan_extra_checkouts", [])
+    checkout_sizes = result.get("orphan_extra_checkout_sizes", {})
     # Failed removals are absent from the lists above; report them separately.
     errors = result.get("errors", [])
 
-    if not dbs and not workspaces and not ports and not roles:
-        print(f"[{mode}] No orphaned resources {'removed' if errors else 'found'}.")
+    if not dbs and not workspaces and not ports and not roles and not checkouts:
+        outcome = "removed" if errors and not result["dry_run"] else "found"
+        print(f"[{mode}] No orphaned resources {outcome}.")
         for error in errors:
             print(f"[{mode}] Error: {error}")
         return
@@ -7761,8 +7784,17 @@ def _run_cleanup(
         print(f"  PostgreSQL roles ({len(roles)}):")
         for role in roles:
             print(f"    - {role}")
+    if checkouts:
+        print(f"  Extra-addons checkouts ({len(checkouts)}):")
+        for checkout in checkouts:
+            size = checkout_sizes.get(checkout)
+            suffix = f" ({_format_size(size)})" if size is not None else ""
+            print(f"    - {checkout}{suffix}")
+        freed = result.get("extra_checkouts_freed_bytes")
+        if freed is not None:
+            print(f"    {_format_size(freed)} freed.")
 
-    total = len(dbs) + len(workspaces) + len(ports) + len(roles)
+    total = len(dbs) + len(workspaces) + len(ports) + len(roles) + len(checkouts)
     if result["dry_run"]:
         print(f"\n  {total} resource(s) would be removed. Run with --force to apply.")
     else:
@@ -8441,7 +8473,10 @@ def _run_cli() -> None:
     # --- Cleanup ---
     p_cleanup = sub.add_parser(
         "cleanup",
-        help="Find and remove orphaned databases, workspaces, and port entries",
+        help=(
+            "Find and remove orphaned databases, workspaces, port entries, "
+            "PG roles, and unused extra-addons checkouts"
+        ),
     )
     p_cleanup.add_argument(
         "--dry-run",

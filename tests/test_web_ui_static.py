@@ -105,7 +105,7 @@ global.fetch = async (url, options) => {
   if (!body.force) return {ok: true, result: preview};
   return new Promise(resolve => { finishCleanup = resolve; });
 };
-const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: [], orphan_roles: []};
+const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: [], orphan_roles: [], orphan_extra_checkouts: []};
 (async () => {
   await confirmCleanup();
   assert.equal(requests.length, 0);
