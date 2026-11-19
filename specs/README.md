@@ -103,6 +103,9 @@ precursors).
 | [0080](0080-stable-environment-identity-across-recreate.md) | 2026-10-18 | Stable environment identity across recreate: MCP token registry + `recreate_environment` tool |
 | [0081](0081-cron-owned-template-sync.md) | 2026-10-07 | Host-cron SSH template sync, retained filestores and opt-in environment data refresh |
 | [0082](0082-operator-only-cluster-dr.md) | 2026-10-18 | Cluster WAL control and PITR moved off the team MCP/dashboard surfaces to /admin and the owner CLI |
+| [0083](0083-configurable-config-dir.md) | 2026-11-09 | Config dir made configurable (`[storage].etc_dir`, default: the loaded TOML's directory) so Docker-out-of-Docker bind sources resolve on the host; mirror/push/PGDATA alternatives rejected |
+| [0084](0084-service-only-stacks.md) | 2026-11-18 | Service-only Stacks and explicit cluster selection for service databases |
+| [0085](0085-repository-image-builds.md) | 2026-11-19 | Image builds from a repository URL without an environment, BuildKit, registry-less builds and `build` on Stack services |
 
 ## Design docs
 

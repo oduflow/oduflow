@@ -7,12 +7,12 @@ import hashlib
 import io
 import json
 import posixpath
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from pydantic import BaseModel
 
-from oduflow import git_ops, stack_production
+from oduflow import git_ops, image_builds, stack_production
 from oduflow.docker_ops import (
     env_ops,
     odoo_ops,
@@ -23,7 +23,12 @@ from oduflow.docker_ops import (
     volume_ops,
 )
 from oduflow.domains import service_hostname
-from oduflow.errors import ConflictError, ExternalCommandError, NotFoundError
+from oduflow.errors import (
+    ConflictError,
+    ExternalCommandError,
+    FlowError,
+    NotFoundError,
+)
 from oduflow.locking import prod_lock_key
 from oduflow.naming import sanitize_repo_url, validate_env_name
 from oduflow.service_runtime import normalize_runtime
@@ -33,7 +38,7 @@ from oduflow.stack_loader import (
     read_stack_file,
     resolve_env_values,
 )
-from oduflow.stack_models import Service, StackManifest
+from oduflow.stack_models import Service, ServiceDatabase, StackManifest
 from oduflow.stack_state import load_state, save_state
 
 STACK_LABEL = "oduflow.stack"
@@ -48,6 +53,7 @@ class PlanAction:
     operation: str
     resource: str
     detail: str = ""
+    modules: tuple[str, ...] = ()
 
     @property
     def conflict(self) -> bool:
@@ -55,9 +61,23 @@ class PlanAction:
 
 
 @dataclass(frozen=True)
+class PlannedImage:
+    """The image a service will run, as resolved while planning.
+
+    For a service that declares ``build``, ``commit`` is what its ref pointed
+    at and ``image`` is the staging tag of a finished build of that commit —
+    empty while that build is still to be run by apply.
+    """
+
+    image: str
+    commit: str = ""
+
+
+@dataclass(frozen=True)
 class StackPlan:
     stack: str
     actions: tuple[PlanAction, ...]
+    images: Mapping[str, PlannedImage] = field(default_factory=dict)
 
     @property
     def has_conflicts(self) -> bool:
@@ -69,19 +89,25 @@ class StackPlan:
 
 
 def _resource_hash(value: BaseModel | dict[str, Any] | list[Any]) -> str:
+    # Default service databases retain the hash of the original empty spec.
     raw = (
-        value.model_dump(mode="json", by_alias=True)
+        value.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_defaults=isinstance(value, ServiceDatabase),
+        )
         if isinstance(value, BaseModel)
         else value
     )
 
-    # Adding productionField must not invalidate existing dev service ownership hashes.
+    # Adding productionField or a service's build must not invalidate the
+    # ownership hashes of resources created before those keys existed.
     def compatible(value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 k: compatible(v)
                 for k, v in value.items()
-                if not (k == "productionField" and v is None)
+                if not (k in ("productionField", "build") and v is None)
             }
         if isinstance(value, list):
             return [compatible(item) for item in value]
@@ -131,6 +157,135 @@ def _owned_by(info: Mapping[str, Any], stack: str, resource: str) -> bool:
 
 def _normalized_template(value: Any) -> str:
     return "none" if value in (None, "", "none") else str(value)
+
+
+def _plan_service_image(
+    team: TeamSettings, service: Service, current_image: str
+) -> PlannedImage:
+    """Resolve the image a service should run without building anything.
+
+    A declared ``build`` costs one ``git ls-remote``: the ref's commit decides
+    whether an earlier build can be reused or apply has to build.
+    """
+    from oduflow.docker_ops import build_ops
+
+    build = service.build
+    if build is None:
+        return PlannedImage(image=str(service.image))
+    build_ops.build_settings(team)  # refuses when the operator disabled builds
+    git_ops.validate_repo_url(build.repo_url)
+    commit, _label = build_ops.resolve_remote_ref(
+        team, git_ops.inject_credential_user(build.repo_url, build.git_user), build.ref
+    )
+    key = image_builds.build_key(
+        sanitize_repo_url(build.repo_url),
+        commit,
+        build.dockerfile,
+        build.context,
+        build.target,
+        build.args,
+    )
+    return PlannedImage(
+        image=build_ops.find_built_image(team, key, prefer=current_image),
+        commit=commit,
+    )
+
+
+def _build_service_image(
+    team: TeamSettings,
+    name: str,
+    service: Service,
+    planned: PlannedImage,
+    keep_tags: set[str],
+) -> str:
+    """Run the build a plan found missing; returns the staging tag to run.
+
+    *keep_tags* holds the images this apply is going to run. No container
+    references them until the services are created, so each build hands the
+    set to retention, which would otherwise be free to prune them.
+    """
+    from oduflow.docker_ops import build_ops
+
+    build = service.build
+    if build is None or planned.image:
+        return planned.image
+    job = build_ops.build_git_image(
+        team,
+        build.repo_url,
+        build.ref,
+        build.dockerfile,
+        build.context,
+        build.target,
+        dict(build.args),
+        git_user=build.git_user,
+        commit=planned.commit,
+        keep_tags=frozenset(keep_tags),
+    )
+    if job.status != image_builds.STATUS_SUCCEEDED:
+        tail = image_builds.store.read_log_tail(team, job.build_id, 40)
+        raise ExternalCommandError(
+            "image build",
+            1,
+            f"Stack service '{name}': build {job.build_id} of "
+            f"{job.repo_url} @ {job.commit[:12]} is '{job.status}' — {job.error}"
+            + (f"\n{tail}" if tail else ""),
+        )
+    keep_tags.add(job.local_tag)
+    return job.local_tag
+
+
+def _refuse_conflicts(plan: StackPlan) -> None:
+    if plan.has_conflicts:
+        conflicts = "; ".join(
+            f"{item.resource}: {item.detail}" for item in plan.actions if item.conflict
+        )
+        raise ConflictError(f"Stack apply refused: {conflicts}")
+
+
+def _planned_tags(plan: StackPlan) -> set[str]:
+    return {planned.image for planned in plan.images.values() if planned.image}
+
+
+def _service_changes(plan: StackPlan, name: str) -> bool:
+    resource = f"services.{name}"
+    return any(
+        item.resource == resource and item.operation in ("create", "update")
+        for item in plan.actions
+    )
+
+
+def _prebuild_service_images(
+    settings: Settings,
+    team: TeamSettings,
+    manifest: StackManifest,
+    manifest_path: str,
+    environ: Mapping[str, str] | None,
+    keep_tags: set[str],
+) -> dict[str, PlannedImage]:
+    """Run the builds an apply needs before it takes any lock.
+
+    A build can take as long as ``build_timeout_seconds``, and the team lock
+    refuses every environment operation of the team while it is held. Planning
+    reads only, so the missing images are built off an unlocked plan; the
+    locked plan that follows is the authority and picks the results up by
+    commit. A ref that moves in between is simply built under the lock.
+    """
+    services = manifest.spec.services
+    if not any(service.build is not None for service in services.values()):
+        return {}
+    plan = build_plan(settings, team, manifest, manifest_path, environ=environ)
+    _refuse_conflicts(plan)
+    keep_tags.update(_planned_tags(plan))
+    built: dict[str, PlannedImage] = {}
+    for name, service in services.items():
+        if service.build is None or not _service_changes(plan, name):
+            continue
+        planned = plan.images[name]
+        built[name] = PlannedImage(
+            image=_build_service_image(team, name, service, planned, keep_tags),
+            commit=planned.commit,
+        )
+    return built
 
 
 def _desired_mounts(service: Service) -> list[dict[str, str]]:
@@ -253,17 +408,21 @@ def build_plan(
     spec = manifest.spec
     desired_env = spec.environment
     target = desired_env or spec.production
-    assert target is not None
     if desired_env is not None:
         validate_env_name(desired_env.name)
-    git_ops.validate_repo_url(target.repo_url)
+    if target is not None:
+        git_ops.validate_repo_url(target.repo_url)
     for desired_repo in spec.extra_repositories.values():
         git_ops.validate_repo_url(desired_repo.repo_url)
     actions: list[PlanAction] = []
 
     from oduflow import extra_addons
 
-    repos = {item["name"]: item for item in extra_addons.list_extra_repos(team)}
+    repos = (
+        {item["name"]: item for item in extra_addons.list_extra_repos(team)}
+        if spec.extra_repositories
+        else {}
+    )
     for name, desired_repo in spec.extra_repositories.items():
         actual = repos.get(name)
         if actual is None:
@@ -281,7 +440,11 @@ def build_plan(
                 )
             )
 
-    volumes = {item["name"]: item for item in volume_ops.list_volumes(settings, team)}
+    volumes = (
+        {item["name"]: item for item in volume_ops.list_volumes(settings, team)}
+        if spec.volumes
+        else {}
+    )
     for name, desired_volume in spec.volumes.items():
         actual = volumes.get(name)
         resource = f"volumes.{name}"
@@ -302,52 +465,45 @@ def build_plan(
                 )
             )
 
-    service_databases: dict[str, dict[str, Any]] = {}
-    if spec.databases:
-        service_databases = {
-            item["name"]: item
-            for item in service_database_ops.list_databases(settings, team)
-        }
+    # Only the declared databases, with credentials: each inspection probes
+    # PostgreSQL, and the records also feed service env resolution below.
+    service_databases = {
+        item["name"]: item
+        for item in service_database_ops.list_databases(
+            settings, team, spec.databases, reveal_password=True
+        )
+    }
     pending_databases: set[str] = set()
+    blocked_databases: set[str] = set()
     for name, desired_database in spec.databases.items():
         resource = f"databases.{name}"
         actual = service_databases.get(name)
-        if actual is None:
+        if desired_database.cluster == "prod" and not settings.prod_enabled:
+            conflict = "production.enabled must be true for cluster prod"
+        elif actual is None:
             pending_databases.add(name)
-            actions.append(PlanAction("create", resource))
+            actions.append(
+                PlanAction("create", resource, f"cluster {desired_database.cluster}")
+            )
+            continue
         elif actual.get("status") == "credentials-error":
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "stored credentials for this database cannot be read",
-                )
-            )
+            conflict = "stored credentials for this database cannot be read"
         elif not _owned_by(actual, stack, resource):
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "existing database is not owned by this stack",
-                )
-            )
+            conflict = "existing database is not owned by this stack"
+        elif service_database_ops.record_cluster(actual) != desired_database.cluster:
+            conflict = "changing the database cluster requires an explicit migration"
+        elif actual.get("status") == "unavailable":
+            conflict = "the database cluster is unavailable"
         elif actual.get("status") != "ready":
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "managed PostgreSQL database or role is missing",
-                )
-            )
+            conflict = "managed PostgreSQL database or role is missing"
         elif actual.get("stack_spec_hash") != _resource_hash(desired_database):
-            actions.append(
-                PlanAction(
-                    "conflict",
-                    resource,
-                    "database metadata is inconsistent with the manifest",
-                )
-            )
+            conflict = "database metadata is inconsistent with the manifest"
+        else:
+            continue
+        blocked_databases.add(name)
+        actions.append(PlanAction("conflict", resource, conflict))
 
+    target_needs_create = False
     if desired_env is not None:
         desired_env_vars = resolve_env_values(
             desired_env.env,
@@ -362,7 +518,7 @@ def build_plan(
         }
         actual_env = environments.get(desired_env.name)
         env_resource = "environment"
-        env_needs_create = actual_env is None
+        target_needs_create = actual_env is None
         if actual_env is None:
             actions.append(PlanAction("create", env_resource, desired_env.name))
             if desired_env.template is not None:
@@ -443,7 +599,7 @@ def build_plan(
                     PlanAction("update", env_resource, ", ".join(mutable_drift))
                 )
 
-    else:
+    elif spec.production is not None:
         production_actions = stack_production.plan_production(
             settings, team, manifest, environ
         )
@@ -451,7 +607,7 @@ def build_plan(
             PlanAction(operation, "production", detail)
             for operation, detail in production_actions
         )
-        env_needs_create = any(
+        target_needs_create = any(
             operation == "create" for operation, _ in production_actions
         )
 
@@ -463,9 +619,12 @@ def build_plan(
         ):
             actions.append(PlanAction("write", resource, item.source))
 
-    services = {
-        item["name"]: item for item in service_ops.list_services(settings, team)
-    }
+    services = (
+        {item["name"]: item for item in service_ops.list_services(settings, team)}
+        if spec.services
+        else {}
+    )
+    images: dict[str, PlannedImage] = {}
     for name, desired_service in spec.services.items():
         resource = f"services.{name}"
         if desired_service.routes and settings.routing_mode != "traefik":
@@ -497,13 +656,29 @@ def build_plan(
                 )
                 continue
         actual = services.get(name)
+        try:
+            planned_image = _plan_service_image(
+                team, desired_service, str((actual or {}).get("image") or "")
+            )
+        except FlowError as exc:
+            actions.append(PlanAction("conflict", resource, f"image build: {exc}"))
+            continue
+        images[name] = planned_image
         if actual is None:
             # Validate host-only values now; environment values are safe to
             # defer until after the environment create action.
             for key, value in desired_service.env.items():
                 if getattr(value, "from_env", None) is not None:
                     resolve_env_values({key: value}, environ=environ)
-            actions.append(PlanAction("create", resource, desired_service.image))
+            build = desired_service.build
+            pending = (
+                f"build {build.repo_url} @ {planned_image.commit[:12]}"
+                if build is not None
+                else ""
+            )
+            actions.append(
+                PlanAction("create", resource, planned_image.image or pending)
+            )
             continue
         if not _owned_by(actual, stack, resource):
             actions.append(
@@ -523,14 +698,19 @@ def build_plan(
             getattr(value, "database", None) in pending_databases
             for value in desired_service.env.values()
         )
+        has_blocked_database_value = any(
+            getattr(value, "database", None) in blocked_databases
+            for value in desired_service.env.values()
+        )
         deferred_env = (
-            env_needs_create and has_environment_value
+            target_needs_create and has_environment_value
         ) or has_pending_database_value
-        if deferred_env:
-            # A generated input this service consumes does not exist yet, so
-            # its value cannot be compared against the running container. Still
-            # validate every host-env source now; apply resolves the generated
-            # values after creating the Odoo environment and the databases.
+        if deferred_env or has_blocked_database_value:
+            # A generated input this service consumes does not exist yet (or
+            # is in conflict), so its value cannot be compared against the
+            # running container. Still validate every host-env source now;
+            # apply resolves the generated values after creating the Odoo
+            # environment and the databases.
             for key, value in desired_service.env.items():
                 if getattr(value, "from_env", None) is not None:
                     resolve_env_values({key: value}, environ=environ)
@@ -540,8 +720,12 @@ def build_plan(
                 desired_service.env,
                 settings=settings,
                 team=team,
-                env_name=target.name if desired_env is not None else "",
-                production_name=target.name if spec.production is not None else "",
+                env_name=desired_env.name if desired_env is not None else "",
+                production_name=spec.production.name
+                if spec.production is not None
+                else "",
+                production_domain=spec.production.domain if spec.production else "",
+                database_records=service_databases,
                 environ=environ,
             )
         desired_caps = (
@@ -562,7 +746,8 @@ def build_plan(
                     desired_service.runtime.model_dump(exclude_none=True)
                 ),
             ),
-            ("image", actual.get("image"), desired_service.image),
+            # Empty while a build is pending, which reads as image drift.
+            ("image", actual.get("image"), planned_image.image),
             ("port", actual.get("port"), desired_service.port),
             (
                 "hostname",
@@ -610,19 +795,28 @@ def build_plan(
             actions.append(
                 PlanAction("update", resource, ", ".join(drift) or "metadata")
             )
+        elif actual.get("status") != "running":
+            # Services run under restart_policy unless-stopped, so a container
+            # that is not running was stopped by hand. The manifest declares it
+            # running; converge like production does for a stopped container.
+            actions.append(PlanAction("start", resource, str(actual.get("status"))))
 
     modules = list(desired_env.modules.install) if desired_env is not None else []
     if modules and desired_env is not None:
         installed = (
             set()
-            if env_needs_create
+            if target_needs_create
             else _installed_modules(settings, team, desired_env.name, modules)
         )
         missing = [module for module in modules if module not in installed]
         if missing:
-            actions.append(PlanAction("install", "modules", ", ".join(missing)))
+            actions.append(
+                PlanAction(
+                    "install", "modules", ", ".join(missing), modules=tuple(missing)
+                )
+            )
 
-    return StackPlan(stack=stack, actions=tuple(actions))
+    return StackPlan(stack=stack, actions=tuple(actions), images=images)
 
 
 def format_plan(plan: StackPlan) -> str:
@@ -633,6 +827,7 @@ def format_plan(plan: StackPlan) -> str:
         "install": "+",
         "conflict": "!",
         "adopt": "=",
+        "start": "^",
     }
     lines = [f"Stack {plan.stack}:"]
     if not plan.actions:
@@ -654,6 +849,7 @@ def _service_kwargs(
     name: str,
     desired: Service,
     environ: Mapping[str, str] | None,
+    image: str,
 ) -> dict[str, Any]:
     env_vars = resolve_env_values(
         desired.env,
@@ -663,11 +859,14 @@ def _service_kwargs(
         production_name=manifest.spec.production.name
         if manifest.spec.production
         else "",
+        production_domain=manifest.spec.production.domain
+        if manifest.spec.production
+        else "",
         environ=environ,
     )
     return {
         "runtime": normalize_runtime(desired.runtime.model_dump(exclude_none=True)),
-        "image": desired.image,
+        "image": image,
         "port": desired.port,
         "hostname": desired.hostname,
         "env_vars": env_vars or None,
@@ -695,6 +894,13 @@ def apply_stack(
     lock_manager: Any = None,
 ) -> StackPlan:
     """Converge live resources to a preflighted, non-destructive V1 plan."""
+    # Builds run before the first mutation and before any lock: a Dockerfile
+    # is the likeliest step to fail, and failing here leaves nothing
+    # half-applied and nobody locked out.
+    keep_tags: set[str] = set()
+    prebuilt = _prebuild_service_images(
+        settings, team, manifest, manifest_path, environ, keep_tags
+    )
     acquired = False
     production_key = None
     if lock_manager is not None:
@@ -706,16 +912,27 @@ def apply_stack(
             lock_manager.acquire_env(key, operation="stack_apply")
             production_key = key
         plan = build_plan(settings, team, manifest, manifest_path, environ=environ)
-        if plan.has_conflicts:
-            conflicts = "; ".join(
-                f"{item.resource}: {item.detail}"
-                for item in plan.actions
-                if item.conflict
-            )
-            raise ConflictError(f"Stack apply refused: {conflicts}")
+        _refuse_conflicts(plan)
         operations = {(item.operation, item.resource): item for item in plan.actions}
         stack = manifest.metadata.name
         spec = manifest.spec
+
+        # Normally every image is there by now. What is still missing — a ref
+        # that moved since the builds above — is built here, still ahead of
+        # the first mutation.
+        keep_tags.update(_planned_tags(plan))
+        service_images: dict[str, str] = {}
+        for name, desired_service in spec.services.items():
+            if not _service_changes(plan, name):
+                continue
+            # Every service the plan creates or updates has a planned image.
+            planned = plan.images[name]
+            early = prebuilt.get(name)
+            if not planned.image and early and early.commit == planned.commit:
+                planned = early
+            service_images[name] = _build_service_image(
+                team, name, desired_service, planned, keep_tags
+            )
 
         from oduflow import extra_addons
 
@@ -746,6 +963,7 @@ def apply_stack(
                     settings,
                     team,
                     name,
+                    cluster=desired_database.cluster,
                     stack_labels=_stack_labels(stack, resource, desired_database),
                 )
 
@@ -797,7 +1015,7 @@ def apply_stack(
                         "stack apply.\n" + "\n".join(updated.get("setup_logs", [])),
                     )
 
-        else:
+        elif spec.production is not None:
             for operation in ("create", "adopt", "update"):
                 if (operation, "production") in operations:
                     stack_production.apply_production(
@@ -819,10 +1037,19 @@ def apply_stack(
             resource = f"services.{name}"
             create_service = ("create", resource) in operations
             update_service = ("update", resource) in operations
+            if ("start", resource) in operations:
+                service_ops.restart_service(settings, team, name)
+                continue
             if not create_service and not update_service:
                 continue
             kwargs = _service_kwargs(
-                settings, team, manifest, name, desired_service, environ
+                settings,
+                team,
+                manifest,
+                name,
+                desired_service,
+                environ,
+                service_images[name],
             )
             if create_service:
                 service_ops.create_service(settings, team, name, **kwargs)
@@ -847,9 +1074,8 @@ def apply_stack(
 
         module_action = operations.get(("install", "modules"))
         if module_action and desired_env is not None:
-            modules = [item.strip() for item in module_action.detail.split(",")]
             result = odoo_ops.install_odoo_modules(
-                settings, team, desired_env.name, *modules
+                settings, team, desired_env.name, *module_action.modules
             )
             if int(result.get("exit_code", 1)) != 0:
                 raise ConflictError(
@@ -858,16 +1084,17 @@ def apply_stack(
                 )
             env_ops.restart_environment(settings, desired_env.name, team)
 
+        target_resource = {}
+        if desired_env is not None:
+            target_resource["environment"] = desired_env.name
+        elif spec.production is not None:
+            target_resource["production"] = spec.production.name
         save_state(
             team,
             stack,
             manifest_hash(manifest),
             {
-                **(
-                    {"environment": desired_env.name}
-                    if desired_env is not None
-                    else {"production": spec.production.name if spec.production else ""}
-                ),
+                **target_resource,
                 "extraRepositories": sorted(spec.extra_repositories),
                 "volumes": sorted(spec.volumes),
                 "databases": sorted(spec.databases),

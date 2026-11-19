@@ -171,6 +171,16 @@ class TestState:
         }
         assert state["suggest"] == {"team_id": "2", "port_range": [50100, 50200]}
         assert state["file_error"] == ""
+        assert state["env_overrides"] == []
+
+    def test_env_overrides_name_the_variable_not_the_value(self, srv, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "env-only-password")
+        srv.login()
+        body = srv.client.get("/admin/api/state").text
+        assert "env-only-password" not in body
+        assert srv.state()["env_overrides"] == [
+            {"path": ["team", "1", "ui_password"], "env": "ODUFLOW_TEAM_1_UI_PASSWORD"}
+        ]
 
     def test_reveal_returns_one_secret(self, srv):
         srv.login()
@@ -182,6 +192,16 @@ class TestState:
             "/admin/api/reveal", json={"path": ["team", "1", "hostname"]}
         )
         assert r.status_code == 400
+
+    def test_reveal_refuses_a_value_the_environment_overrides(self, srv, monkeypatch):
+        monkeypatch.setenv("ODUFLOW_TEAM_1_UI_PASSWORD", "env-only-password")
+        srv.login()
+        r = srv.client.post(
+            "/admin/api/reveal", json={"path": ["team", "1", "ui_password"]}
+        )
+        assert r.status_code == 400
+        assert TEAM_PW not in r.text
+        assert "ODUFLOW_TEAM_1_UI_PASSWORD" in r.text
 
     def test_invalid_file_is_reported_not_fatal(self, srv):
         srv.login()
@@ -439,6 +459,20 @@ def test_admin_cli_enable_and_disable(tmp_path, monkeypatch, capsys):
 
     server._admin_cli("disable")
     assert "password" not in cs.parse_text(s.path.read_text()).get("admin", {})
+
+
+def test_admin_cli_refuses_while_the_variable_is_set(tmp_path, monkeypatch, capsys):
+    from oduflow import server
+
+    s = Server(tmp_path, CONFIG)
+    monkeypatch.setattr(server, "_get_settings", lambda: s.settings)
+    monkeypatch.setenv("ODUFLOW_ADMIN_PASSWORD", "env-console-password")
+    before = s.path.read_text()
+    for action, reset in (("disable", False), ("enable", True)):
+        with pytest.raises(SystemExit):
+            server._admin_cli(action, reset=reset)
+        assert "ODUFLOW_ADMIN_PASSWORD" in capsys.readouterr().err
+    assert s.path.read_text() == before
 
 
 class TestClusterDr:

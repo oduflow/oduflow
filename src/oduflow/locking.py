@@ -128,6 +128,11 @@ def team_secrets_lock_key(team_id: str, name: str = "") -> str:
     return f"secrets:{team_id}"
 
 
+def storage_stats_lock_key(team_id: str, name: str = "") -> str:
+    """The team's storage-stats cache (storage_stats.json read-modify-write)."""
+    return f"storage-stats:{team_id}"
+
+
 def prod_backups_lock_key(team_id: str, name: str = "") -> str:
     """The team's snapshot/chunk store — prune vs. snapshot vs. restore."""
     return f"prod-backups:{team_id}"

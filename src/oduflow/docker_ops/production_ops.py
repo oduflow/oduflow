@@ -292,7 +292,9 @@ def validate_admin_passwd_override(value: object) -> None:
         )
 
 
-def effective_admin_passwd(team: TeamSettings, name: str, conf: dict[str, str]) -> str:
+def effective_admin_passwd(
+    settings: Settings, team: TeamSettings, name: str, conf: dict[str, str]
+) -> str:
     """The master password the next generated conf would carry.
 
     The per-production override when set, otherwise whatever the base conf
@@ -304,14 +306,14 @@ def effective_admin_passwd(team: TeamSettings, name: str, conf: dict[str, str]) 
     base = configparser.RawConfigParser()
     base.read(
         _prod_base_conf_path(
-            team, get_repo_path(prod_env_name(name), team.workspaces_dir)
+            settings, team, get_repo_path(prod_env_name(name), team.workspaces_dir)
         )
     )
     return base.get("options", "admin_passwd", fallback="")
 
 
 def validate_db_manager_overrides(
-    team: TeamSettings, name: str, conf: dict[str, str]
+    settings: Settings, team: TeamSettings, name: str, conf: dict[str, str]
 ) -> None:
     """Refuse an override set that opens Odoo's database manager unlocked.
 
@@ -327,7 +329,7 @@ def validate_db_manager_overrides(
         validate_admin_passwd_override(conf["admin_passwd"])
     if not parse_list_db_override(conf.get("list_db", "False")):
         return
-    passwd = effective_admin_passwd(team, name, conf)
+    passwd = effective_admin_passwd(settings, team, name, conf)
     if not passwd:
         raise ValueError(
             "odoo.conf 'list_db = True' exposes Odoo's database manager, so "
@@ -414,7 +416,7 @@ def _require_container(
 # ---------------------------------------------------------------------------
 
 
-def _prod_base_conf_path(team: TeamSettings, repo_path: str) -> str:
+def _prod_base_conf_path(settings: Settings, team: TeamSettings, repo_path: str) -> str:
     """Resolve the production base conf: team > bundled.
 
     A separate chain from the dev one on purpose: a repo's dev conf
@@ -435,7 +437,7 @@ def _prod_base_conf_path(team: TeamSettings, repo_path: str) -> str:
     team_conf = _resolve_instance_conf("odoo.prod.conf", team.data_dir)
     if team_conf.exists():
         return str(team_conf)
-    return str(_resolve_conf("odoo-prod.conf"))
+    return str(_resolve_conf("odoo-prod.conf", settings))
 
 
 def _build_prod_odoo_conf(
@@ -504,7 +506,7 @@ def _build_prod_odoo_conf(
     # the override restores the managed list_db = False.
     if "list_db" in overrides:
         try:
-            validate_db_manager_overrides(team, name, stored)
+            validate_db_manager_overrides(settings, team, name, stored)
         except ValueError as exc:
             logger.warning("Database management stays disabled for '%s': %s", name, exc)
             overrides["list_db"] = "False"
@@ -521,7 +523,7 @@ def _build_prod_odoo_conf(
         extra_container_paths.append(MOUNT)
     generated = output_path or os.path.join(_workspace(team, name), "odoo.conf")
     generate_odoo_conf(
-        _prod_base_conf_path(team, repo_path),
+        _prod_base_conf_path(settings, team, repo_path),
         generated,
         extra_container_paths,
         resolve_main_addons_path(repo_path),
@@ -1989,7 +1991,7 @@ def set_production_odoo_conf(
     # Validated on the resulting set, not on this call's keys: list_db and
     # admin_passwd guard each other, and either can arrive (or be dropped) in
     # a separate call.
-    validate_db_manager_overrides(team, name, conf)
+    validate_db_manager_overrides(settings, team, name, conf)
     notes = (
         [
             f"Removed odoo.conf overrides Oduflow manages and ignores: "

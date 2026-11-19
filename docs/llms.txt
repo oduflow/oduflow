@@ -27,7 +27,7 @@ pip install oduflow
 
 ### Configure
 
-All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`.
+All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`. Secrets can instead come from environment variables that win over the file: `ODUFLOW_TEAM_<ID>_UI_PASSWORD`, `ODUFLOW_TEAM_<ID>_AUTH_TOKEN`, `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, `ODUFLOW_ADMIN_PASSWORD`, `ODUFLOW_BACKUP_ACCESS_KEY` and `ODUFLOW_BACKUP_SECRET_KEY` (`<ID>` is the team id upper-cased, non-alphanumerics replaced by `_`).
 
 Minimal configuration:
 
@@ -63,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.4.0"
+# image = "oduist/oduflow-coder:0.4.1"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -197,7 +197,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `setup_repo_auth` — cache git credentials for private repositories
 - `add_extra_repo` / `list_extra_repos` / `update_extra_repo` / `delete_extra_repo` — manage extra addons repositories
 - `get_agent_instructions` — load the compact Oduflow agent workflow once at session start
-- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–19)
+- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–20)
 - `report_issue` — build a prefilled GitHub issue link so the user can report an Oduflow bug, request a feature, or send feedback from their own account
 
 ## Production Hosting

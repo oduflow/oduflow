@@ -38,6 +38,47 @@ team credentials; a console session does not open a team dashboard either.
 While the password is empty, `/admin` answers 404. Secrets reach the browser
 only through an explicit, logged **Reveal**.
 
+## Credentials from environment variables
+
+Any of these secrets can come from an environment variable of the Oduflow
+process instead of `oduflow.toml`. A non-empty variable wins; the value in the
+file is then ignored. An empty variable counts as unset.
+
+| `oduflow.toml` key | Environment variable |
+|---|---|
+| `[team.<id>] ui_password` | `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
+| `[team.<id>] auth_token` | `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `[team.<id>] production_token` | `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `[admin] password` | `ODUFLOW_ADMIN_PASSWORD` |
+| `[backup] access_key` | `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup] secret_key` | `ODUFLOW_BACKUP_SECRET_KEY` |
+
+`<ID>` is the team id upper-cased, with every character other than a letter or
+digit replaced by `_`: `[team.1]` → `ODUFLOW_TEAM_1_UI_PASSWORD`,
+`[team.acme-dev]` → `ODUFLOW_TEAM_ACME_DEV_UI_PASSWORD`.
+
+Leading and trailing whitespace is stripped, so a `.env` file with CRLF line
+endings works. Team ids that differ only in case or punctuation (`acme-dev`
+and `acme_dev`) map to the same name; Oduflow refuses to start while such a
+shared variable is set, so keep those teams' secrets in the file.
+
+The variables only replace values: backups are still enabled by a `[backup]`
+section with a `bucket` in the file. Every validation rule (token length,
+uniqueness, the HTTP fail-closed checks) applies to the value from the
+variable, and `ODUFLOW_ADMIN_PASSWORD` must be at least 12 characters, the
+same minimum the console enforces.
+
+A changed variable takes effect on the next restart. After changing
+`ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, also run `sync_production_mcp` for each
+of that team's productions: they keep the key they were configured with until
+then, and production calls fail in the meantime.
+
+The [Server settings console](admin.md) shows a key taken from a variable as
+read-only, names the variable and never sees its value; it refuses to change
+or reveal the unused file value. `oduflow admin enable|disable` refuses to run
+while `ODUFLOW_ADMIN_PASSWORD` is set. On upgrade, a team whose `ui_password`
+comes from a variable does not get a generated one in the file.
+
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
 
 Oduflow can act as its own OAuth 2.1 Authorization Server, so MCP clients that require an OAuth flow (e.g. Claude.ai Remote MCP, MCP Inspector) can connect without any external identity provider.
@@ -156,14 +197,21 @@ override — which environment it operates on.
 
 The four [container image build](image-builds.md) tools
 (`start_image_build`, `get_image_build`, `publish_image_build`,
-`cancel_image_build`) are also on this endpoint, but only for a team that has
-a `[team.X.image_registry]` section; without one they answer with a
-prerequisite error. Where it is configured, an environment-scoped credential
-can therefore **push images to the team's registry namespace** — confined to
-the configured `repository_prefix`, which Oduflow enforces on every publish.
-The agent receives neither the Docker socket nor the registry credentials;
-Oduflow builds and pushes on its behalf. Keep the registry token in
-`oduflow.toml` least-privilege, scoped to that prefix.
+`cancel_image_build`) are also on this endpoint. Building needs no
+configuration, so they work by default; on this endpoint the build source is
+always the environment's own checkout — `repo_url` and `ref` are neither
+listed nor accepted, so building an arbitrary repository stays a team-level
+capability. A Dockerfile runs on the host Docker daemon with the same reach as
+the environment containers the endpoint already runs code in; an operator who
+does not want that for a team sets `builds_enabled = false` in
+`[team.X.image_registry]`.
+
+Where that section configures a `repository_prefix`, an environment-scoped
+credential can additionally **push images to the team's registry namespace** —
+confined to that prefix, which Oduflow enforces on every publish. The agent
+receives neither the Docker socket nor the registry credentials; Oduflow
+builds and pushes on its behalf. Keep the registry token in `oduflow.toml`
+least-privilege, scoped to that prefix.
 
 ### Per-environment Secret Key
 
@@ -523,6 +571,40 @@ element was replaced (`updated` is the inverse). For example, an update returns:
 
 Recreate consumers with `update_service` / `update_environment` to apply the
 updated value to their containers.
+
+## Backup data in S3
+
+Production backups ([Production Hosting → Backups](production.md#backups))
+contain **unsanitized production data**: complete database dumps, every
+attachment, and the WAL stream. Protect the bucket as you would the
+production database.
+
+- **No client-side encryption.** Dumps (`pg_dump -Fc`, compressed but not
+  encrypted), filestore chunks (zstd) and WAL-G objects are stored as plain
+  data. Enable default server-side encryption on the bucket (SSE-S3 or
+  SSE-KMS, or the equivalent on MinIO/R2), and restrict access to the
+  credentials Oduflow uses. A format flag for client-side encryption is
+  reserved but not implemented. That is deliberate: losing a client-side key
+  would make every backup unrestorable.
+- **Object names reveal nothing.** Chunk object names are keyed hashes of
+  keyed content hashes, so a bucket listing does not reveal or confirm file
+  contents. The keys live in the chunkstore's `config` object in the same
+  bucket, so whoever can read the bucket can read the backups.
+- **One credential set for the whole server.** Teams are separated by path
+  (`snapshots/<team>/`, `filestore/<team>/`), not by credentials, and the
+  `[backup]` keys can read and delete every team's backups and the cluster
+  archive. Use a dedicated bucket, or at least a dedicated prefix and IAM user,
+  limited to the [permissions Oduflow needs](production.md#bucket-permissions).
+- **Where the keys are stored.** They are in `oduflow.toml`, and in
+  `<base_data_dir>/walg/walg.json` (mode `0600`, regenerated at every startup)
+  for WAL-G inside the production PostgreSQL container. They are never passed
+  as container environment variables, so `docker inspect` does not show them.
+  To rotate them, edit `[backup]` and restart Oduflow. PostgreSQL does not need
+  to be recreated.
+- **Versioning.** Bucket versioning protects against deletion through leaked
+  credentials. Prune deletes objects routinely, so pair versioning with a
+  lifecycle rule that expires noncurrent versions, or storage will keep
+  growing.
 
 ## iptables rule
 

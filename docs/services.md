@@ -74,11 +74,12 @@ Two limits worth knowing:
 
 - Only the team that produced a build can run it; staging tags are not shared
   between teams.
-- Staging tags are temporary. Build retention never removes a tag that a
-  running or stopped container uses, but once a service's staging image *is*
-  gone — pruned, or the service moved to another host — restoring it needs a
-  published tag. For anything long-lived, publish and point the service at the
-  registry image.
+- A staging tag is local to this host. Build retention never removes one that a
+  running or stopped container uses, so a service can keep running on it
+  indefinitely — a [Stack](stacks.md#building-a-service-image) `build:` does
+  exactly that. But the tag exists in no registry: moving the service to
+  another host, or restoring it after the image has left the daemon, needs a
+  published tag.
 
 ### Connecting from Odoo
 

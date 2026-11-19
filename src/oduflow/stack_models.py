@@ -5,6 +5,7 @@ from __future__ import annotations
 import posixpath
 import re
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -15,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from oduflow.image_builds import validate_git_ref, validate_relative_path
 from oduflow.naming import (
     parse_service_command,
     validate_domain,
@@ -238,7 +240,7 @@ class Volume(StackModel):
 class ServiceDatabase(StackModel):
     """An empty managed PostgreSQL database; credentials are generated at apply."""
 
-    pass
+    cluster: Literal["dev", "prod"] = "dev"
 
 
 class VolumeFile(StackModel):
@@ -297,9 +299,71 @@ class ServiceRoute(StackModel):
         return value.rstrip("/") or "/"
 
 
+class ServiceBuild(StackModel):
+    """Build the service image from a git repository instead of pulling one.
+
+    The ref is resolved to a commit on every plan, so a branch follows its tip
+    and a tag or commit SHA pins the image.
+    """
+
+    repo_url: NonEmptyString
+    ref: str = ""
+    git_user: str = ""
+    dockerfile: NonEmptyString = "Dockerfile"
+    context: NonEmptyString = "."
+    target: str = ""
+    args: dict[EnvironmentVariableName, str] = Field(default_factory=dict)
+
+    @field_validator("ref")
+    @classmethod
+    def valid_ref(cls, value: str) -> str:
+        return validate_git_ref(value)
+
+    @field_validator("repo_url")
+    @classmethod
+    def no_inline_credentials(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme in ("http", "https") and (parsed.username or parsed.password):
+            raise ValueError(
+                "repoUrl must not embed credentials; name the account in "
+                "gitUser and store its token with setup_repo_auth"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def paths_inside_repository(self) -> ServiceBuild:
+        self.context = validate_relative_path(self.context, "context")
+        self.dockerfile = validate_relative_path(self.dockerfile, "dockerfile")
+        if self.dockerfile == ".":
+            raise ValueError("dockerfile must be a file path, not '.'")
+        return self
+
+
 class Service(StackModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "required": ["image"],
+                    "properties": {
+                        "image": {"type": "string"},
+                        "build": {"type": "null"},
+                    },
+                },
+                {
+                    "required": ["build"],
+                    "properties": {
+                        "build": {"not": {"type": "null"}},
+                        "image": {"type": "null"},
+                    },
+                },
+            ]
+        }
+    )
+
     runtime: ServiceRuntime = Field(default_factory=ServiceRuntime)
-    image: NonEmptyString
+    image: NonEmptyString | None = None
+    build: ServiceBuild | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     hostname: NonEmptyString | None = None
     env: dict[EnvironmentVariableName, EnvValue] = Field(default_factory=dict)
@@ -322,6 +386,8 @@ class Service(StackModel):
 
     @model_validator(mode="after")
     def one_exposure_mode(self) -> Service:
+        if (self.image is None) == (self.build is None):
+            raise ValueError("set exactly one of image or build")
         if self.privileged and self.net_admin:
             raise ValueError("privileged and netAdmin are mutually exclusive")
         if self.port is not None and self.routes:
@@ -341,6 +407,13 @@ class StackSpec(StackModel):
     model_config = ConfigDict(
         json_schema_extra={
             "oneOf": [
+                {
+                    "properties": {
+                        "environment": {"type": "null"},
+                        "production": {"type": "null"},
+                        "extraRepositories": {"maxProperties": 0},
+                    }
+                },
                 {
                     "required": ["environment"],
                     "properties": {
@@ -371,17 +444,29 @@ class StackSpec(StackModel):
 
     @model_validator(mode="after")
     def references_exist(self) -> StackSpec:
-        if (self.environment is None) == (self.production is None):
-            raise ValueError("set exactly one of environment or production")
+        if self.environment is not None and self.production is not None:
+            raise ValueError("set at most one of environment or production")
         odoo_target = self.environment or self.production
-        assert odoo_target is not None
-        for value in odoo_target.env.values():
+        if odoo_target is None:
+            if self.extra_repositories:
+                raise ValueError(
+                    "extraRepositories requires an environment or production"
+                )
+            if not (self.volumes or self.databases or self.files or self.services):
+                raise ValueError("a Stack must declare at least one resource")
+        target_env = odoo_target.env if odoo_target else {}
+        for key, value in target_env.items():
             if isinstance(value, ValueFrom) and (
                 value.environment_field is not None
                 or value.production_field is not None
             ):
                 raise ValueError(
                     "target env cannot reference environmentField or productionField"
+                )
+            if isinstance(value, ValueFrom) and value.database is not None:
+                raise ValueError(
+                    f"environment env '{key}' cannot reference a managed database; "
+                    "database value sources are only available to auxiliary services"
                 )
         for service in self.services.values():
             for value in service.env.values():
@@ -421,12 +506,6 @@ class StackSpec(StackModel):
                             f"service '{service_name}' env '{key}' references "
                             f"undeclared database '{value.database}'"
                         )
-        for key, value in odoo_target.env.items():
-            if isinstance(value, ValueFrom) and value.database is not None:
-                raise ValueError(
-                    f"environment env '{key}' cannot reference a managed database; "
-                    "database value sources are only available to auxiliary services"
-                )
         return self
 
 

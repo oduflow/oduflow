@@ -830,30 +830,34 @@ class TestRuntimeStatus:
 
 
 class TestProdConfChain:
-    def test_bundled_fallback(self, team, tmp_path):
+    def test_bundled_fallback(self, settings, team, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
-        path = production_ops._prod_base_conf_path(team, str(repo))
+        path = production_ops._prod_base_conf_path(settings, team, str(repo))
         assert path.endswith("odoo-prod.conf")
 
-    def test_repo_conf_is_ignored(self, team, tmp_path, caplog):
+    def test_repo_conf_is_ignored(self, settings, team, tmp_path, caplog):
         # Whoever can push to the branch must not tune the production server.
         repo = tmp_path / "repo"
         (repo / ".oduflow").mkdir(parents=True)
         (repo / ".oduflow" / "odoo.prod.conf").write_text("[options]\n")
-        path = production_ops._prod_base_conf_path(team, str(repo))
+        path = production_ops._prod_base_conf_path(settings, team, str(repo))
         assert path.endswith("odoo-prod.conf")
         assert "Ignoring" in caplog.text
         team_conf = tmp_path / "team_1" / "odoo.prod.conf"
         team_conf.write_text("[options]\n")
-        assert production_ops._prod_base_conf_path(team, str(repo)) == str(team_conf)
+        assert production_ops._prod_base_conf_path(settings, team, str(repo)) == str(
+            team_conf
+        )
 
-    def test_team_conf_beats_bundled(self, team, tmp_path):
+    def test_team_conf_beats_bundled(self, settings, team, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
         team_conf = tmp_path / "team_1" / "odoo.prod.conf"
         team_conf.write_text("[options]\n")
-        assert production_ops._prod_base_conf_path(team, str(repo)) == str(team_conf)
+        assert production_ops._prod_base_conf_path(settings, team, str(repo)) == str(
+            team_conf
+        )
 
 
 class TestTombstone:

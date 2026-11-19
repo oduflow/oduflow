@@ -26,6 +26,11 @@ oduflow admin enable          # prints the generated password once
 sudo systemctl restart oduflow
 ```
 
+If the password comes from the `ODUFLOW_ADMIN_PASSWORD` environment variable
+instead (at least 12 characters), `oduflow admin` refuses to run; set, change or
+unset the variable and restart. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
+
 Open `/admin` on any hostname the server answers on, for example
 `https://dev.example.com/admin` (Traefik) or `http://server:8000/admin`
 (port mode). While `[admin] password` is empty the console does not exist:
@@ -117,6 +122,13 @@ keep the stored value, or press **Generate** for a new random one. Diffs and
 history show `********` instead of values, plus `(changed)` where a secret
 changed.
 
+A secret set by an [environment variable](security.md#credentials-from-environment-variables)
+overrides the file. The console shows such a key as read-only with an **Env**
+badge and the variable's name; it refuses to change or reveal the file value,
+which stays unused while the variable is set. Change or unset the variable and
+restart instead. The variable's value never reaches the console, and the state
+API (`env_overrides`) only names the variable.
+
 ## Cluster disaster recovery
 
 The **Cluster DR** section operates on the shared production PostgreSQL
@@ -156,7 +168,8 @@ on a fresh install — see [CLI](cli.md#cluster-disaster-recovery) and
   configuration.
 
 To turn the console off, run `oduflow admin disable` on the server and
-restart.
+restart. If the password comes from `ODUFLOW_ADMIN_PASSWORD`, unset the
+variable instead (and clear `[admin] password` in the file, if set).
 
 ## REST API
 
@@ -165,7 +178,7 @@ console session cookie; every POST must be same-origin.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/admin/api/state` | Schema, current values with secrets masked, revision, pending changes |
+| GET | `/admin/api/state` | Schema, current values with secrets masked, revision, pending changes, keys overridden by environment variables (`env_overrides`, names only) |
 | POST | `/admin/api/preview` | Validate a candidate and return changes, apply classes and the masked diff |
 | POST | `/admin/api/apply` | Save a candidate if `revision` still matches; apply live values |
 | POST | `/admin/api/reload` | Apply live values from the file on disk (after a hand edit) |

@@ -54,9 +54,13 @@ share_npm_prefix() {
 umask 022
 if command -v claude >/dev/null 2>&1 && command -v claude-agent-acp >/dev/null 2>&1; then
     log "Claude Code present ($(command -v claude)); refreshing in the background"
-    ( npm install -g "${CLAUDE_PACKAGES[@]/%/@latest}" >/dev/null 2>&1 \
+    # Detached with a double fork: the script ends in `exec sleep`, which never
+    # wait()s, so a plain `&` job would stay a zombie under it once the refresh
+    # finishes. Orphaned at once, the job is adopted and reaped by the
+    # container's init (PID 1) instead.
+    ( ( npm install -g "${CLAUDE_PACKAGES[@]/%/@latest}" >/dev/null 2>&1 \
         && share_npm_prefix \
-        && log "Claude Code refreshed" ) &
+        && log "Claude Code refreshed" ) & )
 else
     log "installing Claude Code + ACP adapter from npm (first start; persists on the home volume)"
     # The ACP adapter moved orgs: @zed-industries/claude-code-acp is deprecated

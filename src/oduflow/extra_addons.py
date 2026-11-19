@@ -15,6 +15,7 @@ from typing import Any
 from oduflow.docker_ops.client import get_client
 from oduflow.docker_ops.stats import _dir_size_bytes
 from oduflow.errors import (
+    BusyError,
     ConflictError,
     ExternalCommandError,
     NotFoundError,
@@ -69,6 +70,10 @@ _CHECKOUT_GRACE_SECONDS = 6 * 3600
 # Cached checkouts are moved here (inside the repo's cache dir) under the repo
 # lock and deleted after it is released.
 _REMOVING_PREFIX = ".removing-"
+# Cleanup waits this long for a repo another operation holds, then skips the
+# repo: a fetch can keep the lock for up to _FETCH_TIMEOUT, and the caller may
+# be holding the team lock meanwhile.
+_CLEANUP_LOCK_WAIT_SECONDS = 5.0
 _LOW_SPEED_ENV = {
     "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
     "GIT_HTTP_LOW_SPEED_TIME": "120",
@@ -316,19 +321,30 @@ def _unset_refspec(repo_path: str, refspec: str) -> None:
 
 
 @contextmanager
-def _repo_operation_lock(team: TeamSettings, repo_name: str) -> Iterator[None]:
+def _repo_operation_lock(
+    team: TeamSettings, repo_name: str, timeout: float | None = None
+) -> Iterator[None]:
     """Serialize fetch/worktree/cache mutations for one team's extra repo.
 
     Environment locks intentionally allow different environments to run in
     parallel. Extra repositories are shared between those environments, so Git
     operations need their own, narrower lock. RLock keeps composed helpers
     (ensure checkout -> fetch) safe without widening the lock to the whole team.
+
+    With *timeout* the wait is bounded and ends in :class:`BusyError`, for
+    callers that would rather skip a busy repo than queue behind a long fetch.
     """
     key = os.path.realpath(os.path.join(team.shared_repos_dir, repo_name))
     with _REPO_LOCKS_GUARD:
         lock = _REPO_LOCKS.setdefault(key, threading.RLock())
-    with lock:
+    if not lock.acquire(timeout=-1 if timeout is None else timeout):
+        raise BusyError(
+            f"Extra repo '{repo_name}' is busy with another operation. Try again later."
+        )
+    try:
         yield
+    finally:
+        lock.release()
 
 
 def register_extra_repo(
@@ -605,6 +621,17 @@ def unprotect_extra_repo(team: TeamSettings, name: str) -> dict[str, Any]:
     return {"name": name, "protected": False}
 
 
+def _managed_containers(settings: Settings, team: TeamSettings) -> list[Any]:
+    """The team's managed containers, running or stopped."""
+    filters = {
+        "label": [
+            f"{settings.managed_label}=true",
+            f"{settings.team_label}={team.team_id}",
+        ]
+    }
+    return list(get_client().containers.list(all=True, filters=filters))
+
+
 def _extra_repo_consumers(
     settings: Settings, team: TeamSettings, name: str
 ) -> list[dict[str, str]]:
@@ -614,15 +641,8 @@ def _extra_repo_consumers(
     name), the repo branch it uses and the checkout revision it is pinned to;
     branch and revision are empty when the labels do not record them.
     """
-    client = get_client()
-    filters = {
-        "label": [
-            f"{settings.managed_label}=true",
-            f"{settings.team_label}={team.team_id}",
-        ]
-    }
     consumers: list[dict[str, str]] = []
-    for c in client.containers.list(all=True, filters=filters):
+    for c in _managed_containers(settings, team):
         raw = c.labels.get("oduflow.extra_addons", "")
         if not raw:
             continue
@@ -677,9 +697,11 @@ def _delete_extra_repo_unlocked(
     # in-flight create fails with a clear "not found" instead of every unrelated
     # repo operation being serialised behind a team lock for minutes.
 
-    # Cached SHA checkouts intentionally outlive environments. They disappear
-    # only with the owning extra repo, after the dependency guard above proves
-    # that no running/stopped managed container still mounts them.
+    # Cached SHA checkouts intentionally outlive environments. Cleanup and
+    # branch removal drop the ones nothing uses any more (see
+    # remove_unused_checkouts / untrack_branch); the rest disappear here with
+    # the owning extra repo, after the dependency guard above proves that no
+    # running/stopped managed container still mounts them.
     checkout_root = os.path.join(team.shared_extra_checkouts_dir, name)
     if os.path.isdir(checkout_root):
         shutil.rmtree(checkout_root)
@@ -696,25 +718,34 @@ def delete_extra_repo(
 
 
 def _get_branch_refs(repo_path: str) -> dict[str, str]:
-    """Return a mapping of branch name → commit SHA for all local branches."""
+    """Return a mapping of branch name → commit SHA for all local branches.
+
+    Empty when git fails; callers that must tell "no branches" from "unknown"
+    use :func:`_read_branch_refs`.
+    """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                repo_path,
-                "for-each-ref",
-                "--format=%(refname) %(objectname)",
-                "refs/heads/",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=GIT_ENV,
-        )
+        return _read_branch_refs(repo_path)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return {}
+
+
+def _read_branch_refs(repo_path: str) -> dict[str, str]:
+    """Branch name → commit SHA for all local branches; raises when git fails."""
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo_path,
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=GIT_ENV,
+    )
     refs: dict[str, str] = {}
     # Full ref names: %(refname:short) yields "heads/17.0" when a tag of the
     # same name exists (legacy all-branches clones fetched tags too).
@@ -1049,6 +1080,109 @@ def _reachable_from_branches(repo_path: str, revisions: set[str]) -> set[str]:
     return {line for line in result.stdout.splitlines() if line in revisions}
 
 
+def _checkout_removal_candidates(
+    cache_dir: str, keep: set[str]
+) -> tuple[list[str], list[str]]:
+    """Cache entries old enough to remove: ``(revisions, stale holder paths)``.
+
+    A revision survives while it is in *keep* or was handed out within the
+    grace period (an environment being created holds its checkout before its
+    container — the in-use record — exists). Stale ``.removing-*`` holders are
+    leftovers of an earlier removal that was interrupted; fresh ones may
+    belong to a removal still deleting outside the lock.
+    """
+    now = time.time()
+    revisions: list[str] = []
+    stale: list[str] = []
+    for entry in sorted(os.listdir(cache_dir)):
+        entry_path = os.path.join(cache_dir, entry)
+        try:
+            age = now - os.path.getmtime(entry_path)
+        except OSError:
+            continue
+        if entry.startswith(_REMOVING_PREFIX):
+            if age > _CHECKOUT_GRACE_SECONDS:
+                stale.append(entry_path)
+        elif (
+            _REVISION_RE.fullmatch(entry)
+            and entry not in keep
+            and age > _CHECKOUT_GRACE_SECONDS
+        ):
+            revisions.append(entry)
+    return revisions, stale
+
+
+def _stage_checkout_removal(
+    cache_dir: str, repo_path: str, revisions: list[str], stale: list[str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Rename *revisions* into ``.removing-*`` holders inside the cache.
+
+    Must run under the repo operation lock; the caller sizes and deletes the
+    returned holders after releasing it. ``git worktree prune`` then drops the
+    moved checkouts' registrations (skipped when the bare repo is gone).
+    Returns ``(revision, holder path)`` pairs — *stale* holders join them with
+    an empty revision — and the revisions that could not be moved. A failure
+    part way keeps what was already moved: those checkouts have left the
+    cache, so they must still be pruned and handed back for deletion.
+    """
+    detached: list[tuple[str, str]] = [("", path) for path in stale]
+    failed: list[str] = []
+    for revision in revisions:
+        holder = ""
+        try:
+            holder = tempfile.mkdtemp(prefix=_REMOVING_PREFIX, dir=cache_dir)
+            os.rename(os.path.join(cache_dir, revision), os.path.join(holder, revision))
+        except OSError as exc:
+            logger.warning(
+                "Failed to stage extra-addons checkout %s for removal: %s",
+                os.path.join(cache_dir, revision),
+                exc,
+            )
+            failed.append(revision)
+            if holder:
+                try:
+                    os.rmdir(holder)
+                except OSError:
+                    pass
+            continue
+        detached.append((revision, holder))
+    if detached and os.path.isdir(repo_path):
+        try:
+            subprocess.run(
+                ["git", "-C", repo_path, "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=GIT_ENV,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            # Stale registrations are harmless; the next prune drops them.
+            logger.warning("git worktree prune failed in %s: %s", repo_path, exc)
+    return detached, failed
+
+
+def _delete_staged_checkouts(
+    detached: list[tuple[str, str]],
+) -> tuple[int, list[tuple[str, str]]]:
+    """Size and delete staged holders, outside the repo lock.
+
+    Returns the bytes freed and the ``(revision, holder path)`` pairs actually
+    deleted. A holder that survives stays in the cache as a ``.removing-*``
+    leftover, which a later removal collects once it is stale.
+    """
+    freed = 0
+    deleted: list[tuple[str, str]] = []
+    for revision, holder in detached:
+        size = _dir_size_bytes(holder)
+        shutil.rmtree(holder, ignore_errors=True)
+        if os.path.exists(holder):
+            logger.warning("Failed to delete staged extra-addons checkout %s", holder)
+            continue
+        freed += size
+        deleted.append((revision, holder))
+    return freed, deleted
+
+
 def _detach_unused_checkouts(
     team: TeamSettings, name: str, repo_path: str, pinned: set[str]
 ) -> list[tuple[str, str]]:
@@ -1064,42 +1198,234 @@ def _detach_unused_checkouts(
     cache_dir = os.path.join(team.shared_extra_checkouts_dir, name)
     if not os.path.isdir(cache_dir):
         return []
-    now = time.time()
-    candidates: list[str] = []
-    detached: list[tuple[str, str]] = []
-    for entry in sorted(os.listdir(cache_dir)):
-        entry_path = os.path.join(cache_dir, entry)
-        try:
-            age = now - os.path.getmtime(entry_path)
-        except OSError:
-            continue
-        if entry.startswith(_REMOVING_PREFIX):
-            # Fresh ones may belong to a removal still deleting outside the lock.
-            if age > _CHECKOUT_GRACE_SECONDS:
-                detached.append(("", entry_path))
-        elif (
-            _REVISION_RE.fullmatch(entry)
-            and entry not in pinned
-            and age > _CHECKOUT_GRACE_SECONDS
-        ):
-            candidates.append(entry)
+    candidates, stale = _checkout_removal_candidates(cache_dir, pinned)
     reachable = _reachable_from_branches(repo_path, set(candidates))
-    for revision in candidates:
-        if revision in reachable:
-            continue
-        holder = tempfile.mkdtemp(prefix=_REMOVING_PREFIX, dir=cache_dir)
-        moved = os.path.join(holder, revision)
-        os.rename(os.path.join(cache_dir, revision), moved)
-        detached.append((revision, holder))
-    if detached:
-        subprocess.run(
-            ["git", "-C", repo_path, "worktree", "prune"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=GIT_ENV,
-        )
+    unreachable = [r for r in candidates if r not in reachable]
+    detached, _failed = _stage_checkout_removal(
+        cache_dir, repo_path, unreachable, stale
+    )
     return detached
+
+
+def _container_bind_sources(container: Any) -> list[str]:
+    """Host paths *container* bind-mounts, from its inspect data."""
+    attrs = getattr(container, "attrs", None)
+    if not isinstance(attrs, dict):
+        return []
+    sources: list[str] = []
+    binds = (attrs.get("HostConfig") or {}).get("Binds")
+    for bind in binds if isinstance(binds, list) else []:
+        if isinstance(bind, str) and bind:
+            sources.append(bind.split(":", 1)[0])
+    mounts = attrs.get("Mounts")
+    for mount in mounts if isinstance(mounts, list) else []:
+        source = mount.get("Source") if isinstance(mount, dict) else None
+        if isinstance(source, str) and source:
+            sources.append(source)
+    return sources
+
+
+def _pinned_checkouts(team: TeamSettings, containers: list[Any]) -> dict[str, set[str]]:
+    """Cached revisions *containers* use, per extra repo.
+
+    A pin comes from the ``oduflow.extra_addons_revisions`` label and from
+    every bind mount whose host source is a cached checkout or lies inside
+    one. The mount is what a deletion would actually break, so it protects
+    the checkout even when the label is missing, empty or malformed.
+    """
+    pins: dict[str, set[str]] = {}
+    root = os.path.normpath(team.shared_extra_checkouts_dir)
+    roots = {root, os.path.realpath(root)}
+    for container in containers:
+        try:
+            revisions = json.loads(
+                container.labels.get("oduflow.extra_addons_revisions", "{}")
+            )
+        except (json.JSONDecodeError, TypeError):
+            revisions = {}
+        if isinstance(revisions, dict):
+            for repo, revision in revisions.items():
+                if isinstance(revision, str) and revision:
+                    pins.setdefault(str(repo), set()).add(revision.lower())
+        for source in _container_bind_sources(container):
+            for path in {os.path.normpath(source), os.path.realpath(source)}:
+                for base in roots:
+                    if not path.startswith(base + os.sep):
+                        continue
+                    parts = path[len(base) + 1 :].split(os.sep)
+                    if len(parts) >= 2:
+                        pins.setdefault(parts[0], set()).add(parts[1])
+    return pins
+
+
+def _unused_checkouts_keep_set(
+    team: TeamSettings, name: str, pins: dict[str, set[str]]
+) -> set[str]:
+    """Revisions of *name* that cleanup must keep.
+
+    *pins* (see :func:`_pinned_checkouts`) covers every managed container,
+    running or stopped. Current branch tips stay too: the next create/pull of
+    that branch reuses their checkouts. Old SHAs merely *reachable* from a
+    branch are not kept — unlike branch removal
+    (:func:`_detach_unused_checkouts`), cleanup exists precisely to drop the
+    history a moving branch leaves behind.
+
+    Raises when git cannot list the branches: without the tips the keep set
+    is unknown, and the caller must then keep every checkout of the repo.
+    """
+    keep = set(pins.get(name, ()))
+    bare_path = os.path.join(team.shared_repos_dir, name)
+    if os.path.isdir(bare_path):
+        keep.update(_read_branch_refs(bare_path).values())
+    return keep
+
+
+def _cached_repo_names(team: TeamSettings) -> list[str]:
+    """Extra repos that have a shared checkout cache directory."""
+    root = team.shared_extra_checkouts_dir
+    if not os.path.isdir(root):
+        return []
+    return [
+        name
+        for name in sorted(os.listdir(root))
+        if os.path.isdir(os.path.join(root, name))
+    ]
+
+
+def _cleanup_scope(
+    settings: Settings, team: TeamSettings
+) -> tuple[list[str], dict[str, set[str]]]:
+    """Repos with a checkout cache and the pins of the team's containers.
+
+    Containers are listed once for all repos, and not at all when there is no
+    cache to clean.
+    """
+    names = _cached_repo_names(team)
+    if not names:
+        return [], {}
+    return names, _pinned_checkouts(team, _managed_containers(settings, team))
+
+
+def list_unused_checkouts(settings: Settings, team: TeamSettings) -> dict[str, Any]:
+    """Shared SHA checkouts (and stale removal leftovers) nothing uses.
+
+    Read-only, like a cleanup dry run: no locks, nothing is modified, so the
+    unused set can change before a removal — :func:`remove_unused_checkouts`
+    recomputes it under the repo lock. Returns ``checkouts`` as
+    ``<repo>/<revision>`` names (stale ``.removing-*`` holders appear under
+    their directory name), a parallel ``sizes`` map in bytes, and ``errors``
+    for repos whose keep set could not be determined: those repos report
+    nothing as unused.
+    """
+    checkouts: list[str] = []
+    sizes: dict[str, int] = {}
+    errors: list[str] = []
+    result = {"checkouts": checkouts, "sizes": sizes, "errors": errors}
+    try:
+        names, pins = _cleanup_scope(settings, team)
+    except Exception as exc:
+        logger.warning("Failed to scan unused extra-addons checkouts: %s", exc)
+        errors.append("Extra-addons checkouts: scan failed. Check server logs.")
+        return result
+    for name in names:
+        cache_dir = os.path.join(team.shared_extra_checkouts_dir, name)
+        try:
+            keep = _unused_checkouts_keep_set(team, name, pins)
+            revisions, stale = _checkout_removal_candidates(cache_dir, keep)
+        except Exception as exc:
+            logger.warning(
+                "Failed to scan unused checkouts of extra repo '%s': %s", name, exc
+            )
+            errors.append(
+                f"Extra-addons checkouts of {name}: scan failed, all are kept. "
+                "Check server logs."
+            )
+            continue
+        for revision in revisions:
+            label = f"{name}/{revision}"
+            checkouts.append(label)
+            sizes[label] = _dir_size_bytes(os.path.join(cache_dir, revision))
+        for holder in stale:
+            label = f"{name}/{os.path.basename(holder)}"
+            checkouts.append(label)
+            sizes[label] = _dir_size_bytes(holder)
+    return result
+
+
+def remove_unused_checkouts(
+    settings: Settings, team: TeamSettings, only: list[str] | None = None
+) -> dict[str, Any]:
+    """Remove unused shared checkouts (see :func:`list_unused_checkouts`).
+
+    *only* limits removal to reviewed ``<repo>/<revision>`` names. The unused
+    set is recomputed here — container pins once for all repos, branch tips
+    and the cache listing per repo under its operation lock — so a checkout
+    pinned between scan and removal survives even when named in *only*.
+    Deletion of the staged directories happens after each lock is released,
+    like branch removal, so environment operations on the repo are not held
+    up. A repo is skipped, with an error, when another operation keeps its
+    lock (a long fetch) or when its keep set cannot be determined. Returns
+    removed names, freed bytes and errors.
+
+    The repo lock is per process. Callers serialise against environment
+    operations of other processes with the team lock, as the dashboard and
+    ``oduflow cleanup --force`` do.
+    """
+    removed: list[str] = []
+    errors: list[str] = []
+    freed = 0
+    reviewed = None if only is None else set(only)
+    try:
+        names, pins = _cleanup_scope(settings, team)
+    except Exception as exc:
+        logger.warning("Failed to scan unused extra-addons checkouts: %s", exc)
+        errors.append("Extra-addons checkouts: removal failed. Check server logs.")
+        names = []
+    for name in names:
+        cache_dir = os.path.join(team.shared_extra_checkouts_dir, name)
+        bare_path = os.path.join(team.shared_repos_dir, name)
+        try:
+            with _repo_operation_lock(team, name, timeout=_CLEANUP_LOCK_WAIT_SECONDS):
+                keep = _unused_checkouts_keep_set(team, name, pins)
+                revisions, stale = _checkout_removal_candidates(cache_dir, keep)
+                if reviewed is not None:
+                    revisions = [r for r in revisions if f"{name}/{r}" in reviewed]
+                    stale = [
+                        h for h in stale if f"{name}/{os.path.basename(h)}" in reviewed
+                    ]
+                detached, failed = _stage_checkout_removal(
+                    cache_dir, bare_path, revisions, stale
+                )
+        except BusyError:
+            errors.append(
+                f"Extra-addons checkouts of {name}: skipped, another operation "
+                "is using the repository. Try again later."
+            )
+            continue
+        except Exception as exc:
+            logger.warning(
+                "Failed to stage unused checkouts of extra repo '%s': %s", name, exc
+            )
+            errors.append(
+                f"Extra-addons checkouts of {name}: removal failed. Check server logs."
+            )
+            continue
+        size, deleted = _delete_staged_checkouts(detached)
+        freed += size
+        for revision, holder in deleted:
+            label = f"{name}/{revision or os.path.basename(holder)}"
+            removed.append(label)
+            logger.info("Removed unused extra-addons checkout %s", label)
+        not_deleted = [
+            revision or os.path.basename(holder)
+            for revision, holder in detached
+            if (revision, holder) not in deleted
+        ]
+        errors.extend(
+            f"Extra-addons checkout {name}/{entry}: removal failed. Check server logs."
+            for entry in failed + not_deleted
+        )
+    return {"removed": removed, "freed_bytes": freed, "errors": errors}
 
 
 def untrack_branch(
@@ -1173,10 +1499,7 @@ def untrack_branch(
         _forget_branch(path, branch)
         detached = _detach_unused_checkouts(team, name, path, pinned)
 
-    checkouts_size = 0
-    for _revision, holder in detached:
-        checkouts_size += _dir_size_bytes(holder)
-        shutil.rmtree(holder, ignore_errors=True)
+    checkouts_size, _deleted = _delete_staged_checkouts(detached)
 
     # gc guards against concurrent writers by itself (gc.pid, and the prune
     # grace period protects objects a parallel fetch has just written).

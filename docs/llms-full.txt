@@ -27,7 +27,7 @@ pip install oduflow
 
 ### Configure
 
-All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`.
+All settings are configured via `oduflow.toml`. Oduflow searches `ODUFLOW_TOML`, then `/etc/oduflow/oduflow.toml`, then `~/.oduflow/conf/oduflow.toml`. Secrets can instead come from environment variables that win over the file: `ODUFLOW_TEAM_<ID>_UI_PASSWORD`, `ODUFLOW_TEAM_<ID>_AUTH_TOKEN`, `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, `ODUFLOW_ADMIN_PASSWORD`, `ODUFLOW_BACKUP_ACCESS_KEY` and `ODUFLOW_BACKUP_SECRET_KEY` (`<ID>` is the team id upper-cased, non-alphanumerics replaced by `_`).
 
 Minimal configuration:
 
@@ -63,7 +63,7 @@ auto_delete_hours = 0                 # auto-delete N hours after stop; 0 disabl
 
 # Per-team coding agent (dashboard Agent Chat / Agent CLI); opt-in, off by default.
 # [agent]
-# image = "oduist/oduflow-coder:0.4.0"
+# image = "oduist/oduflow-coder:0.4.1"
 # opencode_model = ""               # optional provider/model override
 
 [team.1]
@@ -197,7 +197,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `setup_repo_auth` — cache git credentials for private repositories
 - `add_extra_repo` / `list_extra_repos` / `update_extra_repo` / `delete_extra_repo` — manage extra addons repositories
 - `get_agent_instructions` — load the compact Oduflow agent workflow once at session start
-- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–19)
+- `get_odoo_development_guide` — get Odoo development standards guide for a specific version (15–20)
 - `report_issue` — build a prefilled GitHub issue link so the user can report an Oduflow bug, request a feature, or send feedback from their own account
 
 ## Production Hosting
@@ -374,7 +374,7 @@ The agent writes code, installs the module, reads the traceback, fixes the error
 ### Infrastructure
 - **Auxiliary services** — managed sidecar containers for Redis, Meilisearch, Elasticsearch, or any other service your Odoo setup needs
 - **Sidecar PostgreSQL storage** — persistent team-scoped databases with dedicated roles, password rotation, quota accounting, and declarative Stack wiring
-- **Container image builds** — opt-in per team: build an image from an environment's git revision, run it as a service to verify it, then publish those exact bits to your registry — the agent never gets the Docker socket or registry credentials (see [Container Image Builds](image-builds.md))
+- **Container image builds** — build a service image from any git repository (or an environment's checkout) under BuildKit, run it as a service to verify it, then publish those exact bits to your registry — the agent never gets the Docker socket or registry credentials (see [Container Image Builds](image-builds.md))
 - **Traefik auto-HTTPS** — optional reverse proxy with Let's Encrypt certificates for production-like access
 - **Stable port registry** — port assignments are persisted in `ports.json` and survive container restarts
 - **Resource monitoring** — per-container CPU and RAM stats, plus system-level metrics (memory, load average)
@@ -669,6 +669,7 @@ When running in HTTP mode, a web dashboard is available at the root URL (`http:/
 - **Git**
 - **fuse-overlayfs** (Linux only, for filestore overlay mounting) — auto-installed on first launch; see below
 - **rsync** (all platforms, for incremental filestore copies) — auto-installed on first launch; see below
+- **docker CLI with the buildx plugin** (optional, for [container image builds](mcp-tools.md#container-image-builds)) — included in the official Oduflow image. Without it images are built by the Docker Engine's legacy builder, which fails on Dockerfiles that need BuildKit
 
 !!! note "macOS support"
     On macOS, Docker Desktop runs containers inside a Linux VM and projects
@@ -886,7 +887,11 @@ All settings are configured via a TOML file. Oduflow searches for `oduflow.toml`
 
 If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
-`~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
+`~/.oduflow/conf/oduflow.toml`. The directory the loaded `oduflow.toml` lives
+in becomes the **config directory** — where `postgresql.conf`,
+`postgresql-prod.conf`, `traefik-dynamic/` and `license.key` live — unless
+`[storage].etc_dir` overrides it. Pointing `ODUFLOW_TOML` at a file therefore
+relocates the whole config directory with it. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`,
 `[team.1].ui_password` and `[admin].password`. The file is created with mode
 `0600` and the generated secrets are never printed to the log — read them from
@@ -896,6 +901,11 @@ the config file:
 sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
   || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
+
+Team passwords and tokens, `[admin].password` and the `[backup]` S3 keys can
+also come from environment variables such as `ODUFLOW_TEAM_1_UI_PASSWORD`,
+which win over the file. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
 
 You do not have to edit this file by hand afterwards: in HTTP mode the
 [Server settings console](admin.md) at `/admin` edits every section and every
@@ -948,6 +958,7 @@ image = "postgres:16"       # PostgreSQL Docker image (15-17; a newer major upgr
 # ── Storage ───────────────────────────────────────────
 [storage]
 # data_dir = "/srv/oduflow"         # base directory for all data (default: /srv/oduflow or ~/.oduflow/data)
+# etc_dir = "/etc/oduflow"          # config directory (default: the directory of the loaded oduflow.toml)
 overlay_threshold_mb = 50            # template filestore size threshold (MB) — larger uses fuse-overlayfs, smaller uses copy
 
 # ── Lifecycle ─────────────────────────────────────────
@@ -961,7 +972,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # from the dashboard (Agent Chat / Agent CLI). Opt-in per team via
 # agent_enabled below.
 # [agent]
-# image = "oduist/oduflow-coder:0.4.0"
+# image = "oduist/oduflow-coder:0.4.1"
 # claude_model = ""         # optional Claude model override; empty = CLI default
 # codex_model = ""          # optional Codex model override; empty = CLI default
 # opencode_model = ""       # optional provider/model override; empty = OpenCode default
@@ -1018,8 +1029,9 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 # ANTHROPIC_API_KEY = ""
 # OPENAI_API_KEY = ""
 # OPENCODE_API_KEY = ""              # OpenCode Zen; arbitrary provider vars also work
-# [team.1.image_registry]            # enables the image build/publish MCP tools for this team
-# repository_prefix = "acme"         # registry namespace all published images live under (required)
+# [team.1.image_registry]            # image build limits and the registry builds are published to
+# builds_enabled = true              # false refuses new image builds for this team
+# repository_prefix = "acme"         # registry namespace published images live under; omit to build without publishing
 # host = "docker.io"                 # plain registry hostname, optionally with :port
 # username = "acme-ci"               # optional; with token, request-scoped push credentials
 # token = "<registry-token>"         # registry token/password stored in this config
@@ -1046,7 +1058,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 
 | Key | Default | Description |
 |---|---|---|
-| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable` |
+| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable`. Overridden by `ODUFLOW_ADMIN_PASSWORD` (at least 12 characters) |
 
 ### Routing settings
 
@@ -1070,6 +1082,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | Key | Default | Description |
 |---|---|---|
 | `[storage].data_dir` | `/srv/oduflow` or `~/.oduflow/data` | Base directory for all data. Team data directories are `team_{ID}` subdirectories inside |
+| `[storage].etc_dir` | directory of the loaded `oduflow.toml` | Config directory: `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, `license.key` (the overridable `odoo.conf` lives in each team's data directory, not here). The PostgreSQL and Traefik containers bind-mount files from here, so when Oduflow itself runs in Docker it must be a host path mounted at the same path inside the container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)). Must exist and be writable at startup. Locked: existing containers keep mounting the old path, so move the files, edit it in Raw TOML, then recreate `oduflow-db` and Traefik |
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
@@ -1081,7 +1094,7 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 
 | Key | Default | Description |
 |---|---|---|
-| `[agent].image` | `oduist/oduflow-coder:0.4.0` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
+| `[agent].image` | `oduist/oduflow-coder:0.4.1` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
 | `[agent].claude_model` | *(empty)* | Optional Claude model override for the agent; empty = CLI default |
 | `[agent].codex_model` | *(empty)* | Optional Codex model override for the agent; empty = CLI default |
 | `[agent].opencode_model` | *(empty)* | Optional OpenCode model override in `provider/model` format; empty = OpenCode default |
@@ -1125,8 +1138,8 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | Key | Default | Description |
 |---|---|---|
 | `[backup].bucket` | *(required)* | S3-compatible bucket name |
-| `[backup].access_key` | *(required)* | S3 access key |
-| `[backup].secret_key` | *(required)* | S3 secret key |
+| `[backup].access_key` | *(required)* | S3 access key. Overridden by `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup].secret_key` | *(required)* | S3 secret key. Overridden by `ODUFLOW_BACKUP_SECRET_KEY` |
 | `[backup].endpoint` | *(empty)* | Custom S3 endpoint for MinIO, R2, or another compatible service; enables path-style addressing |
 | `[backup].region` | *(empty)* | S3 region |
 | `[backup].prefix` | `oduflow` | Object-key prefix, normalized without leading or trailing `/` |
@@ -1147,9 +1160,9 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
-| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token |
-| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
-| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
+| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token. Overridden by `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
 | `port_range` | `[50000, 50100]` | Port range for Odoo containers `[start, end)` — supports up to 100 concurrent environments |
 | `agent_enabled` | `false` | Enable the per-team coding agent (dashboard Agent Chat / Agent CLI). Off by default |
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
@@ -1157,7 +1170,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
 | `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` or `tls = {}` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
-| `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. Its keys are documented under [Image registry settings](#image-registry-settings) |
+| `[team.X.image_registry]` | *(absent — default limits, no publishing)* | Sub-table for the container image build MCP tools. Building works without it; the section tunes the build limits, enables publishing, and can switch building off. Its keys are documented under [Image registry settings](#image-registry-settings) |
 
 `environment_hostname_mode = "slots"` requires Traefik and a hostname with a
 distinct host prefix and parent domain, such as `dev.example.com`. A bare
@@ -1180,44 +1193,52 @@ team_{ID}/
 
 ### Image registry settings
 
-The `[team.X.image_registry]` sub-table is optional, and its **presence is the
-feature switch**: with it, the team's agents can build and publish container
-images from an environment's git revision; without it, all four image-build MCP
-tools answer with a prerequisite error. Only `repository_prefix` is required —
-see [Container Image Builds](image-builds.md) for the workflow and the trust
-model.
+The `[team.X.image_registry]` sub-table is **optional, and building works
+without it**: a team with no section builds with the defaults below and can run
+the result locally, but cannot publish it. The section does three things —
+tunes the build limits, enables publishing (`repository_prefix`), and gives the
+operator a switch to refuse builds entirely (`builds_enabled = false`). See
+[Container Image Builds](image-builds.md) for the workflow and the trust model.
 
 A present section must be valid, so a misconfigured registry fails at startup
 rather than at the first build.
 
 | Key | Default | Description |
 |---|---|---|
-| `[team.X.image_registry].repository_prefix` | *(required)* | Registry namespace every published image lives under, e.g. `acme` or `acme/odoo`. **This is the authorization boundary**: agents choose any repository and tag below it and can reach nothing outside it. Must be a lowercase OCI namespace — letters and digits, `.`, `_`, `-` as separators, `/` between components; leading and trailing `/` are stripped |
+| `[team.X.image_registry].builds_enabled` | `true` | Operator switch. A build runs a Dockerfile on the host's Docker daemon; `false` refuses every new build for the team — `start_image_build` on both the team and the scoped `/mcp/<env>` endpoint, and `build` on a Stack service. Must be `true` or `false` |
+| `[team.X.image_registry].repository_prefix` | *(empty — publishing disabled)* | Registry namespace every published image lives under, e.g. `acme` or `acme/odoo`. **This is the authorization boundary** for [`publish_image_build`](mcp-tools.md#publish_image_build): agents choose any repository and tag below it and can reach nothing outside it. Leave it out to build and run images on this host without a registry. Must be a lowercase OCI namespace — letters and digits, `.`, `_`, `-` as separators, `/` between components; leading and trailing `/` are stripped |
 | `[team.X.image_registry].host` | `docker.io` | Plain registry hostname, optionally with a port (`ghcr.io`, `registry.example.com:5000`). No scheme and no path: `https://…` or `host/namespace` is rejected. Lowercased |
-| `[team.X.image_registry].username` | *(empty)* | Registry user for pushes. Must be set **together with** `token`, or both left empty to use the host Docker daemon's own `docker login` credentials; setting only one is rejected at startup |
+| `[team.X.image_registry].username` | *(empty)* | Registry user for pushes. Must be set **together with** `token`, or both left empty to use the host Docker daemon's own `docker login` credentials; setting only one is rejected at startup, as is setting them without `repository_prefix` |
 | `[team.X.image_registry].token` | *(empty)* | Registry token or password, passed per-push to the Docker API as request-scoped auth — never a daemon-wide login, and never stored in build jobs. Use a least-privilege token restricted to `repository_prefix` and keep the config file readable only by the Oduflow user |
-| `[team.X.image_registry].build_timeout_seconds` | `1800` | Hard wall-clock deadline per build; the worker is terminated and the job fails. Must be `> 0` |
+| `[team.X.image_registry].build_timeout_seconds` | `1800` | Hard wall-clock deadline per build, including fetching a repository source; the build is terminated and the job fails. Must be `> 0` |
 | `[team.X.image_registry].max_context_mb` | `512` | Size cap for the sealed build context exported from the commit, checked before the build starts. A fixed ceiling of 200 000 files also applies. Must be `> 0` |
 | `[team.X.image_registry].max_log_mb` | `16` | Cap for the persisted build log per build; beyond it the log is truncated with a marker and the build continues. Must be `> 0` |
-| `[team.X.image_registry].max_concurrent_builds` | `2` | Active build workers allowed for the team; further builds are refused as busy. Must be `> 0` |
+| `[team.X.image_registry].max_concurrent_builds` | `2` | Active builds allowed for the team, counted per process — a build started by `oduflow stack apply` does not take one of the server's slots. Further builds are refused as busy. Must be `> 0` |
 | `[team.X.image_registry].keep_images` | `10` | Local staging images (`oduflow-build/team-<id>:<build-id>`) kept per team; older ones are untagged after each successful build, and tags referenced by a running or stopped container are always preserved. `0` disables pruning. Must be `>= 0` |
 
 ### Configuration file overrides
 
 On first startup, Oduflow generates `postgresql.conf` from one host-wide
-resource plan and copies the bundled `odoo.conf` if it does not exist. These
+resource plan into the config directory, and reconciles the bundled `odoo.conf`
+into each team's data directory (`{data_dir}/team_{ID}/odoo.conf`). These
 files take **priority** over the bundled defaults — edit them to customize
 PostgreSQL tuning or Odoo settings globally:
 
 ```
-/etc/oduflow/             (or ~/.oduflow/conf/)
+/etc/oduflow/             (or ~/.oduflow/conf/; see [storage].etc_dir)
   oduflow.toml            ← main configuration file
   postgresql.conf         ← dev PostgreSQL tuning (used by oduflow-db)
   postgresql-prod.conf    ← production PostgreSQL tuning (created lazily)
-  odoo.conf               ← custom Odoo defaults (used by new environments)
   license.key             ← license file (optional)
-  traefik/                ← Traefik dynamic configuration (auto-generated)
+  traefik-dynamic/        ← Traefik dynamic configuration (auto-generated + drop-ins)
 ```
+
+`postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/` are
+**bind-mounted** into `oduflow-db`, the production PostgreSQL container and
+Traefik. The Docker daemon resolves a bind source on the host, so this
+directory must be one the daemon can see — on a native install it always is;
+in a Docker-out-of-Docker deployment read
+[the same-path rule](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host).
 
 `pg_hba.conf` remains in the PostgreSQL data volume rather than this config
 directory. On every startup Oduflow reads the active file reported by
@@ -1481,7 +1502,9 @@ flowchart LR
 
 - **Snapshots** are logical, per-database backups: a `pg_dump` plus the
   filestore deduplicated by the built-in chunkstore engine. They restore one
-  production at a time (`restore_production`), including to a brand-new host.
+  production at a time (`restore_production`). A brand-new host can restore
+  them too, once a production with the same name exists there; see
+  [Restoring a snapshot on a new server](production.md#restoring-a-snapshot-on-a-new-server).
 - **WAL-G** continuously archives WAL and takes scheduled base backups of the
   whole production cluster. Cluster PITR — an operator action in the `/admin`
   console or `oduflow restore-cluster`, deliberately not an MCP tool — rewinds
@@ -2502,7 +2525,7 @@ Custom sanitization then uses a **two-tier** approach:
 1. **Team-level scripts** from `{team_data_dir}/odoo_sanitize/` — managed by the administrator, shared across all environments in the team
 2. **Per-project scripts** from `.oduflow/odoo_sanitize/` in the repository root — managed by the developer, specific to the project
 
-Both folders support `.sql` and `.py` files, executed in alphabetical order (first all `.sql`, then all `.py`). Team-level scripts run first, then per-project scripts.
+Both folders support `.sql` and `.py` files, executed in alphabetical order (first all `.sql`, then all `.py`). Team-level scripts run first, then per-project scripts. In both folders, scripts placed directly in the folder run for **every** environment; scripts an environment alone should run go into an [environment-named subfolder](#environment-scoped-scripts).
 
 ### Team-level sanitization
 
@@ -2556,6 +2579,31 @@ conn.close()
 ```
 
 Python scripts receive the following environment variables: `ODOO_DB`, `DB_HOST`, `DB_USER`, `DB_PASSWORD`.
+
+### Environment-scoped scripts
+
+Scripts directly in `odoo_sanitize/` run for every environment. To run extra scripts for one environment only, put them in a subfolder named **exactly** after the environment — the environment name, not the git branch (an environment can run any branch). This works in both the team-level and the per-project folder:
+
+```
+.oduflow/odoo_sanitize/
+├── 10_anonymize.sql          # every environment
+├── _steps/                   # shared assets — never executed directly
+│   └── rescale_amounts.sql
+├── staging/                  # only the environment named "staging"
+│   ├── 10_rescale.sql -> ../_steps/rescale_amounts.sql
+│   └── 20_demo_users.sql
+└── jacob/                    # only the environment named "jacob"
+    └── 10_rescale.sql -> ../_steps/rescale_amounts.sql
+```
+
+Rules:
+
+- The matching subfolder's scripts run **after** the top-level scripts of its tier, with the same ordering inside it (all `.sql` alphabetically, then all `.py`). Use numeric prefixes like `10_`, `20_` to order scripts.
+- Matching is an exact name comparison — no wildcards or globs. A `/` in the environment name folds to `-` in the folder name (environment `feature/x` → folder `feature-x/`), the same folding used for the environment's database and container names.
+- Subfolders whose name starts with `_` or `.` are never executed; use them for shared assets (such as `_steps/` above) that environment folders symlink to. A symlinked script executes its resolved content, while the symlink's own filename decides ordering and appears in the logs.
+- Any other subfolder — i.e. another environment's folder — is ignored.
+
+The provisioning log records which subfolder matched the environment and each script executed.
 
 ### Disabling sanitization
 
@@ -3706,7 +3754,8 @@ exclusive.
 The filestore engine (a clean-room, duplicacy-inspired content-defined
 chunking store) deduplicates across daily revisions *and* across a team's
 productions; retention (`keep`) is applied weekly with safe two-step fossil
-collection.
+collection. [How snapshots work](#how-snapshots-work) covers the format,
+ordering and restore mechanics in detail.
 
 **WAL-G — cluster disaster recovery.** Continuous WAL archiving plus daily
 base backups of the whole production cluster. This is the "server burned
@@ -3729,6 +3778,221 @@ section can resurrect the cluster the same way with the CLI command above.
 `production_backup_status()` shows per-production snapshot state, WAL
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
+
+### What lands in the bucket
+
+Everything lives under `[backup] prefix` (default `oduflow`) in one bucket:
+
+```text
+<prefix>/
+├── walg/                                  WAL-G: base backups + WAL archive (whole cluster)
+├── snapshots/<team>/<production>/
+│   ├── db/<id>.pgdump                     pg_dump -Fc of the production database
+│   └── manifests/<id>.json                the snapshot itself (see below)
+└── filestore/<team>/                      one chunkstore per team
+    ├── config                             chunker seed + hash keys — never delete
+    ├── chunks/<xx>/<id>                   content-addressed, zstd-compressed chunks
+    ├── snapshots/<production>/<revision>  filestore revisions (one per snapshot)
+    └── fossils/<id>.json                  prune bookkeeping
+```
+
+`<team>` is the `X` of the `[team.X]` section, and `<id>` is the snapshot's UTC
+timestamp (`20260711T020000Z`). Keep every object inside one prefix together.
+The chunkstore `config` object holds the keys that every chunk name and
+integrity check derives from: without it, **no filestore revision of the team
+can be restored**. Never delete objects by hand. Retention is applied by
+[prune](#schedule-and-retention), which knows which chunks are still
+referenced.
+
+### How snapshots work
+
+A snapshot is written in a fixed order, so a failure at any step never produces
+a snapshot that looks healthy but cannot be restored:
+
+1. **Database first.** `pg_dump -Fc` streams straight into an S3 multipart upload
+   in 16 MiB parts, with no temporary file on the server. Its sha256 is computed
+   on the way. If `pg_dump` exits non-zero, even after it has produced output,
+   the upload is aborted and the snapshot fails.
+2. **Filestore second.** A new chunkstore revision is created (details below).
+   Odoo references attachments by content hash, so files added after the dump
+   are harmless extras. The reverse order could leave the database pointing at
+   files missing from the copy.
+3. **Manifest last.** The JSON manifest records the snapshot id, trigger
+   (`schedule`, `pre-update`, `mcp`), note, deployed `commit_sha`, the dump's
+   key, size and sha256, and the filestore revision. **A snapshot exists only
+   once its manifest is written.** A dump or chunks left behind by an
+   interrupted run are reclaimed by prune.
+
+Manifests are also cached under `<team-data>/production/<name>/snapshots/`, but
+S3 is the source of truth: `list_production_snapshots(refresh=true)` re-reads
+the bucket and reconciles the cache. Use it after reinstalling the server or
+when snapshots were taken elsewhere.
+
+**Filestore revisions.** Every revision is *full*: any revision restores on its
+own, without replaying a chain. Each one is still built *incrementally*: a file
+whose size and mtime match the previous revision is not read again, and its
+chunk references are carried over. Odoo filestores are content-addressed and
+files never change in place, so after the first snapshot only the new
+attachments are read. New and changed files are packed into one stream and cut
+by a rolling hash into chunks of 1–16 MiB (4 MiB on average). A chunk is
+uploaded only if an object with the same content-derived name does not exist
+yet. This deduplicates across revisions and across all productions of a team.
+Uploads run on `upload_threads` parallel connections (default 16), and memory is
+bounded by `max(64 MiB, threads × 4 MiB)`. Chunking is pure Python (about
+10 MB/s), so the **first** snapshot of a large filestore takes a while; later
+ones are fast.
+
+When `[backup]` is configured, a snapshot runs before every update that has
+something to apply (`update_production`, a webhook or a dashboard deploy). A
+pull with nothing to apply takes no snapshot. The pre-update snapshot is
+best-effort: if it fails, the failure is logged and the deploy continues. Take an explicit `snapshot_production` before
+a risky migration if you need a guaranteed restore point.
+
+### How a snapshot restore runs
+
+`restore_production(snapshot_id=…)` prepares everything **while the production
+keeps serving**, and stops Odoo only for the final swap:
+
+1. Rebuild the filestore revision into a hidden sibling directory of the live
+   filestore. Every chunk is verified against its keyed hash, and every file
+   against its recorded size. A revision of `0` means the filestore was empty
+   at snapshot time, and the restore produces an empty filestore.
+2. Download the dump, verify its sha256 against the manifest, and restore it
+   with `pg_restore` into a scratch database `<db>__restore`. Then reassign
+   ownership to the production's own PostgreSQL role.
+3. Stop the production's Odoo container, then swap by rename: the live database
+   becomes `<db>__old` and the restored one takes its name, and the filestore
+   directory is replaced. If the filestore swap fails, the database rename is
+   rolled back, so a restored database is never paired with old attachments.
+   The old database and filestore are deleted only after both swaps succeed.
+4. Start Odoo again and wait for the health check, then record a `restore`
+   entry in the deploy history.
+
+Free space requirements:
+
+- about **twice the dump size** in `<team-data>/tmp` (the download, checked
+  before anything starts);
+- a **full copy of the filestore** on the volume that holds the production
+  workspace, because the old and new filestore coexist until the swap. This
+  one is not pre-checked.
+
+A production that was stopped before the restore stays stopped afterwards and
+is not health-probed. If a rollback inside the swap itself fails, Odoo is
+deliberately left stopped, and the server log names both databases
+(`<db>` and `<db>__old`) to inspect before you restart it. The
+code checkout is never changed. When the snapshot's `commit_sha` differs from
+the deployed commit, the result suggests the matching `rollback_production`.
+
+### Restoring a snapshot on a new server
+
+Snapshots only need the bucket, so a production can be rebuilt on another
+Oduflow server from its latest snapshot without the WAL-G archive:
+
+1. Configure the new server with the **same `[backup]` bucket and `prefix`**, and
+   put the production in a team with the **same team id** (`[team.X]`): both
+   are part of the snapshot path.
+2. Create the production with the **same name**, repository and branch. Its
+   initial data does not matter, because the restore replaces it.
+3. `list_production_snapshots(name="erp", refresh=true)` lists the snapshots from
+   S3.
+4. `restore_production(name="erp", snapshot_id="…", confirm="erp")`, then
+   `rollback_production(to_commit=…)` if the result reports a commit mismatch.
+
+!!! warning "Decide on cluster recovery first"
+    The new server's production cluster archives into the same `<prefix>/walg/`
+    as soon as it provisions a production. Its base backups then sit next to
+    the old cluster's. If you want the whole old cluster back
+    (`oduflow restore-cluster`), do that **before** creating productions on the
+    new server. Use the snapshot path when you need specific productions, or
+    when the WAL-G archive is unavailable.
+
+### Schedule and retention
+
+A background scheduler checks every minute and runs three jobs, one at a time:
+
+| Job | When | What |
+|---|---|---|
+| Snapshot | daily at `snapshot_time` (default 02:00), per production; override or `off` via `set_production_backup_schedule` | `snapshot_production` |
+| Base backup | daily at `basebackup_time` (default 03:30), while the production cluster is running | `wal-g backup-push`, then keep the newest `walg_keep_full` (default 7) |
+| Prune | weekly, Sunday 04:30 | snapshot retention + chunkstore cleanup (same as `prune_production_backups`) |
+
+Times are server-local. A job whose slot passed while the server was down runs
+once on the first check after startup. A restart right after a successful run
+does not run it again. A failing job is retried on later checks, up to
+three attempts per slot. A job skipped because a deploy, restore or prune held
+the lock is not counted as a failed attempt. Results appear in
+`production_backup_status()`. While the WAL disk guard is latched, the
+scheduler does nothing.
+
+**Retention (`keep`).** Each `"interval:age"` pair means *for snapshots older
+than `age` days, keep one per `interval` days*. `interval = 0` drops everything
+older than `age`. The strictest matching pair applies; snapshots younger than
+every `age` are all kept, and the newest snapshot is always kept. The default
+`["30:180", "7:30", "1:7"]` keeps:
+
+| Snapshot age | Kept |
+|---|---|
+| up to 7 days | all |
+| 7–30 days | one per day |
+| 30–180 days | one per week |
+| over 180 days | one per 30 days, indefinitely |
+
+Add `"0:365"` to drop everything older than a year. Retention is decided once,
+from the manifests. Each deleted snapshot loses its manifest and dump, and the
+chunkstore keeps exactly the revisions that surviving manifests reference.
+Unreferenced chunks are deleted in two steps. First they are renamed to
+*fossils*. A later prune deletes them permanently, once every production has
+produced a newer revision and at least an hour has passed, or brings them back
+if something still needs them.
+
+Snapshots of a **deleted** production are not pruned: they stay in the bucket,
+with every filestore revision they reference. A production created later
+with the same name sees them in `list_production_snapshots(refresh=true)`.
+
+### Bucket permissions
+
+The `[backup]` credentials need, on the bucket and `<prefix>/*`:
+
+- `s3:ListBucket`;
+- `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject`. Prune's rename is a
+  copy plus a delete;
+- `s3:AbortMultipartUpload`, so that a failed dump upload does not leave
+  billable orphaned parts.
+
+The chunkstore checks whether a chunk exists with a `HEAD` request, and treats
+`403` the same as "missing". Credentials without read access do not fail
+loudly: they re-upload every chunk on every snapshot. The WAL-G storage
+preflight [below](#production-readiness-at-deployment) uses the same
+credentials under `<prefix>/walg/`. S3-compatible stores without conditional
+writes (`If-None-Match`) work: Oduflow falls back to check-then-write and logs
+a warning.
+
+See [Security](security.md#backup-data-in-s3) for encryption and credential
+handling.
+
+### How cluster PITR runs
+
+`oduflow restore-cluster` and **/admin → Cluster DR** run under the system lock:
+
+1. Pick the base backup **before** touching anything: the newest one at or
+   before `--target-time`, or the latest without a target. An unparseable
+   target, an unreadable inventory, or a target older than every base backup
+   fails here, while the cluster is still intact.
+2. Stop every production Odoo container of every team, then stop and remove
+   the production PostgreSQL container. Its volume stays.
+3. In a helper container, move the current data directory aside to
+   `.pitr-old-<timestamp>/` inside the volume (nothing is deleted). Then
+   `wal-g backup-fetch` the base backup and configure recovery: WAL fetch, and
+   when given, the target time with promote.
+4. Recreate PostgreSQL, wait until WAL replay finishes and the cluster
+   promotes, re-enable archiving, and start the productions again.
+
+If the restore fails, Oduflow tries to start the productions it stopped. A
+failure in step 1, or while stopping PostgreSQL, leaves the data directory
+untouched. After the data directory has been moved aside, recovery is manual:
+check `docker logs` of the production PostgreSQL container, and keep in mind
+that the previous data is intact in `.pitr-old-<timestamp>/`. Remove that
+directory by hand once the restored cluster is confirmed good.
 
 ### WAL-G certificates and storage health
 
@@ -4146,7 +4410,7 @@ enablement and credentials live in the `[team.*]` sections:
 ```toml
 # Deployment-wide (optional)
 [agent]
-image = "oduist/oduflow-coder:0.4.0"
+image = "oduist/oduflow-coder:0.4.1"
 # claude_model = ""     # optional Claude model override; empty = CLI default
 # codex_model = ""      # optional Codex model override; empty = CLI default
 # opencode_model = ""   # optional provider/model override; empty = OpenCode default
@@ -4448,11 +4712,12 @@ Two limits worth knowing:
 
 - Only the team that produced a build can run it; staging tags are not shared
   between teams.
-- Staging tags are temporary. Build retention never removes a tag that a
-  running or stopped container uses, but once a service's staging image *is*
-  gone — pruned, or the service moved to another host — restoring it needs a
-  published tag. For anything long-lived, publish and point the service at the
-  registry image.
+- A staging tag is local to this host. Build retention never removes one that a
+  running or stopped container uses, so a service can keep running on it
+  indefinitely — a [Stack](stacks.md#building-a-service-image) `build:` does
+  exactly that. But the tag exists in no registry: moving the service to
+  another host, or restoring it after the image has left the daemon, needs a
+  published tag.
 
 ### Connecting from Odoo
 
@@ -4681,47 +4946,62 @@ arbitrary Docker options or bind mounts from the host.
 
 # Container Image Builds
 
-Oduflow can build a **container image from an environment's git revision** and
-publish it to the team's registry namespace — without handing the agent a
-Docker socket or registry credentials.
+Oduflow can build a **container image from a pinned git commit**, run it as an
+auxiliary service, and publish it to your registry — without handing the agent
+a Docker socket or registry credentials. Oduflow keeps both and builds on the
+agent's behalf; the agent only names what to build.
 
-The motivating case is an auxiliary-service image: a FreeSWITCH build, a worker
-sidecar, a companion API that lives in the same repository as the Odoo modules.
-Before this existed, shipping one required a human with Docker and push rights.
-Now an agent working through the scoped `/mcp/<env>` endpoint can build it, run
-the result as a [service](services.md), verify it, and promote exactly those
-bits to the registry.
+The motivating case is a service image: a gateway, a worker sidecar, a
+companion API. Its repository does not need to contain any Odoo code — or any
+relation to Odoo at all.
 
-The capability is **off until an operator configures it**. Teams without a
-`[team.X.image_registry]` section get a clear prerequisite error from all four
-tools.
+A build has one of two sources:
+
+- **a repository URL** — `repo_url` + `ref`, any git repository, no environment
+  involved. Available on the team endpoint (`/mcp`) only.
+- **an environment** — `env_name`, that environment's managed checkout at its
+  current `HEAD`. On the scoped `/mcp/<env>` endpoint this is the only source,
+  and it is implied.
+
+**Building needs no configuration.** Publishing needs a registry namespace, and
+an operator can switch building off per team — see
+[Prerequisites](#prerequisites).
 
 !!! warning "A Dockerfile is untrusted code with the team's reach"
-    Oduflow builds on the host Docker daemon. A `RUN` step reaches the host's
-    network the same way the team's environment containers already do. That is
-    acceptable for the self-hosted, single-trust-boundary deployments Oduflow
-    targets — one team, or a few mutually trusting ones, on their own server.
-    It is **not** an isolation boundary for mutually untrusting tenants.
+    Builds run on the host Docker daemon, so a `RUN` step reaches the host's
+    network the same way the team's own environment containers already do. That
+    is acceptable for the self-hosted, single-trust-boundary deployments
+    Oduflow targets — one team, or a few mutually trusting ones, on their own
+    server. It is **not** an isolation boundary between mutually untrusting
+    tenants. An operator who does not want it for a team sets
+    `builds_enabled = false`.
 
 ## Prerequisites
 
+| To do this | You need |
+|---|---|
+| Build an image and run it on this host | Nothing. A team with no `[team.X.image_registry]` section builds with the default limits |
+| Build Dockerfiles written for current Docker | The `docker` CLI and its `buildx` plugin beside Oduflow — see [Builders](#builders). The official Oduflow image ships both |
+| Publish a build to a registry | `repository_prefix` in `[team.X.image_registry]`, plus credentials or a host `docker login` |
+| Build from a private repository | The team's stored git credentials ([`setup_repo_auth`](mcp-tools.md#setup_repo_auth)) or its SSH deploy key ([`get_ssh_public_key`](mcp-tools.md#get_ssh_public_key)) |
+| Refuse builds for a team | `builds_enabled = false` in that team's section |
+
+The publishing half is two lines of `oduflow.toml`:
+
 ```toml
 [team.1.image_registry]
-repository_prefix = "acme"     # required — the authorization boundary
+repository_prefix = "acme"     # the authorization boundary for pushes
 ```
 
-That single key enables the tools for team 1 and confines every push to
-`docker.io/acme/*`. Pushes then use the host Docker daemon's own `docker login`
-credentials. To keep credentials in Oduflow instead, set `username` and `token`
-together — they are sent per-push to the Docker API, never as a daemon-wide
-login. Full key list and defaults: [Image registry
+That confines every push to `docker.io/acme/*` and uses the host Docker
+daemon's own `docker login` credentials. To keep credentials in Oduflow
+instead, set `username` and `token` together — they are sent per-push to the
+Docker API, never as a daemon-wide login. Full key list, defaults and
+validation rules: [Image registry
 settings](installation.md#image-registry-settings).
 
 The section is read at startup, so adding it needs an Oduflow restart; the
 [Server settings console](admin.md) applies individual field changes live.
-
-There is **no dashboard UI** for builds — they are driven over MCP, or locally
-with `oduflow call`.
 
 ## The flow
 
@@ -4735,19 +5015,32 @@ start_image_build ──► queued ──► building ──► succeeded
                                      │                 (promote the exact bits)
                                      ├──► failed
                                      ├──► cancelled      (cancel_image_build)
-                                     └──► interrupted    (Oduflow restarted mid-build)
+                                     └──► interrupted    (the process running it died)
 ```
 
-A build is identified by a `build_id` such as `bld-9f3c1a7b22e4` and belongs to
-the environment that started it. Ownership follows the environment *instance*:
-it survives a rename, and is dropped when the environment is deleted, so a
-re-used name never inherits an older instance's builds.
+A build is identified by a `build_id` such as `bld-9f3c1a7b22e4`. A repository
+build belongs to the **team** and is addressed by `build_id` alone; an
+environment build belongs to that environment's identity — it survives a
+rename and is dropped when the environment is deleted, so a re-used name never
+inherits an older instance's builds — and is addressed with `env_name` as well.
 
-### 1. Build from the current revision
+### 1. Build from a repository
 
-The source is the environment checkout's **HEAD commit at call time**, exported
-with `git archive` while the environment lock is held. The sealed copy cannot
-shift mid-build, so a later `pull_and_apply` never changes what is being built.
+```bash
+oduflow call start_image_build '{"repo_url": "https://github.com/acme/gateway.git", "ref": "main", "dockerfile": "docker/Dockerfile"}'
+```
+
+`ref` is a branch, tag or full commit SHA, and is resolved to a commit with one
+`git ls-remote` when the call is admitted; empty means the repository's default
+branch. That commit is then fetched shallow and exported into a sealed context,
+so the build is pinned no matter what the branch does afterwards.
+
+Private repositories use the team's existing credential store or SSH deploy
+key. Do not put a token in `repo_url`: inline credentials are moved into the
+store on the MCP path and rejected outright in a Stack manifest, so they never
+reach `job.json` or the build log.
+
+### 2. …or from an environment checkout
 
 ```bash
 oduflow call start_image_build '{"env_name": "feature-x", "dockerfile": "docker/Dockerfile", "context": "."}'
@@ -4760,34 +5053,39 @@ Source: branch 'feature-x' @ 4f21ac9b1d77 (dockerfile docker/Dockerfile, context
 Timeout: 1800s
 ```
 
-The call returns immediately; the build runs in a background worker process.
+Here the source is the checkout's **HEAD at call time**, exported while the
+environment lock is held, so it cannot shift mid-build.
 
 !!! warning "Push and sync first"
-    The build pins HEAD of the *managed checkout*, not your laptop. Push your
-    commits and run [`pull_and_apply`](mcp-tools.md#pull_and_apply) before
-    building, or you will build the previous revision.
+    An environment build pins HEAD of the *managed checkout*, not your laptop.
+    Push your commits and run [`pull_and_apply`](mcp-tools.md#pull_and_apply)
+    before building, or you will build the previous revision.
+
+Either way the call returns immediately and the build runs in the background.
+`dockerfile` is resolved relative to `context`, `context` relative to the
+repository root, and both must stay inside the tree. A missing Dockerfile fails
+before any Docker work.
+
+!!! note "What the context contains"
+    `git archive` of the pinned commit: tracked files only — no `.git`
+    directory, no submodule contents, no Git LFS objects.
 
 !!! warning "Build arguments are not secret"
     `build_args` values reach the Dockerfile and the image history. Never pass
     credentials. Build secrets are not supported.
 
-`dockerfile` is resolved relative to `context`, `context` relative to the
-repository root, and both must stay inside the checkout. A missing Dockerfile
-or a context that is not a directory at that commit fails immediately, before
-any Docker work.
-
-### 2. Watch it
+### 3. Watch it
 
 ```bash
-oduflow call get_image_build '{"env_name": "feature-x", "build_id": "bld-9f3c1a7b22e4", "tail_lines": 50}'
+oduflow call get_image_build '{"build_id": "bld-9f3c1a7b22e4", "tail_lines": 50}'
 ```
 
-Reports status, the source commit, the publication history, and a tail of the
-build log. Poll this until the status is terminal. A hung build can be stopped
-with `cancel_image_build`, which terminates the worker and its Docker
-connection even when the current Dockerfile step prints nothing.
+Reports status, the source commit, which builder ran, the publication history
+and a tail of the build log. Poll until the status is terminal. A hung build
+can be stopped with `cancel_image_build`, which ends the builder's process
+group even when the current Dockerfile step prints nothing.
 
-### 3. Run it before publishing it
+### 4. Run it before publishing it
 
 A succeeded build stays in the host's Docker daemon under a **staging tag**:
 
@@ -4795,31 +5093,34 @@ A succeeded build stays in the host's Docker daemon under a **staging tag**:
 oduflow-build/team-<team-id>:<build-id>
 ```
 
-`get_image_build` reports it as `Local image`. Pass it as the `image` of
+`get_image_build` reports it as the local image. Pass it as the `image` of
 [`create_service`](mcp-tools.md#create_service) or
 [`update_service`](mcp-tools.md#update_service) and it is resolved from the
-local daemon instead of being pulled — so the build can be smoke-tested as a
-real service before anything reaches a registry:
+local daemon instead of being pulled — so the build can run as a real service,
+reachable on the team network and through Traefik, before anything reaches a
+registry:
 
 ```bash
-oduflow call create_service '{"name": "worker", "image": "oduflow-build/team-1:bld-9f3c1a7b22e4", "port": 8099}'
+oduflow call create_service '{"name": "gateway", "image": "oduflow-build/team-1:bld-9f3c1a7b22e4", "port": 8080}'
 ```
 
-Only the owning team's staging repository is accepted here: the Docker daemon
-is shared between teams, and that prefix check is what keeps one team from
-running another team's build.
+Only the owning team's staging repository is accepted: the Docker daemon is
+shared between teams, and that prefix check is what keeps one team from running
+another team's build. For an image that only ever runs on this host, this is
+the whole story — no registry is involved. See [Auxiliary
+Services](services.md#running-an-image-build-before-publishing-it).
 
-### 4. Publish
+### 5. Publish
 
 Publishing is `docker tag` + `docker push` of the **exact image that was
 built** — never a rebuild, so the bits you verified are the bits you ship.
 
 ```bash
-oduflow call publish_image_build '{"env_name": "feature-x", "build_id": "bld-9f3c1a7b22e4", "repository": "worker", "tags": "1.4.0,latest"}'
+oduflow call publish_image_build '{"build_id": "bld-9f3c1a7b22e4", "repository": "gateway", "tags": "1.4.0,latest"}'
 ```
 
 ```
-Publish results for build bld-9f3c1a7b22e4 (docker.io/acme/worker):
+Publish results for build bld-9f3c1a7b22e4 (docker.io/acme/gateway):
   ✓ 1.4.0: sha256:7c0d…
   ✓ latest: sha256:7c0d…
 ```
@@ -4827,9 +5128,9 @@ Publish results for build bld-9f3c1a7b22e4 (docker.io/acme/worker):
 - The destination is always `{host}/{repository_prefix}/{repository}:{tag}`.
   `repository` is relative to the configured prefix and cannot escape it.
 - Any syntactically valid tag is accepted, including `latest` and semver. Tag
-  naming is deliberately **not** an authorization layer: overwriting an
-  existing tag is intentional and last-writer-wins, and every publish is
-  recorded in the job's publication history.
+  naming is deliberately **not** an authorization layer: overwriting a tag is
+  intentional and last-writer-wins, and every publish is recorded in the job's
+  publication history.
 - Up to 10 tags per call, pushed one at a time. **Partial success is possible**
   — each tag reports its own outcome and the call is retryable per tag.
 - Temporary local tags created for the push are removed afterwards.
@@ -4837,70 +5138,139 @@ Publish results for build bld-9f3c1a7b22e4 (docker.io/acme/worker):
 A published image is an ordinary registry image: use it as the `image` of a
 service on any host, or as the `odoo_image` of an environment or production.
 
+## In a Stack
+
+A [Stack](stacks.md) service can declare `build` in place of `image`, which
+makes the whole flow above declarative:
+
+```yaml
+services:
+  gateway:
+    build:
+      repoUrl: https://github.com/acme/gateway.git
+      ref: main
+      dockerfile: docker/Dockerfile
+    port: 8080
+```
+
+Each build carries a **build key** — a digest of the repository URL, commit,
+Dockerfile, context, target and arguments. A plan looks for a finished build
+with the same key, so re-applying an unmoved ref is a no-op, while a moved
+branch rebuilds and updates the service. Builds run before any other change
+and before apply takes the team lock, one after another. Details and the full
+field list: [Building a service
+image](stacks.md#building-a-service-image).
+
+## Builders
+
+With the `docker` CLI and its `buildx` plugin installed next to Oduflow, the
+build is a `docker buildx build` subprocess — **BuildKit**, the builder current
+Dockerfiles expect. The CLI is pointed at the same daemon the rest of Oduflow
+uses, so the image it loads is the one services can see.
+
+Without the plugin, Oduflow falls back to the Docker Engine's legacy builder
+and says so in the build log. The fallback fails on Dockerfiles that use
+`$BUILDPLATFORM`, `RUN --mount` or `COPY --link`. `get_image_build` reports
+which builder ran, so a surprising failure is quick to attribute. The
+availability check runs per build, so installing the plugin takes effect
+without restarting Oduflow.
+
 ## Limits and retention
 
-Every bound is per team, in `[team.X.image_registry]`:
+Every bound is per team, in `[team.X.image_registry]`; a team without the
+section gets these defaults:
 
 | Bound | Default | What happens at the limit |
 |---|---|---|
-| `max_concurrent_builds` | `2` | A further `start_image_build` is refused as busy |
-| `build_timeout_seconds` | `1800` | Hard wall-clock deadline; the worker is terminated and the job fails |
-| `max_context_mb` | `512` | The sealed context is refused before the build starts (also a fixed 200 000-file ceiling) |
+| `max_concurrent_builds` | `2` | A further build is refused as busy. Counted **per process**, so a build started by `oduflow stack apply` does not take one of the server's slots |
+| `build_timeout_seconds` | `1800` | Hard wall-clock deadline, fetching the source included; the build is terminated and the job fails |
+| `max_context_mb` | `512` | The sealed context is refused before the build starts (a fixed 200 000-file ceiling also applies) |
 | `max_log_mb` | `16` | The persisted log is truncated with a marker; the build continues |
 | `keep_images` | `10` | Older staging images are untagged after each successful build |
 
 Pruning keeps the staging tags of the newest `keep_images` succeeded builds and
 never removes a tag that a running **or stopped** container references, so a
 service built on a staging image keeps working. Underlying image objects are
-removed only once Docker reports no container uses them. Set `keep_images = 0`
-to disable pruning entirely.
+removed only once Docker reports no container uses them. `keep_images = 0`
+disables pruning.
 
-Jobs and logs live under `{data_dir}/team_{ID}/image_builds/<build-id>/`
-(`job.json` plus `build.log`). The sealed build context is deleted when the job
-reaches a terminal state.
+**Build records outlive their images.** Jobs live under
+`{data_dir}/team_{ID}/image_builds/<build-id>/` (`job.json` plus `build.log`)
+and are removed only by [`oduflow cleanup
+--force`](cli.md#maintenance-commands) or the dashboard's **Cleanup**: records
+of failed, cancelled and interrupted builds, and of succeeded builds whose
+staging image is gone. A running build, and a succeeded build whose image is
+still present, are always kept — a Stack reuses it and publishing needs it. The
+sealed build context is deleted as soon as the job reaches a terminal state.
 
-## After an Oduflow restart
+The dashboard's cleanup can additionally prune the Docker **build cache**, as
+its own opt-in. That cache is shared by every team on the server, so the next
+build of any image runs without it — which is exactly what makes a retried
+build cheap. Prefer lowering `keep_images`.
 
-Builds are not resumed. A job found non-terminal on disk is marked
-`interrupted` the first time it is read. Succeeded builds stay publishable for
-as long as their staging image is still in the daemon. Retrying is simply a new
-`start_image_build` — the Docker layer cache usually makes it cheap.
+## Ownership and restarts
+
+Builds are never resumed. A build runs in whichever process admitted it — the
+server, or an `oduflow stack apply` beside it — and that process holds a file
+lock in the job directory for as long as the job runs; the kernel releases it
+if the process dies. That is how Oduflow tells a build still running elsewhere
+from an abandoned one: a job whose owner lock is free is declared
+`interrupted`, and a job whose lock is held is never touched.
+
+Succeeded builds stay publishable while their staging image exists. Retrying is
+simply a new build — the layer cache usually makes it cheap. A build started by
+`oduflow stack apply` is cancelled by interrupting that command, not with
+`cancel_image_build`.
 
 ## Out of scope
 
-Multi-platform builds, build secrets, image signing, SBOM/provenance
-attestations, registry authentication for *pulling* private service images, and
-a dashboard build history are all deliberately absent. See
-[`specs/0054`](https://github.com/oduist/oduflow/blob/main/specs/0054-agent-container-image-build-and-publish.md)
-for the reasoning and for the multi-tenant design that was shelved.
+Multi-platform images, build secrets, submodules and Git LFS in the context,
+image signing, SBOM/provenance attestations, registry authentication for
+*pulling* private service images, and webhook-triggered rebuilds are all
+deliberately absent. See
+[`specs/0054`](https://github.com/oduflow/oduflow/blob/main/specs/0054-agent-container-image-build-and-publish.md)
+and
+[`specs/0085`](https://github.com/oduflow/oduflow/blob/main/specs/0085-repository-image-builds.md)
+for the reasoning, and for the multi-tenant design that was shelved.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| *"Container image building is not configured for this team"* | No `[team.X.image_registry]` section. Add one (`repository_prefix` is enough) and restart Oduflow |
+| *"Container image builds are disabled for team …"* | `builds_enabled = false`. An operator has to turn it back on |
+| *"No container registry is configured for this team"* | Building worked, publishing needs `repository_prefix` in `[team.X.image_registry]` |
 | *"already has N active image build(s)"* | `max_concurrent_builds` reached. Wait, cancel a build, or raise the bound |
-| *"Build context exceeds the configured limit"* | The whole commit tree is bigger than `max_context_mb`. Narrow `context` to a subdirectory or raise the bound |
-| *"dockerfile … not found under context … at commit"* | The path is resolved **in the committed tree**. Commit and push the Dockerfile, then `pull_and_apply` |
-| The build used the wrong code | HEAD of the managed checkout was behind. `pull_and_apply`, then build again |
-| Status is `interrupted` | Oduflow restarted mid-build. Start a new build |
+| Dockerfile fails on `$BUILDPLATFORM`, `RUN --mount` or `COPY --link` | The legacy builder ran. Install the `docker` CLI with its `buildx` plugin beside Oduflow — see [Builders](#builders) |
+| *"Build context exceeds the configured limit"* | The commit tree is bigger than `max_context_mb`. Narrow `context` to a subdirectory or raise the bound |
+| *"dockerfile … not found under context … at commit"* | The path is resolved **in the committed tree**. Commit and push it first (for an environment build, then `pull_and_apply`) |
+| A submodule or LFS file is missing in the image | The context is `git archive`: tracked files only, no submodule contents, no LFS objects. Vendor what the build needs, or fetch it in the Dockerfile |
+| The ref cannot be resolved, or the clone is refused | For a private repository, store credentials with `setup_repo_auth` or add the team's SSH deploy key to it. Never put a token in `repo_url` |
+| An environment build used the wrong code | HEAD of the managed checkout was behind. `pull_and_apply`, then build again |
+| Status is `interrupted` | The process running the build died (an Oduflow restart, or an interrupted `stack apply`). Start a new build |
 | *"The staging image … is no longer in the local Docker daemon"* | Retention or a manual `docker rmi` removed it. Run `start_image_build` again |
-| *"Staging builds can only be used by the team that built them"* | The staging tag belongs to another team. Use the tag `get_image_build` reports for your own build |
-| A push fails with authentication or permission errors | Either the daemon's `docker login` lacks rights to the prefix, or the configured `username`/`token` does. The token must be able to write every repository below `repository_prefix` |
+| *"Staging builds can only be used by the team that built them"* | The staging tag belongs to another team. Use the tag reported for your own build |
+| A push fails with authentication or permission errors | Either the daemon's `docker login` or the configured `username`/`token` lacks rights. The token must be able to write every repository below `repository_prefix` |
 | Some tags published, others failed | Expected — tag writes are not a transaction. Re-call `publish_image_build` with the failed tags |
+
+Host-side symptoms — a job stuck with no log progress, builds filling the disk,
+reading the full log — are covered in
+[Troubleshooting](troubleshooting.md#an-image-build-fails-or-hangs).
 
 ## Security notes
 
 - The agent never receives Docker access or registry credentials; Oduflow
   builds and pushes on its behalf.
-- `repository_prefix` is the authorization boundary, enforced by Oduflow. Still
-  issue a **least-privilege registry token** restricted to that namespace —
-  defence in depth if the config is ever misread.
+- `repository_prefix` is the authorization boundary for publishing, enforced by
+  Oduflow. Still issue a **least-privilege registry token** restricted to that
+  namespace — defence in depth if the config is ever misread.
 - The token is stored in `oduflow.toml`. Protect the file (mode 0600) and
   prefer a token you can revoke over an account password.
-- The four build tools are available on the scoped `/mcp/<env>` endpoint, so an
-  environment-scoped credential can publish within the team's namespace. See
-  [Authentication & Security](security.md#scoped-single-environment-access-mcpenv).
+- The scoped `/mcp/<env>` endpoint can build **only its own environment's
+  checkout**: it neither lists nor accepts `repo_url`/`ref`, so choosing an
+  arbitrary repository stays a team-level capability. Where a registry is
+  configured, an environment-scoped credential can publish within the team's
+  namespace. See [Authentication &
+  Security](security.md#scoped-single-environment-access-mcpenv).
 
 ---
 
@@ -5142,16 +5512,22 @@ environment's read-only mount, and performs the required install, upgrade, or
 restart. Other environments continue using their previous checkout.
 
 Cached checkouts are deliberately not reference-counted or removed with an
-environment. Deleting the extra repository removes its bare repo and every
-cached revision after Oduflow verifies that no environment or production still
-depends on it.
+environment, so checkouts of older commits accumulate as a branch moves.
+`oduflow cleanup` and the dashboard's **Cleanup** button list and remove the
+ones nothing uses any more: no container (running or stopped) mounts or pins
+them, they are not the current tip of a downloaded branch, and they were last
+handed out more than six hours ago. Removing a downloaded branch drops its
+unused checkouts too. Deleting the extra repository removes its bare repo and
+every cached revision after Oduflow verifies that no environment or production
+still depends on it.
 
 ---
 
 # Declarative Stacks
 
 An Oduflow Stack is a versioned YAML manifest describing the complete desired
-state of one development environment or production and its supporting resources.
+state of services, PostgreSQL databases, named volumes and configuration files.
+A Stack can also manage one Odoo development environment or one production.
 It keeps the host-level `oduflow.toml` separate from project configuration: teams, routing,
 authentication, quotas, and backups remain operator settings, while the Stack
 file can live beside the project's code and move between Oduflow installations.
@@ -5169,7 +5545,10 @@ oduflow stack status oduflow.yaml --team 1
 live state without changing it. `apply` validates and plans again under the
 team lock, refuses all conflicts before creating anything, and then converges
 resources in dependency order. `status` emits JSON containing the current plan
-and last successful apply record. `plan`, `apply`, and `status` also accept
+and last successful apply record; `inSync` is true exactly when that plan is
+empty. A declared service whose container is not running is drift: the plan
+shows `start services.<name>` and `apply` starts it again, as it does for a
+stopped production container. `plan`, `apply`, and `status` also accept
 `--env-file` to supply `fromEnv` values from a dotenv file; see
 [Secrets from a `.env` file](#secrets-from-a-env-file).
 
@@ -5263,8 +5642,52 @@ spec:
 
 The generated JSON Schema is shipped at
 `oduflow/schemas/oduflow-stack-v1alpha1.json`. Unknown fields, duplicate YAML
-keys, undeclared volume references, invalid names, and unsafe file paths are
-rejected.
+keys, undeclared volume references, invalid names, unsafe file paths, and a
+`spec` that declares no resource at all are rejected.
+
+## Service-only Stacks
+
+Omit both Odoo targets to deploy services on their own. This example uses
+placeholder Web and API images. Replace them with the images for your application.
+
+```yaml
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: multica
+spec:
+  volumes:
+    attachments: {}
+  databases:
+    multica:
+      cluster: prod
+  services:
+    web:
+      image: example/multica-web:1
+      port: 3000
+    api:
+      image: example/multica-api:1
+      port: 8080
+      env:
+        DATABASE_URL:
+          database: multica
+          databaseField: url
+      volumes:
+        - source: attachments
+          target: /data/attachments
+```
+
+Choose the database cluster at creation. The default is `dev`, including for
+existing manifests that specify `{}`. The `prod` cluster requires production
+hosting to be enabled and participates in cluster-wide WAL-G backups when
+configured. Those backups cover PostgreSQL data. Attachment volumes need their
+own backup. Changing the cluster of an existing database requires a migration.
+
+To add Odoo later, keep the Stack name and resource names and add either
+`spec.environment` or `spec.production`. If the existing resources match their
+declarations, the next apply adds Odoo and leaves those resources in place.
+`extraRepositories` requires an Odoo target. Service variables may use
+`environmentField` or `productionField` only with the corresponding target.
 
 ## Value sources
 
@@ -5350,6 +5773,73 @@ Docker can expose container environment values to host administrators through
 `docker inspect`; Stack value sources do not change that existing Docker trust
 boundary. Configure private Git credentials separately with `setup_repo_auth`.
 
+## Building a service image
+
+A service can build its image from a git repository instead of naming one.
+Declare `build` in place of `image`:
+
+```yaml
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: gateway
+spec:
+  volumes:
+    gateway-home: {}
+  services:
+    gateway:
+      build:
+        repoUrl: https://github.com/acme/gateway.git
+        ref: main                    # branch, tag or full commit SHA
+        dockerfile: docker/Dockerfile
+        # context: .                 # directory inside the repository
+        # target: runtime            # multi-stage target
+        # args: { APP_VERSION: "1.4.0" }
+        # gitUser: acme-ci           # account whose stored token to use
+      port: 8080
+      volumes:
+        - source: gateway-home
+          target: /home/app
+```
+
+The repository needs no Odoo code and the Stack needs no Odoo target. Every
+plan resolves `ref` to a commit with one `git ls-remote`:
+
+- no finished build of that commit and those build inputs exists yet — apply
+  builds it first, then creates or updates the service with the result;
+- the service already runs that build — nothing to do;
+- the branch moved — the next apply builds the new commit and recreates the
+  service on it. Pin a tag or a commit SHA to keep the image fixed.
+
+Builds run before any other change, so a failing Dockerfile leaves the Stack
+untouched; the error carries the build ID and the tail of the build log. A
+build can take as long as the team's `build_timeout_seconds`, and apply waits
+for it. That wait happens before apply takes the team lock, so the team's
+environment tools keep working while an image builds; if the lock is busy once
+the builds are done, run apply again — it reuses them. An operator can refuse
+builds for a team with `builds_enabled = false` in `[team.X.image_registry]`;
+the plan then reports the service as a conflict.
+
+A build started by `oduflow stack apply` belongs to that command:
+[`get_image_build`](mcp-tools.md#get_image_build) shows its progress, and
+interrupting the command is how to cancel it.
+
+The image stays in the host's Docker daemon as a staging tag
+(`oduflow-build/team-<id>:<build-id>`), which the running service keeps alive.
+No registry is involved; publish a build with
+[`publish_image_build`](mcp-tools.md#publish_image_build) when it has to reach
+another host. Private repositories use the team's stored git credentials or SSH
+deploy key — `repoUrl` itself must not contain a token. Build `args` are not
+secret: they end up in the image history.
+
+A Stack's builds run one after another. Each build leaves a record (status and
+log) in the team's data directory. `oduflow cleanup` and the dashboard's
+**Cleanup** remove the records of failed, cancelled and interrupted builds
+(including one whose `stack apply` process died), and of succeeded builds whose
+staging image is gone; a running build and a build whose image still exists
+are kept, so a re-apply keeps reusing it. See
+[Maintenance Commands](cli.md#maintenance-commands).
+
 ## Reconciliation and ownership
 
 Resources created by a Stack carry these Docker labels:
@@ -5370,7 +5860,7 @@ The V1 apply order is:
 1. extra-addon repositories;
 2. named volumes;
 3. managed PostgreSQL databases;
-4. the Odoo environment;
+4. the Odoo target, when declared;
 5. text files in volumes;
 6. auxiliary services;
 7. missing Odoo modules.
@@ -5384,8 +5874,8 @@ uninstalls a module.
 V1 can reconcile these changes in place:
 
 - Odoo image and Odoo container environment variables;
-- service image, environment, port/routes, hostname, volumes, host mode, and
-  capabilities;
+- service image (including a rebuild of a `build` source whose ref moved),
+  environment, port/routes, hostname, volumes, host mode, and capabilities;
 - new extra repositories, volumes, databases, files, services, and modules.
 
 Changing an existing environment's `repoUrl`, `branch`, `template`, or
@@ -5393,8 +5883,7 @@ Changing an existing environment's `repoUrl`, `branch`, `template`, or
 descriptions are also immutable in V1. There is no automatic deletion or
 `prune`: removing something from YAML does not destroy persisted data.
 
-V1 supports one development environment per manifest. Production stacks,
-portable database artifacts, binary volume files, lockfiles, lifecycle shell
+Portable database artifacts, binary volume files, lockfiles, lifecycle shell
 hooks, dashboard controls, and OCI distribution are intentionally deferred.
 
 Service definitions also accept the explicit [`runtime` lifecycle mapping](services.md#container-lifecycle-settings).
@@ -5403,11 +5892,9 @@ Stack planning detects changes to it and replacement preserves the declared sett
 ## Production targets
 
 Use `spec.production` instead of `spec.environment` for a long-lived production.
-Exactly one target is required. The host must have `[production] enabled = true`
-and Traefik routing. Production databases use the dedicated production cluster;
-auxiliary `spec.databases` still use the shared development service database
-cluster (the `cluster` option of `create_service_database` is not yet available
-in Stack specs).
+An Odoo production target requires `[production] enabled = true` and Traefik
+routing. Its Odoo database uses the dedicated production cluster. Each service
+database uses its own declared cluster.
 
 ```yaml
 apiVersion: oduflow.dev/v1alpha1
@@ -5721,10 +6208,10 @@ supported because the cluster is not published on a host port.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/stats` | Container/system metrics plus cached environment storage |
-| `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
-| `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
-| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries and PostgreSQL roles, plus server-wide unused Docker images (`id`, `tags`, `size_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. Failures are listed in `errors` and `images.errors` |
+| `GET` | `/api/stats` | Container/system metrics plus cached environment and production storage |
+| `GET` | `/api/usage` | Cached storage and quotas: `usage.envs` and `usage.productions` (per name: `db_bytes`, `disk_bytes`, `computed_at`) plus `usage.team` totals. `team.db_bytes` is the shared development cluster total, the figure `db_quota_gb` applies to; production databases live on the production cluster and are totalled separately in `team.prod_db_bytes`. `team.disk_bytes` covers the whole team data directory, production workspaces included |
+| `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive. When the production cluster cannot be queried the refresh still succeeds: each production's `db_bytes` and `team.prod_db_bytes` are `null` (unknown), everything else is measured |
+| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries, PostgreSQL roles, unused extra-addons checkouts (named `<repo>/<revision>`, with sizes in `orphan_extra_checkout_sizes`) and stale image build jobs (`orphan_build_jobs`), plus server-wide unused Docker images (`id`, `tags`, `size_bytes`) and the Docker build cache (`build_cache`: `size_bytes`, `reclaimable_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. `"build_cache": true` (a separate opt-in, independent of `image_ids`; accepted only with `force`) prunes the server-wide build cache, after any image removal; cache in use by a running build is kept, and the result reports `build_cache.reclaimed_bytes`. Failures are listed in `errors`, `images.errors` and `build_cache.error` |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
 | `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
@@ -5765,6 +6252,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
 | `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request. Read-only: cluster-wide WAL control (pause/resume/retry/recover/release) and cluster PITR are operator actions in the [server settings console](admin.md) |
 | `GET` | `/api/productions/{name}` | Detailed production information |
+| `POST` | `/api/productions/{name}/storage/refresh` | Refresh cached DB/workspace sizes |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |
 | `POST` | `/api/productions/{name}/restart` | Restart |
@@ -6076,7 +6564,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Comma-separated extra addon repos **with branches**, e.g. `"enterprise:19.0,custom-themes:main"`. The branch after the colon is mandatory.
 
 `sanitize`
-:   *bool · default `True`* — Run Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets `database.is_neutralized`) plus any custom scripts in the repository's `.oduflow/odoo_sanitize/`. Only applies to environments created from a template.
+:   *bool · default `True`* — Run Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets `database.is_neutralized`) plus any custom scripts in the repository's `.oduflow/odoo_sanitize/` (top-level scripts for every environment, then an optional subfolder named exactly after the environment, a `/` in the name folding to `-`). Only applies to environments created from a template.
 
 `auto_install_modules`
 :   *str · default empty* — Comma-separated modules to install right after provisioning (e.g. `"sale,purchase,stock"`). Loaded from template metadata when a template is used and this is empty.
@@ -8044,7 +8532,27 @@ configuration keeps the reference.
 
 ## Container Image Builds
 
-Requires a `[team.X.image_registry]` section in `oduflow.toml` — see [Container Image Builds](image-builds.md) for the end-to-end workflow, the limits and the trust model.
+Build a container image from a git revision, run it as an auxiliary service,
+and optionally publish it to a registry. Oduflow keeps the Docker socket and
+the registry credentials; the agent only names what to build.
+
+A build has one of two sources:
+
+- **a repository URL** (`repo_url` + `ref`) — any git repository, with no
+  environment involved. This is how to build a service whose repository holds
+  no Odoo code at all. Available on the team endpoint (`/mcp`) only;
+- **an environment** (`env_name`) — that environment's managed checkout. On the
+  scoped `/mcp/<env>` endpoint this is the only source, and it is implied.
+
+Building needs no configuration. **Publishing** needs a registry namespace:
+`repository_prefix` in the team's `[team.X.image_registry]` section of
+`oduflow.toml`, which also holds the optional build limits. A build runs its
+Dockerfile on the host's Docker daemon; an operator who does not want that for
+a team sets `builds_enabled = false` in the same section, and
+[`start_image_build`](#start_image_build) then refuses with a prerequisite
+error on both endpoints.
+
+See [Container Image Builds](image-builds.md) for the end-to-end workflow, the limits and retention, and the trust model.
 
 A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 `oduflow-build/team-<id>:<build-id>` (reported by
@@ -8053,26 +8561,57 @@ A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 [`update_service`](#update_service): it is resolved from the local daemon, not
 pulled from a registry, so a build can be run and checked as an auxiliary
 service *before* [`publish_image_build`](#publish_image_build) pushes it
-anywhere. These service operations accept only the team's own staging images.
-Automatic build retention preserves tags referenced by running or stopped
-containers. Unused staging tags remain temporary and can be pruned; use a
-published tag to restore a service after pruning or move it to a new host.
+anywhere — or without ever publishing it. These service operations accept only
+the team's own staging images. Automatic build retention preserves tags
+referenced by running or stopped containers. Unused staging tags remain
+temporary and can be pruned; use a published tag to restore a service after
+pruning or move it to a new host.
+
+Build records (status, log, publication history) are kept until an operator
+runs cleanup — `oduflow cleanup --force` or the dashboard's **Cleanup**. It
+removes the records of failed, cancelled and interrupted builds — a build
+whose Oduflow process died counts as interrupted — and of succeeded builds
+whose staging image is gone, after which
+[`get_image_build`](#get_image_build) reports them as not found. Running
+builds, and succeeded builds whose staging image still exists, are kept. The
+dashboard's cleanup can also prune the Docker **build cache**, as its own
+opt-in; the cache is shared by every team on the server, so the next build of
+any image then runs without it. The legacy builder keeps its cache as
+intermediate images instead. Unused-image cleanup removes those only
+gradually: it never prunes an image's parents, so roughly one layer level goes
+per cleanup pass.
+
+Dockerfiles run under **BuildKit** when the `docker` CLI and its `buildx`
+plugin are installed next to Oduflow (the official Oduflow image ships both).
+Without the plugin Oduflow falls back to the Docker Engine's legacy builder,
+which fails on Dockerfiles that use `$BUILDPLATFORM`, `RUN --mount` or
+`COPY --link`; [`get_image_build`](#get_image_build) reports which builder ran.
+
+A Stack can declare the same build on a service — see
+[Building a service image](stacks.md#building-a-service-image).
 
 ### `start_image_build`
 
-Build a container image from the environment checkout's **current HEAD commit**
-— sealed with `git archive` under the environment lock, so the source cannot
-shift mid-build. The build runs asynchronously server-side and this call
-returns a `build_id` immediately. Hard timeouts, log-size caps and per-team
-concurrency limits apply.
+Build a container image from one git commit. The source is pinned before
+anything runs: a `ref` is resolved to a commit when the call is made, and an
+environment's checkout is sealed at its **current HEAD** under the environment
+lock, so the source cannot shift mid-build. The build runs asynchronously
+server-side and this call returns a `build_id` immediately. Hard timeouts,
+log-size caps and per-team concurrency limits apply.
 
-Lock: environment.
+Lock: environment (environment builds only).
 { .odu-tool-meta }
 
 **Parameters**
 
 `env_name`
-:   *str · required* — The environment whose checkout to build from.
+:   *str · default empty* — The environment whose checkout to build from. Pass this **or** `repo_url`, not both.
+
+`repo_url`
+:   *str · default empty* — Repository to build instead — HTTPS or SSH URL. Private repositories use the team's git credentials ([`setup_repo_auth`](#setup_repo_auth)) or its SSH deploy key ([`get_ssh_public_key`](#get_ssh_public_key)). Not available on the scoped endpoint.
+
+`ref`
+:   *str · default empty* — With `repo_url`: branch, tag or full commit SHA. Empty builds the repository's default branch.
 
 `dockerfile`
 :   *str · default `"Dockerfile"`* — Dockerfile path relative to the context.
@@ -8088,25 +8627,32 @@ Lock: environment.
 
 **Use it when**
 
-- Producing a deployable image from the exact code you just tested.
+- Building an auxiliary service from its own repository, e.g. `repo_url="https://github.com/acme/gateway"`, `dockerfile="docker/Dockerfile"`.
+- Producing a deployable image from the exact code you just tested in an environment.
 - Building a release candidate from a tagged commit.
 
 !!! warning "Build arguments are not secret"
     Their values reach the Dockerfile and the image history. Never pass
-    credentials. Push your commits and [`pull_and_apply`](#pull_and_apply)
-    first — the build uses the checkout's HEAD at call time.
+    credentials. For an environment build, push your commits and
+    [`pull_and_apply`](#pull_and_apply) first — the build uses the checkout's
+    HEAD at call time.
+
+!!! note "What the context contains"
+    The context is `git archive` of the pinned commit: tracked files only, no
+    `.git` directory, no submodule contents and no Git LFS objects.
 
 ### `get_image_build`
 
-Status, source commit, publication history and a build log tail for one build.
+Status, source commit, builder, publication history and a build log tail for
+one build.
 
 **Parameters**
 
-`env_name`
-:   *str · required* — The environment the build belongs to.
-
 `build_id`
 :   *str · required* — The build to inspect.
+
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
 
 `tail_lines`
 :   *int · default `100`* — Trailing build log lines to include.
@@ -8119,7 +8665,8 @@ Status, source commit, publication history and a build log tail for one build.
 ### `publish_image_build`
 
 Push a **succeeded** build's exact image — never a rebuild — to one or more
-tags under the team's configured registry namespace.
+tags under the team's configured registry namespace. Requires
+`repository_prefix` in `[team.X.image_registry]`.
 
 Any syntactically valid tag is accepted, including `latest` and semver.
 Overwriting an existing tag is intentional and last-writer-wins. Tags are
@@ -8127,9 +8674,6 @@ pushed one by one, so partial success is possible and each tag reports its own
 outcome.
 
 **Parameters**
-
-`env_name`
-:   *str · required* — The environment the build belongs to.
 
 `build_id`
 :   *str · required* — A build in status `succeeded`.
@@ -8140,6 +8684,9 @@ outcome.
 `tags`
 :   *str · required* — Comma-separated tags to publish, e.g. `"1.4.0,latest"`.
 
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
+
 **Use it when**
 
 - Promoting a verified build to `latest` and a version tag in one call.
@@ -8148,15 +8695,17 @@ outcome.
 ### `cancel_image_build`
 
 Terminate a running build and its Docker connection — even when the current
-Dockerfile step produces no output — and move the job to `cancelled`.
+Dockerfile step produces no output — and move the job to `cancelled`. A build
+that `oduflow stack apply` started runs inside that command and is cancelled by
+interrupting it, not through this tool.
 
 **Parameters**
 
-`env_name`
-:   *str · required* — The environment the build belongs to.
-
 `build_id`
 :   *str · required* — The build to cancel.
+
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
 
 **Use it when**
 
@@ -8805,7 +9354,9 @@ them with a dev environment's data (promotion into an *existing* production).
 
 The restore is swap-based, so a failed restore leaves the previous state in
 place. The **code checkout is not touched** — a warning is returned if it does
-not match the source's commit.
+not match the source's commit. A snapshot restore needs about twice the dump
+size free in the team's `tmp` directory plus room for a second copy of the
+filestore; see [How a snapshot restore runs](production.md#how-a-snapshot-restore-runs).
 
 Lock: production + backup store. Destructive for current data.
 { .odu-tool-meta }
@@ -8857,7 +9408,9 @@ Lock: production.
 ### `prune_production_backups`
 
 Apply the retention policy (`[backup] keep`) to the team's snapshots and
-filestore chunk store immediately. This also runs weekly on schedule.
+filestore chunk store immediately. This also runs weekly on schedule (Sunday
+04:30, server-local); see [Schedule and retention](production.md#schedule-and-retention)
+for how `keep` pairs are interpreted.
 
 Pruning uses safe two-step fossil collection: chunks are only permanently
 deleted on a *later* prune, after every production has produced a newer
@@ -9108,7 +9661,7 @@ Load the compact Oduflow agent workflow and the active code-delivery mode.
 ### `get_odoo_development_guide`
 
 Get the Odoo development standards and constraints guide for a specific Odoo
-version (15–19).
+version (15–20).
 
 **Parameters**
 
@@ -9290,6 +9843,11 @@ oduflow ui-2fa reset --admin
 `enable` and `disable` write through the same validated, history-keeping writer
 as the console. Restart Oduflow afterwards so the running server picks the
 password up.
+
+While `ODUFLOW_ADMIN_PASSWORD` is set, both refuse to run and exit with an
+error: the variable overrides the file, so a file edit would have no effect.
+Change or unset the variable and restart instead (see
+[Credentials from environment variables](security.md#credentials-from-environment-variables)).
 
 ## Declarative Stack Commands
 
@@ -9528,7 +10086,7 @@ oduflow call delete_service_database '{"name":"events"}'
 ## Maintenance Commands
 
 ```bash
-# Show orphaned databases, workspaces, and port entries (dry-run by default)
+# Show orphaned databases, workspaces, port entries, roles and stale image build jobs (dry-run by default)
 oduflow cleanup [--team 1]
 
 # Same as above — only show what would be removed
@@ -9543,8 +10101,17 @@ The `cleanup` command detects and removes resources that no longer have a corres
 - **Orphan databases** — PostgreSQL databases with the `oduflow_` prefix that have no matching environment container
 - **Orphan workspaces** — workspace directories on disk that have no matching environment container
 - **Orphan port entries** — entries in `ports.json` that have no matching environment container
+- **Orphan PostgreSQL roles** — per-environment login roles that have no matching environment container
+- **Unused extra-addons checkouts** — per-commit shared checkouts under `shared_extra_checkouts/` that no container (running or stopped) mounts or pins, that are not the current tip of a downloaded branch, and that were last handed out more than 6 hours ago. These accumulate as upstream branches move; the dry run lists each one with its size. A repository whose branches cannot be read, or that another operation (such as a long fetch) is using, is skipped with an `Error:` line and keeps all its checkouts
 
-By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images.
+It also removes the records of **image build jobs** that nothing can use any more (the job directory under the team's data dir, with `job.json` and the build log):
+
+- builds that **failed**, were **cancelled**, or were **interrupted** — including a build still recorded as running whose Oduflow process has died, which `--force` first marks interrupted;
+- **succeeded** builds whose staging image is no longer in the Docker daemon.
+
+A build that is still running — in the server or in an `oduflow stack apply` process — is never touched, and a succeeded build whose staging image still exists is kept: a Stack reuses it and [`publish_image_build`](mcp-tools.md#publish_image_build) needs it. After removal, [`get_image_build`](mcp-tools.md#get_image_build) no longer finds the build.
+
+By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. `--force` takes the team lock that a running server also honours: it waits up to five minutes for the team's environment operations to finish and fails with a busy error if they do not. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images and the Docker build cache, each as its own opt-in — both are shared by all teams, so the CLI leaves them alone.
 
 ## Systemd Service
 
@@ -9842,8 +10409,11 @@ For anything the simple `host → url` form can't express — middleware, header
 rewrites, custom TLS options, sticky sessions, multiple services — Oduflow
 mounts a **dynamic-config directory** that Traefik watches:
 
-- On the host it is `<config-dir>/traefik-dynamic/` — `/etc/oduflow/traefik-dynamic/`
-  when writable, otherwise `~/.oduflow/conf/traefik-dynamic/`.
+- On the host it is `<config-dir>/traefik-dynamic/` — the config dir is the
+  directory of the loaded `oduflow.toml` (`/etc/oduflow` or `~/.oduflow/conf`)
+  unless `[storage].etc_dir` says otherwise. When Oduflow itself runs in Docker
+  that directory must be a host path mounted at the same path inside the
+  container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)).
 - Oduflow writes and overwrites only `oduflow.yml` there (its own routers). Any
   **other** `*.yml`/`*.yaml`/`*.toml` file you place in that directory is loaded
   by Traefik and **never touched by Oduflow** — it survives restarts and
@@ -10263,6 +10833,47 @@ team credentials; a console session does not open a team dashboard either.
 While the password is empty, `/admin` answers 404. Secrets reach the browser
 only through an explicit, logged **Reveal**.
 
+## Credentials from environment variables
+
+Any of these secrets can come from an environment variable of the Oduflow
+process instead of `oduflow.toml`. A non-empty variable wins; the value in the
+file is then ignored. An empty variable counts as unset.
+
+| `oduflow.toml` key | Environment variable |
+|---|---|
+| `[team.<id>] ui_password` | `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
+| `[team.<id>] auth_token` | `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `[team.<id>] production_token` | `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `[admin] password` | `ODUFLOW_ADMIN_PASSWORD` |
+| `[backup] access_key` | `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup] secret_key` | `ODUFLOW_BACKUP_SECRET_KEY` |
+
+`<ID>` is the team id upper-cased, with every character other than a letter or
+digit replaced by `_`: `[team.1]` → `ODUFLOW_TEAM_1_UI_PASSWORD`,
+`[team.acme-dev]` → `ODUFLOW_TEAM_ACME_DEV_UI_PASSWORD`.
+
+Leading and trailing whitespace is stripped, so a `.env` file with CRLF line
+endings works. Team ids that differ only in case or punctuation (`acme-dev`
+and `acme_dev`) map to the same name; Oduflow refuses to start while such a
+shared variable is set, so keep those teams' secrets in the file.
+
+The variables only replace values: backups are still enabled by a `[backup]`
+section with a `bucket` in the file. Every validation rule (token length,
+uniqueness, the HTTP fail-closed checks) applies to the value from the
+variable, and `ODUFLOW_ADMIN_PASSWORD` must be at least 12 characters, the
+same minimum the console enforces.
+
+A changed variable takes effect on the next restart. After changing
+`ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`, also run `sync_production_mcp` for each
+of that team's productions: they keep the key they were configured with until
+then, and production calls fail in the meantime.
+
+The [Server settings console](admin.md) shows a key taken from a variable as
+read-only, names the variable and never sees its value; it refuses to change
+or reveal the unused file value. `oduflow admin enable|disable` refuses to run
+while `ODUFLOW_ADMIN_PASSWORD` is set. On upgrade, a team whose `ui_password`
+comes from a variable does not get a generated one in the file.
+
 ## Self-hosted OAuth (for Claude.ai and other MCP clients)
 
 Oduflow can act as its own OAuth 2.1 Authorization Server, so MCP clients that require an OAuth flow (e.g. Claude.ai Remote MCP, MCP Inspector) can connect without any external identity provider.
@@ -10381,14 +10992,21 @@ override — which environment it operates on.
 
 The four [container image build](image-builds.md) tools
 (`start_image_build`, `get_image_build`, `publish_image_build`,
-`cancel_image_build`) are also on this endpoint, but only for a team that has
-a `[team.X.image_registry]` section; without one they answer with a
-prerequisite error. Where it is configured, an environment-scoped credential
-can therefore **push images to the team's registry namespace** — confined to
-the configured `repository_prefix`, which Oduflow enforces on every publish.
-The agent receives neither the Docker socket nor the registry credentials;
-Oduflow builds and pushes on its behalf. Keep the registry token in
-`oduflow.toml` least-privilege, scoped to that prefix.
+`cancel_image_build`) are also on this endpoint. Building needs no
+configuration, so they work by default; on this endpoint the build source is
+always the environment's own checkout — `repo_url` and `ref` are neither
+listed nor accepted, so building an arbitrary repository stays a team-level
+capability. A Dockerfile runs on the host Docker daemon with the same reach as
+the environment containers the endpoint already runs code in; an operator who
+does not want that for a team sets `builds_enabled = false` in
+`[team.X.image_registry]`.
+
+Where that section configures a `repository_prefix`, an environment-scoped
+credential can additionally **push images to the team's registry namespace** —
+confined to that prefix, which Oduflow enforces on every publish. The agent
+receives neither the Docker socket nor the registry credentials; Oduflow
+builds and pushes on its behalf. Keep the registry token in `oduflow.toml`
+least-privilege, scoped to that prefix.
 
 ### Per-environment Secret Key
 
@@ -10749,6 +11367,40 @@ element was replaced (`updated` is the inverse). For example, an update returns:
 Recreate consumers with `update_service` / `update_environment` to apply the
 updated value to their containers.
 
+## Backup data in S3
+
+Production backups ([Production Hosting → Backups](production.md#backups))
+contain **unsanitized production data**: complete database dumps, every
+attachment, and the WAL stream. Protect the bucket as you would the
+production database.
+
+- **No client-side encryption.** Dumps (`pg_dump -Fc`, compressed but not
+  encrypted), filestore chunks (zstd) and WAL-G objects are stored as plain
+  data. Enable default server-side encryption on the bucket (SSE-S3 or
+  SSE-KMS, or the equivalent on MinIO/R2), and restrict access to the
+  credentials Oduflow uses. A format flag for client-side encryption is
+  reserved but not implemented. That is deliberate: losing a client-side key
+  would make every backup unrestorable.
+- **Object names reveal nothing.** Chunk object names are keyed hashes of
+  keyed content hashes, so a bucket listing does not reveal or confirm file
+  contents. The keys live in the chunkstore's `config` object in the same
+  bucket, so whoever can read the bucket can read the backups.
+- **One credential set for the whole server.** Teams are separated by path
+  (`snapshots/<team>/`, `filestore/<team>/`), not by credentials, and the
+  `[backup]` keys can read and delete every team's backups and the cluster
+  archive. Use a dedicated bucket, or at least a dedicated prefix and IAM user,
+  limited to the [permissions Oduflow needs](production.md#bucket-permissions).
+- **Where the keys are stored.** They are in `oduflow.toml`, and in
+  `<base_data_dir>/walg/walg.json` (mode `0600`, regenerated at every startup)
+  for WAL-G inside the production PostgreSQL container. They are never passed
+  as container environment variables, so `docker inspect` does not show them.
+  To rotate them, edit `[backup]` and restart Oduflow. PostgreSQL does not need
+  to be recreated.
+- **Versioning.** Bucket versioning protects against deletion through leaked
+  credentials. Prune deletes objects routinely, so pair versioning with a
+  lifecycle rule that expires noncurrent versions, or storage will keep
+  growing.
+
 ## iptables rule
 
 On startup, an `iptables ACCEPT` rule is automatically added for the `oduflow-net` Docker bridge interface. This ensures that containers on the shared network can communicate with the host (required for Traefik `host.docker.internal` routing and PostgreSQL access). If `iptables` is not available, the rule is skipped with a warning.
@@ -10815,6 +11467,11 @@ restart Oduflow:
 oduflow admin enable          # prints the generated password once
 sudo systemctl restart oduflow
 ```
+
+If the password comes from the `ODUFLOW_ADMIN_PASSWORD` environment variable
+instead (at least 12 characters), `oduflow admin` refuses to run; set, change or
+unset the variable and restart. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
 
 Open `/admin` on any hostname the server answers on, for example
 `https://dev.example.com/admin` (Traefik) or `http://server:8000/admin`
@@ -10907,6 +11564,13 @@ keep the stored value, or press **Generate** for a new random one. Diffs and
 history show `********` instead of values, plus `(changed)` where a secret
 changed.
 
+A secret set by an [environment variable](security.md#credentials-from-environment-variables)
+overrides the file. The console shows such a key as read-only with an **Env**
+badge and the variable's name; it refuses to change or reveal the file value,
+which stays unused while the variable is set. Change or unset the variable and
+restart instead. The variable's value never reaches the console, and the state
+API (`env_overrides`) only names the variable.
+
 ## Cluster disaster recovery
 
 The **Cluster DR** section operates on the shared production PostgreSQL
@@ -10946,7 +11610,8 @@ on a fresh install — see [CLI](cli.md#cluster-disaster-recovery) and
   configuration.
 
 To turn the console off, run `oduflow admin disable` on the server and
-restart.
+restart. If the password comes from `ODUFLOW_ADMIN_PASSWORD`, unset the
+variable instead (and clear `[admin] password` in the file, if set).
 
 ## REST API
 
@@ -10955,7 +11620,7 @@ console session cookie; every POST must be same-origin.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/admin/api/state` | Schema, current values with secrets masked, revision, pending changes |
+| GET | `/admin/api/state` | Schema, current values with secrets masked, revision, pending changes, keys overridden by environment variables (`env_overrides`, names only) |
 | POST | `/admin/api/preview` | Validate a candidate and return changes, apply classes and the masked diff |
 | POST | `/admin/api/apply` | Save a candidate if `revision` still matches; apply live values |
 | POST | `/admin/api/reload` | Apply live values from the file on disk (after a hand edit) |
@@ -10979,6 +11644,46 @@ console session cookie; every POST must be same-origin.
 
 Oduflow can run as a Docker container. Since it manages other Docker containers (Odoo environments, PostgreSQL, etc.), it uses the **Docker-out-of-Docker** pattern — the host's Docker socket is mounted into the container.
 
+## The one rule: both directories must be the same path on the host
+
+Oduflow creates the containers it manages through the **host** daemon, and
+every bind mount it asks for is resolved by that daemon, on the host — not
+inside the Oduflow container. Two directories are handed out as bind sources:
+
+- the **data directory** (`[storage].data_dir`, default `/srv/oduflow`):
+  PostgreSQL tablespaces, the dump exchange dir, filestores, WAL-G;
+- the **config directory** (`[storage].etc_dir`, default: the directory of
+  the loaded `oduflow.toml`, i.e. `/etc/oduflow`): `postgresql.conf`,
+  `postgresql-prod.conf` and `traefik-dynamic/`.
+
+If either path exists only inside the Oduflow container — a named volume, a
+bind from a different host path, or the container's own writable layer — the
+daemon looks for it on the host, finds nothing, and silently auto-creates an
+**empty directory** in its place. `oduflow-db` then crash-loops with
+`input in flex scanner failed at file "/etc/postgresql/postgresql.conf"`
+(PostgreSQL is parsing a directory), Traefik watches an empty dynamic
+directory and loads no per-team routes, and filestores land in the void.
+
+So mount a **host directory at the same path on both sides**, for both:
+
+```
+-v /srv/oduflow:/srv/oduflow
+-v /etc/oduflow:/etc/oduflow
+```
+
+On Docker Desktop (macOS/Windows) the paths must also be under a shared
+location — for example `-v $HOME/oduflow:$HOME/oduflow` together with
+`[storage] data_dir = "/Users/<you>/oduflow"` and
+`etc_dir = "/Users/<you>/oduflow/etc"` in `oduflow.toml` (or simply
+`ODUFLOW_TOML=/Users/<you>/oduflow/etc/oduflow.toml`, which moves the config
+directory with the file).
+
+When Oduflow runs in a container it checks this at startup and on
+`GET /healthz` (`self_mounts`, shown as the dashboard's `MOUNTS` chip): a
+directory the daemon cannot see is logged as a warning that names the
+offending mount and the fix. The check is informational — it never degrades
+`/healthz` on its own.
+
 ## Build
 
 ```bash
@@ -10994,7 +11699,8 @@ docker run -d \
   --name oduflow \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
+  -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
 
@@ -11006,7 +11712,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
@@ -11016,8 +11722,8 @@ docker run -d \
 | Mount | Purpose |
 |---|---|
 | `/var/run/docker.sock` | **Required.** Gives Oduflow access to the host Docker daemon to manage Odoo containers, PostgreSQL, Traefik, etc. |
-| `/srv/oduflow` | Oduflow data directory. Contains team directories with workspaces, templates, port registry. Use a named volume or a host path to persist data across container restarts. |
-| `/etc/oduflow` | System configuration directory. Contains `oduflow.toml`, license key, `postgresql.conf`, default `odoo.conf`, and other configuration files. Mount to persist configuration across container restarts. |
+| `/srv/oduflow` | Oduflow data directory. Contains team directories with workspaces, templates, port registry. **Must be a host directory bound at the same path** (see the rule above) — not a named volume. |
+| `/etc/oduflow` | Config directory. Contains `oduflow.toml`, license key, `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, default `odoo.conf`. **Must be a host directory bound at the same path** too: `oduflow-db` and Traefik bind-mount files from it. |
 
 ## Networking
 
@@ -11027,7 +11733,7 @@ The Oduflow container must be on the same Docker network as the containers it cr
 # 1. Start Oduflow (Docker image defaults to HTTP mode)
 docker run -d --name oduflow -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
   -v /etc/oduflow:/etc/oduflow \
   oduist/oduflow
 
@@ -11058,11 +11764,16 @@ docker exec oduflow oduflow import-template https://my-odoo.example.com master_p
 
 ## Configuration
 
-Oduflow reads its configuration from `oduflow.toml`. When running in Docker, mount the config directory:
+Oduflow reads its configuration from `oduflow.toml`. When running in Docker, mount the config directory from the host, at the same path:
 
 ```bash
 -v /etc/oduflow:/etc/oduflow
 ```
+
+The directory of the loaded `oduflow.toml` is the config directory
+(`[storage].etc_dir` overrides it); `postgresql.conf` and Traefik's dynamic
+config are generated into it and bind-mounted into their containers, which
+is why it has to be a host path and not a named volume.
 
 Key configuration settings in `oduflow.toml`:
 
@@ -11093,15 +11804,14 @@ services:
       - "8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - oduflow_data:/srv/oduflow
-      - oduflow_etc:/etc/oduflow
+      # Host directories, same path on both sides: the host daemon resolves
+      # every mount Oduflow creates under them. Named volumes here break
+      # oduflow-db, Traefik and every environment (see the rule above).
+      - /srv/oduflow:/srv/oduflow
+      - /etc/oduflow:/etc/oduflow
     restart: unless-stopped
     networks:
       - oduflow-net
-
-volumes:
-  oduflow_data:
-  oduflow_etc:
 
 networks:
   oduflow-net:
@@ -11109,6 +11819,24 @@ networks:
 ```
 
 After `docker compose up -d`, Oduflow initializes shared infrastructure automatically.
+
+### Credentials from environment variables
+
+Team passwords and tokens, the `[admin]` password and the `[backup]` S3 keys
+can be passed as environment variables instead of being stored in
+`oduflow.toml`; a set variable wins over the file:
+
+```yaml
+services:
+  oduflow:
+    environment:
+      ODUFLOW_TEAM_1_UI_PASSWORD: ${TEAM_1_UI_PASSWORD}
+      ODUFLOW_TEAM_1_AUTH_TOKEN: ${TEAM_1_AUTH_TOKEN}
+      ODUFLOW_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+```
+
+See [Credentials from environment variables](security.md#credentials-from-environment-variables)
+for the full list of variables.
 
 ## Security Notes
 
@@ -11131,7 +11859,8 @@ docker run -d \
   --cap-add SYS_ADMIN \
   -p 8000:8000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v oduflow_data:/srv/oduflow \
+  -v /srv/oduflow:/srv/oduflow \
+  -v /etc/oduflow:/etc/oduflow \
   oduflow
 ```
 
@@ -11267,6 +11996,7 @@ src/oduflow/
       odoo_17_guide.md    # Odoo 17 development standards
       odoo_18_guide.md    # Odoo 18 development standards
       odoo_19_guide.md    # Odoo 19 development standards
+      odoo_20_guide.md    # Odoo 20 development standards
 
 tests/                  # Unit and integration tests (pytest)
 ```
@@ -11946,8 +12676,9 @@ less /srv/oduflow/team_1/image_builds/bld-9f3c1a7b22e4/build.log
 A job stuck in `building` with no log progress is usually a Dockerfile step
 waiting on the network — an `apt-get` or `pip install` against an unreachable
 mirror. It is bounded by `build_timeout_seconds` and can be ended immediately
-with `cancel_image_build`; the worker process and its Docker connection are
-terminated even when the step prints nothing.
+with `cancel_image_build`; the builder's whole process group is terminated even
+when the step prints nothing. A build that `oduflow stack apply` started runs
+inside that command instead, so interrupting the command is how to cancel it.
 
 Builds run on the **host Docker daemon**, so they compete with everything else
 for disk. A failure with `no space left on device` is a host problem, not a
@@ -11969,9 +12700,22 @@ running or stopped service container are always preserved, so a `docker rmi` by
 hand can break a service that was created from a build — recreate such a
 service from a published tag instead.
 
-After an Oduflow restart, builds are never resumed: a job left mid-flight is
-marked `interrupted` the first time it is read. Succeeded builds stay
-publishable while their staging image exists.
+After an Oduflow restart, builds are never resumed. The process running a build
+holds a file lock in the job directory, so a job whose lock is free was
+abandoned by a dead process and is declared `interrupted`, while a job whose
+lock is held is left alone — a `stack apply` building beside the server is not
+mistaken for a crashed one. Succeeded builds stay publishable while their
+staging image exists.
+
+Job directories are not cleaned up on their own. `oduflow cleanup --force` and
+the dashboard's **Cleanup** remove the records of failed, cancelled and
+interrupted builds, and of succeeded builds whose staging image is gone:
+
+```bash
+# Preview (dry run by default), then remove
+oduflow cleanup --team 1
+oduflow cleanup --force --team 1
+```
 
 ---
 
@@ -12048,7 +12792,7 @@ Existing perpetual keys have no expiration and remain recognized as perpetual.
 
 **Via CLI:**
 
-Copy the license file to `<config-dir>/license.key`. The config directory is usually `/etc/oduflow`; when that path is not writable, Oduflow uses `~/.oduflow/conf`. Oduflow reads the license automatically on startup.
+Copy the license file to `<config-dir>/license.key`. The config directory is the directory of the loaded `oduflow.toml` — usually `/etc/oduflow`, or `~/.oduflow/conf` on installs without root — unless `[storage].etc_dir` overrides it. Oduflow reads the license automatically on startup.
 
 **Via Web Dashboard:**
 

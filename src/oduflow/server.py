@@ -14,7 +14,7 @@ import shlex
 import sys
 import threading
 import warnings
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Any, ParamSpec, TypeVar, cast
 
 # Suppress a third-party deprecation warning emitted at import time by fastmcp's
@@ -176,6 +176,10 @@ def _get_settings() -> Settings:
             settings = Settings.from_raw(raw, toml_path)
             settings_module.TRACE = settings.trace
             settings.validate()
+            # The containers mount files Oduflow generates into the config
+            # dir, so an unusable dir is an operator mistake worth one clear
+            # line now rather than a crash-looping oduflow-db later.
+            settings_module.validate_etc_dir(settings.etc_dir)
         # tomllib.TOMLDecodeError is a ValueError, so syntax errors land here
         # too. TypeError/AttributeError/KeyError/OverflowError cover wrong-typed
         # TOML values (a list where an int belongs, a scalar where a table
@@ -185,6 +189,10 @@ def _get_settings() -> Settings:
             raise ConfigError(f"Invalid configuration in {toml_path}: {exc}") from exc
         except OSError as exc:
             raise ConfigError(f"Cannot read {toml_path}: {exc}") from exc
+        # Outside the try on purpose: files left in the pre-etc_dir location
+        # are a warning, not a broken config, so they must not be reported as
+        # one.
+        settings_module.warn_if_legacy_etc_dir(settings.etc_dir)
         if _no_telemetry:
             settings = dataclasses.replace(settings, disable_telemetry=True)
         _locks.lock_dir = os.path.join(settings.base_data_dir, ".locks")
@@ -1141,7 +1149,7 @@ def create_environment(
         repo_url: URL of the git repository to clone. Optional when template_name is specified (loaded from template metadata).
         odoo_image: Full Docker image name with tag (e.g. "odoo:19.0"). Optional when template_name is specified (loaded from template metadata).
         extra_addons: Comma-separated list of extra addon repo names with branches (e.g. "enterprise:19.0,custom-themes:main"). Each entry must include a branch after a colon.
-        sanitize: Sanitize the database after provisioning (default: True). Runs Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets database.is_neutralized) and then any custom scripts from the .oduflow/odoo_sanitize/ folder in the repository. Only applies to environments created from a template.
+        sanitize: Sanitize the database after provisioning (default: True). Runs Odoo's native neutralization (deactivates outgoing mail servers and crons, disables payment providers, scrubs third-party API credentials, sets database.is_neutralized) and then any custom scripts from the .oduflow/odoo_sanitize/ folder in the repository. Scripts directly in that folder run for every environment; a subfolder named exactly after the environment (not the branch; a '/' in the name folds to '-') runs after them, for that environment only — subfolders with other names, or starting with '_' or '.', are ignored. Only applies to environments created from a template.
         auto_install_modules: Comma-separated list of Odoo modules to install automatically after the environment is provisioned (e.g. "sale,purchase,stock"). When a template is specified and this is empty, the value is loaded from template metadata.
         env_vars: Comma- or newline-separated KEY=VALUE pairs injected as environment variables into the Odoo container (e.g. "WORKERS=2,LIMIT_TIME_CPU=600"). Commas inside values are preserved unless what follows the comma looks like another KEY=; put one pair per line when in doubt. These are added on top of the database connection variables (HOST/USER/PASSWORD). When a template records env_vars, the two sets are merged per key and the values passed here win. A value "secret:<name>" references a team secret (see list_secrets): the real value is injected only inside the container and is never readable back.
         from_production: Name of a production to build this environment from — a dev copy of real production data (database + filestore + repo/image/extra addons). Mutually exclusive with template_name and local_path. The copy goes through one managed template per production, "prod-<name>", which is published on first use and reused afterwards; refresh it with save_production_as_template(name, "prod-<name>", overwrite=True). The environment is sanitized by default (see sanitize). A production whose administrator disabled MCP copies to dev refuses to be published (an already published "prod-<name>" template stays usable, with sanitize=True only).
@@ -2972,66 +2980,83 @@ def read_output(
 # =============================================================================
 # MCP Tools — Container image builds
 #
-# Available only to teams with a [team.X.image_registry] section: for everyone
-# else the tools raise a clear prerequisite error (same pattern as production
-# tools behind [production].enabled). The agent gets no Docker socket and no
-# credentials — Oduflow builds and pushes on its behalf, constrained to the
-# team's configured registry namespace. See specs/0054.
+# Building needs no configuration; publishing needs a registry namespace in
+# [team.X.image_registry], and without one publish_image_build raises a clear
+# prerequisite error. The agent gets no Docker socket and no credentials —
+# Oduflow builds and pushes on its behalf. A build's source is an environment
+# checkout (the only source on the scoped /mcp/<env> endpoint) or a repository
+# URL. See specs/0054 and specs/0085.
 # =============================================================================
 
 
 def _image_registry_settings(team: TeamSettings) -> ImageRegistrySettings:
     registry = team.image_registry
-    if registry is None:
+    if registry is None or not registry.repository_prefix:
         raise PrerequisiteNotMetError(
-            "Container image building is not configured for this team. An "
-            f"operator must add a [team.{team.team_id}.image_registry] section "
-            "(repository_prefix, optional credentials) to oduflow.toml and "
-            "restart Oduflow."
+            "No container registry is configured for this team, so builds can "
+            "be run as services on this host but not published. An operator "
+            f"must set repository_prefix in [team.{team.team_id}.image_registry] "
+            "(plus optional credentials) in oduflow.toml."
         )
     return registry
 
 
-@mcp.tool()
-@handle_errors
-@with_env_lock
-def start_image_build(
-    env_name: str,
-    dockerfile: str = "Dockerfile",
-    context: str = ".",
-    target: str = "",
-    build_args: str = "",
-    ctx: Context | None = None,
+def _image_build_owner(settings: Settings, team: TeamSettings, env_name: str) -> str:
+    """Whose builds a call addresses: an environment's, or the team's own."""
+    if not env_name:
+        return image_builds.TEAM_OWNER_ID
+    from oduflow.docker_ops import build_ops
+
+    _reject_prod_env(env_name)
+    return build_ops.environment_owner_id(settings, team, env_name)
+
+
+def _image_build_call(job: image_builds.BuildJob, tool: str, extra: str = "") -> str:
+    """How to address *job* in a follow-up tool call, for response hints."""
+    owner = f'env_name="{job.env_name}", ' if job.env_name else ""
+    return f'{tool}({owner}build_id="{job.build_id}"{extra})'
+
+
+def _image_build_started(
+    registry_cfg: ImageRegistrySettings, job: image_builds.BuildJob, source: str
 ) -> str:
-    """
-    Build a container image from the environment's current git revision.
+    lines = [
+        "Image build started.",
+        f"build_id: {job.build_id}",
+        f"Source: {source} (dockerfile {job.dockerfile}, context {job.context})",
+        f"Timeout: {registry_cfg.build_timeout_seconds}s",
+        "",
+        f"Poll with {_image_build_call(job, 'get_image_build')}. Once succeeded, "
+        "pass the reported local image to create_service or update_service to "
+        "run it on this host.",
+    ]
+    if registry_cfg.repository_prefix:
+        lines.append(
+            "Publish with "
+            + _image_build_call(
+                job, "publish_image_build", ', repository="<name>", tags="1.0.0,latest"'
+            )
+            + f" — the destination is {registry_cfg.host}/"
+            f"{registry_cfg.repository_prefix}/<name>."
+        )
+    return "\n".join(lines)
 
-    The build source is the exact HEAD commit of the environment's managed
-    checkout at call time (push your commits and pull_and_apply first). The
-    build runs asynchronously server-side; this call returns a build_id
-    immediately. Poll progress with get_image_build, then publish a succeeded
-    build to the team's configured registry namespace with publish_image_build.
 
-    Build arguments are non-secret: their values reach the Dockerfile and the
-    image history. Never pass credentials.
-
-    Args:
-        env_name: The environment whose checkout to build from.
-        dockerfile: Dockerfile path relative to the context (default "Dockerfile").
-        context: Build context directory relative to the repository root (default ".").
-        target: Optional multi-stage build target.
-        build_args: Comma-separated KEY=VALUE Docker build arguments (non-secret).
-    """
+@with_env_lock
+def _start_environment_image_build(
+    *,
+    env_name: str,
+    dockerfile: str,
+    context: str,
+    target: str,
+    build_args: dict[str, str],
+    ctx: Context | None,
+) -> str:
     from oduflow.docker_ops import build_ops
 
     settings = _get_settings()
     team = _resolve_team(ctx)
-    registry_cfg = _image_registry_settings(team)
-    context_path = image_builds.validate_relative_path(context, "context")
-    dockerfile_path = image_builds.validate_relative_path(dockerfile, "dockerfile")
-    if dockerfile_path == ".":
-        raise ToolError("dockerfile must be a file path, not '.'")
-    args = parse_env_vars(build_args) if build_args.strip() else {}
+    registry_cfg = build_ops.build_settings(team)
     repo_path, branch, owner_id = build_ops.env_checkout_for_build(
         settings, team, env_name
     )
@@ -3039,16 +3064,16 @@ def start_image_build(
         team,
         env_name,
         branch,
-        dockerfile_path,
-        context_path,
-        target=target.strip(),
-        build_arg_names=list(args),
+        dockerfile,
+        context,
+        target=target,
+        build_arg_names=list(build_args),
         owner_id=owner_id,
         max_concurrent_builds=registry_cfg.max_concurrent_builds,
     )
     try:
-        # The tool's environment lock is held through this snapshot, so the
-        # sealed context is exactly one commit; the background build then runs
+        # The environment lock is held through this snapshot, so the sealed
+        # context is exactly one commit; the background build then runs
         # lock-free against the immutable copy.
         build_ops.snapshot_context(team, registry_cfg, job, repo_path)
     except Exception as exc:
@@ -3059,25 +3084,110 @@ def start_image_build(
             error=redact_url_credentials(str(exc)),
         )
         raise
-    build_ops.run_build_async(team, registry_cfg, job, args)
-    return (
-        f"Image build started.\n"
-        f"build_id: {job.build_id}\n"
-        f"Source: branch '{branch}' @ {job.commit[:12]} "
-        f"(dockerfile {dockerfile_path}, context {context_path})\n"
-        f"Timeout: {registry_cfg.build_timeout_seconds}s\n\n"
-        f'Poll with get_image_build(build_id="{job.build_id}"). Once succeeded, '
-        f'publish with publish_image_build(build_id="{job.build_id}", '
-        f'repository="<name>", tags="1.0.0,latest") — the destination is '
-        f"{registry_cfg.host}/{registry_cfg.repository_prefix}/<name>."
+    build_ops.run_build_async(team, registry_cfg, job, build_args)
+    return _image_build_started(
+        registry_cfg, job, f"branch '{branch}' @ {job.commit[:12]}"
+    )
+
+
+@mcp.tool()
+@handle_errors
+def start_image_build(
+    env_name: str = "",
+    repo_url: str = "",
+    ref: str = "",
+    dockerfile: str = "Dockerfile",
+    context: str = ".",
+    target: str = "",
+    build_args: str = "",
+    ctx: Context | None = None,
+) -> str:
+    """
+    Build a container image from a git revision.
+
+    Pass exactly one source:
+
+    - repo_url (+ optional ref): any git repository, with no environment
+      involved — the way to build an auxiliary service whose repository holds
+      no Odoo code. The ref is resolved to a commit when the call is made.
+    - env_name: the environment's managed checkout, at its exact HEAD commit
+      at call time (push your commits and pull_and_apply first).
+
+    The build runs asynchronously server-side; this call returns a build_id
+    immediately. Poll progress with get_image_build. A succeeded build can be
+    run on this host by passing its local image to create_service or
+    update_service, and published with publish_image_build when the team has a
+    registry configured.
+
+    Build arguments are non-secret: their values reach the Dockerfile and the
+    image history. Never pass credentials.
+
+    Args:
+        env_name: The environment whose checkout to build from.
+        repo_url: Repository to build instead — HTTPS or SSH URL. Private
+            repositories use the team's git credentials (setup_repo_auth) or
+            its SSH deploy key (get_ssh_public_key).
+        ref: With repo_url: branch, tag or full commit SHA. Empty builds the
+            repository's default branch.
+        dockerfile: Dockerfile path relative to the context (default "Dockerfile").
+        context: Build context directory relative to the repository root (default ".").
+        target: Optional multi-stage build target.
+        build_args: Comma-separated KEY=VALUE Docker build arguments (non-secret).
+    """
+    from oduflow.docker_ops import build_ops
+
+    env_name = env_name.strip()
+    repo_url = repo_url.strip()
+    if bool(env_name) == bool(repo_url):
+        raise ToolError(
+            "Pass exactly one build source: repo_url (optionally with ref) to "
+            "build a repository, or env_name to build an environment's checkout."
+        )
+    context_path = image_builds.validate_relative_path(context, "context")
+    dockerfile_path = image_builds.validate_relative_path(dockerfile, "dockerfile")
+    if dockerfile_path == ".":
+        raise ToolError("dockerfile must be a file path, not '.'")
+    args = parse_env_vars(build_args) if build_args.strip() else {}
+    if env_name:
+        if ref.strip():
+            raise ToolError(
+                "ref applies to repo_url builds only; an environment build "
+                "uses the HEAD commit of its checkout."
+            )
+        return _start_environment_image_build(
+            env_name=env_name,
+            dockerfile=dockerfile_path,
+            context=context_path,
+            target=target.strip(),
+            build_args=args,
+            ctx=ctx,
+        )
+
+    git_ops.validate_repo_url(repo_url)
+    git_ref = image_builds.validate_git_ref(ref)
+    team = _resolve_team(ctx)
+    registry_cfg = build_ops.build_settings(team)
+    job, remote_url = build_ops.admit_git_build(
+        team,
+        registry_cfg,
+        repo_url,
+        git_ref,
+        dockerfile_path,
+        context_path,
+        target.strip(),
+        args,
+    )
+    build_ops.run_build_async(team, registry_cfg, job, args, remote_url=remote_url)
+    return _image_build_started(
+        registry_cfg, job, f"{job.repo_url} ref '{job.branch}' @ {job.commit[:12]}"
     )
 
 
 @mcp.tool()
 @handle_errors
 def get_image_build(
-    env_name: str,
     build_id: str,
+    env_name: str = "",
     tail_lines: int = 100,
     ctx: Context | None = None,
 ) -> str:
@@ -3085,37 +3195,50 @@ def get_image_build(
     Status and log tail of an image build started with start_image_build.
 
     Args:
-        env_name: The environment the build belongs to.
         build_id: The build to inspect.
+        env_name: The environment the build was started from. Leave empty for
+            a build started from a repo_url.
         tail_lines: Number of trailing build log lines to include (default 100).
     """
-    from oduflow.docker_ops import build_ops
-
-    _reject_prod_env(env_name)
     team = _resolve_team(ctx)
-    _image_registry_settings(team)
-    settings = _get_settings()
-    owner_id = build_ops.environment_owner_id(settings, team, env_name)
+    owner_id = _image_build_owner(_get_settings(), team, env_name)
     job = image_builds.store.load(team, env_name, owner_id, build_id)
+    source = (
+        f"{job.repo_url} ref '{job.branch}'"
+        if job.repo_url
+        else f"branch '{job.branch}'"
+    )
     lines = [
         f"Build {job.build_id}: {job.status}",
-        f"Source: branch '{job.branch}' @ {job.commit[:12]}",
+        f"Source: {source} @ {job.commit[:12]}",
         f"Created: {job.created_at}"
         + (f", finished: {job.finished_at}" if job.finished_at else ""),
     ]
+    if job.builder:
+        lines.append(f"Builder: {job.builder}")
     if job.error:
         lines.append(f"Error: {job.error}")
     if job.status == image_builds.STATUS_SUCCEEDED:
         if job.local_tag:
             lines.append(
                 f"Local image: {job.local_tag} — pass it as the image to "
-                "create_service or update_service to run this build before "
-                "publishing (no pull; same team only)."
+                "create_service or update_service to run this build on this "
+                "host (no pull; same team only)."
             )
-        lines.append(
-            f'Ready to publish: publish_image_build(build_id="{job.build_id}", '
-            'repository="<name>", tags="...").'
-        )
+        registry = team.image_registry
+        if registry is not None and registry.repository_prefix:
+            lines.append(
+                "Ready to publish: "
+                + _image_build_call(
+                    job, "publish_image_build", ', repository="<name>", tags="..."'
+                )
+                + "."
+            )
+        else:
+            lines.append(
+                "Publishing is unavailable: this team has no registry "
+                "configured ([team.X.image_registry] repository_prefix)."
+            )
     for pub in job.publications:
         for res in pub.get("results", []):
             outcome = res.get("error") or res.get("digest") or "pushed"
@@ -3134,10 +3257,10 @@ def get_image_build(
 @mcp.tool()
 @handle_errors
 def publish_image_build(
-    env_name: str,
     build_id: str,
     repository: str,
     tags: str,
+    env_name: str = "",
     ctx: Context | None = None,
 ) -> str:
     """
@@ -3150,21 +3273,20 @@ def publish_image_build(
     possible and each tag reports its own outcome.
 
     Args:
-        env_name: The environment the build belongs to.
         build_id: A build in status "succeeded".
         repository: Destination repository below the configured prefix (e.g. "app").
         tags: Comma-separated tags to publish, e.g. "1.4.0,latest".
+        env_name: The environment the build was started from. Leave empty for
+            a build started from a repo_url.
     """
     from oduflow.docker_ops import build_ops
     from oduflow.locking import image_publish_lock_key
 
-    _reject_prod_env(env_name)
-    settings = _get_settings()
     team = _resolve_team(ctx)
     registry_cfg = _image_registry_settings(team)
     repo = image_builds.validate_repository(repository)
     tag_list = image_builds.validate_tags(tags)
-    owner_id = build_ops.environment_owner_id(settings, team, env_name)
+    owner_id = _image_build_owner(_get_settings(), team, env_name)
     job = image_builds.store.load(team, env_name, owner_id, build_id)
     if job.status != image_builds.STATUS_SUCCEEDED:
         raise PrerequisiteNotMetError(
@@ -3199,35 +3321,38 @@ def publish_image_build(
 
 @mcp.tool()
 @handle_errors
-def cancel_image_build(env_name: str, build_id: str, ctx: Context | None = None) -> str:
+def cancel_image_build(
+    build_id: str, env_name: str = "", ctx: Context | None = None
+) -> str:
     """
     Cancel a running image build.
 
-    The build worker and its Docker connection are terminated even when the
-    current Dockerfile step is not producing output; the job then moves to
-    "cancelled".
+    The build and its Docker connection are terminated even when the current
+    Dockerfile step is not producing output; the job then moves to "cancelled".
 
     Args:
-        env_name: The environment the build belongs to.
         build_id: The build to cancel.
+        env_name: The environment the build was started from. Leave empty for
+            a build started from a repo_url.
     """
-    _reject_prod_env(env_name)
     team = _resolve_team(ctx)
-    _image_registry_settings(team)
-    settings = _get_settings()
-    from oduflow.docker_ops import build_ops
-
-    owner_id = build_ops.environment_owner_id(settings, team, env_name)
+    owner_id = _image_build_owner(_get_settings(), team, env_name)
     job = image_builds.store.load(team, env_name, owner_id, build_id)
     if job.status in image_builds.TERMINAL_STATUSES:
         return f"Build {job.build_id} is already '{job.status}'; nothing to cancel."
     event = image_builds.store.cancel_event(job.build_id)
     if event is None:
-        return f"Build {job.build_id} is no longer running."
+        # Finished a moment ago, or owned by another process: only an
+        # `oduflow stack apply` run can stop the builds it started.
+        return (
+            f"Build {job.build_id} is not running in this server process. If "
+            "an `oduflow stack apply` command started it, interrupt that "
+            "command to cancel it."
+        )
     event.set()
     return (
         f"Cancellation requested for build {job.build_id}. Check "
-        f'get_image_build(build_id="{job.build_id}") for the final status.'
+        f"{_image_build_call(job, 'get_image_build')} for the final status."
     )
 
 
@@ -6639,6 +6764,12 @@ def _ensure_initialized(settings: Settings) -> None:
     _copy_bundled_configs()
     prereqs.ensure_fuse_overlayfs()
     prereqs.ensure_rsync()
+    # Before any bind mount is handed to the daemon: when Oduflow itself runs in
+    # a container, every mount source below depends on base_data_dir and
+    # etc_dir being the same path on the host.
+    from oduflow import health
+
+    health.warn_if_dirs_unreachable(settings)
     system_ops.init_system(settings)
 
     # Snapshot-before-deploy hook (no-op while [backup] is unconfigured).
@@ -7315,18 +7446,26 @@ def _inject_admin_password(toml_text: str, password: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def _autofill_ui_passwords(toml_text: str) -> tuple[str, list[str]]:
-    """Fill EVERY empty ``ui_password = ""`` in an existing oduflow.toml with a
-    freshly generated password (one distinct password per team). Used to upgrade
-    older configs that predate the secure-by-default bootstrap without leaving
-    the dashboard open. Returns the rewritten text and the list of generated
-    passwords (empty if there was nothing to fill)."""
+def _autofill_ui_passwords(
+    toml_text: str, keep: Collection[str] = ()
+) -> tuple[str, list[str]]:
+    """Fill every empty ``ui_password = ""`` in an existing oduflow.toml with a
+    freshly generated password (one distinct password per team), except in the
+    ``[team.<id>]`` tables listed in ``keep`` (teams whose password comes from
+    elsewhere). Used to upgrade older configs that predate the secure-by-default
+    bootstrap without leaving the dashboard open. Returns the rewritten text and
+    the list of generated passwords (empty if there was nothing to fill)."""
     import secrets
 
     out: list[str] = []
     generated: list[str] = []
+    team: str | None = None
     for raw in toml_text.splitlines():
-        if raw.split("#", 1)[0].strip() == 'ui_password = ""':
+        stripped = raw.split("#", 1)[0].strip()
+        if stripped.startswith("["):
+            header = re.fullmatch(r'\[\s*team\s*\.\s*"?([^"\]]+?)"?\s*\]', stripped)
+            team = header.group(1) if header else None
+        if stripped == 'ui_password = ""' and team not in keep:
             password = secrets.token_urlsafe(18)
             generated.append(password)
             indent = raw[: len(raw) - len(raw.lstrip())]
@@ -7366,7 +7505,12 @@ def _ensure_web_ui_password(settings: Settings) -> Settings:
         cfg_path = find_toml()
         # Follow a config symlink without replacing the symlink itself.
         cfg = pathlib.Path(cfg_path).resolve(strict=True)
-        updated, generated = _autofill_ui_passwords(cfg.read_text(encoding="utf-8"))
+        # A team whose password comes from an environment variable keeps its
+        # empty file value: a generated one would never be used.
+        has_password = [t.team_id for t in settings.teams.values() if t.ui_password]
+        updated, generated = _autofill_ui_passwords(
+            cfg.read_text(encoding="utf-8"), keep=has_password
+        )
         if not generated:
             return settings
         # Staged privately and swapped in, keeping owner and mode. If
@@ -7678,13 +7822,33 @@ def _run_list_service_databases(settings: Settings, team: TeamSettings) -> None:
         )
 
 
+def _format_size(size: int) -> str:
+    """Bytes as KB/MB/GB, scaled like the dashboard's fmtBytes."""
+    if size >= 1024**3:
+        return f"{size / 1024**3:.1f} GB"
+    if size >= 1024**2:
+        return f"{size / 1024**2:.1f} MB"
+    return f"{round(size / 1024)} KB"
+
+
 def _run_cleanup(
     settings: Settings,
     team: TeamSettings,
     dry_run: bool = True,
     purge_deleted_productions: bool = False,
 ) -> None:
-    result = system_ops.cleanup_orphans(settings, team, dry_run=dry_run)
+    if dry_run:
+        result = system_ops.cleanup_orphans(settings, team, dry_run=True)
+    else:
+        # Same team lock as the dashboard's Confirm, in the file lock space the
+        # server shares: nothing is deleted while an environment operation of
+        # the team runs in any process (a container being recreated pins no
+        # checkout, database or workspace for a moment). Wait a while for such
+        # an operation to finish instead of failing at once.
+        with _cli_locks(settings).team_lock_blocking(
+            team.team_id, ATTACH_SWAP_LOCK_TIMEOUT, operation="cleanup"
+        ):
+            result = system_ops.cleanup_orphans(settings, team, dry_run=False)
     mode = "DRY RUN" if result["dry_run"] else "CLEANUP"
 
     if purge_deleted_productions:
@@ -7708,11 +7872,22 @@ def _run_cleanup(
     workspaces = result["orphan_workspaces"]
     ports = result["orphan_ports"]
     roles = result["orphan_roles"]
+    checkouts = result.get("orphan_extra_checkouts", [])
+    checkout_sizes = result.get("orphan_extra_checkout_sizes", {})
+    build_jobs = result.get("orphan_build_jobs", [])
     # Failed removals are absent from the lists above; report them separately.
     errors = result.get("errors", [])
 
-    if not dbs and not workspaces and not ports and not roles:
-        print(f"[{mode}] No orphaned resources {'removed' if errors else 'found'}.")
+    if (
+        not dbs
+        and not workspaces
+        and not ports
+        and not roles
+        and not checkouts
+        and not build_jobs
+    ):
+        outcome = "removed" if errors and not result["dry_run"] else "found"
+        print(f"[{mode}] No orphaned resources {outcome}.")
         for error in errors:
             print(f"[{mode}] Error: {error}")
         return
@@ -7734,8 +7909,28 @@ def _run_cleanup(
         print(f"  PostgreSQL roles ({len(roles)}):")
         for role in roles:
             print(f"    - {role}")
+    if checkouts:
+        print(f"  Extra-addons checkouts ({len(checkouts)}):")
+        for checkout in checkouts:
+            size = checkout_sizes.get(checkout)
+            suffix = f" ({_format_size(size)})" if size is not None else ""
+            print(f"    - {checkout}{suffix}")
+        freed = result.get("extra_checkouts_freed_bytes")
+        if freed is not None:
+            print(f"    {_format_size(freed)} freed.")
+    if build_jobs:
+        print(f"  Image build jobs ({len(build_jobs)}):")
+        for build_id in build_jobs:
+            print(f"    - {build_id}")
 
-    total = len(dbs) + len(workspaces) + len(ports) + len(roles)
+    total = (
+        len(dbs)
+        + len(workspaces)
+        + len(ports)
+        + len(roles)
+        + len(checkouts)
+        + len(build_jobs)
+    )
     if result["dry_run"]:
         print(f"\n  {total} resource(s) would be removed. Run with --force to apply.")
     else:
@@ -8011,6 +8206,16 @@ def _admin_cli(action: str, *, reset: bool = False) -> None:
 
     from oduflow import config_store
 
+    if os.environ.get("ODUFLOW_ADMIN_PASSWORD", "").strip():
+        # The variable wins over the file, so any edit here would be a no-op
+        # that reports success.
+        print(
+            "The Server settings console password is set by the "
+            "ODUFLOW_ADMIN_PASSWORD environment variable. Change or unset the "
+            "variable and restart Oduflow instead.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     settings = _get_settings()
     path = settings.toml_path
     snapshot = config_store.read_snapshot(path)
@@ -8404,7 +8609,11 @@ def _run_cli() -> None:
     # --- Cleanup ---
     p_cleanup = sub.add_parser(
         "cleanup",
-        help="Find and remove orphaned databases, workspaces, and port entries",
+        help=(
+            "Find and remove orphaned databases, workspaces, port entries, "
+            "PostgreSQL roles, unused extra-addons checkouts and stale image "
+            "build jobs"
+        ),
     )
     p_cleanup.add_argument(
         "--dry-run",
@@ -8621,6 +8830,9 @@ def _run_cli() -> None:
             migrations.run_pending(_settings)
             postgres_migration.upgrade(_settings)
             _ensure_initialized(_settings)
+            # XFS project setup refreshes inode ctime, which the staging sweep
+            # uses to distinguish abandoned files from active restores.
+            system_ops.sweep_pg_exchange(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
                 from oduflow.stack_loader import load_stack, stack_environ

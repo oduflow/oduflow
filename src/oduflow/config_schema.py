@@ -366,6 +366,19 @@ GROUPS: tuple[Group, ...] = (
                 "only after relocating the directory.",
             ),
             Field(
+                "etc_dir",
+                "str",
+                "Config directory",
+                "Where postgresql.conf, postgresql-prod.conf and Traefik's "
+                "dynamic config live; containers bind-mount them from here. "
+                "Default: the directory of the loaded oduflow.toml.",
+                default="",
+                apply=LOCKED,
+                note="Existing containers keep mounting the old path; move the "
+                "files, edit it in Raw TOML, then recreate oduflow-db and "
+                "Traefik.",
+            ),
+            Field(
                 "overlay_threshold_mb",
                 "int",
                 "Overlay threshold (MB)",
@@ -878,15 +891,28 @@ GROUPS: tuple[Group, ...] = (
         title="Image registry",
         table=("team", "*", "image_registry"),
         optional=True,
-        description="Enables the image build/publish MCP tools for the team. "
-        "Agents can publish only below the repository prefix.",
+        description="Limits of the image build MCP tools and, with a repository "
+        "prefix, the registry they publish to. Agents can publish only below "
+        "the prefix; without one, builds stay on this host.",
         presence_apply=LIVE,
         fields=(
+            Field(
+                "builds_enabled",
+                "bool",
+                "Allow image builds",
+                "Builds run Dockerfiles on the host Docker daemon, for team "
+                "and single-environment agents alike. Disable to refuse new "
+                "builds for this team.",
+                default=True,
+                apply=LIVE,
+            ),
             Field(
                 "repository_prefix",
                 "str",
                 "Repository prefix",
-                required=True,
+                "Registry namespace published images live under. Empty: "
+                "build and run locally, no publishing.",
+                default="",
                 apply=LIVE,
                 placeholder="acme",
             ),

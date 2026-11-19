@@ -177,7 +177,7 @@ def run_environment_tests(
     #
     # upgrade=False drops -u for a fast re-run. Odoo then takes the test set from
     # `registry._init_modules` instead of `registry.updated_modules` and builds a
-    # 'post_install' suite only (odoo/service/server.py, identical on 15–19), so
+    # 'post_install' suite only (odoo/service/server.py, identical on 15–20), so
     # at_install tests — the default position for TestCase/TransactionCase — are
     # NOT collected. Keep the default (-u) unless the target class is post_install.
     #

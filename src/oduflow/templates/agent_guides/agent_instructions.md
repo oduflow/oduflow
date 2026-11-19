@@ -10,7 +10,7 @@ workflow contract for the rest of that session.
 
 Before writing or refactoring Odoo module code, call
 `get_odoo_development_guide(version="<major>")` once for the target Odoo
-version (15–19).
+version (15–20).
 
 ## Choose the code-delivery mode
 

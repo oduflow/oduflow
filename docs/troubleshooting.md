@@ -532,8 +532,9 @@ less /srv/oduflow/team_1/image_builds/bld-9f3c1a7b22e4/build.log
 A job stuck in `building` with no log progress is usually a Dockerfile step
 waiting on the network — an `apt-get` or `pip install` against an unreachable
 mirror. It is bounded by `build_timeout_seconds` and can be ended immediately
-with `cancel_image_build`; the worker process and its Docker connection are
-terminated even when the step prints nothing.
+with `cancel_image_build`; the builder's whole process group is terminated even
+when the step prints nothing. A build that `oduflow stack apply` started runs
+inside that command instead, so interrupting the command is how to cancel it.
 
 Builds run on the **host Docker daemon**, so they compete with everything else
 for disk. A failure with `no space left on device` is a host problem, not a
@@ -555,9 +556,22 @@ running or stopped service container are always preserved, so a `docker rmi` by
 hand can break a service that was created from a build — recreate such a
 service from a published tag instead.
 
-After an Oduflow restart, builds are never resumed: a job left mid-flight is
-marked `interrupted` the first time it is read. Succeeded builds stay
-publishable while their staging image exists.
+After an Oduflow restart, builds are never resumed. The process running a build
+holds a file lock in the job directory, so a job whose lock is free was
+abandoned by a dead process and is declared `interrupted`, while a job whose
+lock is held is left alone — a `stack apply` building beside the server is not
+mistaken for a crashed one. Succeeded builds stay publishable while their
+staging image exists.
+
+Job directories are not cleaned up on their own. `oduflow cleanup --force` and
+the dashboard's **Cleanup** remove the records of failed, cancelled and
+interrupted builds, and of succeeded builds whose staging image is gone:
+
+```bash
+# Preview (dry run by default), then remove
+oduflow cleanup --team 1
+oduflow cleanup --force --team 1
+```
 
 ---
 

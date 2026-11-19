@@ -65,13 +65,18 @@ class TestMCPBootstrapInstructions:
 
 
 class TestCLIInitDestroy:
-    def test_cli_transport_short_flag_starts_http(self):
+    def test_cli_transport_short_flag_starts_http(self, tmp_path):
         from oduflow import server
 
+        settings = replace(TEST_SETTINGS, base_data_dir=str(tmp_path))
         with (
-            patch.object(sys, "argv", ["oduflow", "-t", "http"]),
+            patch.object(sys, "argv", ["oduflow", "--no-telemetry", "-t", "http"]),
+            patch.object(server, "find_toml"),
+            patch.object(server, "_get_settings", return_value=settings),
             patch("oduflow.docker_ops.client.wait_for_docker") as mock_wait_for_docker,
+            patch("oduflow.postgres_migration.validate_configuration"),
             patch.object(server.migrations, "run_pending"),
+            patch("oduflow.postgres_migration.upgrade"),
             patch.object(server, "_ensure_initialized"),
             patch.object(server.quotas, "apply_all"),
             patch.object(server, "_start_stdio") as mock_stdio,

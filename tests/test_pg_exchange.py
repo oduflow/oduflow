@@ -9,6 +9,7 @@ recreating the container behind the operator's back.
 """
 
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -255,6 +256,250 @@ def test_staged_dump_cleans_partial_file_when_docker_exec_raises(tmp_path):
 # --------------------------------------------------------------------------
 # reload_template
 # --------------------------------------------------------------------------
+
+
+def test_reload_hardlinks_host_dump_into_exchange_and_cleans_link(tmp_path):
+    settings, team = _settings(tmp_path), _team(tmp_path)
+    source = tmp_path / "import-staging" / "dump.pgdump"
+    source.parent.mkdir()
+    source.write_bytes(b"PGDMP imported from S3")
+    host_exchange_dir = tmp_path / "pg_exchange" / "team_7"
+    host_exchange_dir.mkdir(parents=True)
+
+    db_container = MagicMock()
+    db_container.attrs = {"Mounts": [{"Destination": "/exchange"}]}
+    restore_paths = []
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "pg_restore":
+            container_path = cmd[-1]
+            restore_paths.append(container_path)
+            host_path = host_exchange_dir / os.path.basename(container_path)
+            assert host_path.read_bytes() == source.read_bytes()
+            assert host_path.stat().st_ino == source.stat().st_ino
+        return 0, b""
+
+    db_container.exec_run.side_effect = _run
+    client = MagicMock()
+    client.containers.get.return_value = db_container
+
+    with (
+        patch.object(system_ops, "get_client", return_value=client),
+        patch.object(system_ops, "_wait_pg_ready"),
+        patch.object(system_ops, "_exec_sql", return_value="5"),
+        patch.object(system_ops, "_db_exists", return_value=False),
+        patch.object(system_ops, "_is_text_dump", return_value=False),
+        patch.object(
+            system_ops, "ensure_team_tablespace", return_value="oduflow_team_7"
+        ),
+        patch.object(system_ops, "_update_template_sizes"),
+        patch.object(system_ops, "_copy_file_to_container") as copy_in,
+    ):
+        system_ops.reload_template(
+            settings,
+            team,
+            template_name="prod",
+            dump_path=str(source),
+            persist_dump=False,
+        )
+
+    copy_in.assert_not_called()
+    assert len(restore_paths) == 1
+    assert restore_paths[0].startswith("/exchange/team_7/oduflow-restore-")
+    assert source.read_bytes() == b"PGDMP imported from S3"
+    assert list(host_exchange_dir.iterdir()) == []
+
+
+def test_reload_streams_to_container_when_exchange_hardlink_fails(tmp_path):
+    settings, team = _settings(tmp_path), _team(tmp_path)
+    source = tmp_path / "other-filesystem" / "dump.pgdump"
+    source.parent.mkdir()
+    source.write_bytes(b"PGDMP imported from S3")
+    (tmp_path / "pg_exchange" / "team_7").mkdir(parents=True)
+
+    db_container = MagicMock()
+    db_container.attrs = {"Mounts": [{"Destination": "/exchange"}]}
+    db_container.exec_run.return_value = (0, b"")
+    client = MagicMock()
+    client.containers.get.return_value = db_container
+
+    with (
+        patch.object(system_ops, "get_client", return_value=client),
+        patch.object(system_ops, "_wait_pg_ready"),
+        patch.object(system_ops, "_exec_sql", return_value="5"),
+        patch.object(system_ops, "_db_exists", return_value=False),
+        patch.object(system_ops, "_is_text_dump", return_value=False),
+        patch.object(
+            system_ops, "ensure_team_tablespace", return_value="oduflow_team_7"
+        ),
+        patch.object(system_ops, "_update_template_sizes"),
+        patch.object(system_ops.os, "link", side_effect=OSError("cross-device link")),
+        patch.object(system_ops, "_copy_file_to_container") as copy_in,
+    ):
+        system_ops.reload_template(
+            settings,
+            team,
+            template_name="prod",
+            dump_path=str(source),
+            persist_dump=False,
+        )
+
+    copy_in.assert_called_once()
+    copy_args = copy_in.call_args
+    assert copy_args.args[:3] == (db_container, str(source), "/tmp")
+    assert copy_args.kwargs["archive_name"].startswith("oduflow-restore-")
+    cmds = [call.args[0] for call in db_container.exec_run.call_args_list]
+    restore = next(cmd for cmd in cmds if cmd[0] == "pg_restore")
+    assert restore[-1].startswith("/tmp/oduflow-restore-")
+    assert [cmd for cmd in cmds if cmd[:2] == ["rm", "-f"]] == [
+        ["rm", "-f", restore[-1]]
+    ]
+
+
+def _exposure_setup(tmp_path):
+    source = tmp_path / "import-staging" / "dump.pgdump"
+    source.parent.mkdir()
+    source.write_bytes(b"PGDMP")
+    client, db_container = _client([{"Destination": "/exchange"}])
+    db_container.exec_run.return_value = (0, b"")
+    return source, client, db_container
+
+
+def test_expose_falls_back_when_postgres_cannot_read_the_link(tmp_path):
+    # A hardlink keeps the source's owner and mode; under a remapped container
+    # user that can be unreadable, which pg_restore would only find out later.
+    source, client, db_container = _exposure_setup(tmp_path)
+    db_container.exec_run.return_value = (1, b"")
+    host_exchange_dir = tmp_path / "pg_exchange" / "team_7"
+
+    with (
+        patch.object(system_ops, "_copy_file_to_container") as copy_in,
+        system_ops._expose_file_to_pg(
+            client, _settings(tmp_path), _team(tmp_path), db_container, str(source)
+        ) as container_path,
+    ):
+        assert container_path.startswith("/tmp/oduflow-restore-")
+        assert list(host_exchange_dir.iterdir()) == []
+
+    copy_in.assert_called_once()
+    probe = db_container.exec_run.call_args_list[0].args[0]
+    assert probe[:2] == ["test", "-r"]
+    assert probe[2].startswith("/exchange/team_7/oduflow-restore-")
+    assert db_container.exec_run.call_args_list[-1].args[0] == [
+        "rm",
+        "-f",
+        container_path,
+    ]
+
+
+def test_expose_falls_back_when_the_exchange_dir_cannot_be_created(tmp_path):
+    source, client, db_container = _exposure_setup(tmp_path)
+
+    with (
+        patch.object(
+            system_ops.os, "makedirs", side_effect=PermissionError("read-only")
+        ),
+        patch.object(system_ops, "_copy_file_to_container") as copy_in,
+        system_ops._expose_file_to_pg(
+            client, _settings(tmp_path), _team(tmp_path), db_container, str(source)
+        ) as container_path,
+    ):
+        assert container_path.startswith("/tmp/oduflow-restore-")
+
+    copy_in.assert_called_once()
+    # The container passed in is reused instead of being looked up again.
+    client.containers.get.assert_not_called()
+
+
+def test_expose_removes_the_link_when_the_restore_raises(tmp_path):
+    source, client, db_container = _exposure_setup(tmp_path)
+    host_exchange_dir = tmp_path / "pg_exchange" / "team_7"
+
+    with (
+        pytest.raises(RuntimeError),
+        system_ops._expose_file_to_pg(
+            client, _settings(tmp_path), _team(tmp_path), db_container, str(source)
+        ) as container_path,
+    ):
+        assert container_path.startswith("/exchange/team_7/oduflow-restore-")
+        assert len(list(host_exchange_dir.iterdir())) == 1
+        raise RuntimeError("pg_restore crashed")
+
+    assert list(host_exchange_dir.iterdir()) == []
+    assert source.read_bytes() == b"PGDMP"
+
+
+# --------------------------------------------------------------------------
+# stale staging sweep
+# --------------------------------------------------------------------------
+
+
+def test_sweep_removes_only_abandoned_staging_files(tmp_path):
+    team_dir = tmp_path / "pg_exchange" / "team_7"
+    team_dir.mkdir(parents=True)
+    hexid = "0123456789abcdef0123456789abcdef"
+    staged = [
+        team_dir / f"oduflow-restore-{hexid}",
+        team_dir / f"oduflow_7_main-{hexid}.pgdump",
+        team_dir / f"oduflow_7_prod-{hexid}.pgdump.part",
+    ]
+    unrelated = [
+        team_dir / "operator-notes.pgdump",
+        team_dir / "operator-notes.pgdump.part",
+    ]
+    for path in (*staged, *unrelated):
+        path.write_bytes(b"x")
+    # Hardlinks carry the source's mtime, which says nothing about the link.
+    os.utime(staged[0], (0, 0))
+
+    # A restore started moments ago may still be running (e.g. a CLI
+    # ``stack apply`` next to a starting server): leave it alone.
+    assert system_ops.sweep_pg_exchange(_settings(tmp_path)) == 0
+    assert set(team_dir.iterdir()) == set(staged + unrelated)
+
+    later = system_ops.time.time() + system_ops._PG_EXCHANGE_STALE_SECONDS + 60
+    with patch.object(system_ops.time, "time", return_value=later):
+        assert system_ops.sweep_pg_exchange(_settings(tmp_path)) == len(staged)
+
+    assert set(team_dir.iterdir()) == set(unrelated)
+
+
+def test_sweep_tolerates_a_missing_exchange_dir(tmp_path):
+    assert system_ops.sweep_pg_exchange(_settings(tmp_path)) == 0
+
+
+def test_startup_reclaims_abandoned_dumps_before_quota_setup(tmp_path):
+    from oduflow import server
+
+    settings = _settings(tmp_path)
+    team_dir = tmp_path / "pg_exchange" / "team_7"
+    team_dir.mkdir(parents=True)
+    staged = team_dir / f"oduflow-restore-{'a' * 32}"
+    staged.write_bytes(b"abandoned dump")
+    later = staged.stat().st_ctime + system_ops._PG_EXCHANGE_STALE_SECONDS + 60
+
+    def apply_quotas(_settings):
+        # Real XFS project setup refreshes ctime on every file it visits. The
+        # abandoned dump must already be gone when quota setup reaches it.
+        assert not staged.exists()
+
+    with (
+        patch.object(sys, "argv", ["oduflow", "--no-telemetry", "-t", "http"]),
+        patch.object(server, "find_toml"),
+        patch.object(server, "_get_settings", return_value=settings),
+        patch("oduflow.docker_ops.client.wait_for_docker"),
+        patch("oduflow.postgres_migration.validate_configuration"),
+        patch.object(server.migrations, "run_pending"),
+        patch("oduflow.postgres_migration.upgrade"),
+        patch.object(server, "_ensure_initialized"),
+        patch.object(system_ops.time, "time", return_value=later),
+        patch.object(server.quotas, "apply_all", side_effect=apply_quotas) as quotas,
+        patch.object(server, "_start_http") as start_http,
+    ):
+        server._run_cli()
+
+    quotas.assert_called_once_with(settings)
+    start_http.assert_called_once_with()
 
 
 def test_reload_skips_the_container_copy_for_an_already_readable_dump(tmp_path):
