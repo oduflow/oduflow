@@ -32,7 +32,8 @@ This will:
 
 The temporary Odoo container connects as a one-off PostgreSQL role that owns
 only the build database, not as the cluster superuser: the build runs whatever
-the image contains. The role and the build database are removed afterwards.
+the image contains. The same role dumps the result. The role and the build
+database are removed afterwards.
 
 ### Install additional modules during generation
 
@@ -77,6 +78,8 @@ This operation:
 6. Remounts those overlays against the new baseline, **preserving each environment's filestore changes** by default
 7. Restarts the affected containers
 
+The dump is taken by the **environment's own PostgreSQL role**, not by the cluster superuser (see [How a database is dumped](#how-a-database-is-dumped)). An environment created before each environment had a role of its own is refused with `has no scoped database credentials`; run `update_environment` on it first — it keeps its database and filestore.
+
 The **source environment** is always reset to the new baseline (its data just became the template). **Other environments keep their filestore changes** (the overlay `upper` layer) — this is non-destructive by default. Their existing files shadow the new template (env-local edits win); files they deleted stay deleted; new template files show through.
 
 To instead discard other environments' changes and reset them to the clean new baseline:
@@ -99,7 +102,7 @@ A [production](production.md) can be published as a dev template — the reverse
 oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09"}'
 ```
 
-The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`).
+The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`). It is taken by the production's own PostgreSQL role, not by the production cluster's superuser — see [How a production's data is dumped](production.md#how-a-productions-data-is-dumped).
 
 The template records the production's `repo_url`, `odoo_image`, `git_user` and extra addons, plus [provenance](#template-metadata) — the production's branch, the commit its checkout is on, and the snapshot time — so environments created from it report code/database drift like any other template.
 
@@ -540,6 +543,38 @@ What this means for a dump:
 A template database loaded by an older Oduflow keeps its previous owner until
 it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
 an environment over it).
+
+## How a database is dumped
+
+Dumping is the same question from the other side: `pg_dump` reads a database
+whose tables, views and functions its users defined. On a current PostgreSQL
+release reading runs none of it, but releases before 15.8 and 16.4 had a flaw
+that let a database's user run SQL as whoever dumped it (CVE-2024-7348), and a
+PostgreSQL container keeps the release it was created with. So Oduflow runs
+`pg_dump` as the role the database belongs to, which gains nothing by it:
+
+| What is dumped | By |
+|---|---|
+| An environment (`template-from-env` / `save_as_template`, `create_production(from_environment=…)`, `restore_production(from_environment=…)`) | the environment's own role |
+| A production (snapshots, `save_production_as_template`) | the production's own role |
+| A template (`create_production(template_name=…)`) | the team's template owner |
+| The build database of `init-template` | the one-off build role |
+| A production or service database during a [PostgreSQL upgrade](installation.md#upgrading-postgresql) | the role in its credentials file |
+
+The dump format, where it is written and how it is restored are unchanged.
+
+Two dumps are still the superuser's. A template database that an older Oduflow
+loaded belongs to the superuser, so nobody else can read all of it; no user's
+role can connect to a template database, which is what the flaw needs. It is
+dumped as before until the template is imported or published again. And a
+PostgreSQL upgrade lets the superuser dump the databases you name in
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE`. In both cases the server is told not to
+expand views and foreign tables during the dump; a server too old to know that
+setting is named in a warning in the server log instead.
+
+A dump its role cannot finish fails with PostgreSQL's reason, usually
+`permission denied for table …`; see
+[Troubleshooting](troubleshooting.md#a-dump-fails-with-permission-denied).
 
 ## Listing and Dropping Templates
 

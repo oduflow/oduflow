@@ -221,14 +221,21 @@ def test_upgrade_plan_reads_tenant_databases_with_a_pinned_path(tmp_path):
     assert databases == ["oduflow_1_prod-shop"]
     assert extensions == {"pg_trgm"}
     # Inside databases other than the maintenance one: the two bootstrap
-    # databases are counted, the tenant's extensions are listed. All of it as
-    # the superuser, none of it without the pin (psql_call checks each).
+    # databases are counted, the tenant's extensions are listed, and so is
+    # what its role's dump would leave out. All of it as the superuser, none
+    # of it without the pin (psql_call checks each).
     inside = [(role, db) for role, db, _sql in cluster.calls if db != "postgres"]
-    assert inside == [(SUPERUSER, "odoo"), (SUPERUSER, "oduflow_1_prod-shop")]
+    assert inside == [
+        (SUPERUSER, "odoo"),
+        (SUPERUSER, "oduflow_1_prod-shop"),
+        (SUPERUSER, "oduflow_1_prod-shop"),
+    ]
     assert cluster.other == []
-    # The tenant's database is asked for a catalog table by its full name.
-    (extension_query,) = cluster.sql("oduflow_1_prod-shop")
+    # The tenant's database is asked for catalog tables by their full names.
+    extension_query, omissions_query = cluster.sql("oduflow_1_prod-shop")
     assert "FROM pg_catalog.pg_extension" in extension_query
+    assert omissions_query == pm._ROLE_DUMP_OMISSIONS_SQL
+    assert "FROM pg_catalog.pg_subscription" in omissions_query
 
 
 # --------------------------------------------------------------------------

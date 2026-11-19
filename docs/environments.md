@@ -749,9 +749,10 @@ Oduflow reads an environment's database the same way your code does: as the
 environment's own role, never as the cluster superuser. That holds for the
 checks around `install_odoo_modules` and `upgrade_odoo_modules`, the installed
 modules list, the dashboard's **Connect As** user list, translation exports
-and `reset_admin_password`. The tables, functions and operators in a database
-are its tenant's to define, and a query resolves them with the rights of
-whoever runs it.
+and `reset_admin_password`, and for the `pg_dump` behind `save_as_template`
+and a production seeded from the environment. The tables, functions and
+operators in a database are its tenant's to define, and a query resolves them
+with the rights of whoever runs it.
 
 **Environments without their own role.** An environment created before
 per-environment credentials existed has no role on record, and Oduflow does
@@ -763,7 +764,11 @@ not fall back to the superuser for it. On such an environment:
 - `list_installed_modules`, the dashboard's module picker and the **Connect
   As** user list report the error instead of a list;
 - `run_db_query`, the SQL console, `run_odoo_shell`, `run_odoo_tests`,
-  `connect_as_user` and `reset_admin_password` are refused as before.
+  `connect_as_user` and `reset_admin_password` are refused as before;
+- `save_as_template`, `create_production(from_environment=…)` and
+  `restore_production(from_environment=…)` are refused before anything is
+  dumped: an environment's database is dumped by its own role too (see
+  [How a database is dumped](templates.md#how-a-database-is-dumped)).
 
 The error is `Environment '<name>' has no scoped database credentials`.
 Run `update_environment` on it (no arguments needed): the environment gets a

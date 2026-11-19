@@ -65,11 +65,15 @@ from oduflow.docker_ops.system_ops import (
     drop_signaling_sequences,
     ensure_prod_infra,
     ensure_team_network,
+    explain_dump_failure,
     provision_scoped_role,
     reassign_db_ownership,
     require_postgres_for_odoo,
     restore_archive_as_role,
     restrict_database_access,
+    scoped_dump_role,
+    superuser_dump_environment,
+    template_dump_role,
 )
 from oduflow.domains import (
     NameIndex,
@@ -1076,6 +1080,8 @@ def _copy_db_into_prod_cluster(
     target_db: str,
     label: str,
     creds: dict[str, str],
+    *,
+    source_role: str,
 ) -> None:
     """Copy a dev-cluster database into the production cluster.
 
@@ -1089,16 +1095,32 @@ def _copy_db_into_prod_cluster(
     restore is done by the production's own scoped role — ``creds``, which
     must already own *target_db* — from a throwaway client container, never by
     the production cluster's superuser.
+
+    The dump is taken by *source_role*, the source database's own role: the
+    environment's, or the template owner. Only a template an older version
+    loaded as the superuser is still dumped by the superuser (see
+    system_ops.template_dump_role), with the server told not to expand what
+    is not a plain relation.
     """
     dev = client.containers.get(settings.shared_db_container)
     dump_in_container = f"/tmp/{target_db}.seed.pgdump"
 
+    environment = (
+        superuser_dump_environment(client, settings, source_db)
+        if source_role == settings.db_user
+        else {}
+    )
     exit_code, output = dev.exec_run(
-        ["pg_dump", "-U", settings.db_user, "-Fc", "-f", dump_in_container, source_db]
+        ["pg_dump", "-U", source_role, "-Fc", "-f", dump_in_container, source_db],
+        environment=environment,
     )
     if exit_code != 0:
         text = output.decode("utf-8", errors="replace") if output else ""
-        raise ExternalCommandError(f"pg_dump ({label})", exit_code, text[-2000:])
+        # A failed dump can leave part of itself in the container's layer.
+        dev.exec_run(["rm", "-f", dump_in_container])
+        raise ExternalCommandError(
+            f"pg_dump ({label})", exit_code, explain_dump_failure(text, tail=2000)
+        )
 
     # Under the data directory: the restore client mounts the dump, and the
     # Docker daemon resolves that path, not this process.
@@ -1139,7 +1161,14 @@ def _seed_db_from_template(
             f"template '{template_name}' first."
         )
     _copy_db_into_prod_cluster(
-        client, settings, team, tpl_db, target_db, "template seed", creds
+        client,
+        settings,
+        team,
+        tpl_db,
+        target_db,
+        "template seed",
+        creds,
+        source_role=template_dump_role(client, settings, team, tpl_db),
     )
 
 
@@ -1158,7 +1187,14 @@ def _seed_db_from_environment(
             f"Environment database '{src_db}' not found for environment '{source_env}'."
         )
     _copy_db_into_prod_cluster(
-        client, settings, team, src_db, target_db, "environment seed", creds
+        client,
+        settings,
+        team,
+        src_db,
+        target_db,
+        "environment seed",
+        creds,
+        source_role=scoped_dump_role(client, settings, team, source_env),
     )
 
 

@@ -477,6 +477,107 @@ it, and that turned out to be the weaker half of the boundary:
   conversion helper, and event triggers in a template loaded as the
   superuser before the template entry above.
 
+- (2026-11-19) — **`pg_dump` runs as the role that owns the database.** The
+  last item every entry above carried forward. Every dump ran `pg_dump -U
+  <superuser>` over tenant content: production snapshots, publishing an
+  environment or a production as a template, the dump that seeds or promotes
+  a production from a development database, `init_template`'s build
+  database, and every database carried through a PostgreSQL upgrade.
+  The risk was assessed before anything was changed, because it is *not* the
+  restore's. `pg_dump` empties `search_path` and qualifies every name, turns
+  `row_security` off, and reads data with `COPY ... TO`, which calls nothing
+  but type output functions — and those take a superuser to define. The
+  catalog is read through deparsing functions, which print an expression
+  without evaluating it; no trigger fires on a read, and event triggers fire
+  on DDL. So on a current release a superuser's dump runs nothing of the
+  tenant's. It did until 12.20 / 13.16 / 14.13 / 15.8 / 16.4, though
+  (CVE-2024-7348): `pg_dump` lists relations, then reads them, and a session
+  that swapped a sequence for a view in between had the view's functions run
+  by whoever dumped. That matters here for a reason specific to Oduflow: a
+  PostgreSQL container is never recreated behind the operator's back, so its
+  minor release is the one it was created with, and a tenant has all the time
+  it needs to hold a transaction open and wait for the nightly snapshot.
+  Pinning the defence instead — `restrict_nonsystem_relation_kind`, which a
+  patched `pg_dump` sets itself — was therefore not enough on its own: the
+  servers that need it are the ones that do not know the setting. Changing
+  *who* dumps removes the class rather than the instance: whatever the next
+  such flaw lets a dump run, it runs with rights the tenant already has.
+  *Who.* An environment's or a production's database is dumped by its scoped
+  role (`system_ops.scoped_dump_role`), a template by the team's template
+  owner (`template_dump_role`), the build database by its one-off builder,
+  and a carried database by the role on Oduflow's records — the role that
+  restores it. All of them own what they read, which is what the ownership
+  hand-overs of the earlier entries were for.
+  *Where.* Next to PostgreSQL, through the local socket, as before — not from
+  the throwaway client container the restores use. That container exists to
+  confine a client that *executes its input* (`psql` meta-commands, an
+  archive's SQL); `pg_dump` takes nothing from the tenant but query results
+  and writes one file whose name Oduflow chose, so the role it was started
+  with is the role it keeps. Staying there kept every property the dumps
+  had: the archive written in place through `pg_exchange` (which is what
+  keeps the offsets a parallel restore uses), the stream to S3 with its
+  hash, and no secret in transit — which has a consequence worth more than
+  the convenience. Only the role's *name* is needed, so a production whose
+  credentials file is lost can still be snapshotted, under the derived name,
+  *before* `reconfigure_production` repairs it; refusing (as the restore
+  does, which needs the password) would have withheld the backup exactly
+  when one is wanted. The name is not taken on trust either way: the cluster
+  is asked whether that role exists and is no superuser, which also covers a
+  credentials file somebody edited.
+  *No fallback to the superuser when a role's dump fails*, for the reason the
+  upgrade got none: the failure is the tenant's to cause (a table with
+  `FORCE ROW LEVEL SECURITY` stops its owner's `pg_dump`, which runs with
+  `row_security` off), so a fallback would be a switch in its hands. A dump
+  fails with PostgreSQL's reason and the remedy instead. What can make it
+  fail honestly is content the role does not own — created while an older
+  version ran the container as the superuser — which the same recreate that
+  provisions a role hands over.
+  *What the superuser still dumps*, and why that was kept rather than
+  refused: a template an older version loaded is the superuser's, so no
+  other role can read all of it, and refusing would have made every existing
+  template unusable for `create_production` until reloaded. No tenant role
+  can connect to a template database, which is the second session the flaw
+  needs. And the databases an operator names for the upgrade
+  (`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE`, which now covers the dump as well:
+  they hold what only a superuser can recreate, and may hold what only a
+  superuser can read; the operator vouches for their content, which the
+  stopped applications alone would not — a session can be held from any
+  container that knows the role's password). Both pass
+  `superuser_dump_environment`: on a server
+  that knows the setting it is sent with the connection (`PGOPTIONS`), so it
+  does not depend on the client's release — in the upgrade the client is the
+  *new* image; on one that does not, sending it would fail the connection,
+  so the dump goes ahead and a warning names the release. A check on every
+  start was weighed and left out: with these two dumps as the only ones
+  left, it would have reported a condition that no longer leads anywhere.
+  *The upgrade* needed one thing more, because there the dump is all that
+  remains of a database once its cluster is removed. A role's `pg_dump`
+  fails on what it may not read — loudly, and before anything is removed —
+  but it *skips* two things with at most a warning: subscriptions, and the
+  options of user mappings it may not see. Neither exists without something
+  a superuser set up, so a database containing either is refused when the
+  upgrade is planned.
+  Roles were never dumped with `pg_dumpall`; they are read from the catalog
+  by the superuser, which resolves nothing of a tenant's.
+  The upgrade's helper container held the superuser's password for every
+  command, including `pg_restore --list`, which connects to nothing. It now
+  gets the password of whoever its command connects as — a scoped role's for
+  the dump and the content restore, the superuser's only for the
+  database-level replay and the operator's exceptions — and drops every
+  capability but the one that lets root read and write the dump directory.
+  The password is what outlives the container: loopback in the cluster's
+  namespace is trusted anyway, but the password opens both clusters from
+  every team network until someone changes it.
+  Accepted costs: a tenant can now end its own dump (a role may signal its
+  own sessions), which fails that snapshot visibly and nothing else; and
+  `save_as_template` joins the tools that refuse an environment without a
+  role.
+  Still open, same family: the `postgres:17` conversion helper, which parses
+  an archive as root, and event triggers in a template loaded as the
+  superuser before the template entry above — on PostgreSQL 17 that includes
+  `ON login` triggers, which fire for the superuser's sessions in such a
+  template, its dump among them.
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -561,3 +662,12 @@ native neutralization, rather than re-implementing what Odoo already ships:
   returning the superuser's password, and the start reports the containers
   that still hold it (`superuser_credential_holders`); this withdraws the
   Decision's fallback for old environments (see Evolution).
+- (2026-11-19) — **`pg_dump` runs as the database's own role**
+  (`system_ops.scoped_dump_role`, `template_dump_role`, `_staged_db_dump`,
+  `backup_ops._dump_stream`, `production_ops._copy_db_into_prod_cluster`,
+  `postgres_migration._dump_database`): snapshots, template publishes,
+  production seeds, the template build and the PostgreSQL upgrade. The
+  superuser keeps templates loaded by older versions and the upgrade's
+  operator-named databases, with `restrict_nonsystem_relation_kind` sent to
+  servers that know it, and the upgrade's helper holds the superuser's
+  password only for the steps the superuser itself takes (see Evolution).

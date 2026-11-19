@@ -418,6 +418,38 @@ What this means for the data:
 The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
 and is not affected.
 
+### How a production's data is dumped
+
+The other direction follows the same rule. A snapshot
+(`snapshot_production`, the daily schedule, the one before a deploy) and
+`save_production_as_template` run `pg_dump` as the **production's own
+PostgreSQL role**, not as the superuser of the production cluster; the
+database a production is seeded or promoted from is dumped by the
+environment's role, or by the role that owns the team's templates. `pg_dump`
+only reads, and on a current PostgreSQL release reading runs nothing a
+database defines — but releases before 15.8 and 16.4 had a flaw that let it
+(CVE-2024-7348), and a PostgreSQL container keeps the release it was created
+with. A dump taken by the database's own role cannot do more than that role
+already can.
+
+Nothing changes in what a snapshot contains or how it is stored. What can
+change is that a dump is refused:
+
+- **Something the role may not read.** Everything in a production's database
+  belongs to its role, unless an older version recreated the container with
+  the superuser's login and Odoo has created tables since. The snapshot then
+  fails with `permission denied for table …`; `reconfigure_production` with no
+  settings changed hands everything back to the role (see
+  [Reconfiguring a production](#reconfiguring-a-production)). A table with
+  `FORCE ROW LEVEL SECURITY` has to let its owner read every row.
+- **No role at all.** A production whose role no longer exists in the cluster
+  is not dumped by the superuser in its place; the error names
+  `reconfigure_production`. A missing `env_credentials.json` alone does not
+  stop a snapshot: the role's name is all a dump needs.
+
+A deploy continues when its pre-update snapshot fails, as before, and logs the
+reason; a failed scheduled snapshot is reported by `production_backup_status`.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
@@ -708,8 +740,9 @@ Restore is swap-based: the dump is restored into a scratch database and
 swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
-`rollback_production` to the matching commit. The dump is restored by the
-production's own PostgreSQL role, not by the superuser — see
+`rollback_production` to the matching commit. The dump is taken and restored
+by the production's own PostgreSQL role, not by the superuser — see
+[How a production's data is dumped](#how-a-productions-data-is-dumped) and
 [How data is loaded into a production](#how-data-is-loaded-into-a-production)
 for what that excludes.
 

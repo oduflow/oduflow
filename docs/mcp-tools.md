@@ -1454,6 +1454,10 @@ new baseline. On re-baseline their filestore changes (the overlay upper layer)
 are **preserved** by default; `reset_env_changes=True` discards them. The source
 environment itself is always reset — its data just became the new template.
 
+The database is dumped by the environment's own PostgreSQL role, not by the
+cluster superuser. An environment without one is refused; run
+[`update_environment`](#update_environment) on it first.
+
 Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=True`.
 { .odu-tool-meta }
 
@@ -1485,7 +1489,8 @@ Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=T
 
 Save a **production's** database and filestore as a dev template. The
 production keeps serving throughout — the dump is a consistent snapshot and
-nothing is stopped or modified on the production side.
+nothing is stopped or modified on the production side. It is taken by the
+production's own PostgreSQL role, not by the cluster superuser.
 
 Overwrite and reset semantics are identical to
 [`save_as_template`](#save_as_template).
@@ -2994,7 +2999,11 @@ Both require a `[backup]` section in `oduflow.toml`.
 ### `snapshot_production`
 
 Take a snapshot of a production to S3: a database dump, a deduplicated
-filestore revision, and a manifest recording the deployed commit sha.
+filestore revision, and a manifest recording the deployed commit sha. The
+dump is taken by the production's own PostgreSQL role, not by the cluster
+superuser; if that role may not read something
+(`permission denied for table …`), run
+[`reconfigure_production`](#reconfigure_production) and retry.
 
 Lock: production + backup store.
 { .odu-tool-meta }

@@ -47,8 +47,10 @@ from oduflow.docker_ops.system_ops import (
     _create_load_db,
     _exec_sql,
     drop_signaling_sequences,
+    explain_dump_failure,
     reassign_db_ownership,
     restore_archive_as_role,
+    scoped_dump_role,
 )
 from oduflow.errors import (
     ExternalCommandError,
@@ -104,8 +106,16 @@ def _snapshot_id(now: datetime.datetime | None = None) -> str:
     return (now or _now_utc()).strftime("%Y%m%dT%H%M%SZ")
 
 
+# How much of pg_dump's stderr a failed snapshot reports.
+_DUMP_STDERR_TAIL = 2000
+
+
 def _dump_stream(container: Any, db_user: str, db_name: str) -> Iterator[bytes]:
     """Yield pg_dump -Fc stdout frames from a docker exec stream.
+
+    ``db_user`` is the role that dumps: the production's own scoped role
+    (system_ops.scoped_dump_role), never the cluster superuser. pg_dump runs
+    next to PostgreSQL, whose local socket asks that role for no password.
 
     Uses the low-level exec API so the command's exit code can be inspected
     after the stream drains: with ``stream=True`` docker-py leaves
@@ -120,9 +130,14 @@ def _dump_stream(container: Any, db_user: str, db_name: str) -> Iterator[bytes]:
     exec_id = api.exec_create(container.id, ["pg_dump", "-U", db_user, "-Fc", db_name])[
         "Id"
     ]
+    errors = bytearray()
     for stdout, stderr in api.exec_start(exec_id, stream=True, demux=True):
         if stderr:
             logger.debug("pg_dump stderr: %s", stderr[-500:])
+            # Kept for the failure report: the role that dumps can be refused
+            # (an object it does not own), and the reason is only said here.
+            errors.extend(stderr)
+            del errors[:-_DUMP_STDERR_TAIL]
         if stdout:
             yield stdout
     exit_code = api.exec_inspect(exec_id).get("ExitCode")
@@ -137,8 +152,12 @@ def _dump_stream(container: Any, db_user: str, db_name: str) -> Iterator[bytes]:
                 f"pg_dump of {db_name}: exec status could not be read "
                 "(ExitCode=None); the dump may be truncated",
             )
+        reason = errors.decode("utf-8", errors="replace").strip()
         raise ExternalCommandError(
-            "pg_dump", exit_code, f"pg_dump of {db_name} exited with code {exit_code}"
+            "pg_dump",
+            exit_code,
+            f"pg_dump of {db_name} exited with code {exit_code}"
+            + (f": {explain_dump_failure(reason)}" if reason else ""),
         )
 
 
@@ -177,6 +196,12 @@ def snapshot_production(
         except Exception:
             commit = ""
 
+    # The production's own role dumps it, never the cluster superuser; one
+    # without a role is refused before anything is uploaded.
+    dump_role = scoped_dump_role(
+        client, settings, team, env_name, container_name=settings.prod_db_container
+    )
+
     snapshot_id = _snapshot_id()
     prefix = _snapshot_prefix(backup, team, name)
     db_key = f"{prefix}/db/{snapshot_id}.pgdump"
@@ -195,7 +220,7 @@ def snapshot_production(
     digest = hashlib.sha256()
 
     def _hashing_frames() -> Any:
-        for frame in _dump_stream(pg, settings.db_user, db_name):
+        for frame in _dump_stream(pg, dump_role, db_name):
             digest.update(frame)
             yield frame
 

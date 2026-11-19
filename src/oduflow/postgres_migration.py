@@ -71,13 +71,27 @@ _HEARTBEAT_SECONDS = 60.0
 _POLL_SECONDS = 2.0
 # Image IDs are content addresses, so one ID always runs one PostgreSQL major.
 _BINARY_MAJORS: dict[str, int] = {}
-# Names databases an operator lets the superuser restore; see _restore_database.
+# Names databases an operator lets the superuser dump and restore; see
+# _dump_database and _restore_database.
 SUPERUSER_RESTORE_ENV = "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE"
 # ``pg_restore --create -n <schema>`` restores the database itself and its
 # properties, and of the rest only what lies in that schema. No database has
 # this one: PostgreSQL reserves the ``pg_`` prefix, so nobody can create it.
 _NO_SCHEMA = "pg_oduflow_no_such_schema"
 _TRUSTED_MARKER = "---trusted---"
+# What pg_dump leaves out, with a warning at most, when it is not run by a
+# superuser: subscriptions, and the options of user mappings it may not see
+# (a password, usually). Neither exists without something a superuser set up
+# (the right to subscribe, a foreign-data wrapper). Every name is spelled
+# out: the superuser reads a tenant's database here.
+_ROLE_DUMP_OMISSIONS_SQL = (
+    "SELECT 'a subscription' WHERE EXISTS ("
+    "SELECT 1 FROM pg_catalog.pg_subscription s "
+    "JOIN pg_catalog.pg_database d ON d.oid OPERATOR(pg_catalog.=) s.subdbid "
+    "WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()) "
+    "UNION ALL SELECT 'a user mapping' WHERE EXISTS ("
+    "SELECT 1 FROM pg_catalog.pg_user_mapping);"
+)
 # Control files that mark their extension trusted: its database's owner may
 # create it without being a superuser.
 _TRUSTED_CONTROL_RE = "^[[:space:]]*trusted[[:space:]]*=[[:space:]]*.?(true|on|yes|1)"
@@ -415,7 +429,8 @@ def _carried_databases(settings: Settings, kind: str) -> set[str]:
 
 
 def _superuser_restores() -> set[str]:
-    """Databases the operator lets the superuser restore (SUPERUSER_RESTORE_ENV)."""
+    """Databases the operator lets the superuser carry over: dump and restore
+    (SUPERUSER_RESTORE_ENV)."""
     raw = os.environ.get(SUPERUSER_RESTORE_ENV, "")
     return {name.strip() for name in raw.split(",") if name.strip()}
 
@@ -424,7 +439,7 @@ def _superuser_restore_hint(name: str) -> str:
     return (
         "If you trust everything that database contains, start Oduflow with "
         f"{SUPERUSER_RESTORE_ENV}={name} (comma-separated for several) to let "
-        "the superuser restore it."
+        "the superuser dump and restore it."
     )
 
 
@@ -515,6 +530,24 @@ def _inventory(
         extensions.update(used)
         if name in databases and name not in by_superuser:
             restricted.update(used)
+            # The dump is all that is left of a database once its cluster is
+            # removed, and its role takes it (see _dump_database).
+            omitted = system_ops._exec_sql(
+                client,
+                settings,
+                _ROLE_DUMP_OMISSIONS_SQL,
+                db=name,
+                container_name=container,
+            ).splitlines()
+            if omitted:
+                raise PrerequisiteNotMetError(
+                    f"Database '{name}' in {container} contains "
+                    f"{' and '.join(omitted)}, which only a superuser's dump "
+                    "carries over. A database is dumped and restored by its "
+                    "own role, never by the superuser. "
+                    + _superuser_restore_hint(name)
+                    + " Nothing has been changed."
+                )
     size = 0
     if databases:
         listed = ", ".join(f"'{name}'" for name in databases)
@@ -766,7 +799,9 @@ def _run_helper(
     label: str,
     *,
     progress_path: str = "",
-    password: str | None = None,
+    password: str = "",
+    superuser: bool = False,
+    options: str = "",
     writable: bool = True,
 ) -> None:
     """Run a client tool of the new image against a cluster, to completion.
@@ -777,13 +812,31 @@ def _run_helper(
     restore. Progress is logged only after a successful container poll, so the
     startup watchdog still notices a wedged Docker daemon.
 
-    ``password`` belongs to the role the command connects as; the superuser's
-    by default. ``writable=False`` mounts the dumps read-only, for a restore.
+    The helper is given the password of the role its command connects as and
+    no other: ``password`` is a scoped role's, ``superuser=True`` asks for the
+    superuser's, and a command that does not connect (``pg_restore --list``)
+    gets none. The superuser's password opens both clusters from every team
+    network for as long as it is valid, long after this container is gone, so
+    it goes only where the superuser itself has to act. ``options`` are
+    session settings for the connection (PGOPTIONS). ``writable=False`` mounts
+    the dumps read-only, for a restore.
+
+    The tools only read and write files and talk to a socket, so the helper
+    keeps one capability: reading and writing the dump directory whoever owns
+    it. Without the rest, a client that an archive or a server's answer got
+    the better of cannot sniff or spoof on the cluster's networks.
     """
     name = f"{settings.prefix}{_HELPER}"
     stale = _container(client, name)
     if stale is not None:
         stale.remove(force=True)
+    environment = {}
+    if superuser:
+        environment["PGPASSWORD"] = settings.db_password
+    elif password:
+        environment["PGPASSWORD"] = password
+    if options:
+        environment["PGOPTIONS"] = options
     helper = client.containers.run(
         image_id,
         command[1:],
@@ -791,10 +844,11 @@ def _run_helper(
         name=name,
         detach=True,
         network_mode=f"container:{cluster_container}",
-        environment={
-            "PGPASSWORD": settings.db_password if password is None else password
-        },
+        environment=environment,
         volumes={directory: {"bind": "/dump", "mode": "rw" if writable else "ro"}},
+        cap_drop=["ALL"],
+        cap_add=["DAC_OVERRIDE"],
+        security_opt=["no-new-privileges"],
         log_config={"type": "json-file"},
     )
     started = last_beat = time.monotonic()
@@ -902,28 +956,106 @@ def _dump_cluster(
             os.path.join(directory, "roles.sql"), "\n".join(roles) + "\n"
         )
         for name in cluster["databases"]:
-            dump = f"{name}.pgdump"
+            _dump_database(client, settings, state, cluster, container.name, name)
+            # Read the archive back before anything is removed. Nothing is
+            # connected to, so the helper is given no password.
             _run_helper(
                 client,
                 settings,
                 state["image_id"],
                 container.name,
-                ["pg_dump", "-h", "127.0.0.1", "-U", settings.db_user, "-Fc"]
-                + ["-f", f"/dump/{dump}", name],
-                directory,
-                f"Dumping database {name}",
-                progress_path=os.path.join(directory, dump),
-            )
-            # Read the archive back before anything is removed.
-            _run_helper(
-                client,
-                settings,
-                state["image_id"],
-                container.name,
-                ["pg_restore", "--list", "-f", "/dev/null", f"/dump/{dump}"],
+                ["pg_restore", "--list", "-f", "/dev/null", f"/dump/{name}.pgdump"],
                 directory,
                 f"Verifying the dump of {name}",
+                writable=False,
             )
+
+
+def _dump_database(
+    client: DockerClient,
+    settings: Settings,
+    state: dict[str, Any],
+    cluster: dict[str, Any],
+    container: str,
+    name: str,
+) -> None:
+    """Dump one carried database out of the old cluster, as its own role.
+
+    The role that restores a database (see _restore_database) also dumps it:
+    pg_dump reads what the tenant defined, and an old cluster is the one most
+    likely to run a release in which reading could be turned into running
+    (CVE-2024-7348). The helper gets that role's password, not the
+    superuser's. Roles are dumped apart from this, by the superuser from the
+    cluster's own catalog (see _dump_cluster).
+
+    What a role cannot read fails the dump, and with it the upgrade, while
+    every old cluster is still intact. What it would leave out without
+    failing is refused when the upgrade is planned (see _inventory).
+
+    A database named in SUPERUSER_RESTORE_ENV is dumped by the superuser, as
+    every database was before: it holds what only a superuser can recreate,
+    and may hold what only a superuser can read. The server is told not to
+    expand what is not a plain relation, when it is recent enough to know how.
+    """
+    directory = _dump_path(settings, cluster["kind"])
+    dump = f"{name}.pgdump"
+    command = ["-Fc", "-f", f"/dump/{dump}", name]
+    label = f"Dumping database {name}"
+    progress = os.path.join(directory, dump)
+    if name in _superuser_restores():
+        logger.warning(
+            "Dumping database %s as the PostgreSQL superuser, as %s asks",
+            name,
+            SUPERUSER_RESTORE_ENV,
+        )
+        guard = system_ops.superuser_dump_environment(
+            client, settings, name, container_name=container
+        )
+        _run_helper(
+            client,
+            settings,
+            state["image_id"],
+            container,
+            ["pg_dump", "-h", "127.0.0.1", "-U", settings.db_user, *command],
+            directory,
+            label,
+            progress_path=progress,
+            superuser=True,
+            options=guard.get("PGOPTIONS", ""),
+        )
+        return
+    role = _carried_roles(settings, cluster["kind"]).get(name)
+    if role is None:
+        raise PrerequisiteNotMetError(
+            f"Database {name} has no scoped role on record, and is not dumped "
+            "by the superuser. Put its credentials file back and restart "
+            "Oduflow to retry. "
+            + _superuser_restore_hint(name)
+            + " Nothing has been changed."
+        )
+    user, password = role
+    try:
+        _run_helper(
+            client,
+            settings,
+            state["image_id"],
+            container,
+            ["pg_dump", "-h", "127.0.0.1", "-U", user, *command],
+            directory,
+            label,
+            progress_path=progress,
+            password=password,
+        )
+    except ExternalCommandError as exc:
+        raise PrerequisiteNotMetError(
+            f"Database {name} could not be dumped by its own role '{user}': "
+            f"{exc.output.strip()}. A database is carried into the new cluster "
+            "by its own role, never by the superuser, so that role has to be "
+            "able to connect to it and to read everything in it. "
+            + _superuser_restore_hint(name)
+            + " "
+            + _keep_hint(cluster["old_major"])
+        ) from exc
 
 
 def _remove_old(
@@ -1163,6 +1295,7 @@ def _restore_database(
             [*connect, *create, *jobs, archive],
             directory,
             f"Restoring database {name}",
+            superuser=True,
             writable=False,
         )
         return
@@ -1183,6 +1316,7 @@ def _restore_database(
         [*connect, *create, "-n", _NO_SCHEMA, archive],
         directory,
         f"Creating database {name}",
+        superuser=True,
         writable=False,
     )
     system_ops._exec_sql(

@@ -201,23 +201,33 @@ databases are restored from their dumps on disk last, and the dumps are
 deleted. Productions and services are down while their databases are dumped
 and restored.
 
-Each production and service database is restored into the new cluster by its
-own PostgreSQL role, the one recorded in its credentials file, never by the
-superuser: restoring a database runs what its content defines. The superuser
-recreates only the database itself (locale, tablespace, `ALTER DATABASE`
-settings, privileges on the database) and makes that role its owner. Everything
-inside ends up owned by that role, and privileges are restored as recorded.
-Two consequences are checked before anything is changed:
+Each production and service database is dumped out of the old cluster and
+restored into the new one by its own PostgreSQL role, the one recorded in its
+credentials file, never by the superuser: restoring a database runs what its
+content defines, and the old cluster may run a PostgreSQL release in which
+dumping one could too. The superuser dumps only the roles, and recreates only
+the database itself (locale, tablespace, `ALTER DATABASE` settings, privileges
+on the database), making that role its owner. Everything inside ends up owned
+by that role, and privileges are restored as recorded. Three consequences are
+checked before anything is changed:
 
 - an extension that only a superuser may create (for example `postgis` or
   `pg_stat_statements`) must be marked `trusted = true` in the new image's
   control file, or be dropped first;
-- a database whose credentials file is missing has no role to restore it.
-  For a production, `reconfigure_production` with no settings changed
-  provisions the role again and writes the file.
+- a database whose credentials file is missing has no role to dump and
+  restore it. For a production, `reconfigure_production` with no settings
+  changed provisions the role again and writes the file;
+- a database that contains a subscription or a user mapping is refused:
+  `pg_dump` leaves those out of a dump it does not take as a superuser.
 
-If you trust everything a database contains, you can let the superuser restore
-it as before by starting Oduflow with
+The role also has to be able to read everything in its database. If it cannot
+— a table that still belongs to another role, a table with
+`FORCE ROW LEVEL SECURITY` — the dump fails with PostgreSQL's reason, the
+upgrade stops, the services and productions it had stopped are started again,
+and nothing has been removed.
+
+If you trust everything a database contains, you can let the superuser dump
+and restore it as before by starting Oduflow with
 `ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
 environment. The same variable is the way out when a restore stops on content
 that only a superuser can recreate (an event trigger, a publication

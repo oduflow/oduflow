@@ -2215,6 +2215,190 @@ def _pg_exchange_dirs(
     )
 
 
+# pg_dump reads a database whose content is its tenant's. It pins search_path
+# and qualifies every name itself, so reading does not run tenant code — as
+# long as what it reads is what it listed: until 12.20 / 13.16 / 14.13 / 15.8
+# / 16.4 (CVE-2024-7348) a session that swapped a sequence for a view in
+# between had the view's functions run by whoever dumped. Whatever the next
+# such flaw is, it is worth nothing against a dump taken by the database's own
+# role, so that is who dumps; see scoped_dump_role and template_dump_role.
+# pg_dump is not psql: it reads no input of the tenant's that could reconnect
+# or shell out, so it may run next to PostgreSQL, where the local socket takes
+# the role's name without a password and the dump is written in place.
+#
+# Where the superuser still has to dump, the server is told not to expand
+# what a tenant can put in a relation's place. A patched pg_dump sets this
+# itself; passing it with the connection does not depend on the client.
+_PG_DUMP_GUARD_MINORS = {12: 20, 13: 16, 14: 13, 15: 8, 16: 4}
+PG_DUMP_GUARD_OPTIONS = "-c restrict_nonsystem_relation_kind=view,foreign-table"
+# PostgreSQL's own refusals, as it words them. The operating system's
+# "Permission denied" (an output file that cannot be written) is not one.
+_OWNER_DUMP_MARKERS = (
+    "permission denied for ",
+    "must be owner of ",
+    "row-level security policy",
+)
+_OWNER_DUMP_HINT = (
+    "\n\nA database is dumped by its own PostgreSQL role, never by the cluster "
+    "superuser, so that role has to be able to read everything in it. "
+    "Objects that belong to another role (created while an older version ran "
+    "the container as the superuser) are handed over by update_environment, "
+    "or by reconfigure_production for a production. A table with FORCE ROW "
+    "LEVEL SECURITY has to let its owner read every row."
+)
+
+
+def pg_dump_guard_supported(version_num: int) -> bool:
+    """Whether a server (``server_version_num``) has the fix for CVE-2024-7348.
+
+    That is the release that knows ``restrict_nonsystem_relation_kind``;
+    PostgreSQL 17 had it from the start.
+    """
+    major, minor = divmod(version_num, 10000)
+    if major >= 17:
+        return True
+    fixed = _PG_DUMP_GUARD_MINORS.get(major)
+    return fixed is not None and minor >= fixed
+
+
+def superuser_dump_environment(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> dict[str, str]:
+    """Environment of a ``pg_dump`` that the superuser has to run.
+
+    Only two dumps are left to it. A template database an older version
+    loaded as the superuser: no tenant role can connect to one, so the second
+    session CVE-2024-7348 needs cannot exist there. And a database an
+    operator names for a PostgreSQL upgrade, on the operator's word that its
+    content is trusted. The setting returned here closes the flaw on the
+    server whatever the client's release. A server too old to know the
+    setting cannot be given it (the connection would fail), so that is
+    reported instead.
+    """
+    version = int(
+        _exec_sql(
+            client, settings, "SHOW server_version_num;", container_name=container_name
+        )
+    )
+    if pg_dump_guard_supported(version):
+        return {"PGOPTIONS": PG_DUMP_GUARD_OPTIONS}
+    logger.warning(
+        "Dumping database %s as the PostgreSQL superuser on PostgreSQL %d.%d "
+        "(%s), a release without the fix for CVE-2024-7348: an open session in "
+        "that database could run SQL as the superuser during the dump. Move "
+        "the cluster to a current minor release of its PostgreSQL image.",
+        database,
+        version // 10000,
+        version % 10000,
+        container_name or settings.shared_db_container,
+    )
+    return {}
+
+
+def scoped_dump_role(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    container_name: str | None = None,
+) -> str:
+    """The role that dumps the database of an environment or a production.
+
+    It is the database's own scoped role, the one its Odoo connects as:
+    whatever a dump could be made to run, it runs with rights the tenant has
+    anyway. *env_name* is a production's ``prod_env_name``; ``container_name``
+    selects its cluster.
+
+    A dump runs next to PostgreSQL, where a role needs no password, so only
+    the name is taken from the credentials file, and a lost file does not
+    stop a backup: the name is then the derived one the role was created
+    with. The cluster has the last word on it. A role that does not exist
+    means the database never had one (an environment older than scoped
+    roles) and is refused with the remedy, as everywhere else; a superuser is
+    refused whatever the file says.
+    """
+    from oduflow.env_credentials import (
+        MissingCredentialsError,
+        generate_pg_username,
+        load_credentials,
+        missing_credentials_message,
+    )
+
+    role = load_credentials(env_name, team.workspaces_dir, settings.db_user).get(
+        "pg_user"
+    )
+    if not isinstance(role, str) or not role or role == settings.db_user:
+        role = generate_pg_username(env_name, team.team_id)
+    literal = role.replace("'", "''")
+    superuser = _exec_sql(
+        client,
+        settings,
+        f"SELECT rolsuper FROM pg_roles WHERE rolname = '{literal}';",
+        container_name=container_name,
+    )
+    if superuser == "f":
+        return role
+    if superuser == "t":
+        raise PrerequisiteNotMetError(
+            f"Refusing to dump the database of '{env_name}' as '{role}': that "
+            "role is a PostgreSQL superuser, and a database is dumped by a "
+            "scoped role of its own."
+        )
+    raise MissingCredentialsError(missing_credentials_message(env_name))
+
+
+def template_dump_role(
+    client: DockerClient, settings: Settings, team: TeamSettings, tpl_db: str
+) -> str:
+    """The role that dumps the template database *tpl_db*: its owner.
+
+    That is the team's template owner for everything loaded since templates
+    stopped being the superuser's (see ensure_template_owner_role). A
+    template an older version loaded still belongs to the superuser, and
+    nobody else can read all of it; it is dumped as before until it is
+    loaded again (see superuser_dump_environment for why that holds). A
+    database owned by anyone else is a load that did not finish.
+    """
+    owner = _exec_sql(
+        client,
+        settings,
+        "SELECT r.rolname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba "
+        f"WHERE d.datname = '{tpl_db}';",
+    )
+    if owner == get_template_owner_role(team.team_id):
+        return owner
+    if owner == settings.db_user:
+        logger.info(
+            "Template database %s was loaded by an older version and still "
+            "belongs to the PostgreSQL superuser; it is dumped as the "
+            "superuser until the template is imported or published again",
+            tpl_db,
+        )
+        return owner
+    raise PrerequisiteNotMetError(
+        f"Template database '{tpl_db}' belongs to '{owner or 'nobody'}', not "
+        "to the team's template owner: its load did not finish. Import or "
+        "publish the template again, then retry."
+    )
+
+
+def explain_dump_failure(output: str, *, tail: int = 0) -> str:
+    """A failed pg_dump's *output*, explained when a privilege is the cause.
+
+    ``tail`` keeps only that many trailing characters of the output; the cause
+    is looked for in all of it.
+    """
+    text = output[-tail:] if tail else output
+    if any(marker in output for marker in _OWNER_DUMP_MARKERS):
+        text += _OWNER_DUMP_HINT
+    return text
+
+
 @contextlib.contextmanager
 def _staged_db_dump(
     client: DockerClient,
@@ -2223,9 +2407,13 @@ def _staged_db_dump(
     db_name: str,
     dest_path: str,
     *,
+    role: str,
     container_name: str | None = None,
 ) -> Any:
-    """Dump *db_name* for *dest_path*, as cheaply as this installation allows.
+    """Dump *db_name* as *role* for *dest_path*, as cheaply as possible here.
+
+    *role* is the database's own (see scoped_dump_role), never the superuser:
+    the callers dump an environment's or a production's database.
 
     Yields the host path of the staged dump. With the pg_exchange mount,
     ``pg_dump`` writes it there itself: one write to its final filesystem, and
@@ -2245,7 +2433,11 @@ def _staged_db_dump(
     db_container = client.containers.get(source_name)
     dump_in_place = source_name == settings.shared_db_container
     exchange = _pg_exchange_dirs(client, settings, team)
-    dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fc"]
+    if role == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Refusing to dump database '{db_name}' as the PostgreSQL superuser."
+        )
+    dump_cmd = ["pg_dump", "-U", role, "-Fc"]
     container_path: str | None = None
 
     if exchange is None:
@@ -2258,19 +2450,27 @@ def _staged_db_dump(
         container_path = f"{container_dir}/{name}"
 
     try:
-        if container_path is None or not dump_in_place:
-            _stream_exec_to_file(
-                client, db_container, [*dump_cmd, db_name], host_path, tool="pg_dump"
-            )
-        else:
-            exit_code, output = db_container.exec_run(
-                [*dump_cmd, "-f", container_path, db_name]
-            )
-            if exit_code != 0:
-                msg = (
-                    output.decode("utf-8") if isinstance(output, bytes) else str(output)
+        try:
+            if container_path is None or not dump_in_place:
+                _stream_exec_to_file(
+                    client,
+                    db_container,
+                    [*dump_cmd, db_name],
+                    host_path,
+                    tool="pg_dump",
                 )
-                raise ExternalCommandError("pg_dump", exit_code, msg)
+            else:
+                exit_code, output = db_container.exec_run(
+                    [*dump_cmd, "-f", container_path, db_name]
+                )
+                if exit_code != 0:
+                    raise ExternalCommandError(
+                        "pg_dump", exit_code, _container_output(output)
+                    )
+        except ExternalCommandError as exc:
+            raise ExternalCommandError(
+                exc.cmd, exc.exit_code, explain_dump_failure(exc.output)
+            ) from exc
 
         yield host_path
         try:
@@ -3908,7 +4108,9 @@ def init_template(
     db_container = client.containers.get(settings.shared_db_container)
     # No owners: the dump is loaded by a role that may not give objects away
     # (see reload_template), and a plain-SQL dump can only omit them here.
-    dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fp", "--no-owner", build_db]
+    # Dumped by the builder, which owns all of it: the image that filled the
+    # database may be a tenant's, and the superuser reads none of it.
+    dump_cmd = ["pg_dump", "-U", builder, "-Fp", "--no-owner", build_db]
     try:
         _stream_exec_to_file(
             client, db_container, dump_cmd, template_sql_path, tool="pg_dump"
@@ -4387,6 +4589,9 @@ def publish_env_as_template(
         client, settings, team, template_name, tpl_db, overwrite=overwrite
     )
     _wait_pg_ready(client, settings)
+    # The environment's own role dumps it, never the superuser; an
+    # environment without one is refused before anything is touched.
+    dump_role = scoped_dump_role(client, settings, team, env_name)
 
     dump_path = os.path.join(team.get_template_dir(template_name), "dump.pgdump")
     with _publishing_template(team, template_name) as template_dir:
@@ -4395,8 +4600,10 @@ def publish_env_as_template(
         # leaves no half-published template behind. Ownership is stripped at
         # restore time (pg_restore --no-owner in reload_template), NOT here:
         # --no-owner is ignored by pg_dump for the -Fc archive format.
-        logger.info("Dumping branch database %s", env_db)
-        with _staged_db_dump(client, settings, team, env_db, dump_path) as staged_dump:
+        logger.info("Dumping branch database %s as %s", env_db, dump_role)
+        with _staged_db_dump(
+            client, settings, team, env_db, dump_path, role=dump_role
+        ) as staged_dump:
             logger.info("Branch dump saved to %s", staged_dump)
             reload_template(
                 settings,
@@ -4624,6 +4831,15 @@ def publish_production_as_template(
     )
     _wait_pg_ready(client, settings)
     _wait_pg_ready(client, settings, container_name=settings.prod_db_container)
+    # The production's own role dumps it, never the production cluster's
+    # superuser.
+    dump_role = scoped_dump_role(
+        client,
+        settings,
+        team,
+        prod_env_name(prod_name),
+        container_name=settings.prod_db_container,
+    )
 
     dump_path = os.path.join(team.get_template_dir(template_name), "dump.pgdump")
     with _publishing_template(team, template_name) as template_dir:
@@ -4631,13 +4847,14 @@ def publish_production_as_template(
         # staging file (nothing lands in the production container's writable
         # layer) and restored into the dev cluster; only once that succeeded
         # does it become the template's dump.
-        logger.info("Dumping production database %s", prod_db)
+        logger.info("Dumping production database %s as %s", prod_db, dump_role)
         with _staged_db_dump(
             client,
             settings,
             team,
             prod_db,
             dump_path,
+            role=dump_role,
             container_name=settings.prod_db_container,
         ) as staged_dump:
             logger.info("Production dump staged at %s", staged_dump)

@@ -434,14 +434,53 @@ anything — see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
 
 ---
 
+## A dump fails with `permission denied`
+
+```
+Command 'pg_dump' failed (exit 1): pg_dump: error: query failed: ERROR:  permission denied for table x
+```
+
+`save_as_template`, `save_production_as_template`, production snapshots and
+the dump that seeds or promotes a production run `pg_dump` as the database's
+own PostgreSQL role, never as the cluster superuser, so that role has to be
+able to read everything in the database. It owns everything Odoo created
+through it. What it does not own was created while an older version ran the
+container with the superuser's login: recreate the container
+(`update_environment`, or `reconfigure_production` with no settings changed
+for a production), which hands every table, sequence, view and function back
+to the role, then retry. A table with `FORCE ROW LEVEL SECURITY` has to let
+its owner read every row (`query would be affected by row-level security
+policy`). See
+[How a database is dumped](templates.md#how-a-database-is-dumped).
+
+During a PostgreSQL upgrade the same failure stops the upgrade before anything
+is removed; see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
+## `Dumping database ... as the PostgreSQL superuser on PostgreSQL ...` in the server log
+
+The superuser still dumps a template database that an older version loaded
+(when a production is created from it), and the databases named in
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE` during a PostgreSQL upgrade. The
+warning says the cluster runs a release without the fix for CVE-2024-7348
+(before 15.8 or 16.4), where an open session in a database being dumped could
+run SQL as whoever dumps it. No user's role can connect to a template
+database, and the databases named for an upgrade are ones you declared
+trusted, so the dump went ahead. To clear it, move the cluster to a current
+minor release of its PostgreSQL image, and import or publish the template
+again so that it stops being the superuser's.
+
+---
+
 ## `Environment '...' has no scoped database credentials`
 
 The environment was created before each environment had its own PostgreSQL
-role, so its workspace has no `env_credentials.json`. Oduflow reads and
-writes an environment's database only as that role and does not substitute
+role, so its workspace has no `env_credentials.json`. Oduflow reads, writes
+and dumps an environment's database only as that role and does not substitute
 the cluster superuser, so module installs and upgrades, the module and
-**Connect As** lists, direct SQL, the Odoo shell, tests and
-`reset_admin_password` are refused for it. Run `update_environment` on it: the
+**Connect As** lists, direct SQL, the Odoo shell, tests,
+`reset_admin_password` and `save_as_template` are refused for it. Run `update_environment` on it: the
 container is recreated with a role of its own, and the database and filestore
 are kept. See [Database isolation](environments.md#database-isolation).
 

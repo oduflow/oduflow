@@ -555,6 +555,7 @@ class TestInventory:
         sizes=None,
         credentials=None,
         extensions=None,
+        omissions=None,
     ):
         queries = []
 
@@ -564,6 +565,8 @@ class TestInventory:
                 return "\n".join(present)
             if query.startswith("SELECT count(*)"):
                 return "0"
+            if query == pm._ROLE_DUMP_OMISSIONS_SQL:
+                return (omissions or {}).get(db, "")
             if query.startswith("SELECT extname"):
                 return (
                     extensions
@@ -670,10 +673,56 @@ class TestInventory:
         (ALTER DATABASE ... SET search_path); nothing here resolves through it."""
         settings = _settings(tmp_path)
         self._run(settings, "prod", ["postgres", "oduflow_1_prod-shop"])
-        (query,) = [q for db, q in self.queries if db == "oduflow_1_prod-shop"]
+        query, omissions = [q for db, q in self.queries if db == "oduflow_1_prod-shop"]
         assert "FROM pg_catalog.pg_extension" in query
         assert "OPERATOR(pg_catalog.<>)" in query
         assert "'plpgsql'::pg_catalog.name" in query
+        # So is what its role's dump would leave out: catalog tables by their
+        # full names, compared with the catalog's own operator.
+        assert omissions == pm._ROLE_DUMP_OMISSIONS_SQL
+        assert "FROM pg_catalog.pg_subscription" in omissions
+        assert "FROM pg_catalog.pg_user_mapping" in omissions
+        assert "pg_catalog.current_database()" in omissions
+        assert " = " not in omissions and omissions.count("OPERATOR(pg_catalog.=)") == 2
+
+    @pytest.mark.parametrize(
+        ("found", "named"),
+        [
+            ("a subscription", "a subscription"),
+            ("a subscription\na user mapping", "a subscription and a user mapping"),
+        ],
+    )
+    def test_what_a_roles_dump_would_leave_out_is_refused_up_front(
+        self, tmp_path, found, named
+    ):
+        """pg_dump skips subscriptions, and the options of user mappings it
+        may not see, when a role runs it: with a warning, not an error. The
+        dump is all that is left of a database once its cluster is removed."""
+        settings = _settings(tmp_path)
+        with pytest.raises(PrerequisiteNotMetError) as exc_info:
+            self._run(
+                settings,
+                "prod",
+                ["postgres", "oduflow_1_prod-shop", "oduflow_service_1_pay"],
+                omissions={"oduflow_service_1_pay": found},
+            )
+        message = str(exc_info.value)
+        assert f"'oduflow_service_1_pay' in oduflow-prod-db contains {named}" in message
+        assert "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=oduflow_service_1_pay" in message
+        assert "Nothing has been changed." in message
+
+    def test_a_database_left_to_the_superuser_is_not_asked(self, tmp_path, monkeypatch):
+        # The superuser dumps it, and a superuser's dump leaves nothing out.
+        settings = _settings(tmp_path)
+        monkeypatch.setenv(pm.SUPERUSER_RESTORE_ENV, "oduflow_service_1_pay")
+        databases, *_ = self._run(
+            settings,
+            "prod",
+            ["postgres", "oduflow_service_1_pay"],
+            omissions={"oduflow_service_1_pay": "a subscription"},
+        )
+        assert databases == ["oduflow_service_1_pay"]
+        assert pm._ROLE_DUMP_OMISSIONS_SQL not in [q for _db, q in self.queries]
 
     def test_a_database_without_a_scoped_role_is_refused_up_front(self, tmp_path):
         """Nobody but the superuser could restore it, and the superuser does
@@ -1021,7 +1070,7 @@ class TestRestoreCluster:
                 ["pg_restore", "-h", "127.0.0.1", "-U", self.SUPERUSER]
                 + ["-d", "postgres", "--create", "--exit-on-error"]
                 + ["-n", "pg_oduflow_no_such_schema", "/dump/b.pgdump"],
-                {"writable": False},
+                {"superuser": True, "writable": False},
             ),
             # 2. ...and hands it to the role on record, whoever owned it before.
             ("sql", None, "postgres", 'ALTER DATABASE "b" OWNER TO "u_b";'),
@@ -1050,11 +1099,13 @@ class TestRestoreCluster:
             if user == self.SUPERUSER:
                 assert command[command.index("-n") + 1] == pm._NO_SCHEMA
                 assert "--create" in command
-                # It gets the superuser's password, by _run_helper's default.
+                # It asks for the superuser's password by name.
+                assert kwargs["superuser"] is True
                 assert "password" not in kwargs
             else:
                 database = command[command.index("-d") + 1]
                 assert (user, kwargs["password"]) == self.ROLES[database]
+                assert "superuser" not in kwargs
                 assert "--create" not in command
                 assert "--no-owner" in command
             assert "--exit-on-error" in command
@@ -1244,14 +1295,49 @@ class TestRunHelper:
         assert kwargs["volumes"] == {"/d": {"bind": "/dump", "mode": "rw"}}
         helper.remove.assert_called_once_with(force=True)
 
-    def test_the_superusers_password_is_the_default_and_only_that(self, tmp_path):
-        settings = _settings(tmp_path, db_password="cluster-superuser-secret")
+    def test_the_helper_keeps_one_capability(self, tmp_path):
+        # It shares the cluster's network namespace. pg_dump and pg_restore
+        # read and write files and talk to a socket; root's access to the dump
+        # directory, whoever owns it, is all they need of root.
+        settings = _settings(tmp_path)
         client, _helper = self._client(0)
         pm._run_helper(
             client, settings, "img", "oduflow-db", ["pg_dump", "x"], "/d", "L"
         )
+        kwargs = client.containers.run.call_args.kwargs
+        assert kwargs["cap_drop"] == ["ALL"]
+        assert kwargs["cap_add"] == ["DAC_OVERRIDE"]
+        assert kwargs["security_opt"] == ["no-new-privileges"]
+        assert "privileged" not in kwargs
+
+    def test_no_password_unless_the_command_names_who_connects(self, tmp_path):
+        # `pg_restore --list` connects to nothing. The superuser's password
+        # used to be in every helper's environment all the same.
+        settings = _settings(tmp_path, db_password="cluster-superuser-secret")
+        client, _helper = self._client(0)
+        pm._run_helper(
+            client, settings, "img", "oduflow-db", ["pg_restore", "--list"], "/d", "L"
+        )
+        assert client.containers.run.call_args.kwargs["environment"] == {}
+        assert "cluster-superuser-secret" not in repr(client.containers.run.call_args)
+
+    def test_the_superusers_password_is_asked_for_by_name(self, tmp_path):
+        settings = _settings(tmp_path, db_password="cluster-superuser-secret")
+        client, _helper = self._client(0)
+        pm._run_helper(
+            client,
+            settings,
+            "img",
+            "oduflow-db",
+            ["pg_dump", "x"],
+            "/d",
+            "L",
+            superuser=True,
+            options="-c some_setting=on",
+        )
         assert client.containers.run.call_args.kwargs["environment"] == {
-            "PGPASSWORD": "cluster-superuser-secret"
+            "PGPASSWORD": "cluster-superuser-secret",
+            "PGOPTIONS": "-c some_setting=on",
         }
 
     def test_a_restore_as_a_role_holds_that_roles_password_and_reads_only(

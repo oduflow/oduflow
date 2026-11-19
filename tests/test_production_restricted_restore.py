@@ -42,9 +42,14 @@ class _FakeDocker:
     """Both PostgreSQL containers, the restore clients, and one ordered log of
     everything any of them is asked to do."""
 
-    def __init__(self, *, clients=((0, b""),)):
+    def __init__(self, *, clients=((0, b""),), answers=None):
         self.steps: list[tuple] = []
         self._clients = list(clients)
+        # A fragment of a statement -> what psql prints for it. Every role
+        # asked about exists and is an ordinary one unless a test says so.
+        self._answers = {"SELECT rolsuper": b"f", **(answers or {})}
+        # What each exec was started with besides its command.
+        self.exec_options: list[tuple[list[str], dict]] = []
         # Files the restore client found at its mount: path -> content.
         self.mounted: dict[str, bytes] = {}
         self.pg = {
@@ -58,7 +63,7 @@ class _FakeDocker:
     def _pg_container(self, name, image):
         container = MagicMock(name=name)
         container.attrs = {"Config": {"Image": image}, "Mounts": []}
-        container.exec_run.side_effect = lambda cmd, **kw: self._exec(name, cmd)
+        container.exec_run.side_effect = lambda cmd, **kw: self._exec(name, cmd, kw)
         return container
 
     def _get(self, name):
@@ -68,12 +73,16 @@ class _FakeDocker:
             return self.pg[name]
         raise docker.errors.NotFound(name)
 
-    def _exec(self, container, cmd):
+    def _exec(self, container, cmd, options):
         call = psql_call(cmd, SUPERUSER)
         if call is not None:
             self.steps.append(("sql", container, *call))
+            for fragment, answer in self._answers.items():
+                if fragment in call[2]:
+                    return 0, answer
             return 0, b""
         self.steps.append(("exec", container, cmd))
+        self.exec_options.append((cmd, options))
         return 0, b""
 
     def _run_container(self, image, command=None, **kwargs):
@@ -339,7 +348,11 @@ def test_a_load_database_is_created_for_its_owner_in_the_named_cluster(tmp_path)
 # --------------------------------------------------------------------------
 
 
-def _copy(docker, settings, team, creds, **patches):
+# The scoped role of the development database a production is seeded from.
+SOURCE_ROLE = "u_7_feature-x"
+
+
+def _copy(docker, settings, team, creds, *, source_role=SOURCE_ROLE):
     def copy_out(container, container_path, host_path):
         docker.steps.append(("copied-out", container_path, host_path))
         with open(host_path, "wb") as fh:
@@ -356,6 +369,7 @@ def _copy(docker, settings, team, creds, **patches):
             "oduflow_7_prod-erp",
             "environment seed",
             creds,
+            source_role=source_role,
         )
 
 
@@ -366,12 +380,15 @@ def test_a_development_database_enters_production_as_the_productions_role(tmp_pa
 
     _copy(docker, settings, team, creds)
 
-    # The dump is taken where the source lives, and removed from there.
+    # The dump is taken where the source lives, by the source's own role and
+    # not by the development cluster's superuser, and removed from there.
     in_dev = "/tmp/oduflow_7_prod-erp.seed.pgdump"
     assert docker.execs(DEV) == [
-        ["pg_dump", "-U", SUPERUSER, "-Fc", "-f", in_dev, "oduflow_7_feature-x"],
+        ["pg_dump", "-U", SOURCE_ROLE, "-Fc", "-f", in_dev, "oduflow_7_feature-x"],
         ["rm", "-f", in_dev],
     ]
+    # A role's dump needs no session setting of the superuser's.
+    assert docker.exec_options[0][1] == {"environment": {}}
     # Nothing is copied into, or run inside, the production cluster's container.
     assert docker.execs(PROD) == []
     assert docker.sql() == []
@@ -458,11 +475,32 @@ def test_both_seeds_hand_the_productions_role_to_the_copy(
     with (
         patch.object(production_ops, "_db_exists", return_value=True),
         patch.object(production_ops, "_copy_db_into_prod_cluster") as copy,
+        patch.object(
+            production_ops, "template_dump_role", return_value="tpl-owner"
+        ) as template_role,
+        patch.object(
+            production_ops, "scoped_dump_role", return_value="env-role"
+        ) as environment_role,
     ):
         seed(client, settings, team, name, "oduflow_7_prod-erp", creds)
 
+    # Each source is dumped by the role it belongs to: a template by its
+    # owner, an environment by its scoped role.
+    if label == "template":
+        template_role.assert_called_once_with(client, settings, team, source_db)
+        environment_role.assert_not_called()
+    else:
+        environment_role.assert_called_once_with(client, settings, team, "feature-x")
+        template_role.assert_not_called()
     copy.assert_called_once_with(
-        client, settings, team, source_db, "oduflow_7_prod-erp", f"{label} seed", creds
+        client,
+        settings,
+        team,
+        source_db,
+        "oduflow_7_prod-erp",
+        f"{label} seed",
+        creds,
+        source_role="tpl-owner" if label == "template" else "env-role",
     )
 
 
@@ -731,8 +769,18 @@ def test_an_environment_is_promoted_as_the_productions_role(tmp_path):
 
     # Dumped from the development cluster, restored into the production one by
     # the production's role, into a database that role already owns.
-    assert docker.execs(DEV)[0][:2] == ["pg_dump", "-U"]
+    # ...by the environment's own role, which the development cluster
+    # confirms is an ordinary one.
+    assert docker.execs(DEV)[0][:3] == ["pg_dump", "-U", "u_7_feature-x"]
     assert docker.execs(DEV)[0][-1] == "oduflow_7_feature-x"
+    assert docker.sql(DEV) == [
+        (
+            DEV,
+            SUPERUSER,
+            "postgres",
+            "SELECT rolsuper FROM pg_roles WHERE rolname = 'u_7_feature-x';",
+        )
+    ]
     assert docker.execs(PROD) == []
     (client,) = docker.clients()
     assert client["image"] == PROD_IMAGE

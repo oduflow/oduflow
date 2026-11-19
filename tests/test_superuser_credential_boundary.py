@@ -451,7 +451,7 @@ def test_the_template_build_runs_as_a_one_off_role(tmp_path):
         patch.object(system_ops, "_wait_pg_ready"),
         patch.object(system_ops, "require_postgres_for_odoo"),
         patch.object(system_ops, "ensure_team_network", return_value="net"),
-        patch.object(system_ops, "_stream_exec_to_file"),
+        patch.object(system_ops, "_stream_exec_to_file") as dump,
         patch.object(system_ops, "_extract_archive_from_container", return_value=0),
         patch.object(system_ops, "get_odoo_uid_gid", return_value="100:101"),
         patch.object(system_ops, "chown_recursive"),
@@ -465,6 +465,19 @@ def test_the_template_build_runs_as_a_one_off_role(tmp_path):
     assert role.startswith("oduflow_load_") and role != SUPERUSER
     assert environment["PASSWORD"] not in ("", SECRET)
     assert SECRET not in repr(client.containers.run.call_args)
+
+    # What the image put into the build database is dumped by that role too,
+    # next to PostgreSQL, before the role is dropped.
+    dump.assert_called_once()
+    assert dump.call_args.args[1] is pg.container
+    assert dump.call_args.args[2] == [
+        "pg_dump",
+        "-U",
+        role,
+        "-Fp",
+        "--no-owner",
+        "oduflow_template_build",
+    ]
 
     statements = pg.sql()
     create_role = next(sql for sql in statements if sql.startswith("CREATE ROLE"))
@@ -490,7 +503,8 @@ _PASSWORD_READERS = {
     # Compared with what existing containers hold, to report them.
     ("docker_ops/system_ops.py", "superuser_credential_holders"),
     # The PostgreSQL upgrade's helper: the cluster's own image, in the
-    # cluster's network namespace, running a fixed pg_dump / pg_restore.
+    # cluster's network namespace, running a fixed pg_dump / pg_restore — and
+    # only for the steps the superuser itself takes (superuser=True).
     ("postgres_migration.py", "_run_helper"),
 }
 

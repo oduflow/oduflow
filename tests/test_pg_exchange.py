@@ -17,7 +17,7 @@ import pytest
 
 import docker
 from oduflow.docker_ops import system_ops
-from oduflow.errors import ExternalCommandError
+from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
 from oduflow.settings import Settings, TeamSettings
 
 
@@ -136,6 +136,10 @@ def test_pg_mount_parents_are_searchable_without_opening_team_data(
 # --------------------------------------------------------------------------
 
 
+# The scoped role of the database being dumped.
+ROLE = "u_7_main"
+
+
 def _dump_into_exchange(host_dir):
     """exec_run stand-in: write the file pg_dump was told to write."""
 
@@ -158,7 +162,7 @@ def test_staged_dump_writes_through_the_mount_and_moves_into_place(tmp_path):
     dest.parent.mkdir(parents=True)
 
     with system_ops._staged_db_dump(
-        client, settings, team, "oduflow_7_main", str(dest)
+        client, settings, team, "oduflow_7_main", str(dest), role=ROLE
     ) as host_path:
         assert os.path.dirname(host_path) == str(host_dir)
         assert os.path.exists(host_path)
@@ -166,7 +170,9 @@ def test_staged_dump_writes_through_the_mount_and_moves_into_place(tmp_path):
     assert dest.read_text() == "PGDMP staged"
     assert list(host_dir.iterdir()) == []
     cmd = container.exec_run.call_args.args[0]
-    assert cmd[:4] == ["pg_dump", "-U", settings.db_user, "-Fc"]
+    # The database's own role dumps it, not the cluster superuser.
+    assert cmd[:4] == ["pg_dump", "-U", ROLE, "-Fc"]
+    assert settings.db_user not in cmd
     # pg_dump writes the archive itself, through the mount.
     target = cmd[cmd.index("-f") + 1]
     assert target.startswith("/exchange/team_7/")
@@ -185,7 +191,7 @@ def test_staged_dump_streams_when_the_mount_is_absent(tmp_path):
 
     with patch.object(system_ops, "_stream_exec_to_file", side_effect=_stream):
         with system_ops._staged_db_dump(
-            client, settings, team, "oduflow_7_main", str(dest)
+            client, settings, team, "oduflow_7_main", str(dest), role=ROLE
         ) as host_path:
             assert host_path == str(dest) + ".staged"
 
@@ -204,7 +210,7 @@ def test_staged_dump_leaves_nothing_behind_when_the_restore_fails(tmp_path):
 
     with pytest.raises(RuntimeError):
         with system_ops._staged_db_dump(
-            client, settings, team, "oduflow_7_main", str(dest)
+            client, settings, team, "oduflow_7_main", str(dest), role=ROLE
         ):
             raise RuntimeError("restore blew up")
 
@@ -222,10 +228,49 @@ def test_staged_dump_reports_pg_dump_failure(tmp_path):
 
     with pytest.raises(ExternalCommandError, match="no such database"):
         with system_ops._staged_db_dump(
-            client, settings, team, "oduflow_7_main", str(dest)
+            client, settings, team, "oduflow_7_main", str(dest), role=ROLE
         ):
             pytest.fail("body must not run after pg_dump fails")
 
+    assert not dest.exists()
+
+
+def test_staged_dump_explains_what_the_role_may_not_read(tmp_path):
+    settings, team = _settings(tmp_path), _team(tmp_path)
+    client, container = _client([{"Destination": "/exchange"}])
+    container.exec_run.return_value = (
+        1,
+        b"pg_dump: error: query failed: ERROR:  permission denied for table x",
+    )
+    dest = tmp_path / "templates" / "prod" / "dump.pgdump"
+    dest.parent.mkdir(parents=True)
+
+    with pytest.raises(ExternalCommandError) as exc_info:
+        with system_ops._staged_db_dump(
+            client, settings, team, "oduflow_7_main", str(dest), role=ROLE
+        ):
+            pytest.fail("body must not run after pg_dump fails")
+
+    # The reason pg_dump gave, and what to do about it.
+    assert "permission denied for table x" in exc_info.value.output
+    assert "never by the cluster superuser" in exc_info.value.output
+    assert "update_environment" in exc_info.value.output
+    assert "reconfigure_production" in exc_info.value.output
+
+
+def test_staged_dump_is_never_taken_by_the_superuser(tmp_path):
+    settings, team = _settings(tmp_path), _team(tmp_path)
+    client, container = _client([{"Destination": "/exchange"}])
+    dest = tmp_path / "templates" / "prod" / "dump.pgdump"
+    dest.parent.mkdir(parents=True)
+
+    with pytest.raises(PrerequisiteNotMetError, match="as the PostgreSQL superuser"):
+        with system_ops._staged_db_dump(
+            client, settings, team, "oduflow_7_main", str(dest), role=settings.db_user
+        ):
+            pytest.fail("body must not run")
+
+    container.exec_run.assert_not_called()
     assert not dest.exists()
 
 
@@ -247,7 +292,7 @@ def test_staged_dump_cleans_partial_file_when_docker_exec_raises(tmp_path):
 
     with pytest.raises(docker.errors.APIError, match="connection lost"):
         with system_ops._staged_db_dump(
-            client, settings, team, "oduflow_7_main", str(dest)
+            client, settings, team, "oduflow_7_main", str(dest), role=ROLE
         ):
             pytest.fail("body must not run after Docker exec fails")
 
@@ -445,6 +490,7 @@ def test_staged_dump_from_another_cluster_streams_into_the_exchange_dir(tmp_path
             team,
             "oduflow_7_prod-erp",
             str(dest),
+            role="u_7_prod-erp",
             container_name=settings.prod_db_container,
         ) as host_path:
             assert os.path.dirname(host_path) == str(host_dir)
@@ -454,7 +500,8 @@ def test_staged_dump_from_another_cluster_streams_into_the_exchange_dir(tmp_path
     assert streamed == [
         (
             prod_container,
-            ["pg_dump", "-U", settings.db_user, "-Fc", "oduflow_7_prod-erp"],
+            # The production's role, in the production cluster.
+            ["pg_dump", "-U", "u_7_prod-erp", "-Fc", "oduflow_7_prod-erp"],
         )
     ]
     prod_container.exec_run.assert_not_called()
