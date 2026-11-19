@@ -3124,6 +3124,10 @@ let containerStatsMap = {};
 // per-card refresh button (walking a filestore is too slow for the poll loop).
 let envStorageMap = {};
 let storageRefreshing = {};
+// Same for productions (DB lives on the production cluster, filestore is a
+// plain directory in the prod workspace).
+let prodStorageMap = {};
+let prodStorageRefreshing = {};
 let cachedTemplates = [];
 let cachedEnvs = [];
 let cachedServices = [];
@@ -3503,17 +3507,25 @@ function applyStats() {
   });
   document.querySelectorAll('[data-storage-for]').forEach(function(el) {
     var branch = el.getAttribute('data-storage-for');
-    var s = envStorageMap[branch];
-    var btn = storageRefreshing[branch]
-      ? '<span class="spinner" aria-hidden="true"></span>'
-      : '<button class="stat-refresh" onclick="refreshStorage(\'' + escAttr(branch) + '\')" ' +
-          'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
-          'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
-    el.innerHTML =
-      '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
-      '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
-      btn;
+    el.innerHTML = _storageHtml(
+      envStorageMap[branch], storageRefreshing[branch], 'refreshStorage', branch);
   });
+  document.querySelectorAll('[data-prod-storage-for]').forEach(function(el) {
+    var name = el.getAttribute('data-prod-storage-for');
+    el.innerHTML = _storageHtml(
+      prodStorageMap[name], prodStorageRefreshing[name], 'refreshProdStorage', name);
+  });
+}
+
+function _storageHtml(s, refreshing, fnName, key) {
+  var btn = refreshing
+    ? '<span class="spinner" aria-hidden="true"></span>'
+    : '<button class="stat-refresh" onclick="' + fnName + '(\'' + escAttr(key) + '\')" ' +
+        'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
+        'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
+  return '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
+    '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
+    btn;
 }
 
 async function refreshStorage(branch) {
@@ -3532,6 +3544,25 @@ async function refreshStorage(branch) {
     showToast('Failed to measure usage: ' + e, true);
   }
   delete storageRefreshing[branch];
+  applyStats();
+}
+
+async function refreshProdStorage(name) {
+  if (prodStorageRefreshing[name]) return;
+  prodStorageRefreshing[name] = true;
+  applyStats();
+  try {
+    const r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/storage/refresh', { method: 'POST' });
+    const data = await readResult(r);
+    if (data.ok) {
+      prodStorageMap[name] = data.storage;
+    } else {
+      showToast(data.error || 'Failed to measure usage', true);
+    }
+  } catch (e) {
+    showToast('Failed to measure usage: ' + e, true);
+  }
+  delete prodStorageRefreshing[name];
   applyStats();
 }
 
@@ -4752,6 +4783,7 @@ async function loadStats() {
     containerStatsMap = {};
     (data.containers || []).forEach(c => { containerStatsMap[c.name] = c; });
     envStorageMap = (data.storage && data.storage.envs) || {};
+    prodStorageMap = (data.storage && data.storage.productions) || {};
 
     const sys = data.system;
     document.getElementById('sys-cpu').innerHTML =
@@ -10973,9 +11005,15 @@ function renderProductions() {
         lastHtml +
         snapHtml +
       '</div>' +
+      // DB/disk usage: cached, recomputed only via the per-card refresh
+      // button (filled in by applyStats, same as environment cards).
+      '<div class="containers">' +
+        '<span class="container-stats env-storage" data-prod-storage-for="' + esc(p.name) + '"></span>' +
+      '</div>' +
       (open ? '<div class="prod-section" id="prod-section-' + esc(p.name) + '">Loading…</div>' : '') +
     '</div>';
   }).join('');
+  applyStats();
   Object.keys(_prodOpen).forEach(function(name) {
     if (_prodOpen[name]) _loadProdSection(name, _prodOpen[name]);
   });
