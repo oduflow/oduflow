@@ -374,6 +374,7 @@ The agent writes code, installs the module, reads the traceback, fixes the error
 ### Infrastructure
 - **Auxiliary services** — managed sidecar containers for Redis, Meilisearch, Elasticsearch, or any other service your Odoo setup needs
 - **Sidecar PostgreSQL storage** — persistent team-scoped databases with dedicated roles, password rotation, quota accounting, and declarative Stack wiring
+- **Container image builds** — opt-in per team: build an image from an environment's git revision, run it as a service to verify it, then publish those exact bits to your registry — the agent never gets the Docker socket or registry credentials (see [Container Image Builds](image-builds.md))
 - **Traefik auto-HTTPS** — optional reverse proxy with Let's Encrypt certificates for production-like access
 - **Stable port registry** — port assignments are persisted in `ports.json` and survive container restarts
 - **Resource monitoring** — per-container CPU and RAM stats, plus system-level metrics (memory, load average)
@@ -1156,7 +1157,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
 | `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` or `tls = {}` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
-| `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
+| `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. Its keys are documented under [Image registry settings](#image-registry-settings) |
 
 `environment_hostname_mode = "slots"` requires Traefik and a hostname with a
 distinct host prefix and parent domain, such as `dev.example.com`. A bare
@@ -1176,6 +1177,30 @@ team_{ID}/
 ├── .git-credentials      # Git credentials for this team
 └── agent_guides/         # AI agent guides (markdown)
 ```
+
+### Image registry settings
+
+The `[team.X.image_registry]` sub-table is optional, and its **presence is the
+feature switch**: with it, the team's agents can build and publish container
+images from an environment's git revision; without it, all four image-build MCP
+tools answer with a prerequisite error. Only `repository_prefix` is required —
+see [Container Image Builds](image-builds.md) for the workflow and the trust
+model.
+
+A present section must be valid, so a misconfigured registry fails at startup
+rather than at the first build.
+
+| Key | Default | Description |
+|---|---|---|
+| `[team.X.image_registry].repository_prefix` | *(required)* | Registry namespace every published image lives under, e.g. `acme` or `acme/odoo`. **This is the authorization boundary**: agents choose any repository and tag below it and can reach nothing outside it. Must be a lowercase OCI namespace — letters and digits, `.`, `_`, `-` as separators, `/` between components; leading and trailing `/` are stripped |
+| `[team.X.image_registry].host` | `docker.io` | Plain registry hostname, optionally with a port (`ghcr.io`, `registry.example.com:5000`). No scheme and no path: `https://…` or `host/namespace` is rejected. Lowercased |
+| `[team.X.image_registry].username` | *(empty)* | Registry user for pushes. Must be set **together with** `token`, or both left empty to use the host Docker daemon's own `docker login` credentials; setting only one is rejected at startup |
+| `[team.X.image_registry].token` | *(empty)* | Registry token or password, passed per-push to the Docker API as request-scoped auth — never a daemon-wide login, and never stored in build jobs. Use a least-privilege token restricted to `repository_prefix` and keep the config file readable only by the Oduflow user |
+| `[team.X.image_registry].build_timeout_seconds` | `1800` | Hard wall-clock deadline per build; the worker is terminated and the job fails. Must be `> 0` |
+| `[team.X.image_registry].max_context_mb` | `512` | Size cap for the sealed build context exported from the commit, checked before the build starts. A fixed ceiling of 200 000 files also applies. Must be `> 0` |
+| `[team.X.image_registry].max_log_mb` | `16` | Cap for the persisted build log per build; beyond it the log is truncated with a marker and the build continues. Must be `> 0` |
+| `[team.X.image_registry].max_concurrent_builds` | `2` | Active build workers allowed for the team; further builds are refused as busy. Must be `> 0` |
+| `[team.X.image_registry].keep_images` | `10` | Local staging images (`oduflow-build/team-<id>:<build-id>`) kept per team; older ones are untagged after each successful build, and tags referenced by a running or stopped container are always preserved. `0` disables pruning. Must be `>= 0` |
 
 ### Configuration file overrides
 
@@ -4392,12 +4417,42 @@ Services are:
 - Automatically routed through Traefik with HTTPS when in traefik mode
 - In Traefik TLS mode, automatically given the exact system mount `oduflow-traefik-acme:/etc/traefik:ro`
 - Labeled for management (`oduflow.managed=true`, `oduflow.service=<name>`)
-- Always created from a freshly pulled image — `create_service` and `restore_service` explicitly pull before running, so mutable tags like `:latest` get the current published version instead of a stale local cache
+- Always created from a freshly pulled image — `create_service` and `restore_service` explicitly pull before running, so mutable tags like `:latest` get the current published version instead of a stale local cache. The one exception is a local staging tag from an [image build](image-builds.md), which is resolved from the local daemon
 
 Each team has `service_slots = 10` by default. The cap includes running and
 stopped managed services; updating or restarting an existing service does not
 consume another slot. Delete an unused service to free capacity, or set
 `service_slots = 0` to disable the cap.
+
+### Running an Image Build Before Publishing It
+
+When a service image is built from your own repository, you do not have to push
+it to a registry to try it. A succeeded [image build](image-builds.md) stays in
+the host's Docker daemon under a staging tag,
+`oduflow-build/team-<team-id>:<build-id>`, reported as `Local image` by
+[`get_image_build`](mcp-tools.md#get_image_build). Pass that tag as the
+service `image`:
+
+```bash
+oduflow call create_service '{"name":"worker","image":"oduflow-build/team-1:bld-9f3c1a7b22e4","port":8099}'
+```
+
+The tag is looked up locally instead of being pulled, so the build can run as a
+real service — reachable on the team network and through Traefik like any other
+— and only then be promoted with
+[`publish_image_build`](mcp-tools.md#publish_image_build). The same tag works
+for [`update_service`](mcp-tools.md#update_service), which re-checks that the
+staging image still exists before replacing the running container.
+
+Two limits worth knowing:
+
+- Only the team that produced a build can run it; staging tags are not shared
+  between teams.
+- Staging tags are temporary. Build retention never removes a tag that a
+  running or stopped container uses, but once a service's staging image *is*
+  gone — pruned, or the service moved to another host — restoring it needs a
+  published tag. For anything long-lived, publish and point the service at the
+  registry image.
 
 ### Connecting from Odoo
 
@@ -4621,6 +4676,231 @@ period. These settings do not grant privileges or make a systemd image healthy: 
 image must implement its own readiness check, and its cgroup/capability requirements
 must be verified on the deployment host. The `runtime` field does not accept
 arbitrary Docker options or bind mounts from the host.
+
+---
+
+# Container Image Builds
+
+Oduflow can build a **container image from an environment's git revision** and
+publish it to the team's registry namespace — without handing the agent a
+Docker socket or registry credentials.
+
+The motivating case is an auxiliary-service image: a FreeSWITCH build, a worker
+sidecar, a companion API that lives in the same repository as the Odoo modules.
+Before this existed, shipping one required a human with Docker and push rights.
+Now an agent working through the scoped `/mcp/<env>` endpoint can build it, run
+the result as a [service](services.md), verify it, and promote exactly those
+bits to the registry.
+
+The capability is **off until an operator configures it**. Teams without a
+`[team.X.image_registry]` section get a clear prerequisite error from all four
+tools.
+
+!!! warning "A Dockerfile is untrusted code with the team's reach"
+    Oduflow builds on the host Docker daemon. A `RUN` step reaches the host's
+    network the same way the team's environment containers already do. That is
+    acceptable for the self-hosted, single-trust-boundary deployments Oduflow
+    targets — one team, or a few mutually trusting ones, on their own server.
+    It is **not** an isolation boundary for mutually untrusting tenants.
+
+## Prerequisites
+
+```toml
+[team.1.image_registry]
+repository_prefix = "acme"     # required — the authorization boundary
+```
+
+That single key enables the tools for team 1 and confines every push to
+`docker.io/acme/*`. Pushes then use the host Docker daemon's own `docker login`
+credentials. To keep credentials in Oduflow instead, set `username` and `token`
+together — they are sent per-push to the Docker API, never as a daemon-wide
+login. Full key list and defaults: [Image registry
+settings](installation.md#image-registry-settings).
+
+The section is read at startup, so adding it needs an Oduflow restart; the
+[Server settings console](admin.md) applies individual field changes live.
+
+There is **no dashboard UI** for builds — they are driven over MCP, or locally
+with `oduflow call`.
+
+## The flow
+
+```
+start_image_build ──► queued ──► building ──► succeeded
+                                     │            │
+                                     │            ├──► create_service / update_service
+                                     │            │    (run the staging image, verify it)
+                                     │            │
+                                     │            └──► publish_image_build
+                                     │                 (promote the exact bits)
+                                     ├──► failed
+                                     ├──► cancelled      (cancel_image_build)
+                                     └──► interrupted    (Oduflow restarted mid-build)
+```
+
+A build is identified by a `build_id` such as `bld-9f3c1a7b22e4` and belongs to
+the environment that started it. Ownership follows the environment *instance*:
+it survives a rename, and is dropped when the environment is deleted, so a
+re-used name never inherits an older instance's builds.
+
+### 1. Build from the current revision
+
+The source is the environment checkout's **HEAD commit at call time**, exported
+with `git archive` while the environment lock is held. The sealed copy cannot
+shift mid-build, so a later `pull_and_apply` never changes what is being built.
+
+```bash
+oduflow call start_image_build '{"env_name": "feature-x", "dockerfile": "docker/Dockerfile", "context": "."}'
+```
+
+```
+Image build started.
+build_id: bld-9f3c1a7b22e4
+Source: branch 'feature-x' @ 4f21ac9b1d77 (dockerfile docker/Dockerfile, context .)
+Timeout: 1800s
+```
+
+The call returns immediately; the build runs in a background worker process.
+
+!!! warning "Push and sync first"
+    The build pins HEAD of the *managed checkout*, not your laptop. Push your
+    commits and run [`pull_and_apply`](mcp-tools.md#pull_and_apply) before
+    building, or you will build the previous revision.
+
+!!! warning "Build arguments are not secret"
+    `build_args` values reach the Dockerfile and the image history. Never pass
+    credentials. Build secrets are not supported.
+
+`dockerfile` is resolved relative to `context`, `context` relative to the
+repository root, and both must stay inside the checkout. A missing Dockerfile
+or a context that is not a directory at that commit fails immediately, before
+any Docker work.
+
+### 2. Watch it
+
+```bash
+oduflow call get_image_build '{"env_name": "feature-x", "build_id": "bld-9f3c1a7b22e4", "tail_lines": 50}'
+```
+
+Reports status, the source commit, the publication history, and a tail of the
+build log. Poll this until the status is terminal. A hung build can be stopped
+with `cancel_image_build`, which terminates the worker and its Docker
+connection even when the current Dockerfile step prints nothing.
+
+### 3. Run it before publishing it
+
+A succeeded build stays in the host's Docker daemon under a **staging tag**:
+
+```
+oduflow-build/team-<team-id>:<build-id>
+```
+
+`get_image_build` reports it as `Local image`. Pass it as the `image` of
+[`create_service`](mcp-tools.md#create_service) or
+[`update_service`](mcp-tools.md#update_service) and it is resolved from the
+local daemon instead of being pulled — so the build can be smoke-tested as a
+real service before anything reaches a registry:
+
+```bash
+oduflow call create_service '{"name": "worker", "image": "oduflow-build/team-1:bld-9f3c1a7b22e4", "port": 8099}'
+```
+
+Only the owning team's staging repository is accepted here: the Docker daemon
+is shared between teams, and that prefix check is what keeps one team from
+running another team's build.
+
+### 4. Publish
+
+Publishing is `docker tag` + `docker push` of the **exact image that was
+built** — never a rebuild, so the bits you verified are the bits you ship.
+
+```bash
+oduflow call publish_image_build '{"env_name": "feature-x", "build_id": "bld-9f3c1a7b22e4", "repository": "worker", "tags": "1.4.0,latest"}'
+```
+
+```
+Publish results for build bld-9f3c1a7b22e4 (docker.io/acme/worker):
+  ✓ 1.4.0: sha256:7c0d…
+  ✓ latest: sha256:7c0d…
+```
+
+- The destination is always `{host}/{repository_prefix}/{repository}:{tag}`.
+  `repository` is relative to the configured prefix and cannot escape it.
+- Any syntactically valid tag is accepted, including `latest` and semver. Tag
+  naming is deliberately **not** an authorization layer: overwriting an
+  existing tag is intentional and last-writer-wins, and every publish is
+  recorded in the job's publication history.
+- Up to 10 tags per call, pushed one at a time. **Partial success is possible**
+  — each tag reports its own outcome and the call is retryable per tag.
+- Temporary local tags created for the push are removed afterwards.
+
+A published image is an ordinary registry image: use it as the `image` of a
+service on any host, or as the `odoo_image` of an environment or production.
+
+## Limits and retention
+
+Every bound is per team, in `[team.X.image_registry]`:
+
+| Bound | Default | What happens at the limit |
+|---|---|---|
+| `max_concurrent_builds` | `2` | A further `start_image_build` is refused as busy |
+| `build_timeout_seconds` | `1800` | Hard wall-clock deadline; the worker is terminated and the job fails |
+| `max_context_mb` | `512` | The sealed context is refused before the build starts (also a fixed 200 000-file ceiling) |
+| `max_log_mb` | `16` | The persisted log is truncated with a marker; the build continues |
+| `keep_images` | `10` | Older staging images are untagged after each successful build |
+
+Pruning keeps the staging tags of the newest `keep_images` succeeded builds and
+never removes a tag that a running **or stopped** container references, so a
+service built on a staging image keeps working. Underlying image objects are
+removed only once Docker reports no container uses them. Set `keep_images = 0`
+to disable pruning entirely.
+
+Jobs and logs live under `{data_dir}/team_{ID}/image_builds/<build-id>/`
+(`job.json` plus `build.log`). The sealed build context is deleted when the job
+reaches a terminal state.
+
+## After an Oduflow restart
+
+Builds are not resumed. A job found non-terminal on disk is marked
+`interrupted` the first time it is read. Succeeded builds stay publishable for
+as long as their staging image is still in the daemon. Retrying is simply a new
+`start_image_build` — the Docker layer cache usually makes it cheap.
+
+## Out of scope
+
+Multi-platform builds, build secrets, image signing, SBOM/provenance
+attestations, registry authentication for *pulling* private service images, and
+a dashboard build history are all deliberately absent. See
+[`specs/0054`](https://github.com/oduist/oduflow/blob/main/specs/0054-agent-container-image-build-and-publish.md)
+for the reasoning and for the multi-tenant design that was shelved.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| *"Container image building is not configured for this team"* | No `[team.X.image_registry]` section. Add one (`repository_prefix` is enough) and restart Oduflow |
+| *"already has N active image build(s)"* | `max_concurrent_builds` reached. Wait, cancel a build, or raise the bound |
+| *"Build context exceeds the configured limit"* | The whole commit tree is bigger than `max_context_mb`. Narrow `context` to a subdirectory or raise the bound |
+| *"dockerfile … not found under context … at commit"* | The path is resolved **in the committed tree**. Commit and push the Dockerfile, then `pull_and_apply` |
+| The build used the wrong code | HEAD of the managed checkout was behind. `pull_and_apply`, then build again |
+| Status is `interrupted` | Oduflow restarted mid-build. Start a new build |
+| *"The staging image … is no longer in the local Docker daemon"* | Retention or a manual `docker rmi` removed it. Run `start_image_build` again |
+| *"Staging builds can only be used by the team that built them"* | The staging tag belongs to another team. Use the tag `get_image_build` reports for your own build |
+| A push fails with authentication or permission errors | Either the daemon's `docker login` lacks rights to the prefix, or the configured `username`/`token` does. The token must be able to write every repository below `repository_prefix` |
+| Some tags published, others failed | Expected — tag writes are not a transaction. Re-call `publish_image_build` with the failed tags |
+
+## Security notes
+
+- The agent never receives Docker access or registry credentials; Oduflow
+  builds and pushes on its behalf.
+- `repository_prefix` is the authorization boundary, enforced by Oduflow. Still
+  issue a **least-privilege registry token** restricted to that namespace —
+  defence in depth if the config is ever misread.
+- The token is stored in `oduflow.toml`. Protect the file (mode 0600) and
+  prefer a token you can revoke over an account password.
+- The four build tools are available on the scoped `/mcp/<env>` endpoint, so an
+  environment-scoped credential can publish within the team's namespace. See
+  [Authentication & Security](security.md#scoped-single-environment-access-mcpenv).
 
 ---
 
@@ -7764,7 +8044,7 @@ configuration keeps the reference.
 
 ## Container Image Builds
 
-Requires a `[team.X.image_registry]` section in `oduflow.toml`.
+Requires a `[team.X.image_registry]` section in `oduflow.toml` — see [Container Image Builds](image-builds.md) for the end-to-end workflow, the limits and the trust model.
 
 A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 `oduflow-build/team-<id>:<build-id>` (reported by
@@ -10099,6 +10379,17 @@ listing other environments) are **not exposed and cannot be called**. The
 environment is taken from the URL, so the agent never passes — and cannot
 override — which environment it operates on.
 
+The four [container image build](image-builds.md) tools
+(`start_image_build`, `get_image_build`, `publish_image_build`,
+`cancel_image_build`) are also on this endpoint, but only for a team that has
+a `[team.X.image_registry]` section; without one they answer with a
+prerequisite error. Where it is configured, an environment-scoped credential
+can therefore **push images to the team's registry namespace** — confined to
+the configured `repository_prefix`, which Oduflow enforces on every publish.
+The agent receives neither the Docker socket nor the registry credentials;
+Oduflow builds and pushes on its behalf. Keep the registry token in
+`oduflow.toml` least-privilege, scoped to that prefix.
+
 ### Per-environment Secret Key
 
 Every environment gets its own access token, minted at creation time and kept
@@ -11627,6 +11918,60 @@ oduflow call run_odoo_tests '{"env_name": "my-branch", "modules": "my_module"}'
 
 Then narrow the failing asset with `get_environment_logs` and by disabling the
 suspect module's assets.
+
+---
+
+## An image build fails or hangs
+
+Tool-level causes (a missing `[team.X.image_registry]` section, a context over
+`max_context_mb`, a Dockerfile that is not in the commit, a pruned staging tag,
+a partially published tag set) are listed in the
+[Container Image Builds troubleshooting table](image-builds.md#troubleshooting).
+What follows is the host-side half.
+
+Every build keeps its state and full log on disk, which is the first place to
+look when `get_image_build` is not enough:
+
+```bash
+# Jobs for team 1, newest last
+ls -lt /srv/oduflow/team_1/image_builds/
+
+# Final state of one job (status, commit, error, publications)
+cat /srv/oduflow/team_1/image_builds/bld-9f3c1a7b22e4/job.json
+
+# The complete build log (get_image_build only returns a tail)
+less /srv/oduflow/team_1/image_builds/bld-9f3c1a7b22e4/build.log
+```
+
+A job stuck in `building` with no log progress is usually a Dockerfile step
+waiting on the network — an `apt-get` or `pip install` against an unreachable
+mirror. It is bounded by `build_timeout_seconds` and can be ended immediately
+with `cancel_image_build`; the worker process and its Docker connection are
+terminated even when the step prints nothing.
+
+Builds run on the **host Docker daemon**, so they compete with everything else
+for disk. A failure with `no space left on device` is a host problem, not a
+build one — see [Disk full](#disk-full). Layer cache and staging images are the
+usual culprits:
+
+```bash
+# What the builds are costing
+docker system df
+
+# Staging images of team 1 (retention keeps the newest keep_images builds)
+docker images 'oduflow-build/team-1'
+```
+
+Do not clear the layer cache reflexively: it is what makes a retried build
+cheap. Lowering `keep_images`, or publishing and then letting retention untag
+the staging builds, reclaims space without that cost. Staging tags used by a
+running or stopped service container are always preserved, so a `docker rmi` by
+hand can break a service that was created from a build — recreate such a
+service from a published tag instead.
+
+After an Oduflow restart, builds are never resumed: a job left mid-flight is
+marked `interrupted` the first time it is read. Succeeded builds stay
+publishable while their staging image exists.
 
 ---
 

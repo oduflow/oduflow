@@ -2243,7 +2243,7 @@ configuration keeps the reference.
 
 ## Container Image Builds
 
-Requires a `[team.X.image_registry]` section in `oduflow.toml`.
+Requires a `[team.X.image_registry]` section in `oduflow.toml` — see [Container Image Builds](image-builds.md) for the end-to-end workflow, the limits and the trust model.
 
 A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 `oduflow-build/team-<id>:<build-id>` (reported by

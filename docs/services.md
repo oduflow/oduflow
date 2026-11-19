@@ -43,12 +43,42 @@ Services are:
 - Automatically routed through Traefik with HTTPS when in traefik mode
 - In Traefik TLS mode, automatically given the exact system mount `oduflow-traefik-acme:/etc/traefik:ro`
 - Labeled for management (`oduflow.managed=true`, `oduflow.service=<name>`)
-- Always created from a freshly pulled image — `create_service` and `restore_service` explicitly pull before running, so mutable tags like `:latest` get the current published version instead of a stale local cache
+- Always created from a freshly pulled image — `create_service` and `restore_service` explicitly pull before running, so mutable tags like `:latest` get the current published version instead of a stale local cache. The one exception is a local staging tag from an [image build](image-builds.md), which is resolved from the local daemon
 
 Each team has `service_slots = 10` by default. The cap includes running and
 stopped managed services; updating or restarting an existing service does not
 consume another slot. Delete an unused service to free capacity, or set
 `service_slots = 0` to disable the cap.
+
+### Running an Image Build Before Publishing It
+
+When a service image is built from your own repository, you do not have to push
+it to a registry to try it. A succeeded [image build](image-builds.md) stays in
+the host's Docker daemon under a staging tag,
+`oduflow-build/team-<team-id>:<build-id>`, reported as `Local image` by
+[`get_image_build`](mcp-tools.md#get_image_build). Pass that tag as the
+service `image`:
+
+```bash
+oduflow call create_service '{"name":"worker","image":"oduflow-build/team-1:bld-9f3c1a7b22e4","port":8099}'
+```
+
+The tag is looked up locally instead of being pulled, so the build can run as a
+real service — reachable on the team network and through Traefik like any other
+— and only then be promoted with
+[`publish_image_build`](mcp-tools.md#publish_image_build). The same tag works
+for [`update_service`](mcp-tools.md#update_service), which re-checks that the
+staging image still exists before replacing the running container.
+
+Two limits worth knowing:
+
+- Only the team that produced a build can run it; staging tags are not shared
+  between teams.
+- Staging tags are temporary. Build retention never removes a tag that a
+  running or stopped container uses, but once a service's staging image *is*
+  gone — pruned, or the service moved to another host — restoring it needs a
+  published tag. For anything long-lived, publish and point the service at the
+  registry image.
 
 ### Connecting from Odoo
 

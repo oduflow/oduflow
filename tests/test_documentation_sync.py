@@ -120,6 +120,12 @@ def test_every_toml_setting_is_in_the_installation_reference():
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_parse_backup_section"
     )
+    parse_image_registry = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_parse_image_registry_section"
+    )
     reference = (DOCS / "installation.md").read_text(encoding="utf-8")
 
     sections = {
@@ -146,6 +152,14 @@ def test_every_toml_setting_is_in_the_installation_reference():
     for key in team_keys:
         if f"`{key}`" not in reference and f"`[team.X.{key}]`" not in reference:
             missing.append(f"[team.*].{key}")
+
+    # The image_registry sub-table has its own parser, so its keys are out of
+    # reach of `from_raw` above. They are documented one by one: the section is
+    # both a feature switch and the push-authorization boundary.
+    for key in _get_keys(parse_image_registry, {"raw"}):
+        qualified = f"[team.X.image_registry].{key}"
+        if f"`{qualified}`" not in reference:
+            missing.append(qualified)
 
     assert not sorted(missing), (
         f"TOML settings missing from docs/installation.md: {sorted(missing)}"
