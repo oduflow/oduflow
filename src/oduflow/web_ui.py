@@ -6253,10 +6253,15 @@ def _build_routes(
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        except Exception as e:
+        except Exception:
             logger.exception("WebSocket agent console error for branch %s", branch)
+            # Reachable by scoped share-link visitors, so never echo str(exc)
+            # (host paths, container names) into an untrusted terminal; the
+            # detail is in the server log, like ws_agent_acp's 1011 close.
             try:
-                await websocket.send_text(_term_error(e))
+                await websocket.send_text(
+                    "\x1b[31mError: internal error — check the server logs.\x1b[0m\r\n"
+                )
                 await websocket.close(code=1011)
             except Exception:
                 pass

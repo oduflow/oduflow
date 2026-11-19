@@ -544,12 +544,82 @@ def test_share_modal_ignores_stale_loads_and_blocks_unsafe_actions():
     }
 
 
-def test_share_modal_discloses_agent_chat_workspace_access(tmp_path):
+def test_share_modal_discloses_agent_workspace_access(tmp_path):
     dashboard = _client(tmp_path).get("/")
 
     assert dashboard.status_code == 200
-    assert "Agent Chat runs in the team's shared coder container" in dashboard.text
-    assert "may read other team checkouts and Git credentials" in dashboard.text
+    assert "Agent Chat and Agent CLI run as this environment's own user" in (
+        dashboard.text
+    )
+    assert "the team's Git credentials and deploy key" in dashboard.text
+    assert "any agent login made in this environment" in dashboard.text
+    assert "may read other team checkouts" not in dashboard.text
+    assert "as is Agent CLI" not in dashboard.text
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_scoped_view_offers_agent_cli():
+    """Render an environment card in scoped and operator modes and compare the
+    produced HTML: the scoped card offers Agent CLI (and Agent Chat) but none
+    of the operator-only items, however the template happens to spell its
+    guards."""
+    source = _DASHBOARD.read_text(encoding="utf-8")
+    function = _js_function(source, "renderEnvMenu") + _js_function(
+        source, "renderEnvironments"
+    )
+    result = _run_node(
+        f"""
+        const el = {{innerHTML: '', _lastHtml: ''}};
+        global.document = {{getElementById: () => el, activeElement: null}};
+        global.window = {{ODU_AGENT_ENABLED: true}};
+        var busyOps = {{}};
+        var selectedEnvs = new Set();
+        var _prevStatuses = {{}};
+        function esc(value) {{ return String(value == null ? '' : value); }}
+        var escAttr = esc;
+        function badgeClass() {{ return ''; }}
+        function containerStatsHtml() {{ return ''; }}
+        function formatDate(value) {{ return esc(value); }}
+        function repoHttpUrl() {{ return ''; }}
+        function isGitlab() {{ return false; }}
+        function extrasHtml() {{ return ''; }}
+        function _fmtElapsed() {{ return ''; }}
+        function _prodEnabled() {{ return false; }}
+        function applyStats() {{}}
+        function applyExtras() {{}}
+        function updateBulkBar() {{}}
+        {function}
+        const env = {{
+          branch: 'feature/x', env_name: 'feature/x', git_branch: 'feature/x',
+          status: 'running', containers: [{{name: 'odoo', status: 'running'}}]
+        }};
+        var SCOPED_ENV = 'feature/x';
+        renderEnvironments([env], true);
+        const scoped = el.innerHTML;
+        SCOPED_ENV = '';
+        renderEnvironments([env], true);
+        const operator = el.innerHTML;
+        const items = [
+          'Agent CLI', 'Agent Chat', 'Info', 'Share UI', 'Delete', 'Recreate'
+        ];
+        const has = html => Object.fromEntries(
+          items.map(item => [item, html.includes('>' + item + '</button>')])
+        );
+        console.log(JSON.stringify({{scoped: has(scoped), operator: has(operator)}}));
+        """
+    )
+
+    assert result["scoped"] == {
+        "Agent CLI": True,
+        "Agent Chat": True,
+        # Operator-only: GET …/env-vars (Info) is not in the scoped allowlist,
+        # and share management / provisioning are denied server-side.
+        "Info": False,
+        "Share UI": False,
+        "Delete": False,
+        "Recreate": False,
+    }
+    assert result["operator"] == {item: True for item in result["operator"]}
 
 
 def test_dashboard_accepts_opencode_default_and_labels_it(tmp_path):
@@ -2577,10 +2647,11 @@ const scoped = render();
 SCOPED_ENV = 'feature/test';
 const shared = render();
 assert.deepEqual(pageNames(shared).map(page => page.name), ['root', 'consoles', 'modules', 'access']);
-for (const absent of ['Management', 'Data', 'Delete', 'Share UI', 'Agent CLI', 'Add note', 'New Template']) {
+for (const absent of ['Management', 'Data', 'Delete', 'Share UI', 'Info', 'Add note', 'New Template']) {
   assert.equal(buttons(shared).some(item => item.text.includes(absent)), false, `scoped menu includes ${absent}`);
 }
 assert.ok(button(shared, 'MCP Access'));
+assert.ok(button(shared, 'Agent CLI'));
 assert.equal(buttons(shared).filter(item => /class="env-menu-group"/.test(item.attrs)).length, 3);
 assert.ok(scoped.includes('Agent CLI'));
 
