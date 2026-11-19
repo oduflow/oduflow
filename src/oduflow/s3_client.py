@@ -16,8 +16,21 @@ from oduflow.settings import BackupSettings
 
 logger = logging.getLogger("oduflow")
 
-# S3 multipart minimum part size is 5 MiB; use 16 MiB parts.
+# S3 multipart minimum part size is 5 MiB; start with 16 MiB parts.
 _PART_SIZE = 16 * 1024 * 1024
+_PART_SIZE_MAX = 256 * 1024 * 1024
+
+
+def _part_size(part_number: int) -> int:
+    """Part size for a stream of unknown total length.
+
+    S3 caps an object at 10,000 parts, so fixed 16 MiB parts silently cap a
+    streaming backup at ~156 GiB — the 10,001st upload_part fails mid-backup.
+    The size doubles every 1000 parts instead (16, 32, 64, 128, then 256 MiB),
+    which covers ~1.7 TiB within the part limit while small backups keep the
+    exact 16 MiB behaviour and the in-memory buffer stays <= 256 MiB.
+    """
+    return min(_PART_SIZE_MAX, _PART_SIZE << ((part_number - 1) // 1000))
 
 
 def make_client(backup: BackupSettings) -> Any:
@@ -151,9 +164,10 @@ def multipart_upload_stream(
 ) -> int:
     """Stream an unbounded byte iterator into S3 as a multipart upload.
 
-    Buffers frames into ~16 MiB parts (no temp disk). Returns total bytes.
-    Aborts the multipart upload on any failure so no orphaned parts accrue
-    storage costs.
+    Buffers frames into parts sized by :func:`_part_size` (16 MiB growing to
+    256 MiB, no temp disk) so long streams never hit S3's 10,000-part cap.
+    Returns total bytes. Aborts the multipart upload on any failure so no
+    orphaned parts accrue storage costs.
     """
     upload = client.create_multipart_upload(Bucket=bucket, Key=key)
     upload_id = upload["UploadId"]
@@ -183,7 +197,7 @@ def multipart_upload_stream(
                 continue
             buffer.extend(frame)
             total += len(frame)
-            if len(buffer) >= _PART_SIZE:
+            if len(buffer) >= _part_size(part_number):
                 _flush_part()
         _flush_part()
         if not parts:

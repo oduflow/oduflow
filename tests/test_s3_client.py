@@ -10,7 +10,7 @@ forever).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -392,3 +392,44 @@ class TestS3PutIfAbsent:
         client.exceptions.ClientError = err
         client.put_object.side_effect = err()
         assert self._storage(client).put_if_absent("config", b"x") is False
+
+
+class TestAdaptivePartSize:
+    """P-L5: fixed 16 MiB parts capped a streaming backup at ~156 GiB
+    (S3 allows at most 10,000 parts per object)."""
+
+    def test_ladder_doubles_every_thousand_parts_up_to_the_cap(self):
+        mib = 1024 * 1024
+        assert s3_client._part_size(1) == 16 * mib
+        assert s3_client._part_size(1000) == 16 * mib
+        assert s3_client._part_size(1001) == 32 * mib
+        assert s3_client._part_size(2001) == 64 * mib
+        assert s3_client._part_size(3001) == 128 * mib
+        assert s3_client._part_size(4001) == 256 * mib
+        # The cap holds forever after; parts never exceed 256 MiB of RAM.
+        assert s3_client._part_size(9999) == 256 * mib
+
+    def test_ten_thousand_parts_cover_far_more_than_the_old_cap(self):
+        capacity = sum(s3_client._part_size(n) for n in range(1, 10_001))
+        gib = 1024**3
+        old_cap = 10_000 * 16 * 1024 * 1024  # ~156 GiB
+        assert capacity > 10 * old_cap
+        assert capacity > 1.5 * 1024 * gib  # ~1.7 TiB headroom
+
+    def test_upload_uses_the_current_part_number_for_the_threshold(self):
+        client = MagicMock()
+        client.create_multipart_upload.return_value = {"UploadId": "UP1"}
+        client.upload_part.side_effect = lambda **kw: {
+            "ETag": f"etag-{kw['PartNumber']}"
+        }
+        # Shrink the ladder so the test moves real bytes: part 1 flushes at
+        # 10 bytes, part 2 at 20, the tail ships as-is.
+        with patch.object(
+            s3_client, "_part_size", side_effect=lambda n: 10 if n == 1 else 20
+        ):
+            total = s3_client.multipart_upload_stream(
+                client, "backups", "dump.sql", iter([b"x" * 5] * 7)
+            )
+        assert total == 35
+        bodies = [c.kwargs["Body"] for c in client.upload_part.call_args_list]
+        assert [len(b) for b in bodies] == [10, 20, 5]

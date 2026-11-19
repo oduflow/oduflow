@@ -341,18 +341,31 @@ def warn_if_dirs_unreachable(settings: Settings) -> str | None:
     return status
 
 
-def _unhealthy_productions(settings: Settings) -> list[str]:
+def _unhealthy_productions(settings: Settings) -> tuple[list[str], list[str]]:
+    """Unhealthy production names plus teams whose registry is unreadable.
+
+    A corrupt productions.json must degrade /healthz, not hide behind "ok" —
+    swallowing the read error here masked exactly the state the check exists
+    to surface. The exception (which may contain host paths) goes to the
+    server log; /healthz is public, so its detail carries only the team id.
+    """
     from oduflow import production_registry
 
     names = []
+    errors = []
     for team in settings.teams.values():
         try:
             for name, record in production_registry.list_productions(team).items():
                 if record.get("unhealthy"):
                     names.append(f"{team.team_id}/{name}")
         except Exception:
-            continue
-    return names
+            logger.warning(
+                "Production registry for team %s is unreadable",
+                team.team_id,
+                exc_info=True,
+            )
+            errors.append(f"team {team.team_id}: production registry unreadable")
+    return names, errors
 
 
 def _disabled_production_status(client: Any, settings: Settings) -> dict[str, Any]:
@@ -427,10 +440,12 @@ def collect_health(settings: Settings, *, force: bool = False) -> dict[str, Any]
     if not settings.prod_enabled and client is not None:
         checks["productions"] = _disabled_production_status(client, settings)
     else:
-        unhealthy = _unhealthy_productions(settings) if settings.prod_enabled else []
+        unhealthy, registry_errors = (
+            _unhealthy_productions(settings) if settings.prod_enabled else ([], [])
+        )
         checks["productions"] = {
-            "status": "error" if unhealthy else "ok",
-            "detail": ", ".join(unhealthy),
+            "status": "error" if unhealthy or registry_errors else "ok",
+            "detail": ", ".join(unhealthy + registry_errors),
             "unhealthy": unhealthy,
         }
 
