@@ -98,6 +98,17 @@ one-click open.
 - Adds one reserved path (`/oduflow-connect`) and one Traefik router; no new
   config knobs. Traefik mode only — port/local mode keeps the shared-host cookie.
 
+## Evolution
+
+The landing later gained a second kind of token for links issued over MCP
+([[0085-mcp-connect-link]]). Such a link is relayed to a person by another
+application, so its token carries only *who to sign in as*: a GET of the
+landing shows a page and changes nothing, and the session is minted in the POST
+that page makes. The dashboard's token described above is unchanged — minted up
+front, consumed by the first GET. The failure page became HTML and no longer
+tells its reader to "reopen it from the dashboard", since they may never have
+seen one.
+
 ## History
 
 - `litnimax/connect-as-user-selects` (2026-07-19) — one-time token store, traefik

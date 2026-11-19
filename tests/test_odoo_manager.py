@@ -4247,6 +4247,96 @@ class TestConnectAsUser:
         assert container.exec_run.call_count == 2
 
 
+class TestResolveEnvUser:
+    """The session-free user check behind connect_link's call-time validation."""
+
+    @staticmethod
+    def _db(mock_docker_client, output: bytes, exit_code: int = 0):
+        db = MagicMock()
+        db.exec_run.return_value = (exit_code, output)
+        mock_docker_client.containers.get.return_value = db
+        return db
+
+    @staticmethod
+    def _sql(db) -> str:
+        cmd = db.exec_run.call_args.args[0]
+        assert cmd[:6] == ["psql", "-tAX", "-U", "odoo", "-d", "oduflow_1_main"]
+        return cmd[cmd.index("-c") + 1]
+
+    def test_default_resolves_the_admin_through_its_xml_id(self, mock_docker_client):
+        # The admin's login was changed to an email address.
+        db = self._db(mock_docker_client, b'{"uid" : 2, "login" : "boss@acme.com"}\n')
+        result = odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "")
+
+        assert result == {"uid": 2, "login": "boss@acme.com"}
+        sql = self._sql(db)
+        assert "ir_model_data" in sql
+        assert "d.module = 'base' AND d.name = 'user_admin'" in sql
+        # The pitfall this avoids: looking the admin up by a literal login.
+        assert "login =" not in sql
+        # One query on the shared DB container; no Odoo registry is booted.
+        mock_docker_client.containers.get.assert_called_once_with(
+            TEST_SETTINGS.shared_db_container
+        )
+        assert db.exec_run.call_count == 1
+
+    def test_login_reaches_sql_only_as_hex(self, mock_docker_client):
+        hostile = "x'; DROP TABLE res_users; --"
+        db = self._db(mock_docker_client, b"")
+        with pytest.raises(NotFoundError, match="not found in environment 'main'"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", hostile)
+
+        sql = self._sql(db)
+        assert "DROP" not in sql and "--" not in sql
+        assert f"decode('{hostile.encode().hex()}', 'hex')" in sql
+        # Archived users are not sign-in targets, as in the mint script.
+        assert "u.active" in sql
+        assert "u.id =" not in sql  # not a number: no id branch
+
+    def test_numeric_selector_prefers_a_login_match_then_the_id(
+        self, mock_docker_client
+    ):
+        db = self._db(mock_docker_client, b'{"uid" : 7, "login" : "jane@acme.com"}')
+        result = odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", " 7 ")
+
+        assert result == {"uid": 7, "login": "jane@acme.com"}
+        sql = self._sql(db)
+        assert "OR u.id = 7)" in sql
+        # Same precedence as the mint script: login first, id as the fallback.
+        assert sql.index("ORDER BY (u.login =") < sql.index("DESC LIMIT 1")
+
+    @pytest.mark.parametrize("selector", ["٣", "²", "7 OR 1=1", "-1", "1e3"])
+    def test_only_plain_digits_take_the_id_branch(self, selector, mock_docker_client):
+        db = self._db(mock_docker_client, b"")
+        with pytest.raises(NotFoundError):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", selector)
+        assert "u.id =" not in self._sql(db)
+
+    def test_missing_admin_record_names_what_was_looked_up(self, mock_docker_client):
+        self._db(mock_docker_client, b"\n")
+        with pytest.raises(NotFoundError, match=r"admin \(base\.user_admin\)"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "")
+
+    @pytest.mark.parametrize("selector", ["a\x00b", "x" * 600])
+    def test_impossible_logins_never_reach_the_database(
+        self, selector, mock_docker_client
+    ):
+        db = self._db(mock_docker_client, b"")
+        with pytest.raises(NotFoundError):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", selector)
+        db.exec_run.assert_not_called()
+
+    def test_psql_failure_is_an_external_command_error(self, mock_docker_client):
+        self._db(mock_docker_client, b'FATAL: database "x" does not exist', 2)
+        with pytest.raises(ExternalCommandError, match="does not exist"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "admin")
+
+    def test_missing_db_container_is_reported(self, mock_docker_client):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("gone")
+        with pytest.raises(NotFoundError, match="is not running"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "admin")
+
+
 class TestGetLogs:
     def test_logs(self, mock_docker_client):
         container = MagicMock()

@@ -2,7 +2,7 @@
 
 ![Agent Instructions](img/agent_instructions.png)
 
-Oduflow exposes **108 tools**. They are reachable from any MCP client (Cursor,
+Oduflow exposes **109 tools**. They are reachable from any MCP client (Cursor,
 Cline, Amp, Claude Code, …), locally with `oduflow call`, against a remote
 Oduflow server with `oduflow client`, and — for a subset — over the
 [REST API](web-api.md).
@@ -83,7 +83,8 @@ end to end.
     [`run_odoo_shell`](#run_odoo_shell)&nbsp;·
     [`http_request_to_odoo`](#http_request_to_odoo)&nbsp;·
     [`reset_admin_password`](#reset_admin_password)&nbsp;·
-    [`connect_as_user`](#connect_as_user)
+    [`connect_as_user`](#connect_as_user)&nbsp;·
+    [`connect_link`](#connect_link)
 
 -   __[Translations](#translations)__
 
@@ -1325,7 +1326,101 @@ Lock: environment.
 !!! warning "The session id is a live credential"
     It is shown in the tool's output (and therefore in the transcript) — treat
     it like a password. The tool grants no new privilege: whoever can call it
-    can already [`run_odoo_shell`](#run_odoo_shell).
+    can already [`run_odoo_shell`](#run_odoo_shell). The server log shows the
+    call but not the session id.
+
+To sign a **person** in rather than an automated browser, use
+[`connect_link`](#connect_link): another application cannot set a cookie for
+the environment's host from its own origin.
+
+### `connect_link`
+
+Create a one-time browser sign-in link for an environment. Redirect a person's
+browser to the returned URL — or hand it to them to click — and they land in
+Odoo already signed in as the chosen user, with no password and no cookie
+handling on the caller's side. This is the building block for an "Open as
+admin" button in an application that drives Oduflow over MCP.
+
+The result is an object (MCP structured content; the same object as JSON in the
+text content):
+
+| Field | Meaning |
+|---|---|
+| `url` | The redirect target: `https://<environment-host>/oduflow-connect?token=…` |
+| `login`, `uid` | The user the link signs in as, resolved when the link is created |
+| `env_name` | The environment |
+| `expires_in` | Lifetime of the link in seconds (300) |
+| `note` | Empty unless something needs saying — the environment was stopped and has been started |
+
+```json
+{
+  "url": "https://feature-x.dev.example.com/oduflow-connect?token=…",
+  "env_name": "feature-x",
+  "login": "admin",
+  "uid": 2,
+  "expires_in": 300,
+  "note": ""
+}
+```
+
+Lock: environment.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`env_name`
+:   *str · required* — The environment.
+
+`user`
+:   *str · default empty* — The user to sign in as: a login (e.g. `"jane@acme.com"`) or a numeric id. Empty means the database's administrator, found through its `base.user_admin` record, so it keeps working when the administrator's login has been changed from `admin` to an email address. Passing `"admin"` looks up that literal login.
+
+**What the link does**
+
+- It works **once**, only on **that environment's host**, and for **five
+  minutes**.
+- **Nothing is minted until it is used.** The link carries only who to sign in
+  as; the Odoo session is created when a browser redeems it. A link nobody
+  opens leaves no session behind.
+- **Fetching it does not use it up.** Opening the URL shows a short page that
+  continues to Odoo by itself; the sign-in happens in the request that page
+  makes. A chat link preview or a mail link scanner that only fetches the URL
+  changes nothing, and the link still works for the person afterwards. A
+  browser driven by automation (`navigator.webdriver`) is shown the same page
+  but has to press **Continue** itself.
+- **A busy or stopped environment does not cost the link.** If another
+  operation holds the environment when the link is opened, the page says so
+  and retries every few seconds until the link expires. A stopped environment
+  is started, and the browser is sent on once Odoo answers. The link is spent
+  only by a successful sign-in; if the environment or the user has been deleted
+  in the meantime, the page says the link can no longer be used.
+- An unknown `user` is rejected by the tool call, not later in the person's
+  browser. A stopped environment is started by the call as well, so the link
+  opens without a wait.
+
+**Requirements**
+
+- **Traefik routing.** In port mode an environment has no host of its own to
+  serve the landing; the tool fails with an explanation.
+- **The HTTP transport.** The link is redeemed by the web UI of the server
+  process that issued it, so the tool fails under the stdio transport and for a
+  one-off `oduflow call`. Links also do not survive a server restart.
+
+In both cases use [`connect_as_user`](#connect_as_user) and set the cookie
+yourself.
+
+**Use it when**
+
+- An application wants an "Open" or "Open as admin" button for an environment
+  it manages over MCP.
+- An agent should give a person a way into the environment it just prepared,
+  as a specific user, without sharing a password.
+
+!!! warning "The link is a bearer credential until it is used"
+    Anyone who opens it within five minutes is signed in as that user, so pass
+    it only to the person it is for. Oduflow keeps it out of its own log: the
+    tool-call log line and the HTTP access log both show the URL with the
+    token masked. Like `connect_as_user`, the tool grants no new privilege:
+    whoever can call it can already [`run_odoo_shell`](#run_odoo_shell).
 
 ## Translations
 

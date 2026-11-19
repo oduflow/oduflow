@@ -105,6 +105,7 @@ precursors).
 | [0082](0082-operator-only-cluster-dr.md) | 2026-10-18 | Cluster WAL control and PITR moved off the team MCP/dashboard surfaces to /admin and the owner CLI |
 | [0083](0083-configurable-config-dir.md) | 2026-11-09 | Config dir made configurable (`[storage].etc_dir`, default: the loaded TOML's directory) so Docker-out-of-Docker bind sources resolve on the host; mirror/push/PGDATA alternatives rejected |
 | [0084](0084-service-only-stacks.md) | 2026-11-18 | Service-only Stacks and explicit cluster selection for service databases |
+| [0085](0085-mcp-connect-link.md) | 2026-11-19 | One-time browser sign-in links over MCP (`connect_link`): session minted at redemption, GET changes nothing, link spent only by a successful sign-in; credentials scrubbed from tool-result and access logs |
 
 ## Design docs
 

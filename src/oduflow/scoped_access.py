@@ -80,6 +80,9 @@ SCOPED_ALLOWLIST = frozenset(
         "odoo_schema",
         "reset_admin_password",
         "connect_as_user",
+        # Same reach as connect_as_user (a session as any user of THIS
+        # environment), handed out as a one-time link instead of a raw sid.
+        "connect_link",
         "write_file_in_odoo",
         "read_file_in_odoo",
         "search_in_odoo",

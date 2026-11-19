@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>__BRAND_NAME__ — __HEADING__</title>
+  <style>
+    /* Self-contained on purpose: no font, logo or script files (see
+       _render_connect_page in web_ui.py for why). */
+    :root {
+      /* "The Engineer's Console" tokens (see DESIGN.md); light values below
+         follow the OS, since the stored theme choice is per origin. */
+      --bg: oklch(0.07 0.01 260);
+      --surface-raised: oklch(0.16 0.012 260);
+      --border: oklch(0.3 0.013 260);
+      --border-raised: oklch(0.34 0.015 260);
+      --text: oklch(0.93 0.005 260);
+      --text-dim: oklch(0.7 0.01 260);
+      --accent: oklch(0.6 0.2 260);
+      --shadow-modal: 0 24px 64px rgba(0,0,0,0.65);
+      --radius: 0.625rem;
+      --radius-sm: 0.425rem;
+      --focus-ring: 0 0 0 3px color-mix(in oklab, var(--accent) 50%, transparent);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: oklch(0.97 0.004 260);
+        --surface-raised: oklch(1 0 0);
+        --border: oklch(0.9 0.006 260);
+        --border-raised: oklch(0.86 0.008 260);
+        --text: oklch(0.25 0.02 260);
+        --text-dim: oklch(0.48 0.02 260);
+        --accent: oklch(0.5 0.2 260);
+        --shadow-modal: 0 24px 64px rgba(15,23,42,0.18);
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--surface-raised);
+      border: 1px solid var(--border-raised);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-modal);
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    h1 { font-size: 18px; font-weight: 600; }
+    p { font-size: 14px; line-height: 1.5; }
+    p.dim { color: var(--text-dim); font-size: 13px; }
+    /* Machine artifacts (host names, logins) are set in mono — The Console Voice Rule. */
+    code {
+      font-family: "Source Code Pro", ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    form { display: flex; }
+    /* The quiet primary: neutral at rest, Console Blue on hover and focus. */
+    button {
+      margin-top: 4px;
+      background: var(--surface-raised);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.3125rem 0.875rem;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled), button:focus-visible {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: color-mix(in oklab, var(--accent) 10%, var(--surface-raised));
+    }
+    button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>__HEADING__</h1>
+    <!--CONTENT-->
+  </main>
+  <script>
+    (function () {
+      var form = document.getElementById('connect-form');
+      if (!form) return;
+      var button = form.querySelector('button');
+      function busy() {
+        button.disabled = true;
+        button.textContent = form.dataset.busyLabel;
+      }
+      form.addEventListener('submit', busy);
+      // Continue without a click for a person's browser. An automated browser
+      // — a link scanner detonating the URL, a test driver — reports itself
+      // through navigator.webdriver and has to press the button deliberately,
+      // so merely rendering this page never spends the one-time link.
+      var delay = parseInt(form.dataset.autoMs, 10);
+      if (!isNaN(delay) && !navigator.webdriver) {
+        setTimeout(function () { busy(); form.submit(); }, delay);
+      }
+    })();
+  </script>
+</body>
+</html>
