@@ -14,7 +14,7 @@ import shlex
 import sys
 import threading
 import warnings
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, ParamSpec, TypeVar, cast
 
 # Suppress a third-party deprecation warning emitted at import time by fastmcp's
@@ -375,6 +375,17 @@ def _compact_pull_result(
 # Wrap every credential a tool puts in its result — a session id, a password, a
 # DATABASE_URL, a one-time link token — so handle_errors keeps it out of the log.
 _secret = log_redaction.secret
+
+
+def _env_pairs(env_vars: Mapping[str, object]) -> str:
+    """``K=V, K2=V2`` for a tool result, kept out of the log as one credential.
+
+    Literal env-var values routinely are API keys and passwords
+    (``MEILI_MASTER_KEY=…``). The listing is marked whole rather than value by
+    value: scrubbing is plain substring replacement, and marking a value such as
+    ``2`` or ``false`` would mask every other occurrence of it in the log line.
+    """
+    return _secret(", ".join(f"{k}={v}" for k, v in env_vars.items()))
 
 
 def _artifact_url(settings: Settings, team: TeamSettings, token: str) -> str | None:
@@ -1378,9 +1389,7 @@ def create_environment(
         if auto_install_list:
             lines.append(f"Auto-install modules: {', '.join(auto_install_list)}")
         if parsed_env:
-            lines.append(
-                "Env vars: " + ", ".join(f"{k}={v}" for k, v in parsed_env.items())
-            )
+            lines.append(f"Env vars: {_env_pairs(parsed_env)}")
         lineage = result.get("template_lineage") or {}
         if lineage.get("message"):
             label = (
@@ -2506,9 +2515,7 @@ def update_environment(
     ]
     env_result = result.get("env_vars") or {}
     if env_result:
-        lines.append(
-            "Env vars: " + ", ".join(f"{k}={v}" for k, v in env_result.items())
-        )
+        lines.append(f"Env vars: {_env_pairs(env_result)}")
     if renamed_from:
         lines.append(
             f"Use env_name='{final_env_name}' from now on; its scoped MCP endpoint "
@@ -2581,8 +2588,7 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
         addons = ", ".join(f"{k}:{v}" for k, v in info["extra_addons"].items())
         lines.append(f"Extra addons: {addons}")
     if info.get("env_vars"):
-        env_display = ", ".join(f"{k}={v}" for k, v in info["env_vars"].items())
-        lines.append(f"Env vars: {env_display}")
+        lines.append(f"Env vars: {_env_pairs(info['env_vars'])}")
     if info.get("workspace"):
         lines.append(f"Workspace: {info['workspace']}")
     for key in ("odoo", "db"):
@@ -4074,13 +4080,17 @@ def connect_link(
     The link works once, only on that environment's host, and expires after
     `expires_in` seconds. Nothing is minted until a browser actually redeems it,
     so a link that is never opened leaves no Odoo session behind, and a link
-    preview or scanner that merely fetches the URL does not use it up. Until it
-    is redeemed or expires it is a bearer credential for that user — pass it
-    only to the person it is for.
+    preview or scanner that merely fetches the URL does not use it up. That
+    protection stops at fetching: the page the URL shows continues by itself
+    unless the browser reports itself as automated, so a scanner that opens
+    links in a full browser hiding that fact does use the link up. Until it is
+    redeemed or expires it is a bearer credential for that user — pass it only
+    to the person it is for.
 
     Requires Traefik routing and the HTTP transport; it fails with an
     explanation otherwise. `user` is checked now, so an unknown user fails here
-    rather than in the person's browser.
+    rather than in the person's browser — and before a stopped environment is
+    started for the link.
 
     Args:
         env_name: The name of the environment.
@@ -4110,16 +4120,20 @@ def connect_link(
             "serve the sign-in landing. Use connect_as_user to get a session "
             "cookie instead."
         )
+    # Everything that can refuse the call comes before the wake: a mistyped
+    # user must not start an auto-stopped environment (and reset its idle
+    # clock) only to fail. Neither check needs Odoo running — the URL comes
+    # from the container's labels and doubles as the "environment exists"
+    # check, and the user lookup runs on the shared DB container.
+    base_url, env_host = env_ops.get_env_base_url(settings, team, env_name)
+    who = odoo_ops.resolve_env_user(settings, team, env_name, user)
     woke = _wake_for_work(settings, team, env_name, "so the link opens right away")
     note = woke.strip()
-    # Before the readiness wait, so a bad user fails fast.
-    who = odoo_ops.resolve_env_user(settings, team, env_name, user)
     if woke and not env_ops.wait_for_odoo_ready(settings, team, env_name):
         note += (
             " Odoo did not become ready within 120 seconds; the link may land "
             "on an error page until it does. Check get_environment_logs."
         )
-    base_url, env_host = env_ops.get_env_base_url(settings, team, env_name)
     token = connect_tokens.issue_link(
         env_host,
         connect_tokens.LinkGrant(
@@ -5197,8 +5211,7 @@ def get_service_info(name: str, ctx: Context | None = None) -> str:
         )
         lines.append(f"System mounts: {system_str} (implicit; do not pass as volumes)")
     if info.get("env_vars"):
-        env_str = ", ".join(f"{k}={v}" for k, v in info["env_vars"].items())
-        lines.append(f"Env: {env_str}")
+        lines.append(f"Env: {_env_pairs(info['env_vars'])}")
     if info.get("started_at"):
         lines.append(
             f"Started: {info['started_at']} (restart_count={info.get('restart_count', 0)})"
@@ -5217,11 +5230,7 @@ def list_service_presets(ctx: Context | None = None) -> str:
         return "No service presets saved."
     output = "Saved Service Presets:\n"
     for p in presets:
-        env_str = (
-            ", ".join(f"{k}={v}" for k, v in p["env_vars"].items())
-            if p.get("env_vars")
-            else ""
-        )
+        env_str = _env_pairs(p["env_vars"]) if p.get("env_vars") else ""
         output += f"- {p['name']}: image={p['image']}"
         if not p.get("routes"):
             output += f", port={p['port']}"
@@ -5382,8 +5391,7 @@ def list_services(ctx: Context | None = None) -> str:
             for route in svc["routes"]:
                 output += f"  Route: {route['path']} -> {route['port']}\n"
         if svc.get("env_vars"):
-            env_str = ", ".join(f"{k}={v}" for k, v in svc["env_vars"].items())
-            output += f"  Env: {env_str}\n"
+            output += f"  Env: {_env_pairs(svc['env_vars'])}\n"
     return output
 
 

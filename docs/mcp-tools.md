@@ -1386,16 +1386,23 @@ Lock: environment.
   makes. A chat link preview or a mail link scanner that only fetches the URL
   changes nothing, and the link still works for the person afterwards. A
   browser driven by automation (`navigator.webdriver`) is shown the same page
-  but has to press **Continue** itself.
+  but has to press **Continue** itself. The protection ends there: a scanner
+  that opens links in a full browser, runs the page's script and does not
+  report itself as automated continues exactly like a person, and uses the
+  link up.
 - **A busy or stopped environment does not cost the link.** If another
   operation holds the environment when the link is opened, the page says so
   and retries every few seconds until the link expires. A stopped environment
   is started, and the browser is sent on once Odoo answers. The link is spent
   only by a successful sign-in; if the environment or the user has been deleted
-  in the meantime, the page says the link can no longer be used.
+  in the meantime, the page says the link can no longer be used. Any other
+  failure keeps the link and offers a retry; the page does not say what went
+  wrong — its reader may be anyone holding the link — and the reason is in the
+  server log.
 - An unknown `user` is rejected by the tool call, not later in the person's
   browser. A stopped environment is started by the call as well, so the link
-  opens without a wait.
+  opens without a wait — after the user check, so a mistyped user does not
+  start an environment.
 
 **Requirements**
 

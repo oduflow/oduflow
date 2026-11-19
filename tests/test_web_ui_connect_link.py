@@ -12,6 +12,7 @@ import re
 import time
 from unittest.mock import patch
 
+import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
@@ -357,11 +358,59 @@ def test_failed_start_keeps_the_link(tmp_path):
         )
         resp = _land(client, token, "POST")
         assert resp.status_code == 400
-        assert "Cannot start" in resp.text
+        assert "could not be signed in" in resp.text
         assert "Try again" in resp.text
         r.connect.assert_not_called()
     with _Redemption():
         assert _land(client, token, "POST").status_code == 303
+
+
+@pytest.mark.parametrize(
+    ("error", "internal"),
+    [
+        (
+            PrerequisiteNotMetError(
+                "Cannot start '18.0': its filestore overlay could not be "
+                "re-mounted (fuse-overlayfs: /srv/oduflow/1/overlay/18.0: "
+                "Transport endpoint is not connected)."
+            ),
+            ["/srv/oduflow", "fuse-overlayfs", "filestore overlay"],
+        ),
+        (
+            PrerequisiteNotMetError(
+                "Interrupted template refresh needs recovery; inspect "
+                "/srv/oduflow/1/workspaces/18.0/.refresh-journal before "
+                "starting or updating this environment"
+            ),
+            ["/srv/oduflow", "refresh-journal"],
+        ),
+        (
+            PrerequisiteNotMetError(
+                "oduflow-db not found. System not initialized. Restart Oduflow."
+            ),
+            ["oduflow-db", "Restart Oduflow"],
+        ),
+    ],
+)
+def test_failure_page_keeps_operator_detail_for_the_log(
+    error, internal, tmp_path, caplog
+):
+    """The page is read by whoever holds the link, with no dashboard login
+    behind them: host paths, container names and exception text are for the
+    operator's log, not for that page."""
+    caplog.set_level("ERROR", logger="oduflow")
+    with _Redemption() as r:
+        r.ensure_running.side_effect = error
+        resp = _land(_client(_settings(tmp_path)), _issue(), "POST")
+    assert resp.status_code == 400
+    for fragment in internal:
+        assert fragment not in resp.text
+    # The operator still gets all of it, with the environment named.
+    assert str(error) in caplog.text
+    assert "'18.0'" in caplog.text
+    # ...and the person is told what they can do.
+    assert "Try again" in resp.text
+    assert "tell whoever gave you the link" in resp.text
 
 
 def test_failed_mint_keeps_the_link_and_scrubs_the_detail(tmp_path, caplog):

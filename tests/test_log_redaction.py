@@ -251,6 +251,112 @@ def test_artifact_download_token_is_not_logged(server, caplog):
     assert "tok-ZYXWVUT" not in caplog.text
 
 
+# Literal env-var values are routinely API keys. Each case is a tool whose
+# result lists them inside the logged preview.
+_ENV_VARS = {"MEILI_MASTER_KEY": "mk-9f8e7d6c5b4a", "WORKERS": "2"}
+_ENV_LISTING_TOOLS = [
+    (
+        "list_services",
+        "oduflow.docker_ops.service_ops.list_services",
+        [
+            {
+                "name": "search",
+                "container_name": "oduflow-1-svc-search",
+                "image": "getmeili/meilisearch:v1",
+                "status": "running",
+                "port": 7700,
+                "env_vars": _ENV_VARS,
+            }
+        ],
+        {},
+    ),
+    (
+        "get_service_info",
+        "oduflow.docker_ops.service_ops.get_service_info",
+        {
+            "name": "search",
+            "container_name": "oduflow-1-svc-search",
+            "status": "running",
+            "image": "getmeili/meilisearch:v1",
+            "port": 7700,
+            "env_vars": _ENV_VARS,
+        },
+        {"name": "search"},
+    ),
+    (
+        "list_service_presets",
+        "oduflow.docker_ops.service_presets.list_presets",
+        [
+            {
+                "name": "search",
+                "image": "getmeili/meilisearch:v1",
+                "port": 7700,
+                "env_vars": _ENV_VARS,
+            }
+        ],
+        {},
+    ),
+    (
+        "get_environment_info",
+        "oduflow.docker_ops.env_ops.get_environment_info",
+        {
+            "db_name": "oduflow_1_main",
+            "all_running": True,
+            "env_vars": _ENV_VARS,
+            "odoo": {"status": "running", "running": True},
+            "db": {"status": "running", "running": True},
+        },
+        {"env_name": "main"},
+    ),
+    (
+        "update_environment",
+        "oduflow.docker_ops.env_ops.update_environment",
+        {
+            "url": "http://localhost:50000",
+            "odoo_container": "oduflow-main-odoo",
+            "database": "oduflow_1_main",
+            "workspace": "/tmp/ws",
+            "image": "odoo:17.0",
+            "env_vars": _ENV_VARS,
+        },
+        {"env_name": "main", "env_vars": "MEILI_MASTER_KEY=mk-9f8e7d6c5b4a,WORKERS=2"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("tool", "target", "data", "kwargs"),
+    _ENV_LISTING_TOOLS,
+    ids=[case[0] for case in _ENV_LISTING_TOOLS],
+)
+def test_env_var_values_are_not_logged(tool, target, data, kwargs, server, caplog):
+    with (
+        patch(target, return_value=data),
+        caplog.at_level(logging.INFO, logger="oduflow"),
+    ):
+        result = _call(tool, **kwargs)
+    # The caller reads the values back as before...
+    assert "MEILI_MASTER_KEY=mk-9f8e7d6c5b4a, WORKERS=2" in result
+    # ...while the log line shows the listing masked (the 200-character
+    # preview may end inside the mask itself).
+    line = next(r.getMessage() for r in caplog.records if f"[{tool}] ->" in r.message)
+    assert "mk-9f8e7d6c5b4a" not in line
+    assert "MEILI_MASTER_KEY" not in line
+    assert REDACTED[:4] in line
+
+
+def test_env_var_listing_is_masked_whole_not_value_by_value(server, caplog):
+    """Scrubbing is substring replacement: marking the value "2" by itself
+    would also mask the 2 in an unrelated port, image tag or timestamp."""
+
+    def listing_tool() -> str:
+        return f"Port: 6222\nEnv: {server._env_pairs({'WORKERS': '2', 'KEY': 'k9'})}"
+
+    with caplog.at_level(logging.INFO, logger="oduflow"):
+        assert _run_handled(listing_tool) == "Port: 6222\nEnv: WORKERS=2, KEY=k9"
+    assert f"[listing_tool] -> Port: 6222\nEnv: {REDACTED}" in caplog.text
+
+
 # -- The access log --
 
 
@@ -270,14 +376,59 @@ def test_artifact_download_token_is_not_logged(server, caplog):
             "/x?a=1&token=T0K&b=2&KEY=K3Y",
             f"/x?a=1&token={REDACTED}&b=2&KEY={REDACTED}",
         ),
+        # A percent-encoded parameter name is still that parameter to the
+        # server; the name is logged as it arrived, the value masked.
+        ("/oduflow-connect?tok%65n=AbC-123", f"/oduflow-connect?tok%65n={REDACTED}"),
+        (
+            "/x?a=1&%74oken=T0K&k%45y=K3Y&b=2",
+            f"/x?a=1&%74oken={REDACTED}&k%45y={REDACTED}&b=2",
+        ),
+        ("/x?acc%65ss%5Ftoken=T0K#frag", f"/x?acc%65ss%5Ftoken={REDACTED}#frag"),
         # Not credentials: left readable.
         ("/api/environments/18.0/logs?n=200", "/api/environments/18.0/logs?n=200"),
         ("/api/x?tokenizer=1&monkey=2", "/api/x?tokenizer=1&monkey=2"),
         ("/static/chat.js?v=12", "/static/chat.js?v=12"),
+        # Decoded once, as the server does: this name is "tok%65n", not "token".
+        ("/x?tok%2565n=plain", "/x?tok%2565n=plain"),
     ],
 )
 def test_redact_query(line, expected):
     assert redact_query(line) == expected
+
+
+def test_encoded_parameter_name_is_honoured_by_the_landing_and_masked(tmp_path):
+    """Why redact_query decodes names: the landing accepts ``tok%65n=`` as
+    ``token=``, so the access-log line of that request carries a live token."""
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from oduflow import connect_tokens
+    from oduflow.locking import LockManager
+    from oduflow.web_ui import mount_web_ui
+
+    host = "180.dev.example.com"
+    settings = Settings(
+        routing_mode="traefik",
+        routing_tls=False,
+        base_data_dir=str(tmp_path),
+        teams={"1": TeamSettings(team_id="1", hostname="dev.example.com")},
+    )
+    app = Starlette()
+    mount_web_ui(app, lambda: settings, LockManager())
+    token = connect_tokens.issue_link(
+        host,
+        connect_tokens.LinkGrant(team_id="1", env_name="18.0", user="", login="admin"),
+    )
+    target = f"/oduflow-connect?tok%65n={token}"
+
+    resp = TestClient(app).get(target, headers={"host": host})
+    assert resp.status_code == 200  # recognised as a valid link token
+    assert 'name="token"' in resp.text
+
+    record = _access_record(target)
+    AccessLogQueryFilter().filter(record)
+    assert token not in record.getMessage()
+    assert f"/oduflow-connect?tok%65n={REDACTED}" in record.getMessage()
 
 
 def _access_record(path: str) -> logging.LogRecord:

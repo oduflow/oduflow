@@ -2057,18 +2057,57 @@ class TestConnectLinkTool:
     @patch("oduflow.docker_ops.env_ops.wait_for_odoo_ready")
     @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=True)
     @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
-    def test_bad_user_fails_before_the_readiness_wait(
+    def test_bad_user_does_not_wake_a_stopped_environment(
         self, mock_resolve, mock_ensure, mock_ready
     ):
+        """The user check needs only the shared DB container, so a mistyped
+        user must not start an auto-stopped environment and reset its idle
+        clock on the way to failing."""
         from oduflow.errors import NotFoundError
 
         mock_resolve.side_effect = NotFoundError("User 'ghost' not found")
         with (
-            patch("oduflow.server.activity.mark_started"),
+            patch("oduflow.server.activity.mark_started") as started,
             pytest.raises(ToolError, match="not found"),
         ):
             _get_tool_fn("connect_link")(env_name="feature", user="ghost")
+        mock_ensure.assert_not_called()
+        started.assert_not_called()
         mock_ready.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.wait_for_odoo_ready", return_value=True)
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_user_is_checked_before_the_environment_is_started(
+        self, mock_resolve, mock_ensure, mock_ready
+    ):
+        order = []
+        mock_resolve.side_effect = lambda *a: (
+            order.append("resolve") or {"uid": 2, "login": "admin"}
+        )
+        mock_ensure.side_effect = lambda *a: order.append("wake") or True
+        with patch("oduflow.server.activity.mark_started"):
+            link = _get_tool_fn("connect_link")(env_name="feature")
+        assert order == ["resolve", "wake"]
+        assert "environment was stopped; started it" in link.note
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")
+    def test_missing_environment_is_reported_as_such(self, mock_resolve, mock_ensure):
+        """With the user check ahead of the wake, a missing environment must
+        still read "does not exist" — not as a psql error about its database."""
+        from oduflow.errors import NotFoundError
+
+        missing = NotFoundError(
+            "Environment 'ghost-env' does not exist. Use create_environment first."
+        )
+        with (
+            patch("oduflow.docker_ops.env_ops.get_env_base_url", side_effect=missing),
+            pytest.raises(ToolError, match="'ghost-env' does not exist"),
+        ):
+            _get_tool_fn("connect_link")(env_name="ghost-env")
+        mock_resolve.assert_not_called()
+        mock_ensure.assert_not_called()
 
     @patch("oduflow.docker_ops.env_ops.ensure_running")
     @patch("oduflow.docker_ops.odoo_ops.resolve_env_user")

@@ -106,9 +106,10 @@
       }
       form.addEventListener('submit', busy);
       // Continue without a click for a person's browser. An automated browser
-      // — a link scanner detonating the URL, a test driver — reports itself
-      // through navigator.webdriver and has to press the button deliberately,
-      // so merely rendering this page never spends the one-time link.
+      // that reports itself through navigator.webdriver — a test driver, most
+      // headless link scanners — has to press the button deliberately, so
+      // rendering this page there does not spend the one-time link. One that
+      // hides the flag cannot be told from a person and continues as well.
       var delay = parseInt(form.dataset.autoMs, 10);
       if (!isNaN(delay) && !navigator.webdriver) {
         setTimeout(function () { busy(); form.submit(); }, delay);

@@ -1166,6 +1166,34 @@ def connect_as_user(
         container.exec_run(["rm", "-f", script_path])
 
 
+def _psql_on_env_db(
+    settings: Settings, team: TeamSettings, env_name: str, sql: str
+) -> str:
+    """Run one query on an environment's database and return its bare output.
+
+    ``psql -tAX`` on the shared DB container as the cluster superuser: tuples
+    only, unaligned, no psqlrc. It needs only that container, so it answers
+    whether or not the environment's Odoo is running. For fixed internal
+    queries — *sql* is passed as written.
+    """
+    client = get_client()
+    env_db = get_db_name(env_name, team.team_id)
+    try:
+        db_container = client.containers.get(settings.shared_db_container)
+    except docker.errors.NotFound:
+        raise NotFoundError(
+            f"Database container '{settings.shared_db_container}' is not running. "
+            "System not initialized. Restart Oduflow."
+        )
+    exit_code, output = db_container.exec_run(
+        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
+    )
+    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
+    if exit_code != 0:
+        raise ExternalCommandError("psql", exit_code, out)
+    return out
+
+
 def resolve_env_user(
     settings: Settings, team: TeamSettings, env_name: str, user: str
 ) -> dict[str, Any]:
@@ -1185,16 +1213,6 @@ def resolve_env_user(
     Raises :class:`NotFoundError` when nothing matches.
     """
     import json
-
-    client = get_client()
-    env_db = get_db_name(env_name, team.team_id)
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
 
     selector = user.strip()
     not_found = NotFoundError(
@@ -1230,16 +1248,11 @@ def resolve_env_user(
             f"ORDER BY (u.login = {login}) DESC LIMIT 1"
         )
 
-    exit_code, output = db_container.exec_run(
-        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    )
-    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, out)
+    out = _psql_on_env_db(settings, team, env_name, sql)
     try:
         row = json.loads(out) if out else None
     except json.JSONDecodeError:
-        raise ExternalCommandError("psql", exit_code, out)
+        raise ExternalCommandError("psql", 0, out)
     if not isinstance(row, dict) or not row.get("uid"):
         raise not_found
     return {"uid": int(row["uid"]), "login": str(row.get("login") or "")}
@@ -1260,15 +1273,6 @@ def list_env_users(
     """
     import json
 
-    client = get_client()
-    env_db = get_db_name(env_name, team.team_id)
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
     # json_agg → a single JSON array so the value parses cleanly without CSV
     # quoting concerns (partner names may contain commas).
     # ``portal`` = membership in the base.group_portal user-type group, resolved
@@ -1286,12 +1290,7 @@ def list_env_users(
         "FROM res_users u JOIN res_partner p ON p.id = u.partner_id "
         "WHERE u.active AND u.login IS NOT NULL AND u.login <> '__system__'"
     )
-    exit_code, output = db_container.exec_run(
-        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    )
-    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, out)
+    out = _psql_on_env_db(settings, team, env_name, sql)
     try:
         rows: list[dict[str, Any]] = json.loads(out or "[]")
         return rows

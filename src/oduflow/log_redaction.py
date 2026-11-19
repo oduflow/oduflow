@@ -16,7 +16,10 @@ One mechanism covers each:
 - A tool wraps every credential it puts in its result in :func:`secret`. The
   value is returned unchanged for the caller and remembered for the duration of
   the call; :func:`scrub` then masks it in anything ``handle_errors`` logs. A
-  tool that hands out a new kind of credential only has to mark it.
+  tool that hands out a new kind of credential only has to mark it. Nothing is
+  detected: what a tool does not mark is logged as it is, so the marks have to
+  cover whatever *may* be a credential — which is why listings of literal
+  env-var values are marked whole.
 - :class:`AccessLogQueryFilter` masks the values of credential-bearing query
   parameters in access-log records, whatever the path.
 """
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -73,18 +77,27 @@ def scrub(text: str) -> str:
 
 # Query parameters that carry a credential on some Oduflow route: one-time
 # link tokens, the share-link key, and the conventional OAuth bearer name.
-_SENSITIVE_QUERY_PARAMS = ("token", "key", "access_token")
-_QUERY_SECRET_RE = re.compile(
-    r"([?&](?:" + "|".join(_SENSITIVE_QUERY_PARAMS) + r")=)[^&#\s\"']+",
-    re.IGNORECASE,
-)
+_SENSITIVE_QUERY_PARAMS = frozenset({"token", "key", "access_token"})
+# Any ``name=value`` pair of a query string; the name is judged in _mask_param.
+_QUERY_PARAM_RE = re.compile(r"([?&])([^=&#\s\"']+)=([^&#\s\"']+)")
 
 _ACCESS_LOGGER_NAME = "uvicorn.access"
 
 
+def _mask_param(match: re.Match[str]) -> str:
+    # The log holds the query string as it came off the wire, but the server
+    # percent-decodes a parameter's name before looking it up: ``tok%65n=…`` is
+    # honoured as ``token=…``. So the name is compared the way the server reads
+    # it, and written back the way it arrived.
+    name = urllib.parse.unquote_plus(match.group(2)).lower()
+    if name not in _SENSITIVE_QUERY_PARAMS:
+        return match.group(0)
+    return f"{match.group(1)}{match.group(2)}={REDACTED}"
+
+
 def redact_query(text: str) -> str:
     """Mask the values of credential-bearing query parameters in *text*."""
-    return _QUERY_SECRET_RE.sub(r"\1" + REDACTED, text)
+    return _QUERY_PARAM_RE.sub(_mask_param, text)
 
 
 class AccessLogQueryFilter(logging.Filter):

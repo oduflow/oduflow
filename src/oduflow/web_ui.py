@@ -5600,11 +5600,20 @@ def _build_routes(
                 ],
             )
         except FlowError as e:
-            detail = html.escape(_public_flow_error(e, context="Connect link"))
+            # Whoever holds the link reads this page, with no dashboard login
+            # behind them. A failed start or mint explains itself in operator
+            # terms — host paths, container names, the text of the underlying
+            # exception — so the message goes to the log and the page says only
+            # what its reader can act on.
+            logger.error("Connect link for '%s' failed: %s", grant.env_name, e)
             return _connect_page(
                 _flow_error_status(e),
                 "You could not be signed in",
-                [detail, "Your link has not been used up — you can try again."],
+                [
+                    "The environment could not sign you in right now.",
+                    "Your link has not been used up — you can try again. If it "
+                    "keeps failing, tell whoever gave you the link.",
+                ],
                 token=token,
                 button="Try again",
             )

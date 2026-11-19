@@ -182,7 +182,7 @@ For OAuth-based MCP clients like Claude.ai Remote MCP, Oduflow runs its own OAut
 - `run_db_query` — execute SQL queries against the environment's PostgreSQL database
 - `reset_admin_password` — reset the admin user password (default: "test")
 - `connect_as_user` — mint a passwordless Odoo login session for a user and return the `session_id` cookie + URL (Playwright-ready; skips the login form, supports any role incl. portal)
-- `connect_link` — create a one-time browser sign-in link for a person: returns an object whose `url` (on the environment's own host) opens Odoo already signed in as `user` (login or id; empty = the database's admin via `base.user_admin`, which survives a renamed admin login). Use it as a redirect target for an "Open as admin" button. Single use, host-bound, expires in 5 minutes; the session is minted only when a browser redeems the link, so an unopened link leaves nothing behind and a link preview/scanner fetching the URL does not spend it; a busy or stopped environment at that moment does not spend it either. Requires Traefik routing and the HTTP transport (fails clearly otherwise — use `connect_as_user`). The link is a bearer credential until used
+- `connect_link` — create a one-time browser sign-in link for a person: returns an object whose `url` (on the environment's own host) opens Odoo already signed in as `user` (login or id; empty = the database's admin via `base.user_admin`, which survives a renamed admin login). Use it as a redirect target for an "Open as admin" button. Single use, host-bound, expires in 5 minutes; the session is minted only when a browser redeems the link, so an unopened link leaves nothing behind and a link preview/scanner fetching the URL does not spend it (one that opens it in a full browser which does not report itself as automated does); a busy or stopped environment at that moment does not spend it either. Requires Traefik routing and the HTTP transport (fails clearly otherwise — use `connect_as_user`). The link is a bearer credential until used
 - `read_output` — read from a cached tool output by ID (paginate, grep, errors, tail)
 - `list_environments` / `get_environment_info` — inspect environments, including current branch, last activity, stopped time/source, protection, Stack ownership and operator notes used for safe slot reuse
 - `create_service` / `delete_service` / `restart_service` / `update_service` / `list_services` / `get_service_info` / `get_service_logs` / `run_service_command` — manage auxiliary services
@@ -7001,16 +7001,23 @@ Lock: environment.
   makes. A chat link preview or a mail link scanner that only fetches the URL
   changes nothing, and the link still works for the person afterwards. A
   browser driven by automation (`navigator.webdriver`) is shown the same page
-  but has to press **Continue** itself.
+  but has to press **Continue** itself. The protection ends there: a scanner
+  that opens links in a full browser, runs the page's script and does not
+  report itself as automated continues exactly like a person, and uses the
+  link up.
 - **A busy or stopped environment does not cost the link.** If another
   operation holds the environment when the link is opened, the page says so
   and retries every few seconds until the link expires. A stopped environment
   is started, and the browser is sent on once Odoo answers. The link is spent
   only by a successful sign-in; if the environment or the user has been deleted
-  in the meantime, the page says the link can no longer be used.
+  in the meantime, the page says the link can no longer be used. Any other
+  failure keeps the link and offers a retry; the page does not say what went
+  wrong — its reader may be anyone holding the link — and the reason is in the
+  server log.
 - An unknown `user` is rejected by the tool call, not later in the person's
   browser. A stopped environment is started by the call as well, so the link
-  opens without a wait.
+  opens without a wait — after the user check, so a mistyped user does not
+  start an environment.
 
 **Requirements**
 

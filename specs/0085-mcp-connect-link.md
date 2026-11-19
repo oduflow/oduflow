@@ -37,8 +37,10 @@ changes in how a token for a *relayed* link behaves:
 2. **A GET changes nothing.** Opening the URL renders a small page; the sign-in
    happens in the POST that page makes. A previewer or scanner that fetches the
    URL neither spends the link nor creates a session. The page continues by
-   itself in a person's browser and waits for a click in an automated one
-   (`navigator.webdriver`).
+   itself in a person's browser and waits for a click in one that reports
+   itself as automated (`navigator.webdriver`) — a guarantee about fetching,
+   not about a scanner that runs the page in a browser hiding that flag (see
+   Consequences).
 3. **The token is spent only by a successful sign-in.** A busy or stopped
    environment, or a failed mint, leaves the link valid.
 
@@ -54,10 +56,12 @@ not consumed by the GET).
   (error handling, environment lock, `prod-*` rejected, activity recorded). It
   refuses port routing (no per-environment host serves the landing) and any
   process without the web UI mounted — stdio and `oduflow call` — since the
-  token store is in-process and nothing would redeem it. It wakes a stopped
-  environment and waits for Odoo, validates the user, then issues the token
-  (300 s; the dashboard's stays 120 s, a relayed link needs a person to notice
-  it).
+  token store is in-process and nothing would redeem it. It validates the
+  user, then wakes a stopped environment and waits for Odoo, then issues the
+  token (300 s; the dashboard's stays 120 s, a relayed link needs a person to
+  notice it). Validation comes first because it needs only the shared database
+  container: a mistyped user must not start an auto-stopped environment and
+  reset its idle clock on the way to failing.
 - **User validation without a session.** `resolve_env_user` answers "would the
   mint find this user?" with one `psql` query on the shared database container
   — no Odoo registry boot, no session. It mirrors the mint script's rule, so an
@@ -74,7 +78,10 @@ not consumed by the GET).
   moment a session exists, wait for Odoo if it had to be started, and set the
   host-only cookie as in 0036.
   "Environment or user no longer exists" retires the link; any other failure
-  keeps it and offers a retry.
+  keeps it and offers a retry. The failure page never carries the error text:
+  its reader is whoever holds the link, with no dashboard login behind them,
+  and a failed start explains itself in host paths and container names. That
+  text goes to the server log.
 - **The result is structured.** The tool returns an object (`url`, `login`,
   `uid`, `env_name`, `expires_in`, `note`), so a program reads one field to get
   its redirect target instead of parsing prose.
@@ -91,9 +98,13 @@ not consumed by the GET).
   wraps each credential it returns in `_secret()`, and everything
   `handle_errors` logs is scrubbed of the values marked during that call
   (before truncation, so a credential cut by the preview limit cannot leak its
-  head). An access-log filter masks credential query parameters (`token`,
-  `key`) on every path, which also covers artifact download links and share
-  links. The POST carries the token in its body.
+  head). Listings of literal env-var values, which routinely are API keys,
+  are marked the same way — whole, since scrubbing is substring replacement
+  and a marked value such as `2` would mask unrelated text. An access-log
+  filter masks credential query parameters (`token`, `key`) on every path,
+  which also covers artifact download links and share links; it compares the
+  parameter name percent-decoded, as the server reads it. The POST carries the
+  token in its body.
 
 ## Consequences
 
