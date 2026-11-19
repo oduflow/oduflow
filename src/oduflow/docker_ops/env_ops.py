@@ -1654,8 +1654,14 @@ def _template_module_upgrades(
     odoo_volumes: dict[str, Any],
     odoo_conf_path: str | None,
     env_name: str,
+    *,
+    db_user: str,
 ) -> tuple[dict[str, tuple[str, str]], str | None]:
     """Installed modules whose checkout manifest is newer than the cloned DB.
+
+    The database is a template's content, so it is read as *db_user*, the
+    environment's own role, not as the superuser: ``ir_module_module`` may be
+    a view over a function the template's dump defined.
 
     Compares ``ir_module_module.latest_version`` with the manifests the
     serving Odoo will load: the generated odoo.conf's addons_path, mapped back
@@ -1676,6 +1682,7 @@ def _template_module_upgrades(
             "SELECT COALESCE(json_object_agg(name, latest_version), '{}'::json)::text "
             "FROM ir_module_module WHERE state = 'installed';",
             db=env_db,
+            user=db_user,
         )
         installed = json.loads(raw or "{}")
         # Without a generated conf the image's own odoo.conf applies, which
@@ -2784,13 +2791,12 @@ def _create_environment_impl(
     )
 
     if template_name is not None:
-        # A template DB's objects are owned by whatever role created them —
-        # normally the superuser (pg_restore --no-owner), but the plain-SQL /
-        # import_template path (psql without --no-owner) can leave
-        # objects owned by the source env's per-env role (e.g. u_2_fs19). DDL
-        # during module upgrades requires ownership; Odoo connects as the env
-        # role and never SET ROLEs, so per-object ownership — not role
-        # membership — is what actually enables its DDL.
+        # A template DB's objects belong to the team's template owner role
+        # (see system_ops.reload_template), or to the superuser or a source
+        # env's role in a template loaded by an older version. DDL during
+        # module upgrades requires ownership; Odoo connects as the env role
+        # and never SET ROLEs, so per-object ownership — not role membership
+        # — is what actually enables its DDL.
         reassign_db_ownership(client, settings, env_db, env_creds["pg_user"])
         drop_signaling_sequences(client, settings, env_db)
         logger.info(
@@ -2824,7 +2830,13 @@ def _create_environment_impl(
     template_check_error: str | None = None
     if template_name is not None:
         template_upgrades, template_check_error = _template_module_upgrades(
-            client, settings, env_db, odoo_volumes, odoo_conf_to_copy, env_name
+            client,
+            settings,
+            env_db,
+            odoo_volumes,
+            odoo_conf_to_copy,
+            env_name,
+            db_user=env_creds["pg_user"],
         )
         if template_upgrades:
             logger.info(

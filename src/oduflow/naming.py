@@ -468,6 +468,17 @@ def get_tablespace_name(team_id: str) -> str:
     return f"oduflow_team_{team_id}"
 
 
+def get_template_owner_role(team_id: str) -> str:
+    """PostgreSQL role owning the team's template databases and their objects.
+
+    Not a superuser and without a password, so it cannot log in over the
+    network; Oduflow alone uses it, next to PostgreSQL. The ``oduflow_`` prefix
+    keeps it out of the namespaces tenants name roles in (``u_`` environments,
+    ``svc_`` service databases).
+    """
+    return f"oduflow_tplown_{team_id}"
+
+
 def get_template_db_name(template_name: str, team_id: str = "1") -> str:
     # validate_template_name guarantees the (slugified) name cannot break out of
     # the double-quoted SQL identifier this is interpolated into.

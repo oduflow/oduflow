@@ -971,8 +971,11 @@ class TestCreateEnvironment:
 
 
 class TestReloadTemplate:
+    """The restore commands; who runs them, and as which role, is covered in
+    tests/test_template_restricted_load.py."""
+
     @patch("oduflow.docker_ops.system_ops._update_template_sizes")
-    @patch("oduflow.docker_ops.system_ops._copy_file_to_container")
+    @patch("oduflow.docker_ops.system_ops._run_restore_client", return_value=(0, ""))
     @patch(
         "oduflow.docker_ops.system_ops.ensure_team_tablespace",
         return_value="oduflow_team_1",
@@ -990,7 +993,7 @@ class TestReloadTemplate:
         mock_db_exists,
         mock_text,
         mock_tablespace,
-        mock_copy,
+        mock_restore,
         mock_sizes,
         mock_docker_client,
     ):
@@ -999,92 +1002,23 @@ class TestReloadTemplate:
         # source env leaves an undroppable orphan role. (--no-owner is honored
         # only at restore time for -Fc archives, not at pg_dump time.)
         db_container = MagicMock()
-        db_container.exec_run.return_value = (0, b"")
         mock_docker_client.containers.get.return_value = db_container
 
         system_ops.reload_template(TEST_SETTINGS, TEST_TEAM, "mytpl")
-        system_ops.reload_template(TEST_SETTINGS, TEST_TEAM, "mytpl")
 
-        archive_names = [
-            call.kwargs["archive_name"] for call in mock_copy.call_args_list
-        ]
-        assert len(set(archive_names)) == 2
-
-        # exec_run is also used for the post-restore /tmp cleanup, so locate the
-        # pg_restore invocation explicitly rather than assuming it is the last.
-        restore_cmds = [
-            call.args[0]
-            for call in db_container.exec_run.call_args_list
-            if "pg_restore" in " ".join(call.args[0])
-        ]
-        assert restore_cmds, "expected a pg_restore invocation"
-        assert all("--no-owner" in " ".join(cmd) for cmd in restore_cmds)
-        assert {cmd[-1] for cmd in restore_cmds} == {
-            f"/tmp/{name}" for name in archive_names
-        }
-
-        # The dump copied into the container's /tmp must be removed afterwards so
-        # the oduflow-db writable layer does not accumulate full-size dumps.
-        cleanup_cmds = [
-            call.args[0]
-            for call in db_container.exec_run.call_args_list
-            if call.args[0][:2] == ["rm", "-f"]
-        ]
-        assert {cmd[2] for cmd in cleanup_cmds} == {
-            f"/tmp/{name}" for name in archive_names
-        }
-
-    @patch("oduflow.docker_ops.system_ops._update_template_sizes")
-    @patch("oduflow.docker_ops.system_ops._copy_file_to_container")
-    @patch(
-        "oduflow.docker_ops.system_ops.ensure_team_tablespace",
-        return_value="oduflow_team_1",
-    )
-    @patch("oduflow.docker_ops.system_ops._is_text_dump", return_value=False)
-    @patch("oduflow.docker_ops.system_ops._db_exists", return_value=False)
-    @patch("oduflow.docker_ops.system_ops._exec_sql", return_value="5")
-    @patch("oduflow.docker_ops.system_ops._wait_pg_ready")
-    @patch("oduflow.docker_ops.system_ops.os.path.isfile", return_value=True)
-    def test_cleanup_when_initial_copy_fails(
-        self,
-        mock_isfile,
-        mock_wait,
-        mock_sql,
-        mock_db_exists,
-        mock_text,
-        mock_tablespace,
-        mock_copy,
-        mock_sizes,
-        mock_docker_client,
-    ):
-        db_container = MagicMock()
-        mock_docker_client.containers.get.return_value = db_container
-        mock_copy.side_effect = RuntimeError("upload failed")
-
-        with pytest.raises(RuntimeError, match="upload failed"):
-            system_ops.reload_template(TEST_SETTINGS, TEST_TEAM, "mytpl")
-
-        archive_name = mock_copy.call_args.kwargs["archive_name"]
-        db_container.exec_run.assert_called_once_with(
-            ["rm", "-f", f"/tmp/{archive_name}"]
-        )
+        restore_cmd = mock_restore.call_args.args[4]
+        assert restore_cmd[0] == "pg_restore"
+        assert "--no-owner" in restore_cmd
+        assert restore_cmd[-1] == system_ops._RESTORE_CLIENT_DUMP
+        # The archive is neither copied into nor restored from the shared
+        # PostgreSQL container.
+        db_container.exec_run.assert_not_called()
+        db_container.put_archive.assert_not_called()
 
     def test_restore_retries_unsupported_archive_with_helper(self, mock_docker_client):
         db_container = MagicMock()
-
-        # Route by command so the post-restore /tmp cleanup (extra `rm -f`
-        # exec_run calls) does not exhaust a fixed side_effect list: only the
-        # initial pg_restore fails with the unsupported-archive error.
-        def _exec_run(cmd, *args, **kwargs):
-            if cmd and cmd[0] == "pg_restore":
-                return (
-                    1,
-                    b"pg_restore: error: unsupported version (1.16) in file header",
-                )
-            return (0, b"helper sql restored")
-
-        db_container.exec_run.side_effect = _exec_run
         mock_docker_client.containers.get.return_value = db_container
+        helper_sql = "/tmp/flow-test/templates/mytpl/dump.sql"
 
         with (
             patch("oduflow.docker_ops.system_ops.os.path.isfile", return_value=True),
@@ -1096,87 +1030,44 @@ class TestReloadTemplate:
                 return_value="oduflow_team_1",
             ),
             patch("oduflow.docker_ops.system_ops._is_text_dump", return_value=False),
-            patch("oduflow.docker_ops.system_ops._copy_file_to_container") as copy_file,
             patch("oduflow.docker_ops.system_ops._update_template_sizes"),
             patch(
+                "oduflow.docker_ops.system_ops._run_restore_client",
+                side_effect=[
+                    (1, "pg_restore: error: unsupported version (1.16) in file header"),
+                    (0, ""),
+                ],
+            ) as restore,
+            patch(
                 "oduflow.docker_ops.system_ops._convert_custom_dump_to_sql_with_helper",
-                return_value=(
-                    0,
-                    "converted",
-                    "/tmp/flow-test/templates/mytpl/dump.sql",
-                ),
+                return_value=(0, "converted", helper_sql),
             ) as helper,
         ):
             result = system_ops.reload_template(TEST_SETTINGS, TEST_TEAM, "mytpl")
 
         assert result["status"] == "reloaded"
         helper.assert_called_once()
-        assert copy_file.call_args_list[-1].args[1].endswith("dump.sql")
-        psql_cmds = [
-            call.args[0]
-            for call in db_container.exec_run.call_args_list
-            if call.args[0] and call.args[0][0] == "psql"
-        ]
-        assert psql_cmds, "expected a psql invocation via the helper path"
+        first, second = restore.call_args_list
+        assert first.args[4][0] == "pg_restore"
+        # The converted SQL goes through the same restricted client, as the
+        # same loader role — not through psql in the PostgreSQL container.
+        assert second.args[4] == ["psql", "-X", "-q", "-w", "-f", "/restore/dump"]
+        assert second.kwargs["dump_path"] == helper_sql
+        assert second.kwargs["role"] == first.kwargs["role"]
+        db_container.exec_run.assert_not_called()
+        statements = [call.args[2] for call in sql.call_args_list]
         assert any(
-            'DROP DATABASE IF EXISTS "oduflow_template_1_mytpl"' in call.args[2]
-            for call in sql.call_args_list
+            'DROP DATABASE IF EXISTS "oduflow_template_1_mytpl"' in statement
+            for statement in statements
         )
-        assert any(
-            'CREATE DATABASE "oduflow_template_1_mytpl"' in call.args[2]
-            for call in sql.call_args_list
-        )
-
-    def test_cleanup_when_helper_copy_fails(self, mock_docker_client):
-        db_container = MagicMock()
-
-        def _exec_run(cmd, *args, **kwargs):
-            if cmd and cmd[0] == "pg_restore":
-                return (
-                    1,
-                    b"pg_restore: error: unsupported version (1.16) in file header",
-                )
-            return (0, b"")
-
-        db_container.exec_run.side_effect = _exec_run
-        mock_docker_client.containers.get.return_value = db_container
-
-        with (
-            patch("oduflow.docker_ops.system_ops.os.path.isfile", return_value=True),
-            patch("oduflow.docker_ops.system_ops._wait_pg_ready"),
-            patch("oduflow.docker_ops.system_ops._exec_sql", return_value="5"),
-            patch("oduflow.docker_ops.system_ops._db_exists", return_value=False),
-            patch(
-                "oduflow.docker_ops.system_ops.ensure_team_tablespace",
-                return_value="oduflow_team_1",
-            ),
-            patch("oduflow.docker_ops.system_ops._is_text_dump", return_value=False),
-            patch(
-                "oduflow.docker_ops.system_ops._copy_file_to_container",
-                side_effect=[None, RuntimeError("helper upload failed")],
-            ) as copy_file,
-            patch("oduflow.docker_ops.system_ops._update_template_sizes"),
-            patch(
-                "oduflow.docker_ops.system_ops._convert_custom_dump_to_sql_with_helper",
-                return_value=(
-                    0,
-                    "converted",
-                    "/tmp/flow-test/templates/mytpl/dump.sql",
-                ),
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="helper upload failed"):
-                system_ops.reload_template(TEST_SETTINGS, TEST_TEAM, "mytpl")
-
-        archive_names = [
-            call.kwargs["archive_name"] for call in copy_file.call_args_list
+        loader = first.kwargs["role"]
+        created = [
+            statement
+            for statement in statements
+            if statement.startswith('CREATE DATABASE "oduflow_template_1_mytpl"')
         ]
-        cleanup_paths = {
-            call.args[0][2]
-            for call in db_container.exec_run.call_args_list
-            if call.args[0][:2] == ["rm", "-f"]
-        }
-        assert cleanup_paths == {f"/tmp/{name}" for name in archive_names}
+        assert len(created) == 2
+        assert all(f'OWNER "{loader}"' in statement for statement in created)
 
 
 class TestLocalSnapshotBasics:
@@ -2942,6 +2833,7 @@ class TestTemplateModuleUpgrade:
             {"/repo": {"bind": "/mnt/extra-addons", "mode": "rw"}},
             None,
             "feature",
+            db_user="u_1_feature",
         )
 
         assert upgrades == {}
@@ -2973,6 +2865,7 @@ class TestTemplateModuleUpgrade:
                 {str(tmp_path / "repo"): {"bind": "/mnt/extra-addons", "mode": "rw"}},
                 str(conf),
                 "feature",
+                db_user="u_1_feature",
             )
 
         assert error is None
@@ -3017,6 +2910,7 @@ class TestTemplateModuleUpgrade:
                 },
                 str(conf),
                 "feature",
+                db_user="u_1_feature",
             )
 
         # The repository copy comes first on the addons_path and shadows OCA's.

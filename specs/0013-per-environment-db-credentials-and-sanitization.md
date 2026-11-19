@@ -181,6 +181,72 @@ it, and that turned out to be the weaker half of the boundary:
   (the "Connect as" user picker, template manifest checks) remain to be moved
   to the scoped role.
 
+- (2026-11-19) — **template dumps are no longer executed by the superuser, nor
+  inside the shared PostgreSQL container.** "Template loads" sat on the
+  Decision's list of administrative operations the superuser keeps, and
+  `reload_template` ran every dump as it, in that container: `psql -U
+  <superuser> -f` for plain SQL, `pg_restore --no-owner -U <superuser>` for
+  archives. But a dump is tenant input — `import_template` fetches it from a
+  URL, bucket or path the caller names, and `save_as_template` dumps a database
+  whose tenant defines its functions. Plain SQL could simply say `ALTER ROLE
+  ... SUPERUSER`, `COPY ... FROM PROGRAM` or `\!`; an archive needs one more
+  step (a function in a CHECK constraint runs during `COPY`, as the restoring
+  user) and gets to the same place. And `--no-owner` as the superuser left
+  every restored view and SECURITY DEFINER function *owned* by the superuser
+  in a database any role can connect to. So both the executing role and the
+  resulting owner had to change, and the client had to leave the container
+  for the same reason as in the SQL-console change above.
+  A load now uses three roles. The superuser only prepares and hands over: it
+  creates a one-off **loader** role (`oduflow_load_<random>`, no privileges
+  beyond owning the new, empty template database and its `public` schema), and
+  afterwards issues `REASSIGN OWNED` / `DROP OWNED` — utility statements that
+  run no code from the database — and drops the loader. The loader executes
+  the dump, from a throwaway **restore client** container (the cluster's own
+  image, team network, no capabilities, dump mounted read-only, loader
+  password in `PGPASSWORD`), so `\!` lands in a container holding nothing and
+  `\c` to another role needs a password. The result is owned by a per-team
+  **template owner** (`oduflow_tplown_<team>`): an ordinary role that can log
+  in only through the local socket (no password, and `VALID UNTIL 'epoch'`
+  because a role may set its own). Oduflow's own reads of a freshly loaded
+  template (table count, version and module list) run as that owner, since a
+  query over tenant-defined objects resolves the tenant's operators and
+  functions with the caller's rights. Cloning works as before: `CREATE DATABASE
+  ... TEMPLATE` and the per-object reassignment to the environment's role
+  treat the template owner exactly like the superuser they used to find there.
+  But the clone is the same tenant content, and two superuser steps right
+  after it were reachable from a dump: the ownership-reassignment and
+  signaling-sequence blocks compare catalog names with `LIKE`, and with
+  `public` on the search path an operator `public.!~~(name, name)` planted by
+  the dump is a *better* match than the built-in `(name, text)` one. Both
+  blocks now start with `SET LOCAL search_path = pg_catalog` and name what
+  they touch with its schema; the create-time module-version check reads the
+  clone as the environment's role. (That is the "template manifest checks"
+  item from the previous entry; the "Connect as" user picker is still open.)
+  Alternatives weighed: *filtering the dump* (backslash lines, statement
+  denylist) — rejected as the only defence for the same reason as before, and
+  useless against archives; *reassigning the result to the superuser* to keep
+  the old end state — rejected, it is the view/SECURITY DEFINER hole again;
+  *a role per template* — rejected for its lifecycle (rename, delete while
+  clones still hold objects of it, scheduled generations) when a per-team
+  owner plus a per-load loader gives the same confinement with nothing to
+  clean up; *the loader's client inside the PostgreSQL container* — would have
+  kept the in-place read through `pg_exchange`, but trust auth there makes
+  the role a suggestion for `psql`, and one transport for both formats is
+  simpler than two. *Extensions* needed no superuser step after all:
+  `pg_trgm`, `unaccent` and the rest of what Odoo uses are *trusted*
+  extensions on every supported PostgreSQL (15+), so the loader, as database
+  owner, creates them itself and owns them (which `COMMENT ON EXTENSION` in a
+  dump requires — a superuser-pre-created extension would make every archive
+  restore fail on that comment, since `ALTER EXTENSION ... OWNER` does not
+  exist). The accepted cost: a dump that needs an untrusted extension
+  (PostGIS, `pg_stat_statements`) or anything else superuser-only now fails —
+  loudly for archives, statement-by-statement for plain SQL — unless the
+  operator's PostgreSQL image marks that extension trusted. Templates loaded
+  before this change keep their superuser-owned objects until reloaded. Still
+  open, same class: the other `pg_restore`-as-superuser paths (production
+  snapshot restore, seeding a production from a dev database, the PostgreSQL
+  upgrade's whole-cluster restore).
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -238,3 +304,8 @@ native neutralization, rather than re-implementing what Odoo already ships:
 - (2026-11-19) — **`reset_admin_password` hashes in the Oduflow process and
   updates as the scoped role**, closing an SQL injection into a superuser
   `psql` through the output of the tenant's Odoo container (see Evolution).
+- (2026-11-19) — **template dumps load as a one-off non-superuser role from a
+  throwaway client container** and end up owned by a per-team template owner
+  (`system_ops.reload_template`, `_run_restore_client`), closing superuser
+  code execution through `import_template` / `save_as_template` dumps (see
+  Evolution).

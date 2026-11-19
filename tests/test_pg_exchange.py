@@ -1,8 +1,9 @@
 """Staging database dumps through the pg_exchange mount.
 
 A dump written straight into a directory the PostgreSQL container also sees
-costs one write to its final filesystem, and a restore can read it in place
-instead of having a full-size copy pushed into the container's writable layer.
+costs one write to its final filesystem instead of a full-size copy through the
+container's writable layer. Restores do not go through the mount: the restore
+client reads the staged file from the host.
 The mount is only attached when the shared container is created, so an existing
 installation must keep working unchanged — detection is by inspection, never by
 recreating the container behind the operator's back.
@@ -158,8 +159,7 @@ def test_staged_dump_writes_through_the_mount_and_moves_into_place(tmp_path):
 
     with system_ops._staged_db_dump(
         client, settings, team, "oduflow_7_main", str(dest)
-    ) as (host_path, container_path):
-        assert container_path.startswith("/exchange/team_7/")
+    ) as host_path:
         assert os.path.dirname(host_path) == str(host_dir)
         assert os.path.exists(host_path)
 
@@ -167,6 +167,9 @@ def test_staged_dump_writes_through_the_mount_and_moves_into_place(tmp_path):
     assert list(host_dir.iterdir()) == []
     cmd = container.exec_run.call_args.args[0]
     assert cmd[:4] == ["pg_dump", "-U", settings.db_user, "-Fc"]
+    # pg_dump writes the archive itself, through the mount.
+    target = cmd[cmd.index("-f") + 1]
+    assert target.startswith("/exchange/team_7/")
     assert cmd[-1] == "oduflow_7_main"
 
 
@@ -183,8 +186,7 @@ def test_staged_dump_streams_when_the_mount_is_absent(tmp_path):
     with patch.object(system_ops, "_stream_exec_to_file", side_effect=_stream):
         with system_ops._staged_db_dump(
             client, settings, team, "oduflow_7_main", str(dest)
-        ) as (host_path, container_path):
-            assert container_path is None
+        ) as host_path:
             assert host_path == str(dest) + ".staged"
 
     assert dest.read_text() == "PGDMP streamed"
@@ -258,28 +260,17 @@ def test_staged_dump_cleans_partial_file_when_docker_exec_raises(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_reload_hardlinks_host_dump_into_exchange_and_cleans_link(tmp_path):
+def test_reload_restores_a_staged_dump_from_its_host_path(tmp_path):
+    # A dump is tenant input: it is neither linked nor copied into the shared
+    # PostgreSQL container. The restore client reads the staged file itself.
     settings, team = _settings(tmp_path), _team(tmp_path)
-    source = tmp_path / "import-staging" / "dump.pgdump"
-    source.parent.mkdir()
+    source = tmp_path / "pg_exchange" / "team_7" / "staged.pgdump"
+    source.parent.mkdir(parents=True)
     source.write_bytes(b"PGDMP imported from S3")
-    host_exchange_dir = tmp_path / "pg_exchange" / "team_7"
-    host_exchange_dir.mkdir(parents=True)
 
     db_container = MagicMock()
     db_container.attrs = {"Mounts": [{"Destination": "/exchange"}]}
-    restore_paths = []
-
-    def _run(cmd, **kwargs):
-        if cmd[0] == "pg_restore":
-            container_path = cmd[-1]
-            restore_paths.append(container_path)
-            host_path = host_exchange_dir / os.path.basename(container_path)
-            assert host_path.read_bytes() == source.read_bytes()
-            assert host_path.stat().st_ino == source.stat().st_ino
-        return 0, b""
-
-    db_container.exec_run.side_effect = _run
+    db_container.exec_run.return_value = (0, b"")
     client = MagicMock()
     client.containers.get.return_value = db_container
 
@@ -294,6 +285,9 @@ def test_reload_hardlinks_host_dump_into_exchange_and_cleans_link(tmp_path):
         ),
         patch.object(system_ops, "_update_template_sizes"),
         patch.object(system_ops, "_copy_file_to_container") as copy_in,
+        patch.object(
+            system_ops, "_run_restore_client", return_value=(0, "")
+        ) as restore,
     ):
         system_ops.reload_template(
             settings,
@@ -303,130 +297,12 @@ def test_reload_hardlinks_host_dump_into_exchange_and_cleans_link(tmp_path):
             persist_dump=False,
         )
 
+    restore.assert_called_once()
+    assert restore.call_args.kwargs["dump_path"] == str(source)
     copy_in.assert_not_called()
-    assert len(restore_paths) == 1
-    assert restore_paths[0].startswith("/exchange/team_7/oduflow-restore-")
+    db_container.exec_run.assert_not_called()
+    assert [entry.name for entry in source.parent.iterdir()] == ["staged.pgdump"]
     assert source.read_bytes() == b"PGDMP imported from S3"
-    assert list(host_exchange_dir.iterdir()) == []
-
-
-def test_reload_streams_to_container_when_exchange_hardlink_fails(tmp_path):
-    settings, team = _settings(tmp_path), _team(tmp_path)
-    source = tmp_path / "other-filesystem" / "dump.pgdump"
-    source.parent.mkdir()
-    source.write_bytes(b"PGDMP imported from S3")
-    (tmp_path / "pg_exchange" / "team_7").mkdir(parents=True)
-
-    db_container = MagicMock()
-    db_container.attrs = {"Mounts": [{"Destination": "/exchange"}]}
-    db_container.exec_run.return_value = (0, b"")
-    client = MagicMock()
-    client.containers.get.return_value = db_container
-
-    with (
-        patch.object(system_ops, "get_client", return_value=client),
-        patch.object(system_ops, "_wait_pg_ready"),
-        patch.object(system_ops, "_exec_sql", return_value="5"),
-        patch.object(system_ops, "_db_exists", return_value=False),
-        patch.object(system_ops, "_is_text_dump", return_value=False),
-        patch.object(
-            system_ops, "ensure_team_tablespace", return_value="oduflow_team_7"
-        ),
-        patch.object(system_ops, "_update_template_sizes"),
-        patch.object(system_ops.os, "link", side_effect=OSError("cross-device link")),
-        patch.object(system_ops, "_copy_file_to_container") as copy_in,
-    ):
-        system_ops.reload_template(
-            settings,
-            team,
-            template_name="prod",
-            dump_path=str(source),
-            persist_dump=False,
-        )
-
-    copy_in.assert_called_once()
-    copy_args = copy_in.call_args
-    assert copy_args.args[:3] == (db_container, str(source), "/tmp")
-    assert copy_args.kwargs["archive_name"].startswith("oduflow-restore-")
-    cmds = [call.args[0] for call in db_container.exec_run.call_args_list]
-    restore = next(cmd for cmd in cmds if cmd[0] == "pg_restore")
-    assert restore[-1].startswith("/tmp/oduflow-restore-")
-    assert [cmd for cmd in cmds if cmd[:2] == ["rm", "-f"]] == [
-        ["rm", "-f", restore[-1]]
-    ]
-
-
-def _exposure_setup(tmp_path):
-    source = tmp_path / "import-staging" / "dump.pgdump"
-    source.parent.mkdir()
-    source.write_bytes(b"PGDMP")
-    client, db_container = _client([{"Destination": "/exchange"}])
-    db_container.exec_run.return_value = (0, b"")
-    return source, client, db_container
-
-
-def test_expose_falls_back_when_postgres_cannot_read_the_link(tmp_path):
-    # A hardlink keeps the source's owner and mode; under a remapped container
-    # user that can be unreadable, which pg_restore would only find out later.
-    source, client, db_container = _exposure_setup(tmp_path)
-    db_container.exec_run.return_value = (1, b"")
-    host_exchange_dir = tmp_path / "pg_exchange" / "team_7"
-
-    with (
-        patch.object(system_ops, "_copy_file_to_container") as copy_in,
-        system_ops._expose_file_to_pg(
-            client, _settings(tmp_path), _team(tmp_path), db_container, str(source)
-        ) as container_path,
-    ):
-        assert container_path.startswith("/tmp/oduflow-restore-")
-        assert list(host_exchange_dir.iterdir()) == []
-
-    copy_in.assert_called_once()
-    probe = db_container.exec_run.call_args_list[0].args[0]
-    assert probe[:2] == ["test", "-r"]
-    assert probe[2].startswith("/exchange/team_7/oduflow-restore-")
-    assert db_container.exec_run.call_args_list[-1].args[0] == [
-        "rm",
-        "-f",
-        container_path,
-    ]
-
-
-def test_expose_falls_back_when_the_exchange_dir_cannot_be_created(tmp_path):
-    source, client, db_container = _exposure_setup(tmp_path)
-
-    with (
-        patch.object(
-            system_ops.os, "makedirs", side_effect=PermissionError("read-only")
-        ),
-        patch.object(system_ops, "_copy_file_to_container") as copy_in,
-        system_ops._expose_file_to_pg(
-            client, _settings(tmp_path), _team(tmp_path), db_container, str(source)
-        ) as container_path,
-    ):
-        assert container_path.startswith("/tmp/oduflow-restore-")
-
-    copy_in.assert_called_once()
-    # The container passed in is reused instead of being looked up again.
-    client.containers.get.assert_not_called()
-
-
-def test_expose_removes_the_link_when_the_restore_raises(tmp_path):
-    source, client, db_container = _exposure_setup(tmp_path)
-    host_exchange_dir = tmp_path / "pg_exchange" / "team_7"
-
-    with (
-        pytest.raises(RuntimeError),
-        system_ops._expose_file_to_pg(
-            client, _settings(tmp_path), _team(tmp_path), db_container, str(source)
-        ) as container_path,
-    ):
-        assert container_path.startswith("/exchange/team_7/oduflow-restore-")
-        assert len(list(host_exchange_dir.iterdir())) == 1
-        raise RuntimeError("pg_restore crashed")
-
-    assert list(host_exchange_dir.iterdir()) == []
-    assert source.read_bytes() == b"PGDMP"
 
 
 # --------------------------------------------------------------------------
@@ -502,44 +378,6 @@ def test_startup_reclaims_abandoned_dumps_before_quota_setup(tmp_path):
     start_http.assert_called_once_with()
 
 
-def test_reload_skips_the_container_copy_for_an_already_readable_dump(tmp_path):
-    team = _team(tmp_path)
-    os.makedirs(team.get_template_dir("prod"), exist_ok=True)
-    with open(team.get_template_sql_path("prod"), "wb") as fh:
-        fh.write(b"PGDMP")
-
-    db_container = MagicMock()
-    db_container.exec_run.return_value = (0, b"")
-    client = MagicMock()
-    client.containers.get.return_value = db_container
-
-    with (
-        patch.object(system_ops, "get_client", return_value=client),
-        patch.object(system_ops, "_wait_pg_ready"),
-        patch.object(system_ops, "_exec_sql", return_value="5"),
-        patch.object(system_ops, "_db_exists", return_value=False),
-        patch.object(system_ops, "_is_text_dump", return_value=False),
-        patch.object(
-            system_ops, "ensure_team_tablespace", return_value="oduflow_team_7"
-        ),
-        patch.object(system_ops, "_update_template_sizes"),
-        patch.object(system_ops, "_copy_file_to_container") as copy_in,
-    ):
-        system_ops.reload_template(
-            Settings(),
-            team,
-            template_name="prod",
-            container_dump_path="/exchange/team_7/staged.pgdump",
-        )
-
-    copy_in.assert_not_called()
-    cmds = [call.args[0] for call in db_container.exec_run.call_args_list]
-    restore = next(cmd for cmd in cmds if cmd[0] == "pg_restore")
-    assert restore[-1] == "/exchange/team_7/staged.pgdump"
-    # The staged dump belongs to the caller; only copies made here are removed.
-    assert not [cmd for cmd in cmds if cmd[:2] == ["rm", "-f"]]
-
-
 def test_reload_does_not_persist_a_dump_owned_by_the_staging_context(tmp_path):
     team = _team(tmp_path)
     staged = tmp_path / "pg_exchange" / "team_7" / "staged.pgdump"
@@ -561,6 +399,7 @@ def test_reload_does_not_persist_a_dump_owned_by_the_staging_context(tmp_path):
             system_ops, "ensure_team_tablespace", return_value="oduflow_team_7"
         ),
         patch.object(system_ops, "_update_template_sizes"),
+        patch.object(system_ops, "_run_restore_client", return_value=(0, "")),
         patch.object(system_ops.shutil, "copy2") as copy_dump,
     ):
         system_ops.reload_template(
@@ -568,7 +407,6 @@ def test_reload_does_not_persist_a_dump_owned_by_the_staging_context(tmp_path):
             team,
             template_name="prod",
             dump_path=str(staged),
-            container_dump_path="/exchange/team_7/staged.pgdump",
             persist_dump=False,
         )
 
@@ -608,8 +446,7 @@ def test_staged_dump_from_another_cluster_streams_into_the_exchange_dir(tmp_path
             "oduflow_7_prod-erp",
             str(dest),
             container_name=settings.prod_db_container,
-        ) as (host_path, container_path):
-            assert container_path.startswith("/exchange/team_7/")
+        ) as host_path:
             assert os.path.dirname(host_path) == str(host_dir)
 
     assert dest.read_text() == "PGDMP streamed from prod"

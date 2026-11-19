@@ -404,13 +404,17 @@ def _reload_template_restore_cmds(tmp_path, *, is_text_dump: bool, jobs: int = 4
         patch.object(
             system_ops, "ensure_team_tablespace", return_value="oduflow_team_1"
         ),
-        patch.object(system_ops, "_copy_file_to_container"),
         patch.object(system_ops, "_update_template_sizes"),
         patch.object(system_ops, "_pg_restore_jobs", return_value=jobs),
+        patch.object(
+            system_ops, "_run_restore_client", return_value=(0, "")
+        ) as restore,
     ):
         system_ops.reload_template(TEST_SETTINGS, team, "mytpl")
 
-    return [call.args[0] for call in db_container.exec_run.call_args_list]
+    # Nothing is restored from inside the shared PostgreSQL container.
+    db_container.exec_run.assert_not_called()
+    return [call.args[4] for call in restore.call_args_list]
 
 
 def test_custom_dump_restore_runs_parallel(tmp_path):
@@ -420,7 +424,7 @@ def test_custom_dump_restore_runs_parallel(tmp_path):
     assert "-j" in restore
     assert restore[restore.index("-j") + 1] == "4"
     # The archive path must stay last: -j is inserted before it, not after.
-    assert restore[-1].startswith("/tmp/")
+    assert restore[-1] == system_ops._RESTORE_CLIENT_DUMP
 
 
 def test_single_cpu_restore_omits_jobs_flag(tmp_path):

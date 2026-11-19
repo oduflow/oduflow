@@ -401,6 +401,22 @@ first (or keep the template). The same guard applies to renaming a template.
 
 ---
 
+## A template import fails with `permission denied to create extension`
+
+```
+pg_restore: error: could not execute query: ERROR:  permission denied to create extension "postgis"
+HINT:  Must be superuser to create this extension.
+```
+
+Template dumps are loaded by a restricted PostgreSQL role, never by the
+cluster superuser, so a dump can only create the extensions PostgreSQL marks
+as trusted (`pg_trgm`, `unaccent` and the like). The same applies to
+`must be owner of extension` and `must be superuser` errors during an import.
+See [How a dump is loaded](templates.md#how-a-dump-is-loaded) for what is
+allowed and how to make a further extension available.
+
+---
+
 ## A brand-new environment fails its first upgrade
 
 An environment is a *new* database cloned from a template plus *your* branch's

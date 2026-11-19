@@ -480,6 +480,63 @@ separate worker container**: overlay mounts must be created in the same mount
 namespace as the server. The native installation uses the configured Python
 executable directly.
 
+## How a dump is loaded
+
+A dump is input from outside: it comes from a URL, a bucket or a path someone
+named, or from an environment's database, which holds whatever its users put
+there. Oduflow therefore never runs a dump as the PostgreSQL superuser, and
+never inside the shared PostgreSQL container. This applies to every way a
+template database is built — `init-template`, `import-template` in all its
+forms, saving a branch or a production as a template, a scheduled sync, and
+the template rebuild after a PostgreSQL upgrade.
+
+For each load Oduflow:
+
+1. creates a one-off **loader role** — not a superuser, unable to create
+   databases or roles — and an empty template database owned by it;
+2. starts a short-lived **restore client** container from the cluster's own
+   PostgreSQL image on the team network. It runs `psql` (plain SQL) or
+   `pg_restore --no-owner` (custom format) as the loader role, connecting over
+   the network with a password like an Odoo container does, and sees the dump
+   file read-only;
+3. hands everything the load created to the team's **template owner** role
+   (`oduflow_tplown_<team>`, not a superuser and without a password) and drops
+   the loader role.
+
+Environments created from the template get their own role as owner of the
+copy, exactly as before.
+
+What this means for a dump:
+
+- **Extensions.** `CREATE EXTENSION` works for the extensions PostgreSQL marks
+  as *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `btree_gist`,
+  `fuzzystrmatch`, `pgcrypto`, `uuid-ossp`, `citext`, `hstore` and the rest of
+  that list — which covers what Odoo itself uses. An extension that needs a
+  superuser (for example `postgis`, `pg_stat_statements`, `dblink` or
+  `postgres_fdw`) or an untrusted language (`plpython3u`) cannot be created by
+  a dump any more. If you need one, use a `[database].image` in which the
+  extension's control file sets `trusted = true`; that is the PostgreSQL-native
+  way to let a database owner install it.
+- **Anything else reserved for superusers** — `ALTER ROLE ... SUPERUSER`,
+  `COPY ... FROM PROGRAM`, `ALTER SYSTEM`, event triggers, subscriptions — is
+  refused by PostgreSQL. `psql` meta-commands in a dump (`\!`, `\c`) take
+  effect only inside the restore client, which holds nothing but the dump and
+  the loader role's connection.
+- **Custom-format dumps fail on the first such statement**, because
+  `pg_restore` reports any error as a failed restore; the error message names
+  the statement. An archive from an old server (PostgreSQL 10 or earlier)
+  usually contains `COMMENT ON EXTENSION plpgsql`, which now fails the same way
+  (`must be owner of extension plpgsql`): convert it with
+  `pg_restore --no-owner -f dump.sql dump.pgdump` and import the SQL instead.
+- **Plain-SQL dumps stay tolerant**: a refused statement is skipped and the
+  rest loads. Ownership statements (`ALTER ... OWNER TO`) are among the skipped
+  ones — the template has one owner — and are reported as a single summary
+  line.
+
+A template database loaded by an older Oduflow keeps its previous owner until
+it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
+an environment over it).
+
 ## Listing and Dropping Templates
 
 ```bash

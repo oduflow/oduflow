@@ -356,7 +356,9 @@ class TestStrictRestoreCommands:
             patch.object(system_ops, "_is_text_dump", return_value=text_dump),
             patch.object(system_ops, "ensure_team_tablespace", return_value="ts"),
             patch.object(system_ops, "_update_template_sizes"),
-            patch.object(system_ops, "_copy_file_to_container"),
+            patch.object(
+                system_ops, "_run_restore_client", return_value=(0, "")
+            ) as restore_client,
         ):
             system_ops.reload_template(
                 settings,
@@ -367,8 +369,8 @@ class TestStrictRestoreCommands:
                 strict=True,
             )
 
-        cmds = [c.args[0] for c in db_container.exec_run.call_args_list]
-        restore = next(cmd for cmd in cmds if cmd[0] in ("psql", "pg_restore"))
+        db_container.exec_run.assert_not_called()
+        restore = restore_client.call_args.args[4]
         if text_dump:
             assert restore[0] == "psql"
             assert "ON_ERROR_STOP=1" not in restore

@@ -91,11 +91,16 @@ def _patch_import_dependencies(monkeypatch, backup_requests, *, patch_url_safety
         },
     )
 
-    def fake_exec_sql(_client, _settings, sql, db="postgres"):
+    def fake_exec_sql(_client, _settings, sql, db="postgres", *, user=None):
+        if "SHOW server_version" in sql:
+            assert db == "postgres"
+            return "16"
+        # The restored database holds what the dump defined, so it is read
+        # as the template owner, never as the superuser.
+        assert db == "oduflow_template_1_imported"
+        assert user == "oduflow_tplown_1"
         if "name='base'" in sql:
             return "18.0.1.0"
-        if "SHOW server_version" in sql:
-            return "16"
         if "json_object_agg" in sql:
             return json.dumps({"base": "18.0.1.0", "web": "18.0.1.0"})
         raise AssertionError(f"Unexpected SQL against {db}: {sql}")
