@@ -3004,7 +3004,9 @@ them with a dev environment's data (promotion into an *existing* production).
 
 The restore is swap-based, so a failed restore leaves the previous state in
 place. The **code checkout is not touched** — a warning is returned if it does
-not match the source's commit.
+not match the source's commit. A snapshot restore needs about twice the dump
+size free in the team's `tmp` directory plus room for a second copy of the
+filestore; see [How a snapshot restore runs](production.md#how-a-snapshot-restore-runs).
 
 Lock: production + backup store. Destructive for current data.
 { .odu-tool-meta }
@@ -3056,7 +3058,9 @@ Lock: production.
 ### `prune_production_backups`
 
 Apply the retention policy (`[backup] keep`) to the team's snapshots and
-filestore chunk store immediately. This also runs weekly on schedule.
+filestore chunk store immediately. This also runs weekly on schedule (Sunday
+04:30, server-local); see [Schedule and retention](production.md#schedule-and-retention)
+for how `keep` pairs are interpreted.
 
 Pruning uses safe two-step fossil collection: chunks are only permanently
 deleted on a *later* prune, after every production has produced a newer
