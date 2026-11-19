@@ -190,6 +190,22 @@ oduflow call delete_service '{"name":"redis","save_preset":false}'
 oduflow call run_service_command redis "redis-cli ping"
 ```
 
+### Shell Access
+
+In the dashboard, **Shell** on a service card opens an interactive terminal
+inside the running container — the equivalent of
+`docker exec -it <container> sh`. The shell runs as the image's default user,
+and the window can be minimized to the dock without ending the session.
+Closing the window ends the shell and its foreground job, so an abandoned
+terminal does not leave them running in the container. Jobs the shell put in
+the background (`worker &`, `nohup ...`) are not stopped, the same as after
+leaving a `docker exec` session; stop them yourself before closing. The
+button is disabled while the service is not running, and an image that ships no
+`sh` (scratch/distroless) reports the exec error instead of a prompt; use
+`run_service_command` with `shell=false` there. Protection does not block the
+shell. A shared single-environment link cannot reach it, like every other
+team-wide surface.
+
 ### Changing a Service
 
 `update_service` is the preferred way to change **any** setting of a running service — image, env vars, port/routes, hostname, `host_mode`, `command`, `volumes`, `privileged`, or `net_admin`. It recreates the container automatically and preserves every setting you do not override, so you rarely need to delete and recreate a service by hand. Passing `routes` fully replaces the route list. To return to a single catch-all port, pass `routes=[]` and the replacement `port` in the same call.

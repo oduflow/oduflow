@@ -20,7 +20,9 @@ WebSocket ↔ `docker exec` bridge:
 
 - **Agent CLI** — the agent's own terminal UI (TUI) rendered in the browser,
   exec'd with a PTY at the environment's git checkout. Full access to the
-  agent's native command-line experience.
+  agent's native command-line experience. Closing the window ends that agent
+  process (it gets a hangup, and is killed if it does not exit), so a task
+  still in progress is interrupted; minimize the window to keep it running.
 - **Agent Chat** — a structured, framework-free browser chat that speaks the
   **Agent Client Protocol (ACP)** to the agent's adapter. Each environment has
   a durable, bounded **conversation history**: use **History** to resume one of

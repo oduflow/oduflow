@@ -3021,6 +3021,14 @@ The WebSocket endpoint is `ws://<host>:<port>/api/environments/{branch}/terminal
 !!! note
     The terminal requires the environment container to be running. If the container is stopped, the terminal will display an error message.
 
+Closing the terminal window ends its process: Docker itself leaves a TTY
+`docker exec` running after the client disconnects, so the dashboard hangs up
+the `odoo shell` (and the SQL console's `psql`) and kills one that does not
+exit. Uncommitted work in the shell is rolled back, and no idle process or
+database connection is left behind. Minimizing the window keeps the session. A
+query that is still executing when a SQL console is closed runs to completion
+on the server before its connection goes away.
+
 ## Environment Protection
 
 Environments can be **protected** from accidental deletion. A protected environment cannot be deleted until protection is removed.
@@ -4106,7 +4114,9 @@ WebSocket ↔ `docker exec` bridge:
 
 - **Agent CLI** — the agent's own terminal UI (TUI) rendered in the browser,
   exec'd with a PTY at the environment's git checkout. Full access to the
-  agent's native command-line experience.
+  agent's native command-line experience. Closing the window ends that agent
+  process (it gets a hangup, and is killed if it does not exit), so a task
+  still in progress is interrupted; minimize the window to keep it running.
 - **Agent Chat** — a structured, framework-free browser chat that speaks the
   **Agent Client Protocol (ACP)** to the agent's adapter. Each environment has
   a durable, bounded **conversation history**: use **History** to resume one of
@@ -4581,6 +4591,22 @@ oduflow call delete_service '{"name":"redis","save_preset":false}'
 # Execute a command inside a service container
 oduflow call run_service_command redis "redis-cli ping"
 ```
+
+### Shell Access
+
+In the dashboard, **Shell** on a service card opens an interactive terminal
+inside the running container — the equivalent of
+`docker exec -it <container> sh`. The shell runs as the image's default user,
+and the window can be minimized to the dock without ending the session.
+Closing the window ends the shell and its foreground job, so an abandoned
+terminal does not leave them running in the container. Jobs the shell put in
+the background (`worker &`, `nohup ...`) are not stopped, the same as after
+leaving a `docker exec` session; stop them yourself before closing. The
+button is disabled while the service is not running, and an image that ships no
+`sh` (scratch/distroless) reports the exec error instead of a prompt; use
+`run_service_command` with `shell=false` there. Protection does not block the
+shell. A shared single-environment link cannot reach it, like every other
+team-wide surface.
 
 ### Changing a Service
 
@@ -5476,6 +5502,7 @@ Odoo.sh ingest endpoints accept the import token only in
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
+| `WebSocket` | `/api/services/{name}/shell` | Interactive `sh` terminal inside the service container, as the image's default user (the dashboard's **Shell** button). Same JSON `input`/`resize` frames as the environment terminals |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
 | `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |

@@ -181,6 +181,7 @@ Odoo.sh ingest endpoints accept the import token only in
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
+| `WebSocket` | `/api/services/{name}/shell` | Interactive `sh` terminal inside the service container, as the image's default user (the dashboard's **Shell** button). Same JSON `input`/`resize` frames as the environment terminals |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
 | `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |

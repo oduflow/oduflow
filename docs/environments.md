@@ -710,6 +710,14 @@ The WebSocket endpoint is `ws://<host>:<port>/api/environments/{branch}/terminal
 !!! note
     The terminal requires the environment container to be running. If the container is stopped, the terminal will display an error message.
 
+Closing the terminal window ends its process: Docker itself leaves a TTY
+`docker exec` running after the client disconnects, so the dashboard hangs up
+the `odoo shell` (and the SQL console's `psql`) and kills one that does not
+exit. Uncommitted work in the shell is rolled back, and no idle process or
+database connection is left behind. Minimizing the window keeps the session. A
+query that is still executing when a SQL console is closed runs to completion
+on the server before its connection goes away.
+
 ## Environment Protection
 
 Environments can be **protected** from accidental deletion. A protected environment cannot be deleted until protection is removed.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import dataclasses
 import hashlib
@@ -105,6 +106,7 @@ from oduflow.locking import (
 )
 from oduflow.naming import (
     PROD_ENV_PREFIX,
+    get_service_container_name,
     parse_env_vars,
     parse_service_command,
     slugify_branch,
@@ -564,6 +566,220 @@ def _error_response(e: FlowError) -> JSONResponse:
 def _term_error(exc: Exception) -> str:
     """A red error line for the WebSocket terminals, under the brand."""
     return f"\x1b[31mError: {branding.rebrand(str(exc))}\x1b[0m\r\n"
+
+
+def _pid_reporting_argv(argv: list[str]) -> list[str]:
+    """Wrap *argv* so the process first prints its own PID on a line.
+
+    ``exec`` keeps that PID for the real command, so ``_run_exec_pty`` can end
+    it once its terminal is gone.
+    """
+    return ["sh", "-c", 'echo $$; exec "$@"', "sh", *argv]
+
+
+def _end_lingering_exec(
+    client: Any, container: Any, exec_id: str, pid: int, user: str = ""
+) -> None:
+    """End a TTY exec that outlived its terminal.
+
+    Docker does not stop a TTY exec when its client disconnects (moby#9098):
+    the process gets neither EOF nor a hangup, so every closed terminal would
+    leave its shell, ``odoo shell``, ``psql`` or coding agent — and whatever
+    it was running — behind in the container. The process is the session
+    leader of its PTY, so when it goes the kernel hangs up its foreground job
+    too; jobs it put in the background are not signalled. It gets a hangup
+    first and a moment to exit; one that ignores it (``odoo shell`` turns
+    SIGHUP into a KeyboardInterrupt at the prompt) is killed.
+
+    *user* is the exec's own ``user`` option: an unprivileged default user
+    cannot signal a process that was started under another uid.
+
+    ``Running`` guards against the PID having been reused after a process
+    that already exited on its own.
+    """
+
+    def running() -> bool:
+        return bool(client.api.exec_inspect(exec_id).get("Running"))
+
+    try:
+        if not running():
+            return
+        container.exec_run(["sh", "-c", f"kill -HUP {pid}"], user=user)
+        for _ in range(10):
+            time.sleep(0.2)
+            if not running():
+                return
+        container.exec_run(["sh", "-c", f"kill -KILL {pid}"], user=user)
+    except Exception:
+        logger.debug("Could not end lingering exec %s", exec_id, exc_info=True)
+
+
+async def _run_exec_pty(
+    websocket: WebSocket,
+    client: Any,
+    container: Any,
+    argv: list[str],
+    **exec_options: Any,
+) -> None:
+    """Run *argv* in *container* on a PTY bridged to a browser terminal.
+
+    Returns when either side ends. The browser sends JSON frames:
+    ``{"type": "input", "data": ...}`` for keystrokes and
+    ``{"type": "resize", "cols": ..., "rows": ...}`` when the terminal is
+    refitted; the exec's output goes back as text frames. *exec_options*
+    (``user``, ``workdir``, ``environment``) go to ``exec_create``.
+
+    The command is started through :func:`_pid_reporting_argv`: its leading
+    PID line is consumed here instead of reaching the terminal, and the
+    process is ended once the session is over (see
+    :func:`_end_lingering_exec`). Docker calls run off the event loop, so a
+    slow daemon stalls this terminal only.
+    """
+    loop = asyncio.get_event_loop()
+
+    def start() -> tuple[str, Any]:
+        exec_id = client.api.exec_create(
+            container.id,
+            _pid_reporting_argv(argv),
+            stdin=True,
+            tty=True,
+            stdout=True,
+            stderr=True,
+            **exec_options,
+        )["Id"]
+        return exec_id, client.api.exec_start(
+            exec_id, detach=False, tty=True, socket=True
+        )
+
+    exec_id, sock = await loop.run_in_executor(None, start)
+    raw_sock = sock._sock
+
+    closed = asyncio.Event()
+    shell_pid: int | None = None
+    # A character cut in two by the 4096-byte reads must survive the cut.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # The PTY echoes input at once, so keystrokes that reached it before the
+    # PID line would be echoed ahead of that line and hide the PID. They are
+    # held here until the line has been read.
+    held_input: list[bytes] | None = []
+    input_lock = asyncio.Lock()
+
+    async def send_input(data: bytes) -> None:
+        async with input_lock:
+            if held_input is not None:
+                held_input.append(data)
+            else:
+                await loop.run_in_executor(None, raw_sock.sendall, data)
+
+    async def release_input() -> None:
+        nonlocal held_input
+        async with input_lock:
+            held, held_input = held_input or [], None
+            for data in held:
+                await loop.run_in_executor(None, raw_sock.sendall, data)
+
+    async def read_pid_line() -> bytes:
+        """Consume the PID line; return whatever else arrived with it."""
+        nonlocal shell_pid
+        buf = b""
+        while b"\n" not in buf and len(buf) < 32:
+            data = await loop.run_in_executor(None, raw_sock.recv, 4096)
+            if not data:
+                break
+            buf += data
+        line, newline, rest = buf.partition(b"\n")
+        if newline and line.strip().isdigit():
+            shell_pid = int(line.strip())
+            return rest
+        # Not a PID (an image without `sh` answers with the exec error):
+        # show it as is.
+        return buf
+
+    async def docker_to_browser() -> None:
+        try:
+            data = await read_pid_line()
+            await release_input()
+            while not closed.is_set():
+                text = decoder.decode(data)
+                if text:
+                    await websocket.send_text(text)
+                data = await loop.run_in_executor(None, raw_sock.recv, 4096)
+                if not data:
+                    break
+        except Exception:
+            pass
+        finally:
+            closed.set()
+
+    async def browser_to_docker() -> None:
+        try:
+            while not closed.is_set():
+                msg = json.loads(await websocket.receive_text())
+                if msg.get("type") == "input":
+                    await send_input(msg["data"].encode("utf-8"))
+                elif msg.get("type") == "resize":
+                    rows, cols = msg.get("rows", 24), msg.get("cols", 80)
+                    try:
+                        await loop.run_in_executor(
+                            None,
+                            lambda: client.api.exec_resize(
+                                exec_id, height=rows, width=cols
+                            ),
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            closed.set()
+
+    tasks = [
+        asyncio.ensure_future(docker_to_browser()),
+        asyncio.ensure_future(browser_to_docker()),
+    ]
+    try:
+        # Return as soon as EITHER side ends so a browser-closed/idle terminal
+        # never parks docker_to_browser in recv() forever, leaking the executor
+        # thread that blocks interpreter shutdown.
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        closed.set()
+        # shutdown() reliably wakes a thread blocked in recv (a bare close()
+        # need not).
+        for close in (
+            lambda: raw_sock.shutdown(socket.SHUT_RDWR),
+            raw_sock.close,
+            sock.close,
+        ):
+            try:
+                close()
+            except Exception:
+                pass
+        if shell_pid is not None:
+            # Detached, and started before the awaits below: the cleanup must
+            # not be skipped or cut short when this handler is cancelled.
+            threading.Thread(
+                target=_end_lingering_exec,
+                args=(
+                    client,
+                    container,
+                    exec_id,
+                    shell_pid,
+                    exec_options.get("user") or "",
+                ),
+                name="oduflow-shell-cleanup",
+                daemon=True,
+            ).start()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        for t in tasks:
+            t.cancel()
+        # wait(), not gather(): if this handler is itself being cancelled,
+        # gather() re-raises a child's bare CancelledError in place of the
+        # caller's, which an anyio cancel scope then fails to recognize.
+        await asyncio.wait(tasks)
 
 
 def _validate_dev_env_name(env_name: str) -> str:
@@ -5485,7 +5701,9 @@ def _build_routes(
             db_name = get_db_name(branch, team.team_id)
 
             try:
-                container = client.containers.get(container_name)
+                container = await run_in_threadpool(
+                    client.containers.get, container_name
+                )
             except _docker.errors.NotFound:
                 await websocket.send_text(
                     "\x1b[31mError: environment not found\x1b[0m\r\n"
@@ -5500,8 +5718,10 @@ def _build_routes(
                 await websocket.close(code=1011)
                 return
 
-            exec_id = client.api.exec_create(
-                container.id,
+            await _run_exec_pty(
+                websocket,
+                client,
+                container,
                 [
                     "/entrypoint.sh",
                     "odoo",
@@ -5512,85 +5732,7 @@ def _build_routes(
                     "-c",
                     "/etc/odoo/odoo.conf",
                 ],
-                stdin=True,
-                tty=True,
-                stdout=True,
-                stderr=True,
-            )["Id"]
-            sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
-            raw_sock = sock._sock
-
-            loop = asyncio.get_event_loop()
-            closed = asyncio.Event()
-
-            async def docker_to_browser() -> None:
-                try:
-                    while not closed.is_set():
-                        data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-                        if not data:
-                            break
-                        await websocket.send_text(
-                            data.decode("utf-8", errors="replace")
-                        )
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            async def browser_to_docker() -> None:
-                try:
-                    while not closed.is_set():
-                        text = await websocket.receive_text()
-                        msg = json.loads(text)
-                        if msg.get("type") == "input":
-                            await loop.run_in_executor(
-                                None, raw_sock.sendall, msg["data"].encode("utf-8")
-                            )
-                        elif msg.get("type") == "resize":
-                            cols = msg.get("cols", 80)
-                            rows = msg.get("rows", 24)
-                            try:
-                                client.api.exec_resize(exec_id, height=rows, width=cols)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            tasks = [
-                asyncio.ensure_future(docker_to_browser()),
-                asyncio.ensure_future(browser_to_docker()),
-            ]
-            try:
-                # Return as soon as EITHER side ends so a browser-closed/idle
-                # terminal never parks docker_to_browser in recv() forever,
-                # leaking the executor thread that blocks interpreter shutdown.
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                closed.set()
-                # shutdown() reliably wakes a thread blocked in recv (a bare
-                # close() need not) and gives the exec'd process EOF on stdin so
-                # it exits.
-                try:
-                    raw_sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    raw_sock.close()
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            )
 
         except Exception as e:
             logger.exception("WebSocket terminal error for branch %s", branch)
@@ -5625,7 +5767,9 @@ def _build_routes(
             db_name = get_db_name(branch, team.team_id)
 
             try:
-                db_container = client.containers.get(settings.shared_db_container)
+                db_container = await run_in_threadpool(
+                    client.containers.get, settings.shared_db_container
+                )
             except _docker.errors.NotFound:
                 await websocket.send_text(
                     "\x1b[31mError: database container not found\x1b[0m\r\n"
@@ -5661,91 +5805,73 @@ def _build_routes(
                 await websocket.close(code=1011)
                 return
 
-            exec_id = client.api.exec_create(
-                db_container.id,
+            await _run_exec_pty(
+                websocket,
+                client,
+                db_container,
                 ["psql", "-U", creds["pg_user"], "-d", db_name],
-                stdin=True,
-                tty=True,
-                stdout=True,
-                stderr=True,
-            )["Id"]
-            sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
-            raw_sock = sock._sock
-
-            loop = asyncio.get_event_loop()
-            closed = asyncio.Event()
-
-            async def docker_to_browser() -> None:
-                try:
-                    while not closed.is_set():
-                        data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-                        if not data:
-                            break
-                        await websocket.send_text(
-                            data.decode("utf-8", errors="replace")
-                        )
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            async def browser_to_docker() -> None:
-                try:
-                    while not closed.is_set():
-                        text = await websocket.receive_text()
-                        msg = json.loads(text)
-                        if msg.get("type") == "input":
-                            await loop.run_in_executor(
-                                None, raw_sock.sendall, msg["data"].encode("utf-8")
-                            )
-                        elif msg.get("type") == "resize":
-                            cols = msg.get("cols", 80)
-                            rows = msg.get("rows", 24)
-                            try:
-                                client.api.exec_resize(exec_id, height=rows, width=cols)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            tasks = [
-                asyncio.ensure_future(docker_to_browser()),
-                asyncio.ensure_future(browser_to_docker()),
-            ]
-            try:
-                # Return as soon as EITHER side ends so a browser-closed/idle
-                # terminal never parks docker_to_browser in recv() forever,
-                # leaking the executor thread that blocks interpreter shutdown.
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                closed.set()
-                # shutdown() reliably wakes a thread blocked in recv (a bare
-                # close() need not) and gives the exec'd process EOF on stdin so
-                # it exits.
-                try:
-                    raw_sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    raw_sock.close()
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            )
 
         except Exception as e:
             logger.exception("WebSocket SQL terminal error for branch %s", branch)
+            try:
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1011)
+            except Exception:
+                pass
+
+    async def ws_service_shell(websocket: WebSocket) -> None:
+        """Interactive ``sh`` inside a service container.
+
+        The dashboard counterpart of ``docker exec -it <container> sh``: the
+        shell runs as the image's default user, exactly like a bare
+        ``docker exec``.
+        """
+        name = websocket.path_params["name"]
+        await websocket.accept()
+        try:
+            import docker as _docker
+            from oduflow.docker_ops.client import get_client as _get_client
+
+            settings = get_settings()
+            team = _get_ui_team(websocket)
+            # Validates the name, and the team prefix keeps the lookup inside
+            # this session's team: another team's service is simply not found.
+            try:
+                container_name = get_service_container_name(
+                    name, settings.prefix, team.team_id
+                )
+            except ValueError as e:
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1008)
+                return
+
+            client = _get_client()
+            try:
+                container = await run_in_threadpool(
+                    client.containers.get, container_name
+                )
+            except _docker.errors.NotFound:
+                container = None
+            # The label, as in every service_ops lookup: an environment named
+            # `svc` owns `<prefix><team>-svc-odoo` too, and that container is
+            # not a service.
+            if container is None or not container.labels.get("oduflow.service"):
+                await websocket.send_text("\x1b[31mError: service not found\x1b[0m\r\n")
+                await websocket.close(code=1011)
+                return
+
+            if container.status != "running":
+                await websocket.send_text(
+                    "\x1b[31mError: service is not running\x1b[0m\r\n"
+                )
+                await websocket.close(code=1011)
+                return
+
+            await _run_exec_pty(websocket, client, container, ["sh"])
+
+        except Exception as e:
+            logger.exception("WebSocket shell error for service %s", name)
             try:
                 await websocket.send_text(_term_error(e))
                 await websocket.close(code=1011)
@@ -5792,7 +5918,9 @@ def _build_routes(
 
             container_name = get_agent_container_name(team.team_id, settings.prefix)
             try:
-                container = client.containers.get(container_name)
+                container = await run_in_threadpool(
+                    client.containers.get, container_name
+                )
             except _docker.errors.NotFound:
                 await websocket.send_text(
                     "\x1b[31mError: agent container not found "
@@ -5905,93 +6033,18 @@ def _build_routes(
                 if settings.agent_claude_model:
                     cmd += ["--model", settings.agent_claude_model]
 
-            exec_id = client.api.exec_create(
-                container.id,
+            # Ended when the console closes: the agent container is long-lived,
+            # and a session left behind would keep this environment's scoped
+            # MCP token in its env.
+            await _run_exec_pty(
+                websocket,
+                client,
+                container,
                 env_ops.agent_session_command(cmd),
-                stdin=True,
-                tty=True,
-                stdout=True,
-                stderr=True,
                 workdir=checkout,
                 environment=exec_env,
                 user=exec_user,
-            )["Id"]
-            sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
-            raw_sock = sock._sock
-
-            loop = asyncio.get_event_loop()
-            closed = asyncio.Event()
-
-            async def docker_to_browser() -> None:
-                try:
-                    while not closed.is_set():
-                        data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-                        if not data:
-                            break
-                        await websocket.send_text(
-                            data.decode("utf-8", errors="replace")
-                        )
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            async def browser_to_docker() -> None:
-                try:
-                    while not closed.is_set():
-                        text = await websocket.receive_text()
-                        msg = json.loads(text)
-                        if msg.get("type") == "input":
-                            await loop.run_in_executor(
-                                None, raw_sock.sendall, msg["data"].encode("utf-8")
-                            )
-                        elif msg.get("type") == "resize":
-                            cols = msg.get("cols", 80)
-                            rows = msg.get("rows", 24)
-                            try:
-                                client.api.exec_resize(exec_id, height=rows, width=cols)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            tasks = [
-                asyncio.ensure_future(docker_to_browser()),
-                asyncio.ensure_future(browser_to_docker()),
-            ]
-            try:
-                # Return as soon as EITHER side ends. Unlike ws_terminal (whose
-                # exec dies with the environment container), the agent container
-                # is long-lived: waiting for BOTH would park docker_to_browser
-                # in recv() forever after the browser closes an idle console,
-                # leaking the exec'd agent process and the executor thread.
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                closed.set()
-                # shutdown() reliably wakes a thread blocked in recv (a bare
-                # close() need not) and gives the agent EOF on stdin so the
-                # `docker exec` process exits instead of leaking.
-                try:
-                    raw_sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    raw_sock.close()
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            )
 
         except Exception as e:
             logger.exception("WebSocket agent console error for branch %s", branch)
@@ -7367,6 +7420,7 @@ def _build_routes(
             "/api/services/{name}/unprotect", api_service_unprotect, methods=["POST"]
         ),
         Route("/api/services/{name}/logs", api_service_logs, methods=["GET"]),
+        WebSocketRoute("/api/services/{name}/shell", ws_service_shell),
         Route("/api/service-presets", api_service_presets, methods=["GET"]),
         Route("/api/service-presets/restore", api_service_restore, methods=["POST"]),
         Route(

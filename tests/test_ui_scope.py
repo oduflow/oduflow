@@ -56,6 +56,8 @@ def test_single_environment_surface_is_allowed(method, path):
         ("GET", "/"),
         ("GET", "/api/templates"),
         ("GET", "/api/services"),
+        # A shell in a team service is not confined to the shared environment.
+        ("WEBSOCKET", "/api/services/redis/shell"),
         ("GET", "/api/volumes"),
         ("GET", "/api/extra-repos"),
         ("GET", "/api/credentials"),
