@@ -24,8 +24,8 @@ from typing import Any
 
 import docker
 from docker import DockerClient
-from oduflow import pg_hba, service_database_credentials
-from oduflow.docker_ops import image_cleanup
+from oduflow import image_builds, pg_hba, service_database_credentials
+from oduflow.docker_ops import build_ops, image_cleanup
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.errors import (
@@ -5167,13 +5167,21 @@ def cleanup_orphans(
     namespace protects live productions even when productions.json is stale or
     unreadable.
 
+    Stale image build jobs are reported as ``orphan_build_jobs``: job
+    directories of builds that failed, were cancelled or interrupted — or
+    abandoned by a process that died, which removal declares interrupted
+    first — or whose staging image has left the daemon (see
+    ``BuildJobStore.stale_job_ids``). Running builds and builds whose image
+    can still be run or published stay.
+
     Returns a dict with keys: orphan_databases, orphan_workspaces, orphan_ports,
-    orphan_roles and orphan_extra_checkouts (unused shared extra-addons
-    checkouts, named ``<repo>/<revision>``), each a list of removed (or
-    would-be-removed) names. Dry runs add ``orphan_extra_checkout_sizes``
-    (bytes per checkout); removals add ``extra_checkouts_freed_bytes``.
-    ``errors`` lists what could not be removed and, in both modes, extra repos
-    whose checkouts could not be examined (those are kept).
+    orphan_roles, orphan_extra_checkouts (unused shared extra-addons
+    checkouts, named ``<repo>/<revision>``) and orphan_build_jobs (stale image
+    build job directories), each a list of removed (or would-be-removed)
+    names. Dry runs add ``orphan_extra_checkout_sizes`` (bytes per checkout);
+    removals add ``extra_checkouts_freed_bytes``. ``errors`` lists what could
+    not be removed and, in both modes, extra repos whose checkouts could not
+    be examined (those are kept).
 
     ``only`` maps those keys to names the caller reviewed: when given, only
     reviewed names that are still orphaned are removed.
@@ -5286,6 +5294,11 @@ def cleanup_orphans(
     # set itself, under each repo's lock.
     from oduflow import extra_addons
 
+    # 7. Stale image build jobs
+    orphan_build_jobs = image_builds.store.stale_job_ids(
+        team, build_ops.staging_image_exists
+    )
+
     if only is not None:
         orphan_dbs = [n for n in orphan_dbs if n in only.get("orphan_databases", [])]
         orphan_workspaces = [
@@ -5293,6 +5306,9 @@ def cleanup_orphans(
         ]
         orphan_ports = [n for n in orphan_ports if n in only.get("orphan_ports", [])]
         orphan_roles = [n for n in orphan_roles if n in only.get("orphan_roles", [])]
+        orphan_build_jobs = [
+            n for n in orphan_build_jobs if n in only.get("orphan_build_jobs", [])
+        ]
 
     if dry_run:
         # Contains its own failures (reported in "errors"), so a repo that
@@ -5304,12 +5320,14 @@ def cleanup_orphans(
             orphan_checkouts = [n for n in orphan_checkouts if n in reviewed]
         logger.info(
             "Cleanup dry-run: %d orphan DBs, %d orphan workspaces, %d orphan ports, "
-            "%d orphan roles, %d unused extra checkouts",
+            "%d orphan roles, %d unused extra checkouts, "
+            "%d stale image build jobs",
             len(orphan_dbs),
             len(orphan_workspaces),
             len(orphan_ports),
             len(orphan_roles),
             len(orphan_checkouts),
+            len(orphan_build_jobs),
         )
         return {
             "dry_run": True,
@@ -5319,6 +5337,7 @@ def cleanup_orphans(
             "orphan_roles": orphan_roles,
             "orphan_extra_checkouts": orphan_checkouts,
             "orphan_extra_checkout_sizes": checkout_scan["sizes"],
+            "orphan_build_jobs": orphan_build_jobs,
             "errors": checkout_scan["errors"],
         }
 
@@ -5378,6 +5397,16 @@ def cleanup_orphans(
     )
     errors.extend(checkout_result["errors"])
 
+    # Each job is judged again right before its directory goes: a build that
+    # an owner holds or that became usable since the listing is left alone.
+    removed_build_jobs, failed_build_jobs = image_builds.store.remove_stale_jobs(
+        team, orphan_build_jobs, build_ops.staging_image_exists
+    )
+    errors.extend(
+        f"Image build job {build_id}: removal failed. Check server logs."
+        for build_id in failed_build_jobs
+    )
+
     return {
         "dry_run": False,
         "orphan_databases": removed_dbs,
@@ -5386,6 +5415,7 @@ def cleanup_orphans(
         "orphan_roles": removed_roles,
         "orphan_extra_checkouts": checkout_result["removed"],
         "extra_checkouts_freed_bytes": checkout_result["freed_bytes"],
+        "orphan_build_jobs": removed_build_jobs,
         "errors": errors,
     }
 

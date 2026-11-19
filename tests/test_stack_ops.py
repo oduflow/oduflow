@@ -4,12 +4,14 @@ from unittest.mock import patch
 
 import pytest
 
-from oduflow.errors import ConflictError, ExternalCommandError
+from oduflow import image_builds
+from oduflow.errors import ConflictError, ExternalCommandError, NotFoundError
 from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import StackValidationError, load_stack, resolve_env_values
 from oduflow.stack_models import ServiceDatabase, ServiceRoute, StackManifest, ValueFrom
 from oduflow.stack_ops import (
     PlanAction,
+    PlannedImage,
     StackPlan,
     _environment_hash_with_sanitize,
     _file_matches,
@@ -57,6 +59,10 @@ spec:
         - source: fs-data
           target: /data
 """
+
+# What build_plan records for MANIFEST's one service; hand-made plans that
+# create or update the service carry it too.
+_FS_IMAGES = {"fs": PlannedImage(image="example/fs:1")}
 
 
 @pytest.fixture(autouse=True)
@@ -605,6 +611,7 @@ def test_apply_creates_resources_and_persists_non_secret_state(stack_fixture):
             PlanAction("create", "services.fs"),
             PlanAction("install", "modules", modules=("acme_base",)),
         ),
+        images=_FS_IMAGES,
     )
     events = []
 
@@ -693,6 +700,7 @@ def test_apply_wires_generated_database_url_without_saving_it_in_state(stack_fix
             PlanAction("create", "environment"),
             PlanAction("create", "services.fs"),
         ),
+        images=_FS_IMAGES,
     )
     generated = {
         "status": "ready",
@@ -816,6 +824,7 @@ def test_stack_update_dependency_failure_preserves_actionable_error(stack_fixtur
             PlanAction("create", "services.fs"),
             PlanAction("install", "modules", modules=("acme_base",)),
         ),
+        images=_FS_IMAGES,
     )
     with (
         patch("oduflow.stack_ops.build_plan", return_value=actions),
@@ -1017,3 +1026,403 @@ def test_format_plan_renders_every_operation():
         "  ^ start services.fs — exited",
         "  + install modules — a, b",
     ]
+
+
+# -- services built from a repository (spec.services.<name>.build) --
+
+BUILD_MANIFEST = """\
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: paseo
+spec:
+  services:
+    paseo:
+      build:
+        repoUrl: https://github.com/acme/paseo.git
+        ref: main
+        dockerfile: docker/base/Dockerfile
+      port: 6767
+"""
+
+_COMMIT = "c" * 40
+_BUILT = "oduflow-build/team-1:bld-aaaaaaaaaaaa"
+
+
+@pytest.fixture
+def build_stack(stack_fixture, tmp_path):
+    settings, team, _manifest, _path = stack_fixture
+    path = tmp_path / "paseo.yaml"
+    path.write_text(BUILD_MANIFEST, encoding="utf-8")
+    return settings, team, load_stack(path), str(path)
+
+
+def _running_built_service(manifest, image):
+    return {
+        "name": "paseo",
+        "image": image,
+        "port": 6767,
+        "hostname": None,
+        "env_vars": {},
+        "host_mode": False,
+        "volumes": [],
+        "cap_add": [],
+        "privileged": False,
+        "routes": [],
+        "stack": "paseo",
+        "stack_resource": "services.paseo",
+        "status": "running",
+        "stack_spec_hash": _resource_hash(manifest.spec.services["paseo"]),
+    }
+
+
+def test_image_service_hash_is_unchanged_by_the_build_field(stack_fixture):
+    import hashlib
+    import json
+
+    _settings, _team, manifest, _path = stack_fixture
+    service = manifest.spec.services["fs"]
+    legacy = service.model_dump(mode="json", by_alias=True)
+    assert legacy.pop("build") is None
+    for value in legacy["env"].values():
+        if isinstance(value, dict):
+            value.pop("productionField")
+    expected = hashlib.sha256(
+        json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    # Services deployed before `build` existed must not be recreated.
+    assert _resource_hash(service) == expected
+
+
+def test_plan_builds_a_service_image_that_does_not_exist_yet(build_stack):
+    settings, team, manifest, path = build_stack
+
+    with (
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=[]),
+        patch(
+            "oduflow.docker_ops.build_ops.resolve_remote_ref",
+            return_value=(_COMMIT, "main"),
+        ) as resolve,
+        patch("oduflow.docker_ops.build_ops.find_built_image", return_value=""),
+    ):
+        plan = build_plan(settings, team, manifest, path)
+
+    assert plan.actions == (
+        PlanAction(
+            "create",
+            "services.paseo",
+            "build https://github.com/acme/paseo.git @ cccccccccccc",
+        ),
+    )
+    assert plan.images == {"paseo": PlannedImage(image="", commit=_COMMIT)}
+    assert resolve.call_args.args[1:] == ("https://github.com/acme/paseo.git", "main")
+
+
+def test_plan_is_in_sync_while_the_ref_has_not_moved(build_stack):
+    settings, team, manifest, path = build_stack
+    key = image_builds.build_key(
+        "https://github.com/acme/paseo.git",
+        _COMMIT,
+        "docker/base/Dockerfile",
+        ".",
+        "",
+        {},
+    )
+
+    with (
+        patch(
+            "oduflow.stack_ops.service_ops.list_services",
+            return_value=[_running_built_service(manifest, _BUILT)],
+        ),
+        patch(
+            "oduflow.docker_ops.build_ops.resolve_remote_ref",
+            return_value=(_COMMIT, "main"),
+        ),
+        patch(
+            "oduflow.docker_ops.build_ops.find_built_image", return_value=_BUILT
+        ) as find,
+    ):
+        plan = build_plan(settings, team, manifest, path)
+
+    assert plan.actions == ()
+    # The running tag is offered back so an equal newer build does not win.
+    assert find.call_args.args[1] == key
+    assert find.call_args.kwargs == {"prefer": _BUILT}
+
+
+def test_plan_updates_the_service_when_the_ref_moved(build_stack):
+    settings, team, manifest, path = build_stack
+
+    with (
+        patch(
+            "oduflow.stack_ops.service_ops.list_services",
+            return_value=[_running_built_service(manifest, _BUILT)],
+        ),
+        patch(
+            "oduflow.docker_ops.build_ops.resolve_remote_ref",
+            return_value=("d" * 40, "main"),
+        ),
+        patch("oduflow.docker_ops.build_ops.find_built_image", return_value=""),
+    ):
+        plan = build_plan(settings, team, manifest, path)
+
+    assert plan.actions == (PlanAction("update", "services.paseo", "image"),)
+
+
+def test_plan_reports_an_unresolvable_build_source_as_a_conflict(build_stack):
+    settings, team, manifest, path = build_stack
+
+    with (
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=[]),
+        patch(
+            "oduflow.docker_ops.build_ops.resolve_remote_ref",
+            side_effect=NotFoundError("Ref 'main' is neither a branch nor a tag"),
+        ),
+    ):
+        plan = build_plan(settings, team, manifest, path)
+
+    assert plan.has_conflicts
+    assert "neither a branch nor a tag" in plan.actions[0].detail
+
+
+def test_apply_builds_then_runs_the_staging_image(build_stack):
+    settings, team, manifest, path = build_stack
+    plan = StackPlan(
+        "paseo",
+        (PlanAction("create", "services.paseo"),),
+        images={"paseo": PlannedImage(image="", commit=_COMMIT)},
+    )
+    job = image_builds.BuildJob(
+        build_id="bld-aaaaaaaaaaaa",
+        team_id="1",
+        env_name="",
+        branch="main",
+        dockerfile="docker/base/Dockerfile",
+        context=".",
+        status=image_builds.STATUS_SUCCEEDED,
+        local_tag=_BUILT,
+    )
+
+    with (
+        patch("oduflow.stack_ops.build_plan", return_value=plan),
+        patch(
+            "oduflow.docker_ops.build_ops.build_git_image", return_value=job
+        ) as build,
+        patch("oduflow.stack_ops.service_ops.create_service") as create_service,
+    ):
+        apply_stack(settings, team, manifest, path)
+
+    assert build.call_args.args[1:] == (
+        "https://github.com/acme/paseo.git",
+        "main",
+        "docker/base/Dockerfile",
+        ".",
+        "",
+        {},
+    )
+    # The commit the plan saw is the one built, even if the branch moved since.
+    assert build.call_args.kwargs == {
+        "git_user": "",
+        "commit": _COMMIT,
+        "keep_tags": frozenset(),
+    }
+    # Planned twice — unlocked for the build, then for real — but built once.
+    build.assert_called_once()
+    assert create_service.call_args.kwargs["image"] == _BUILT
+
+
+def test_apply_reuses_an_existing_build(build_stack):
+    settings, team, manifest, path = build_stack
+    plan = StackPlan(
+        "paseo",
+        (PlanAction("create", "services.paseo"),),
+        images={"paseo": PlannedImage(image=_BUILT, commit=_COMMIT)},
+    )
+
+    with (
+        patch("oduflow.stack_ops.build_plan", return_value=plan),
+        patch("oduflow.docker_ops.build_ops.build_git_image") as build,
+        patch("oduflow.stack_ops.service_ops.create_service") as create_service,
+    ):
+        apply_stack(settings, team, manifest, path)
+
+    build.assert_not_called()
+    assert create_service.call_args.kwargs["image"] == _BUILT
+
+
+def test_apply_stops_before_any_change_when_the_build_fails(build_stack):
+    settings, team, manifest, path = build_stack
+    manifest.spec.volumes = {"paseo-home": manifest.spec.volumes.__class__()}
+    plan = StackPlan(
+        "paseo",
+        (
+            PlanAction("create", "volumes.paseo-home"),
+            PlanAction("create", "services.paseo"),
+        ),
+        images={"paseo": PlannedImage(image="", commit=_COMMIT)},
+    )
+    job = image_builds.BuildJob(
+        build_id="bld-aaaaaaaaaaaa",
+        team_id="1",
+        env_name="",
+        branch="main",
+        dockerfile="docker/base/Dockerfile",
+        context=".",
+        commit=_COMMIT,
+        repo_url="https://github.com/acme/paseo.git",
+        status=image_builds.STATUS_FAILED,
+        error="failed to solve: exit code: 1",
+    )
+
+    with (
+        patch("oduflow.stack_ops.build_plan", return_value=plan),
+        patch("oduflow.docker_ops.build_ops.build_git_image", return_value=job),
+        patch("oduflow.stack_ops.volume_ops.create_volume") as create_volume,
+        patch("oduflow.stack_ops.service_ops.create_service") as create_service,
+        pytest.raises(ExternalCommandError, match="failed to solve"),
+    ):
+        apply_stack(settings, team, manifest, path)
+
+    create_volume.assert_not_called()
+    create_service.assert_not_called()
+
+
+def _built_job(build_id, commit=_COMMIT):
+    return image_builds.BuildJob(
+        build_id=build_id,
+        team_id="1",
+        env_name="",
+        branch="main",
+        dockerfile="docker/base/Dockerfile",
+        context=".",
+        commit=commit,
+        status=image_builds.STATUS_SUCCEEDED,
+        local_tag=f"oduflow-build/team-1:{build_id}",
+    )
+
+
+def test_apply_builds_before_it_takes_the_team_lock(build_stack):
+    settings, team, manifest, path = build_stack
+    plan = StackPlan(
+        "paseo",
+        (PlanAction("create", "services.paseo"),),
+        images={"paseo": PlannedImage(image="", commit=_COMMIT)},
+    )
+    events = []
+
+    class Locks:
+        def acquire_team(self, team_id, operation=""):
+            events.append("lock")
+
+        def release_team(self, team_id):
+            events.append("unlock")
+
+    def build(*_args, **_kwargs):
+        events.append("build")
+        return _built_job("bld-aaaaaaaaaaaa")
+
+    with (
+        patch("oduflow.stack_ops.build_plan", return_value=plan),
+        patch("oduflow.docker_ops.build_ops.build_git_image", side_effect=build),
+        patch(
+            "oduflow.stack_ops.service_ops.create_service",
+            side_effect=lambda *_a, **_k: events.append("create"),
+        ),
+    ):
+        apply_stack(settings, team, manifest, path, lock_manager=Locks())
+
+    # A long build must not keep the team's environment tools locked out.
+    assert events == ["build", "lock", "create", "unlock"]
+
+
+def test_apply_rebuilds_under_the_lock_when_the_ref_moved_meanwhile(build_stack):
+    settings, team, manifest, path = build_stack
+    moved = "d" * 40
+
+    def plan_at(commit):
+        return StackPlan(
+            "paseo",
+            (PlanAction("create", "services.paseo"),),
+            images={"paseo": PlannedImage(image="", commit=commit)},
+        )
+
+    with (
+        patch(
+            "oduflow.stack_ops.build_plan",
+            side_effect=[plan_at(_COMMIT), plan_at(moved)],
+        ),
+        patch(
+            "oduflow.docker_ops.build_ops.build_git_image",
+            side_effect=[
+                _built_job("bld-aaaaaaaaaaaa"),
+                _built_job("bld-bbbbbbbbbbbb", moved),
+            ],
+        ) as build,
+        patch("oduflow.stack_ops.service_ops.create_service") as create_service,
+    ):
+        apply_stack(settings, team, manifest, path)
+
+    assert [call.kwargs["commit"] for call in build.call_args_list] == [
+        _COMMIT,
+        moved,
+    ]
+    # The service runs the commit the authoritative plan saw.
+    assert (
+        create_service.call_args.kwargs["image"]
+        == "oduflow-build/team-1:bld-bbbbbbbbbbbb"
+    )
+
+
+def test_apply_shields_images_it_has_not_started_from_retention(build_stack):
+    settings, team, manifest, path = build_stack
+    services = manifest.spec.services
+    services["worker"] = services["paseo"].model_copy(deep=True)
+    services["worker"].build.target = "worker"
+    plan = StackPlan(
+        "paseo",
+        (
+            PlanAction("create", "services.paseo"),
+            PlanAction("create", "services.worker"),
+        ),
+        images={
+            # Reused from an earlier build; no container runs it yet.
+            "paseo": PlannedImage(image=_BUILT, commit=_COMMIT),
+            "worker": PlannedImage(image="", commit=_COMMIT),
+        },
+    )
+
+    with (
+        patch("oduflow.stack_ops.build_plan", return_value=plan),
+        patch(
+            "oduflow.docker_ops.build_ops.build_git_image",
+            return_value=_built_job("bld-bbbbbbbbbbbb"),
+        ) as build,
+        patch("oduflow.stack_ops.service_ops.create_service"),
+    ):
+        apply_stack(settings, team, manifest, path)
+
+    # The worker's build ends with a retention pass; it must not untag the
+    # image the other service is about to be created from.
+    assert build.call_args.kwargs["keep_tags"] == frozenset({_BUILT})
+
+
+def test_plan_reports_disabled_builds_as_a_conflict(build_stack):
+    import dataclasses
+
+    from oduflow.settings import ImageRegistrySettings
+
+    settings, team, manifest, path = build_stack
+    team = dataclasses.replace(
+        team, image_registry=ImageRegistrySettings(builds_enabled=False)
+    )
+
+    with (
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=[]),
+        patch("oduflow.docker_ops.build_ops.resolve_remote_ref") as resolve,
+    ):
+        plan = build_plan(settings, team, manifest, path)
+
+    assert plan.has_conflicts
+    assert "builds are disabled" in plan.actions[0].detail
+    resolve.assert_not_called()

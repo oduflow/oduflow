@@ -241,14 +241,63 @@
     },
     "Service": {
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "image": {
+              "type": "string"
+            },
+            "build": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "image"
+          ]
+        },
+        {
+          "properties": {
+            "build": {
+              "not": {
+                "type": "null"
+              }
+            },
+            "image": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "build"
+          ]
+        }
+      ],
       "properties": {
         "runtime": {
           "$ref": "#/$defs/ServiceRuntime"
         },
         "image": {
-          "minLength": 1,
-          "title": "Image",
-          "type": "string"
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image"
+        },
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceBuild"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "port": {
           "anyOf": [
@@ -338,10 +387,59 @@
           "title": "Command"
         }
       },
-      "required": [
-        "image"
-      ],
       "title": "Service",
+      "type": "object"
+    },
+    "ServiceBuild": {
+      "additionalProperties": false,
+      "description": "Build the service image from a git repository instead of pulling one.\n\nThe ref is resolved to a commit on every plan, so a branch follows its tip\nand a tag or commit SHA pins the image.",
+      "properties": {
+        "repoUrl": {
+          "minLength": 1,
+          "title": "Repourl",
+          "type": "string"
+        },
+        "ref": {
+          "default": "",
+          "title": "Ref",
+          "type": "string"
+        },
+        "gitUser": {
+          "default": "",
+          "title": "Gituser",
+          "type": "string"
+        },
+        "dockerfile": {
+          "default": "Dockerfile",
+          "minLength": 1,
+          "title": "Dockerfile",
+          "type": "string"
+        },
+        "context": {
+          "default": ".",
+          "minLength": 1,
+          "title": "Context",
+          "type": "string"
+        },
+        "target": {
+          "default": "",
+          "title": "Target",
+          "type": "string"
+        },
+        "args": {
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "type": "string"
+            }
+          },
+          "title": "Args",
+          "type": "object"
+        }
+      },
+      "required": [
+        "repoUrl"
+      ],
+      "title": "ServiceBuild",
       "type": "object"
     },
     "ServiceDatabase": {

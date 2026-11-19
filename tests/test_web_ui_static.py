@@ -105,7 +105,10 @@ global.fetch = async (url, options) => {
   if (!body.force) return {ok: true, result: preview};
   return new Promise(resolve => { finishCleanup = resolve; });
 };
-const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: [], orphan_roles: [], orphan_extra_checkouts: []};
+const noOrphans = {
+  orphan_databases: [], orphan_workspaces: [], orphan_ports: [], orphan_roles: [],
+  orphan_extra_checkouts: [], orphan_build_jobs: []
+};
 (async () => {
   await confirmCleanup();
   assert.equal(requests.length, 0);
@@ -120,7 +123,9 @@ const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: []
   const pending = confirmCleanup();
   await confirmCleanup();
   assert.equal(requests.length, 2);
-  assert.deepEqual(requests[1], {force: true, orphans: noOrphans, image_ids: [image.id]});
+  assert.deepEqual(requests[1], {
+    force: true, orphans: noOrphans, image_ids: [image.id], build_cache: false
+  });
   assert.equal(fields['cleanup-confirm'].disabled, true);
   finishCleanup({ok: true, result: {dry_run: false, images: {
     removed: [], skipped: [{id: image.id, reason: 'Now used by a container.'}], errors: []
@@ -139,7 +144,8 @@ const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: []
   assert.equal(fields['cleanup-confirm'].disabled, false);
   const orphanCleanup = confirmCleanup();
   assert.deepEqual(requests[3], {
-    force: true, orphans: {...noOrphans, orphan_databases: ['oduflow_1_old']}, image_ids: []
+    force: true, orphans: {...noOrphans, orphan_databases: ['oduflow_1_old']}, image_ids: [],
+    build_cache: false
   });
   finishCleanup({ok: true, result: {dry_run: false, orphan_databases: ['oduflow_1_old'], images: {
     removed: [], skipped: [], errors: []
@@ -151,6 +157,151 @@ const noOrphans = {orphan_databases: [], orphan_workspaces: [], orphan_ports: []
 """
     )
     assert _run_node(harness) == {"ok": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_cleanup_offers_build_cache_as_its_own_opt_in():
+    dashboard = _DASHBOARD.read_text(encoding="utf-8")
+    source = dashboard.split("var cleanupPreview = null;", 1)[1].split(
+        "async function loadStats()", 1
+    )[0]
+    harness = (
+        "var cleanupPreview = null;"
+        + source
+        + r"""
+const assert = require('node:assert/strict');
+const fields = {};
+global.document = {getElementById: id => fields[id] || (fields[id] = {
+  disabled: false, checked: false, textContent: '', setAttribute() {}
+})};
+function loadEnvironments() {}
+function loadStats() {}
+function fmtBytes(n) { return n + ' B'; }
+async function readResult(r) { return r; }
+const image = {id: 'sha256:' + 'a'.repeat(64), tags: ['<test-image>'], size_bytes: 100};
+const requests = [];
+let preview;
+let outcome;
+global.fetch = async (url, options) => {
+  const body = JSON.parse(options.body);
+  requests.push(body);
+  return {ok: true, result: body.force ? outcome : preview};
+};
+const images = () => fields['cleanup-images'];
+const cache = () => fields['cleanup-build-cache'];
+const confirm = () => fields['cleanup-confirm'];
+const output = () => fields['cleanup-output'].textContent;
+const sent = () => requests[requests.length - 1];
+function toggle(field, checked) { field.checked = checked; updateCleanupConfirm(); }
+(async () => {
+  // Stale build jobs are a reviewed group like the others.
+  preview = {dry_run: true, orphan_build_jobs: ['bld-0123456789ab'], images: [image],
+    build_cache: {size_bytes: 500, reclaimable_bytes: 400}};
+  await scanCleanup();
+  assert.match(output(), /Image build jobs \(1\):\n    - bld-0123456789ab/);
+  assert.match(output(), /Docker build cache: 500 B total, 400 B reclaimable\./);
+  assert.match(output(), /Select "Remove Docker build cache" to include it\./);
+  // Offered on its own, unchecked, whatever the images option says.
+  assert.equal(cache().disabled, false);
+  assert.equal(cache().checked, false);
+  toggle(cache(), true);
+  toggle(images(), true);
+  toggle(images(), false);
+  assert.equal(cache().checked, true);
+  // A rescan resets both options.
+  toggle(images(), true);
+  await scanCleanup();
+  assert.equal(images().checked, false);
+  assert.equal(cache().checked, false);
+
+  toggle(images(), true);
+  toggle(cache(), true);
+  outcome = {dry_run: false, orphan_build_jobs: ['bld-0123456789ab'],
+    images: {removed: [image.id], skipped: [], errors: []}, build_cache: {reclaimed_bytes: 400}};
+  await confirmCleanup();
+  assert.equal(sent().build_cache, true);
+  assert.deepEqual(sent().image_ids, [image.id]);
+  assert.deepEqual(sent().orphans.orphan_build_jobs, ['bld-0123456789ab']);
+  assert.match(output(), /Image build jobs \(1\):/);
+  assert.match(output(), /Docker build cache removed: 400 B reclaimed\./);
+  assert.equal(cache().checked, false);
+  assert.equal(cache().disabled, true);
+
+  // Only the build cache: nothing else to remove, with or without unused images.
+  for (const unused of [[image], []]) {
+    preview = {dry_run: true, images: unused, build_cache: {size_bytes: 500, reclaimable_bytes: 400}};
+    await scanCleanup();
+    assert.equal(images().disabled, unused.length === 0);
+    assert.equal(cache().disabled, false);
+    assert.equal(confirm().disabled, true);
+    toggle(cache(), true);
+    assert.equal(confirm().disabled, false);
+    toggle(cache(), false);
+    assert.equal(confirm().disabled, true);
+    toggle(cache(), true);
+    outcome = {dry_run: false, images: {removed: [], skipped: [], errors: []},
+      build_cache: {reclaimed_bytes: 400}};
+    const before = requests.length;
+    await confirmCleanup();
+    assert.equal(requests.length, before + 1);
+    assert.equal(sent().force, true);
+    assert.equal(sent().build_cache, true);
+    assert.deepEqual(sent().image_ids, []);
+    assert.match(output(), /Docker build cache removed: 400 B reclaimed\./);
+  }
+
+  // A failed prune is spelled out, and an untouched cache is not mentioned.
+  preview = {dry_run: true, images: [image], build_cache: {size_bytes: 500, reclaimable_bytes: 400}};
+  await scanCleanup();
+  toggle(cache(), true);
+  outcome = {dry_run: false, images: {removed: [], skipped: [], errors: []},
+    build_cache: {reclaimed_bytes: 0, error: 'Docker could not remove the build cache.'}};
+  await confirmCleanup();
+  assert.match(output(), /Error Docker build cache: Docker could not remove the build cache\./);
+  await scanCleanup();
+  toggle(images(), true);
+  outcome = {dry_run: false, images: {removed: [image.id], skipped: [], errors: []}, build_cache: null};
+  await confirmCleanup();
+  assert.equal(sent().build_cache, false);
+  assert.doesNotMatch(output(), /build cache/);
+
+  // Nothing reclaimable, an empty cache, or a failed query: never offered.
+  for (const [usage, text] of [
+    [{size_bytes: 300, reclaimable_bytes: 0}, /300 B total, 0 B reclaimable\./],
+    [{size_bytes: 0, reclaimable_bytes: 0}, /Docker build cache: none found\./],
+    [{size_bytes: 0, reclaimable_bytes: 0, error: 'Docker did not report it.'}, /Docker build cache: Docker did not report it\./],
+    [undefined, /Docker build cache: none found\./],
+  ]) {
+    preview = {dry_run: true, images: [], build_cache: usage};
+    await scanCleanup();
+    assert.match(output(), text);
+    assert.doesNotMatch(output(), /Select "Remove Docker build cache"/);
+    assert.equal(cache().disabled, true);
+    assert.equal(cache().checked, false);
+    assert.equal(confirm().disabled, true);
+  }
+  process.stdout.write(JSON.stringify({ok: true}));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    assert _run_node(harness) == {"ok": True}
+
+
+def test_cleanup_modal_offers_the_build_cache_beside_image_removal(tmp_path):
+    page = _client(tmp_path).get("/").text
+    images = page.index('id="cleanup-images"')
+    build_cache = page.index('id="cleanup-build-cache"')
+    assert images < build_cache < page.index('id="cleanup-confirm"')
+    # Disabled until a scan shows something to remove, and labelled as shared.
+    assert re.search(
+        r'<input type="checkbox" id="cleanup-build-cache"[^>]* disabled>', page
+    )
+    assert (
+        '<label for="cleanup-build-cache">Remove Docker build cache '
+        "(shared by all teams)</label>" in page
+    )
+    # A sibling row of the images option, not nested under it.
+    assert "check-row-nested" not in page
 
 
 def test_chat_assets_share_one_positive_integer_cache_version(tmp_path):
