@@ -108,6 +108,7 @@ def _patch_create_stack(client, **overrides):
         ),
         "_exec_sql": patch.object(production_ops, "_exec_sql"),
         "_create_pg_role": patch.object(production_ops, "_create_pg_role"),
+        "_own_public_schema": patch.object(production_ops, "_own_public_schema"),
         "create_credentials": patch.object(
             production_ops,
             "create_credentials",
@@ -2472,6 +2473,140 @@ class TestServerMode:
                 settings, team, "erp", set_options=options
             )
         assert production_registry.get_production(team, "erp")["odoo_conf"] == {}
+
+
+class TestSeedRunsAsTheProductionsRole:
+    """A seed is a tenant's database content: the production's own role
+    restores it, so that role exists and owns the database before any of it
+    is loaded — the superuser used to restore it and create the role after."""
+
+    CREDS = {"pg_user": "u_1_prod-erp", "pg_password": "pw"}
+
+    def _stack(self, client, order):
+        def log(step):
+            return lambda *args, **kwargs: order.append(step)
+
+        patches = _patch_create_stack(client)
+        patches["_exec_sql"] = patch.object(
+            production_ops,
+            "_exec_sql",
+            side_effect=lambda client, settings, sql, *a, **k: order.append(sql),
+        )
+        for name in (
+            "_create_pg_role",
+            "_own_public_schema",
+            "reassign_db_ownership",
+            "drop_signaling_sequences",
+            "_seed_db_from_template",
+            "_seed_db_from_environment",
+        ):
+            patches[name] = patch.object(production_ops, name, side_effect=log(name))
+        patches["get_filestore_paths"] = patch.object(
+            production_ops,
+            "get_filestore_paths",
+            return_value={"merged": tempfile.mkdtemp(prefix="env-filestore-")},
+        )
+        patches["create_worktree"] = patch(
+            "oduflow.extra_addons.create_worktree",
+            side_effect=lambda team, repo, branch, path: os.makedirs(
+                path, exist_ok=True
+            ),
+        )
+        return patches
+
+    def test_template_seed_follows_the_role_and_gets_its_credentials(
+        self, settings, team
+    ):
+        client = _mock_client()
+        order = []
+        with _PatchAll(self._stack(client, order)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "erp.example.com",
+                "odoo:18.0",
+                template_name="tpl",
+            )
+
+        db = production_ops.prod_db_name(team, "erp")
+        assert order[:6] == [
+            f'CREATE DATABASE "{db}";',
+            "_create_pg_role",
+            "_own_public_schema",
+            "_seed_db_from_template",
+            "reassign_db_ownership",
+            "drop_signaling_sequences",
+        ]
+        mocks["_seed_db_from_template"].assert_called_once_with(
+            client, settings, team, "tpl", db, self.CREDS
+        )
+        # The role owns the database, and its public schema, in the
+        # production cluster before the seed arrives.
+        assert mocks["_create_pg_role"].call_args.args[2:] == ("u_1_prod-erp", "pw", db)
+        assert mocks["_create_pg_role"].call_args.kwargs == {
+            "container_name": settings.prod_db_container
+        }
+        assert mocks["_own_public_schema"].call_args.args[2:] == (db, "u_1_prod-erp")
+        assert mocks["_own_public_schema"].call_args.kwargs == {
+            "container_name": settings.prod_db_container
+        }
+        mocks["_init_empty_database"].assert_not_called()
+
+    def test_environment_seed_follows_the_role_and_gets_its_credentials(
+        self, settings, team
+    ):
+        helper = TestCreateFromEnvironment()
+        env_container = helper._env_container(settings)
+        client = helper._client_with_env(settings, env_container)
+        order = []
+        with _PatchAll(self._stack(client, order)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "",
+                "",
+                "erp.example.com",
+                "",
+                from_environment="feature-x",
+            )
+
+        db = production_ops.prod_db_name(team, "erp")
+        assert order[:6] == [
+            f'CREATE DATABASE "{db}";',
+            "_create_pg_role",
+            "_own_public_schema",
+            "_seed_db_from_environment",
+            "reassign_db_ownership",
+            "drop_signaling_sequences",
+        ]
+        mocks["_seed_db_from_environment"].assert_called_once_with(
+            client, settings, team, "feature-x", db, self.CREDS
+        )
+
+    def test_an_empty_production_needs_no_schema_handover(self, settings, team):
+        client = _mock_client()
+        order = []
+        with _PatchAll(self._stack(client, order)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "erp.example.com",
+                "odoo:18.0",
+            )
+
+        db = production_ops.prod_db_name(team, "erp")
+        assert order[:2] == [f'CREATE DATABASE "{db}";', "_create_pg_role"]
+        mocks["_own_public_schema"].assert_not_called()
+        mocks["_seed_db_from_template"].assert_not_called()
+        mocks["reassign_db_ownership"].assert_not_called()
+        mocks["_init_empty_database"].assert_called_once()
 
 
 class TestCreateFromEnvironment:

@@ -138,6 +138,13 @@ scheduled backup work runs only while `[production].enabled = true`.
 
 ## History
 
+- 2026-11-19 — a production's data is loaded by the production's own
+  PostgreSQL role, never by the cluster superuser: seeding
+  (`template_name`, `from_environment`) and both forms of
+  `restore_production` restore from a throwaway client container into a
+  database that role owns, so the role is created before the seed.
+  Content that needs a superuser (an untrusted extension) no longer loads.
+  Rationale in [[0013-per-environment-db-credentials-and-sanitization]].
 - 2026-10-14 — the repo `.oduflow/odoo.prod.conf` was dropped from the
   production conf chain: anyone who can push to the deployed branch could
   otherwise tune the production server. Operator-only per-production

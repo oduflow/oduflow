@@ -247,6 +247,75 @@ it, and that turned out to be the weaker half of the boundary:
   snapshot restore, seeding a production from a dev database, the PostgreSQL
   upgrade's whole-cluster restore).
 
+- (2026-11-19) — **the remaining `pg_restore`-as-superuser paths: production
+  data and the PostgreSQL upgrade.** The three paths the previous entry left
+  open were the same hole in the production cluster, where it matters most:
+  `create_production(template_name | from_environment)` and
+  `restore_production(from_environment)` dumped a *development* database and
+  ran `pg_restore -U <superuser> --no-owner` inside the production PostgreSQL
+  container, so a dev tenant's CHECK-constraint function ran as the production
+  cluster's superuser; `restore_production(snapshot_id)` did the same with the
+  production's own snapshot; and the major-version upgrade restored every
+  production and service database with `pg_restore --create` as the superuser
+  of the new cluster.
+  *Production data* now reuses the restricted load, generalised: the restore
+  client takes the cluster as a parameter (the production cluster is on every
+  team network too), and the role is not a one-off loader but the
+  **production's own scoped role** — it already exists, already has a
+  password on record, and is the role the content will run as once Odoo
+  starts, so restoring as it grants the content nothing new and needs no
+  `REASSIGN OWNED` afterwards. That required one reordering:
+  `create_production` used to seed first and create the role after; the role
+  now comes first and owns the database (and its `public` schema) before any
+  of the seed is loaded, and a restore creates its staged `…__restore`
+  database with that owner. A side effect worth knowing: a restored
+  production database used to stay owned by the superuser (only the objects
+  inside were reassigned); it now belongs to the production's role like a
+  freshly created one. The pinned-`search_path` reassignment and
+  signaling-sequence blocks still run afterwards as a no-op safety net.
+  `load_credentials`' superuser fallback is refused on these paths
+  (`production_db_credentials`): with it, a production missing its
+  credentials file would have had its content restored *and owned* by the
+  superuser. Flags are otherwise unchanged (tolerant restore that fails on
+  any error, privileges kept, `-j 2` for snapshots). The dump staged for the
+  client lives under the team's data directory, because the Docker daemon —
+  not the Oduflow process, which may itself be a container — resolves the
+  mount path. Accepted cost, same as for templates: content only a superuser
+  can create (an untrusted extension such as PostGIS, an event trigger, a
+  `FOR ALL TABLES` publication) no longer loads, *including from snapshots
+  taken earlier*; the remedy is an image that marks the extension trusted.
+  Cluster PITR is physical and unaffected.
+  *The upgrade* could not copy that design as is, because it must keep what
+  `--create` restores (locale, tablespace, `ALTER DATABASE ... SET`, database
+  privileges) and may not fail halfway for reasons the operator cannot fix.
+  Splitting by section — schema as the superuser, data as the owner — was
+  rejected: DDL alone executes tenant code (`CREATE AGGREGATE ... INITCOND`
+  and a partition bound both run the input function of their type, and a
+  domain's input function evaluates its CHECK constraints). So each database
+  is restored in two passes: the superuser runs `pg_restore --create` filtered
+  to a schema that cannot exist (`-n pg_…`; the `pg_` prefix is reserved),
+  which leaves exactly the database-level entries, then makes the role *on
+  Oduflow's records* the owner — the records, not `datdba`, since databases
+  restored by older versions are superuser-owned — and that role restores the
+  whole archive with `--no-owner --exit-on-error`. It connects through the
+  cluster's own network namespace like before (loopback, where pg_hba trusts);
+  that is acceptable here and was not for templates, because the client is
+  `pg_restore` reading an archive Oduflow wrote itself, not `psql` reading a
+  caller's SQL. Two refusals move to the plan, while every old cluster is
+  intact: a carried database without a scoped role on record, and an extension
+  of a carried database that the *new image* does not mark trusted (read from
+  its control files). An automatic superuser fallback on failure was rejected
+  — content could fail for its own role on purpose — in favour of an explicit
+  operator switch, `ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<db,…>`, which also
+  is the way out of a restore that stops on superuser-only content after the
+  old cluster is gone. Ownership inside a carried database is no longer
+  replayed: everything belongs to its role, which is what a managed database
+  looked like anyway. Still open, same family but not `pg_restore`: `pg_dump`
+  runs as the superuser against tenant databases (it pins `search_path` and
+  relies on current minor releases), the "Connect as" user picker reads tenant
+  tables as the superuser, and legacy environments without a credentials file
+  still fall back to it for fixed reads.
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -309,3 +378,9 @@ native neutralization, rather than re-implementing what Odoo already ships:
   (`system_ops.reload_template`, `_run_restore_client`), closing superuser
   code execution through `import_template` / `save_as_template` dumps (see
   Evolution).
+- (2026-11-19) — **production data and the PostgreSQL upgrade restore as the
+  database's own role** (`system_ops.restore_archive_as_role`,
+  `production_ops.production_db_credentials`,
+  `postgres_migration._restore_database`), closing superuser code execution in
+  the production cluster through a seeded, promoted or snapshot-restored
+  database, and in a new cluster through the upgrade (see Evolution).

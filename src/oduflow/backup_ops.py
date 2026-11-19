@@ -44,12 +44,12 @@ from oduflow.chunkstore.prune import parse_keep, select_revisions_to_keep
 from oduflow.docker_ops import production_ops
 from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
 from oduflow.docker_ops.system_ops import (
-    _copy_file_to_container,
+    _create_load_db,
     _exec_sql,
     drop_signaling_sequences,
     reassign_db_ownership,
+    restore_archive_as_role,
 )
-from oduflow.env_credentials import load_credentials
 from oduflow.errors import (
     ExternalCommandError,
     NotFoundError,
@@ -565,6 +565,7 @@ def restore_production(
     assert_writable(settings)
     backup = _require_backup(settings)
     record = production_registry.get_production(team, name)
+    creds = production_ops.production_db_credentials(settings, team, name)
     manifest = _load_manifest(settings, team, name, snapshot_id)
     fs_revision = _filestore_revision_from_manifest(manifest)
     client = get_client()
@@ -614,6 +615,10 @@ def restore_production(
             chown_recursive(restore_dir, int(uid_str), int(gid_str), client, odoo_image)
 
         # ------------------------ database ------------------------------
+        # A snapshot is the content of the production's database, and
+        # restoring it runs what that content defines. So the production's
+        # own role restores it into a database it owns, from a throwaway
+        # client container; the cluster superuser only creates that database.
         with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
             dump_path = os.path.join(tmpdir, f"{snapshot_id}.pgdump")
             s3 = s3_client.make_client(backup)
@@ -626,43 +631,31 @@ def restore_production(
                 raise ExternalCommandError(
                     "restore", 1, "Downloaded dump failed sha256 verification."
                 )
-            pg = client.containers.get(pg_container)
-            _copy_file_to_container(pg, dump_path, "/tmp")
-            in_container = f"/tmp/{os.path.basename(dump_path)}"
-
-        _exec_sql(
-            client,
-            settings,
-            f'DROP DATABASE IF EXISTS "{restore_db}" WITH (FORCE);',
-            container_name=pg_container,
-        )
-        _exec_sql(
-            client,
-            settings,
-            f'CREATE DATABASE "{restore_db}";',
-            container_name=pg_container,
-        )
-        exit_code, output = pg.exec_run(
-            [
-                "pg_restore",
-                "-U",
-                settings.db_user,
-                "--no-owner",
-                "-j",
-                "2",
-                "-d",
+            _exec_sql(
+                client,
+                settings,
+                f'DROP DATABASE IF EXISTS "{restore_db}" WITH (FORCE);',
+                container_name=pg_container,
+            )
+            _create_load_db(
+                client,
+                settings,
                 restore_db,
-                in_container,
-            ]
-        )
-        pg.exec_run(["rm", "-f", in_container])
-        if exit_code != 0:
-            text = output.decode("utf-8", errors="replace") if output else ""
-            raise ExternalCommandError("pg_restore", exit_code, text[-2000:])
+                creds["pg_user"],
+                container_name=pg_container,
+            )
+            restore_archive_as_role(
+                client,
+                settings,
+                team,
+                dump_path,
+                database=restore_db,
+                role=creds["pg_user"],
+                password=creds["pg_password"],
+                container_name=pg_container,
+                jobs=2,
+            )
 
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
         reassign_db_ownership(
             client, settings, restore_db, creds["pg_user"], container_name=pg_container
         )
@@ -785,6 +778,7 @@ def restore_production_from_environment(
 
     assert_writable(settings)
     record = production_registry.get_production(team, name)
+    creds = production_ops.production_db_credentials(settings, team, name)
     client = get_client()
     source_env = production_ops._source_env_info(client, settings, team, source)
     env_name = prod_env_name(name)
@@ -832,10 +826,13 @@ def restore_production_from_environment(
             f'DROP DATABASE IF EXISTS "{restore_db}" WITH (FORCE);',
             container_name=pg_container,
         )
-        _exec_sql(
+        # Owned by the production's role from the start: that role, not the
+        # cluster superuser, restores the environment's database into it.
+        _create_load_db(
             client,
             settings,
-            f'CREATE DATABASE "{restore_db}";',
+            restore_db,
+            creds["pg_user"],
             container_name=pg_container,
         )
 
@@ -851,6 +848,7 @@ def restore_production_from_environment(
                     source,
                     name,
                     restore_db,
+                    creds,
                     filestore_dest=restore_dir,
                 )
             )
@@ -860,9 +858,6 @@ def restore_production_from_environment(
             uid_str, gid_str = get_odoo_uid_gid(client, odoo_image).split(":")
             chown_recursive(restore_dir, int(uid_str), int(gid_str), client, odoo_image)
 
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
         reassign_db_ownership(
             client, settings, restore_db, creds["pg_user"], container_name=pg_container
         )

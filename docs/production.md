@@ -373,6 +373,49 @@ To promote into a production that **already exists**, use
 `restore_production(from_environment=…)` instead — see
 [Backups](#backups) for the restore mechanics.
 
+### How data is loaded into a production
+
+A production's database is filled from a template, from a dev environment, or
+from one of its own snapshots. All three are database content that the
+database's users defined, and restoring it runs what it defines: a function
+used in a `CHECK` constraint, for example, is called for every row the restore
+copies. Oduflow therefore never restores this content as the PostgreSQL
+superuser, in either cluster. For `create_production(template_name=…)`,
+`create_production(from_environment=…)` and both forms of `restore_production`
+it:
+
+1. creates the target database for the **production's own PostgreSQL role**
+   (the role its Odoo connects with), which owns it from the start;
+2. starts a short-lived **restore client** container from the production
+   cluster's PostgreSQL image on the team network. It runs
+   `pg_restore --no-owner` as that role, connecting over the network with the
+   role's password like the production's Odoo does, and sees the dump
+   read-only. Nothing is restored inside the PostgreSQL container;
+3. leaves the result with that role: every restored object, and the database
+   itself, belongs to the production's role.
+
+What this means for the data:
+
+- **Extensions.** The role creates the extensions PostgreSQL marks as
+  *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `pgcrypto`, `uuid-ossp` and
+  the rest of that list, which covers what Odoo itself uses. A database that
+  contains an extension only a superuser may create (for example `postgis`,
+  `pg_stat_statements`, `dblink`, `postgres_fdw`) can no longer be seeded,
+  promoted or restored from a snapshot: the restore fails with
+  `permission denied to create extension` and the production keeps its previous
+  data. Use a `[database].image` in which that extension's control file sets
+  `trusted = true`; a database owner may then create it. Snapshots taken
+  earlier become restorable the same way.
+- **Anything else reserved for superusers** — event triggers, publications
+  `FOR ALL TABLES`, subscriptions, functions in an untrusted language — fails
+  the restore the same way.
+- **A production without its credentials file**
+  (`env_credentials.json` in its workspace) is not restored at all, instead of
+  being restored as the superuser.
+
+The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
+and is not affected.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
@@ -646,7 +689,10 @@ Restore is swap-based: the dump is restored into a scratch database and
 swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
-`rollback_production` to the matching commit.
+`rollback_production` to the matching commit. The dump is restored by the
+production's own PostgreSQL role, not by the superuser — see
+[How data is loaded into a production](#how-data-is-loaded-into-a-production)
+for what that excludes.
 
 **Restoring from a dev environment.** The same tool also promotes a dev
 environment's data into an *existing* production — the counterpart of

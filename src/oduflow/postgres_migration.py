@@ -44,6 +44,7 @@ from oduflow import (
 )
 from oduflow.docker_ops import system_ops
 from oduflow.docker_ops.client import get_client, pull_with_progress, run_for_output
+from oduflow.env_credentials import load_credentials
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
 from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
 from oduflow.naming import (
@@ -70,6 +71,16 @@ _HEARTBEAT_SECONDS = 60.0
 _POLL_SECONDS = 2.0
 # Image IDs are content addresses, so one ID always runs one PostgreSQL major.
 _BINARY_MAJORS: dict[str, int] = {}
+# Names databases an operator lets the superuser restore; see _restore_database.
+SUPERUSER_RESTORE_ENV = "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE"
+# ``pg_restore --create -n <schema>`` restores the database itself and its
+# properties, and of the rest only what lies in that schema. No database has
+# this one: PostgreSQL reserves the ``pg_`` prefix, so nobody can create it.
+_NO_SCHEMA = "pg_oduflow_no_such_schema"
+_TRUSTED_MARKER = "---trusted---"
+# Control files that mark their extension trusted: its database's owner may
+# create it without being a superuser.
+_TRUSTED_CONTROL_RE = "^[[:space:]]*trusted[[:space:]]*=[[:space:]]*.?(true|on|yes|1)"
 
 # Every role except the bootstrap superuser, which a new cluster creates itself.
 # Password hashes are copied, so credentials files stay valid.
@@ -344,14 +355,22 @@ def _check_environments(
         )
 
 
-def _carried_databases(settings: Settings, kind: str) -> set[str]:
-    """Databases of one cluster that are dumped and restored."""
-    names: set[str] = set()
+def _carried_roles(settings: Settings, kind: str) -> dict[str, tuple[str, str] | None]:
+    """Databases of one cluster that are dumped and restored, each with the
+    scoped role (name, password) that restores it, per Oduflow's own records.
+
+    The records decide, not ``pg_database.datdba``: a production restored from
+    a snapshot by an older version is owned by the superuser. ``None`` marks a
+    database without a scoped role on record.
+    """
+    roles: dict[str, tuple[str, str] | None] = {}
     for team in settings.teams.values():
         for name in service_database_credentials.list_names(team):
             record = service_database_credentials.load(team, name)
             if (record.get("cluster") or "dev") == kind:
-                names.add(record["database"])
+                roles[record["database"]] = _scoped(
+                    settings, record.get("username"), record.get("password")
+                )
         if kind != "prod":
             continue
         # Registered productions and those deleted with their data kept.
@@ -367,8 +386,47 @@ def _carried_databases(settings: Settings, kind: str) -> set[str]:
                 env_name = prod_env_name(production)
             except ValueError:
                 continue  # a development branch such as prod/Feature_X
-            names.add(get_db_name(env_name, team.team_id))
-    return names
+            try:
+                creds = load_credentials(
+                    env_name,
+                    team.workspaces_dir,
+                    settings.db_user,
+                    settings.db_password,
+                )
+            except (OSError, ValueError):
+                creds = {}  # an unreadable file is no role on record either
+            roles[get_db_name(env_name, team.team_id)] = _scoped(
+                settings, creds.get("pg_user"), creds.get("pg_password")
+            )
+    return roles
+
+
+def _scoped(settings: Settings, user: Any, password: Any) -> tuple[str, str] | None:
+    """A role on record, unless it is missing or is the superuser itself."""
+    if not isinstance(user, str) or not isinstance(password, str):
+        return None
+    if not user or not password or user == settings.db_user:
+        return None
+    return user, password
+
+
+def _carried_databases(settings: Settings, kind: str) -> set[str]:
+    """Databases of one cluster that are dumped and restored."""
+    return set(_carried_roles(settings, kind))
+
+
+def _superuser_restores() -> set[str]:
+    """Databases the operator lets the superuser restore (SUPERUSER_RESTORE_ENV)."""
+    raw = os.environ.get(SUPERUSER_RESTORE_ENV, "")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def _superuser_restore_hint(name: str) -> str:
+    return (
+        "If you trust everything that database contains, start Oduflow with "
+        f"{SUPERUSER_RESTORE_ENV}={name} (comma-separated for several) to let "
+        "the superuser restore it."
+    )
 
 
 def _inventory(
@@ -376,10 +434,12 @@ def _inventory(
     settings: Settings,
     cluster: dict[str, Any],
     templates: list[dict[str, str]],
-) -> tuple[list[str], set[str], int]:
-    """Databases to dump, the extensions they use and their total size.
+) -> tuple[list[str], set[str], set[str], int]:
+    """Databases to dump, the extensions in use, those of them a scoped role
+    will have to create, and the total size of the databases.
 
-    Refuses when the cluster holds anything that would be lost.
+    Refuses when the cluster holds anything that would be lost, or a database
+    that no scoped role could restore.
     """
     container = cluster["container"]
     present = system_ops._exec_sql(
@@ -388,7 +448,8 @@ def _inventory(
         "SELECT datname FROM pg_database WHERE datname NOT IN ('template0', 'template1');",
         container_name=container,
     ).splitlines()
-    carried = _carried_databases(settings, cluster["kind"])
+    roles = _carried_roles(settings, cluster["kind"])
+    carried = set(roles)
     bootstrap = {"postgres", settings.db_user}
     restored_from_disk = (
         {get_template_db_name(t["name"], t["team"]) for t in templates}
@@ -421,18 +482,37 @@ def _inventory(
                 "upgrade would lose. Move them into a service database first."
             )
     databases = sorted(carried.intersection(present))
+    by_superuser = _superuser_restores()
+    unowned = [
+        name for name in databases if roles[name] is None and name not in by_superuser
+    ]
+    if unowned:
+        raise PrerequisiteNotMetError(
+            f"Cluster {container} contains databases without a scoped role on "
+            f"record: {', '.join(unowned)}. A database is restored into the new "
+            "cluster by its own role, never by the superuser, and their "
+            "credentials files are missing. "
+            + _superuser_restore_hint(",".join(unowned))
+            + " Nothing has been changed."
+        )
     extensions: set[str] = set()
+    restricted: set[str] = set()
     # Templates are restored from disk, but need the same extensions.
     for name in sorted(set(databases) | restored_from_disk.intersection(present)):
-        extensions.update(
-            system_ops._exec_sql(
-                client,
-                settings,
-                "SELECT extname FROM pg_extension WHERE extname <> 'plpgsql';",
-                db=name,
-                container_name=container,
-            ).splitlines()
-        )
+        # The superuser reads a tenant's database here, so every name is
+        # spelled out: its owner may have put a schema of its own ahead of
+        # pg_catalog (ALTER DATABASE ... SET search_path).
+        used = system_ops._exec_sql(
+            client,
+            settings,
+            "SELECT extname FROM pg_catalog.pg_extension "
+            "WHERE extname OPERATOR(pg_catalog.<>) 'plpgsql'::pg_catalog.name;",
+            db=name,
+            container_name=container,
+        ).splitlines()
+        extensions.update(used)
+        if name in databases and name not in by_superuser:
+            restricted.update(used)
     size = 0
     if databases:
         listed = ", ".join(f"'{name}'" for name in databases)
@@ -445,23 +525,40 @@ def _inventory(
                 container_name=container,
             )
         )
-    return databases, extensions, size
+    return databases, extensions, restricted, size
 
 
 def _check_extensions(
-    client: DockerClient, image: str, image_id: str, needed: set[str]
+    client: DockerClient,
+    image: str,
+    image_id: str,
+    needed: set[str],
+    restricted: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Refuse before removing anything when the new image lacks an extension."""
+    """Refuse before removing anything when the new image cannot restore an
+    extension: it lacks one of *needed*, or does not mark one of *restricted*
+    as trusted. The latter are created by a database's own role, which is no
+    superuser (see _restore_database).
+    """
     if not needed:
         return
+    find = "find / -xdev -path '*/extension/*.control'"
     output = run_for_output(
         client,
         image_id,
-        ["-c", "find / -xdev -path '*/extension/*.control' 2>/dev/null; true"],
+        [
+            "-c",
+            f"{find} 2>/dev/null; echo {_TRUSTED_MARKER}; "
+            f"{find} -exec grep -lEi '{_TRUSTED_CONTROL_RE}' {{}} + 2>/dev/null; true",
+        ],
         entrypoint="sh",
         network_disabled=True,
     ).decode()
-    available = {os.path.basename(p).removesuffix(".control") for p in output.split()}
+    listing, _, marked = output.partition(_TRUSTED_MARKER)
+    available, trusted = (
+        {os.path.basename(p).removesuffix(".control") for p in part.split()}
+        for part in (listing, marked)
+    )
     if "plpgsql" not in available:
         raise PrerequisiteNotMetError(
             f"Cannot list the extensions available in {image}. Nothing has been changed."
@@ -472,6 +569,26 @@ def _check_extensions(
             f"[database].image '{image}' lacks extensions that the databases use: "
             f"{', '.join(sorted(missing))}. Choose an image that provides them. "
             "Nothing has been changed."
+        )
+    if not restricted:
+        return
+    # plpgsql is trusted in every PostgreSQL that knows the word.
+    if "plpgsql" not in trusted:
+        raise PrerequisiteNotMetError(
+            f"Cannot tell which extensions {image} marks as trusted. Nothing has "
+            "been changed."
+        )
+    untrusted = restricted - trusted
+    if untrusted:
+        raise PrerequisiteNotMetError(
+            f"The databases use extensions that [database].image '{image}' does "
+            f"not mark as trusted: {', '.join(sorted(untrusted))}. A database is "
+            "restored into the new cluster by its own role, never by the "
+            "superuser, and only a superuser may create an untrusted extension. "
+            "Use an image whose control file for the extension says "
+            "`trusted = true`, or drop the extension. To let the superuser "
+            f"restore a database whose content you trust, set {SUPERUSER_RESTORE_ENV} "
+            "to its name. Nothing has been changed."
         )
 
 
@@ -587,14 +704,18 @@ def _plan(
             )
     templates = _templates(settings) if "dev" in kinds else []
     extensions: set[str] = set()
+    restricted: set[str] = set()
     size = 0
     for cluster in clusters:
         if preflight and not cluster["was_running"]:
             continue
         with _started(client, settings, cluster):
-            databases, used, nbytes = _inventory(client, settings, cluster, templates)
+            databases, used, by_role, nbytes = _inventory(
+                client, settings, cluster, templates
+            )
         cluster["databases"] = databases
         extensions |= used
+        restricted |= by_role
         size += nbytes
     state: dict[str, Any] = {
         "version": 2,
@@ -614,7 +735,7 @@ def _plan(
             f"{settings.postgres_image} is PostgreSQL {target_major}, not newer "
             "than the clusters it would upgrade."
         )
-    _check_extensions(client, settings.postgres_image, image_id, extensions)
+    _check_extensions(client, settings.postgres_image, image_id, extensions, restricted)
     _check_disk_space(settings, size)
     state["image_id"] = image_id
     state["major"] = target_major
@@ -643,6 +764,8 @@ def _run_helper(
     label: str,
     *,
     progress_path: str = "",
+    password: str | None = None,
+    writable: bool = True,
 ) -> None:
     """Run a client tool of the new image against a cluster, to completion.
 
@@ -651,6 +774,9 @@ def _run_helper(
     dumps through a bind mount, which keeps an archive seekable for a parallel
     restore. Progress is logged only after a successful container poll, so the
     startup watchdog still notices a wedged Docker daemon.
+
+    ``password`` belongs to the role the command connects as; the superuser's
+    by default. ``writable=False`` mounts the dumps read-only, for a restore.
     """
     name = f"{settings.prefix}{_HELPER}"
     stale = _container(client, name)
@@ -663,8 +789,10 @@ def _run_helper(
         name=name,
         detach=True,
         network_mode=f"container:{cluster_container}",
-        environment={"PGPASSWORD": settings.db_password},
-        volumes={directory: {"bind": "/dump", "mode": "rw"}},
+        environment={
+            "PGPASSWORD": settings.db_password if password is None else password
+        },
+        volumes={directory: {"bind": "/dump", "mode": "rw" if writable else "ro"}},
         log_config={"type": "json-file"},
     )
     started = last_beat = time.monotonic()
@@ -960,26 +1088,119 @@ def _restore_cluster(
         )
         dump = f"{name}.pgdump"
         try:
-            _run_helper(
-                client,
-                settings,
-                state["image_id"],
-                container,
-                ["pg_restore", "-h", "127.0.0.1", "-U", settings.db_user]
-                + ["-d", "postgres", "--create", "--exit-on-error"]
-                + ["-j", str(system_ops._pg_restore_jobs()), f"/dump/{dump}"],
-                directory,
-                f"Restoring database {name}",
-            )
+            _restore_database(client, settings, state, cluster, name)
         except ExternalCommandError as exc:
+            # The database's own role restores it; what only a superuser can
+            # recreate is the one failure an operator cannot fix in the data.
+            way_out = (
+                ""
+                if name in _superuser_restores()
+                else " It is restored by its own role, not by the superuser. "
+                + _superuser_restore_hint(name)
+            )
             raise PrerequisiteNotMetError(
                 f"Database {name} could not be restored into the new PostgreSQL "
                 f"cluster: {exc.output}. Its dump is kept at "
                 f"{os.path.join(directory, dump)}. Fix the cause and restart "
-                "Oduflow to retry."
+                f"Oduflow to retry.{way_out}"
             ) from exc
         cluster["restored_databases"].append(name)
         _save(settings, state)
+
+
+def _restore_database(
+    client: DockerClient,
+    settings: Settings,
+    state: dict[str, Any],
+    cluster: dict[str, Any],
+    name: str,
+) -> None:
+    """Restore one dumped database into the new cluster, as its own role.
+
+    The content of a database is its tenant's, and restoring it runs what that
+    content defines: a function in a CHECK constraint is called for every
+    copied row, and one behind a domain already when an aggregate or a
+    partition that uses the domain is created. So the superuser restores none
+    of it. It restores what describes the database itself — CREATE DATABASE
+    with its locale and tablespace, ALTER DATABASE ... SET, the database's
+    comment and privileges — which is all ``--create`` leaves of an archive
+    filtered to a schema that cannot exist, and makes the scoped role on
+    Oduflow's records the owner. That role then restores everything inside,
+    with ``--no-owner``: it may not give objects to anyone else, and a managed
+    database belongs to its one role anyway. Privileges are restored as
+    recorded.
+
+    The role connects through the cluster's own network namespace like the
+    superuser does, so pg_hba decides whether its password is asked for; the
+    helper is given that password and no other. Unlike psql, pg_restore has no
+    commands an archive's SQL could address, and the archive is one Oduflow
+    wrote itself.
+
+    A database named in SUPERUSER_RESTORE_ENV is restored whole by the
+    superuser, as every database was before: the operator's way out for
+    content only a superuser can recreate.
+    """
+    container = cluster["container"]
+    directory = _dump_path(settings, cluster["kind"])
+    archive = f"/dump/{name}.pgdump"
+    connect = ["pg_restore", "-h", "127.0.0.1", "-U", settings.db_user]
+    create = ["-d", "postgres", "--create", "--exit-on-error"]
+    jobs = ["-j", str(system_ops._pg_restore_jobs())]
+    if name in _superuser_restores():
+        logger.warning(
+            "Restoring database %s as the PostgreSQL superuser, as %s asks: "
+            "whatever its content defines runs with superuser rights",
+            name,
+            SUPERUSER_RESTORE_ENV,
+        )
+        _run_helper(
+            client,
+            settings,
+            state["image_id"],
+            container,
+            [*connect, *create, *jobs, archive],
+            directory,
+            f"Restoring database {name}",
+            writable=False,
+        )
+        return
+    role = _carried_roles(settings, cluster["kind"]).get(name)
+    if role is None:
+        raise PrerequisiteNotMetError(
+            f"Database {name} has no scoped role on record, and is not restored "
+            "into the new PostgreSQL cluster by the superuser. Its dump is kept "
+            f"at {os.path.join(directory, f'{name}.pgdump')}. Put its credentials "
+            "file back and restart Oduflow to retry. " + _superuser_restore_hint(name)
+        )
+    user, password = role
+    _run_helper(
+        client,
+        settings,
+        state["image_id"],
+        container,
+        [*connect, *create, "-n", _NO_SCHEMA, archive],
+        directory,
+        f"Creating database {name}",
+        writable=False,
+    )
+    system_ops._exec_sql(
+        client,
+        settings,
+        f'ALTER DATABASE "{name}" OWNER TO "{user}";',
+        container_name=container,
+    )
+    _run_helper(
+        client,
+        settings,
+        state["image_id"],
+        container,
+        ["pg_restore", "-h", "127.0.0.1", "-U", user, "-d", name]
+        + ["--no-owner", "--exit-on-error", *jobs, archive],
+        directory,
+        f"Restoring database {name}",
+        password=password,
+        writable=False,
+    )
 
 
 @contextlib.contextmanager

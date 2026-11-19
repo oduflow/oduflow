@@ -1411,8 +1411,10 @@ def reassign_db_ownership(
     """Reassign every object in *db_name* not owned by *new_user* to it.
 
     A restored/cloned database's objects are owned by whatever role created
-    them — a team's template owner for a clone, the superuser for a restored
-    snapshot, or a source env's role in an old template. DDL during module
+    them — a team's template owner for a clone, the superuser for a database
+    an older version restored, or a source env's role in an old template. (A
+    production's data is restored by the production's own role nowadays, which
+    leaves this nothing to do there.) DDL during module
     upgrades requires ownership, so transfer it per-object instead of granting
     superuser-role membership (which would be a cross-tenant RCE, #40). Linked
     (SERIAL/identity) sequences are skipped: they follow their table's owner
@@ -2015,6 +2017,27 @@ _RESTRICTED_LOAD_HINT = (
     "comment on an extension it did not create. See 'How a dump is loaded' "
     "in the templates guide."
 )
+_RESTRICTED_RESTORE_HINT = (
+    "\n\nDatabase content is restored by the database's own PostgreSQL role, "
+    "never by the cluster superuser, so it cannot contain what only a "
+    "superuser may create: an extension PostgreSQL does not mark as trusted "
+    "(pg_trgm, unaccent and the other trusted extensions restore fine), an "
+    "untrusted language, an event trigger. An operator who needs such an "
+    "extension marks it trusted in the PostgreSQL image "
+    "(`trusted = true` in its control file)."
+)
+
+
+def _restricted_load_failure(output: str, hint: str, *, tail: int = 0) -> str:
+    """*output* of a failed restricted load, explained when a privilege is why.
+
+    ``tail`` keeps only that many trailing characters of the output; the cause
+    is looked for in all of it.
+    """
+    text = output[-tail:] if tail else output
+    if any(marker in output.lower() for marker in _RESTRICTED_LOAD_MARKERS):
+        text += hint
+    return text
 
 
 def ensure_template_owner_role(
@@ -2058,22 +2081,51 @@ def _create_template_loader(
     return role, password
 
 
-def _create_template_load_db(
+def _create_load_db(
     client: DockerClient,
     settings: Settings,
-    tpl_db: str,
-    tablespace: str,
-    loader: str,
+    database: str,
+    owner: str,
+    *,
+    tablespace: str | None = None,
+    container_name: str | None = None,
 ) -> None:
-    """Create the empty template database for *loader* to restore into."""
+    """Create the empty *database* for the non-superuser *owner* to restore into.
+
+    ``container_name`` selects the cluster, like everywhere else: the shared
+    development one by default, or the production cluster.
+    """
+    placement = f' TABLESPACE "{tablespace}"' if tablespace else ""
     _exec_sql(
         client,
         settings,
-        f'CREATE DATABASE "{tpl_db}" OWNER "{loader}" TABLESPACE "{tablespace}";',
+        f'CREATE DATABASE "{database}" OWNER "{owner}"{placement};',
+        container_name=container_name,
     )
-    # A dump may grant on, comment on or re-own the public schema, which takes
-    # its owner. Nothing from the dump is in the database yet.
-    _exec_sql(client, settings, f'ALTER SCHEMA public OWNER TO "{loader}";', tpl_db)
+    _own_public_schema(client, settings, database, owner, container_name=container_name)
+
+
+def _own_public_schema(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    owner: str,
+    *,
+    container_name: str | None = None,
+) -> None:
+    """Give the ``public`` schema of a still empty *database* to *owner*.
+
+    A dump may grant on, comment on or re-own the public schema, which takes
+    its owner. Nothing from the dump is in the database yet, so the superuser
+    runs this utility statement over no tenant content.
+    """
+    _exec_sql(
+        client,
+        settings,
+        f'ALTER SCHEMA public OWNER TO "{owner}";',
+        database,
+        container_name=container_name,
+    )
 
 
 def _stale_template_loader(
@@ -2135,12 +2187,18 @@ def _retire_template_loader(
 
 
 def _template_restore_command(
-    *, text_dump: bool, gzipped: bool, database: str, strict: bool
+    *,
+    text_dump: bool,
+    gzipped: bool,
+    database: str,
+    strict: bool,
+    jobs: int | None = None,
 ) -> list[str]:
     """The client command restoring the dump mounted in a restore client.
 
     The connection comes from the client's environment. ``-w`` keeps either
-    tool from waiting on a password prompt nobody can answer.
+    tool from waiting on a password prompt nobody can answer. ``jobs`` fixes
+    the parallelism of an archive restore; by default it follows the host.
     """
     if text_dump:
         # -X: no psqlrc. -q: errors and notices only — a command tag per
@@ -2164,7 +2222,8 @@ def _template_restore_command(
     # Parallel restore only here: -j needs a seekable archive, which rules out
     # the gzip pipeline above and plain SQL. Odoo restores are dominated by
     # index and constraint builds, which is exactly what -j parallelises.
-    jobs = _pg_restore_jobs()
+    if jobs is None:
+        jobs = _pg_restore_jobs()
     if jobs > 1:
         tool += ["-j", str(jobs)]
     return [*tool, _RESTORE_CLIENT_DUMP]
@@ -2201,6 +2260,8 @@ def _run_restore_client(
     password: str,
     database: str,
     dump_path: str,
+    host: str | None = None,
+    purpose: str = "template-restore",
 ) -> tuple[int, str]:
     """Run a restore *command* as *role* from a throwaway client container.
 
@@ -2209,6 +2270,10 @@ def _run_restore_client(
     do, which makes every connection password-authenticated: the dump can only
     act as *role*, whose password is the only secret in the container. It sees
     the dump read-only and nothing else of the host.
+
+    ``host`` is the cluster to restore into: *db_container*'s name on the team
+    network, the shared development cluster by default. Both clusters are
+    attached to every team network. ``purpose`` names the client container.
     """
     container = None
     try:
@@ -2216,12 +2281,12 @@ def _run_restore_client(
             _container_image(db_container, settings.postgres_image),
             command[1:],
             entrypoint=command[0],
-            name=f"{settings.prefix}template-restore-{uuid.uuid4().hex[:12]}",
+            name=f"{settings.prefix}{purpose}-{uuid.uuid4().hex[:12]}",
             detach=True,
             network=ensure_team_network(client, settings, team),
             user=_restore_client_user(dump_path),
             environment={
-                "PGHOST": settings.shared_db_container,
+                "PGHOST": host or settings.shared_db_container,
                 "PGUSER": role,
                 "PGPASSWORD": password,
                 "PGDATABASE": database,
@@ -2248,6 +2313,70 @@ def _run_restore_client(
         if container is not None:
             with contextlib.suppress(Exception):
                 container.remove(force=True)
+
+
+def restore_archive_as_role(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    dump_path: str,
+    *,
+    database: str,
+    role: str,
+    password: str,
+    container_name: str | None = None,
+    jobs: int = 1,
+    label: str = "pg_restore",
+) -> None:
+    """Restore a ``pg_dump -Fc`` archive into *database* as its owner *role*.
+
+    The restricted load of reload_template, for a database whose owner already
+    exists: a production's scoped role restoring that production's own data.
+    The content of a database is its tenant's — a function in a CHECK
+    constraint, an index expression or a column default runs during the
+    restore with the rights of whoever restores — so no superuser does it, in
+    either cluster. *role* must own *database* and be an ordinary role; the
+    superuser is refused rather than trusted to be one.
+
+    The archive is read by a throwaway client container (see
+    _run_restore_client), never inside the PostgreSQL container, and must lie
+    where the Docker daemon can mount it from: under the data directory.
+    ``--no-owner`` leaves everything with *role*, and trusted extensions
+    (pg_trgm, unaccent) are created and owned by it. pg_restore exits non-zero
+    after any failed statement, so content that needs a superuser fails the
+    restore instead of being half applied.
+    """
+    if role == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Refusing to restore database content into '{database}' as the "
+            "PostgreSQL superuser: the database has no scoped role."
+        )
+    host = container_name or settings.shared_db_container
+    exit_code, output = _run_restore_client(
+        client,
+        settings,
+        team,
+        client.containers.get(host),
+        _template_restore_command(
+            text_dump=False,
+            gzipped=False,
+            database=database,
+            strict=False,
+            jobs=jobs,
+        ),
+        role=role,
+        password=password,
+        database=database,
+        dump_path=dump_path,
+        host=host,
+        purpose="db-restore",
+    )
+    if exit_code != 0:
+        raise ExternalCommandError(
+            label,
+            exit_code,
+            _restricted_load_failure(output, _RESTRICTED_RESTORE_HINT, tail=2000),
+        )
 
 
 def _summarize_restore_output(output: str) -> str:
@@ -3145,7 +3274,7 @@ def reload_template(
 
     restore_tool = "psql" if use_psql else "pg_restore"
     try:
-        _create_template_load_db(client, settings, tpl_db, ts_name, loader)
+        _create_load_db(client, settings, tpl_db, loader, tablespace=ts_name)
 
         logger.info(
             "DB restore started, template_db=%s, dump=%s", tpl_db, resolved_dump
@@ -3171,7 +3300,7 @@ def reload_template(
                 settings,
                 f'DROP DATABASE IF EXISTS "{tpl_db}" WITH (FORCE);',
             )
-            _create_template_load_db(client, settings, tpl_db, ts_name, loader)
+            _create_load_db(client, settings, tpl_db, loader, tablespace=ts_name)
             helper_start = time.monotonic()
             # The helper only rewrites the archive as SQL; it connects to
             # nothing. Loading that SQL is the same restricted restore.
@@ -3202,9 +3331,11 @@ def reload_template(
             logger.error(
                 "DB restore failed after %.1fs: %s", restore_elapsed, output_str
             )
-            if any(marker in output_str.lower() for marker in _RESTRICTED_LOAD_MARKERS):
-                output_str += _RESTRICTED_LOAD_HINT
-            raise ExternalCommandError(restore_tool, exit_code, output_str)
+            raise ExternalCommandError(
+                restore_tool,
+                exit_code,
+                _restricted_load_failure(output_str, _RESTRICTED_LOAD_HINT),
+            )
     except BaseException:
         # The loader must not outlive a failed load either; whatever it left
         # in the database is still handed over, so a retry starts clean.

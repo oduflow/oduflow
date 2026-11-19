@@ -187,8 +187,9 @@ Both clusters are upgraded together. Prepare the server first:
 
 On startup, before changing anything, Oduflow checks that no environment
 remains, that the clusters hold only databases it can restore, that the new
-image provides every extension those databases use, and that there is room for
-the dumps. It then stops services and production Odoo containers, and dumps
+image provides every extension those databases use and marks the ones in
+production and service databases as trusted, and that there is room for the
+dumps. It then stops services and production Odoo containers, and dumps
 service databases and production databases (including productions deleted
 with their data kept) together with all PostgreSQL roles and their passwords.
 With `[backup]` configured, it then deletes the old WAL-G archive. Only then
@@ -199,6 +200,27 @@ verified), and a new base backup is taken shortly afterwards. Template
 databases are restored from their dumps on disk last, and the dumps are
 deleted. Productions and services are down while their databases are dumped
 and restored.
+
+Each production and service database is restored into the new cluster by its
+own PostgreSQL role, the one recorded in its credentials file, never by the
+superuser: restoring a database runs what its content defines. The superuser
+recreates only the database itself (locale, tablespace, `ALTER DATABASE`
+settings, privileges on the database) and makes that role its owner. Everything
+inside ends up owned by that role, and privileges are restored as recorded.
+Two consequences are checked before anything is changed:
+
+- an extension that only a superuser may create (for example `postgis` or
+  `pg_stat_statements`) must be marked `trusted = true` in the new image's
+  control file, or be dropped first;
+- a database whose credentials file is missing has no role to restore it.
+
+If you trust everything a database contains, you can let the superuser restore
+it as before by starting Oduflow with
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
+environment. The same variable is the way out when a restore stops on content
+that only a superuser can recreate (an event trigger, a publication
+`FOR ALL TABLES`): the error names the database and its kept dump; set the
+variable and restart to resume.
 
 A failure before an old cluster is removed, including a refused S3 delete,
 leaves everything as it was, and setting the image back cancels the upgrade; if

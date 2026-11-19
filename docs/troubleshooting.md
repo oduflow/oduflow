@@ -417,6 +417,23 @@ allowed and how to make a further extension available.
 
 ---
 
+## Creating or restoring a production fails with `permission denied to create extension`
+
+`create_production` with `template_name` or `from_environment`, and
+`restore_production`, load the data as the production's own PostgreSQL role,
+never as the cluster superuser. A database that contains an extension
+PostgreSQL does not mark as trusted (`postgis`, `pg_stat_statements`,
+`dblink`, …), or anything else only a superuser may create, fails to load; a
+restore leaves the production's previous data in place. Use a
+`[database].image` whose control file for that extension sets
+`trusted = true`. See
+[How data is loaded into a production](production.md#how-data-is-loaded-into-a-production).
+
+The same rule holds for a PostgreSQL upgrade, which checks it before changing
+anything — see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
 ## A brand-new environment fails its first upgrade
 
 An environment is a *new* database cloned from a template plus *your* branch's

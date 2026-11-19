@@ -59,6 +59,7 @@ from oduflow.docker_ops.system_ops import (
     _db_exists,
     _drop_pg_role,
     _exec_sql,
+    _own_public_schema,
     _resolve_conf,
     _resolve_instance_conf,
     drop_signaling_sequences,
@@ -66,6 +67,7 @@ from oduflow.docker_ops.system_ops import (
     ensure_team_network,
     reassign_db_ownership,
     require_postgres_for_odoo,
+    restore_archive_as_role,
 )
 from oduflow.domains import (
     NameIndex,
@@ -1002,12 +1004,40 @@ def _normalize_extra_domains(
     return result
 
 
+def production_db_credentials(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, str]:
+    """The scoped PostgreSQL role a production's data is restored as.
+
+    Database content is never restored by the cluster superuser (see
+    system_ops.restore_archive_as_role), so a production whose credentials
+    file is gone is refused instead of falling back to it.
+    """
+    creds = load_credentials(
+        prod_env_name(name),
+        team.workspaces_dir,
+        settings.db_user,
+        settings.db_password,
+    )
+    if creds["pg_user"] == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Production '{name}' has no scoped database credentials "
+            f"(env_credentials.json is missing from {_workspace(team, name)}). "
+            "Its data is restored by the production's own PostgreSQL role, "
+            "never by the cluster superuser; restore the credentials file "
+            "before retrying."
+        )
+    return creds
+
+
 def _copy_db_into_prod_cluster(
     client: DockerClient,
     settings: Settings,
+    team: TeamSettings,
     source_db: str,
     target_db: str,
     label: str,
+    creds: dict[str, str],
 ) -> None:
     """Copy a dev-cluster database into the production cluster.
 
@@ -1015,9 +1045,14 @@ def _copy_db_into_prod_cluster(
     source from the dev instance and restores it into the production one
     (pg_dump -Fc | pg_restore --no-owner). The production image's pg_restore
     is same-or-newer than the dev dump's format, so defaults are compatible.
+
+    The source is a tenant's database, and restoring it runs what it defines
+    (a function in a CHECK constraint is called for every copied row). So the
+    restore is done by the production's own scoped role — ``creds``, which
+    must already own *target_db* — from a throwaway client container, never by
+    the production cluster's superuser.
     """
     dev = client.containers.get(settings.shared_db_container)
-    prod = client.containers.get(settings.prod_db_container)
     dump_in_container = f"/tmp/{target_db}.seed.pgdump"
 
     exit_code, output = dev.exec_run(
@@ -1027,30 +1062,27 @@ def _copy_db_into_prod_cluster(
         text = output.decode("utf-8", errors="replace") if output else ""
         raise ExternalCommandError(f"pg_dump ({label})", exit_code, text[-2000:])
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    # Under the data directory: the restore client mounts the dump, and the
+    # Docker daemon resolves that path, not this process.
+    tmp_root = os.path.join(team.data_dir, "tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
         host_dump = os.path.join(tmpdir, "seed.pgdump")
-        _copy_file_from_container(dev, dump_in_container, host_dump)
-        dev.exec_run(["rm", "-f", dump_in_container])
-        _copy_file_to_container(prod, host_dump, "/tmp")
         try:
-            exit_code, output = prod.exec_run(
-                [
-                    "pg_restore",
-                    "-U",
-                    settings.db_user,
-                    "--no-owner",
-                    "-d",
-                    target_db,
-                    f"/tmp/{os.path.basename(host_dump)}",
-                ]
-            )
-            if exit_code != 0:
-                text = output.decode("utf-8", errors="replace") if output else ""
-                raise ExternalCommandError(
-                    f"pg_restore ({label})", exit_code, text[-2000:]
-                )
+            _copy_file_from_container(dev, dump_in_container, host_dump)
         finally:
-            prod.exec_run(["rm", "-f", f"/tmp/{os.path.basename(host_dump)}"])
+            dev.exec_run(["rm", "-f", dump_in_container])
+        restore_archive_as_role(
+            client,
+            settings,
+            team,
+            host_dump,
+            database=target_db,
+            role=creds["pg_user"],
+            password=creds["pg_password"],
+            container_name=settings.prod_db_container,
+            label=f"pg_restore ({label})",
+        )
 
 
 def _seed_db_from_template(
@@ -1059,6 +1091,7 @@ def _seed_db_from_template(
     team: TeamSettings,
     template_name: str,
     target_db: str,
+    creds: dict[str, str],
 ) -> None:
     """Copy a (dev-cluster) template database into the production cluster."""
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -1067,7 +1100,9 @@ def _seed_db_from_template(
             f"Template database '{tpl_db}' not found. Import or create the "
             f"template '{template_name}' first."
         )
-    _copy_db_into_prod_cluster(client, settings, tpl_db, target_db, "template seed")
+    _copy_db_into_prod_cluster(
+        client, settings, team, tpl_db, target_db, "template seed", creds
+    )
 
 
 def _seed_db_from_environment(
@@ -1076,6 +1111,7 @@ def _seed_db_from_environment(
     team: TeamSettings,
     source_env: str,
     target_db: str,
+    creds: dict[str, str],
 ) -> None:
     """Copy a dev environment's database into the production cluster."""
     src_db = get_db_name(source_env, team.team_id)
@@ -1083,7 +1119,9 @@ def _seed_db_from_environment(
         raise NotFoundError(
             f"Environment database '{src_db}' not found for environment '{source_env}'."
         )
-    _copy_db_into_prod_cluster(client, settings, src_db, target_db, "environment seed")
+    _copy_db_into_prod_cluster(
+        client, settings, team, src_db, target_db, "environment seed", creds
+    )
 
 
 def _production_env_vars(raw: object) -> dict[str, str]:
@@ -1201,13 +1239,16 @@ def _copy_env_data_into_production(
     source: str,
     name: str,
     env_db: str,
+    creds: dict[str, str],
     filestore_dest: str | None = None,
 ) -> list[str]:
     """Copy the source environment's database and filestore into a
     production, with the environment's Odoo stopped over both copies for a
     consistent pair. The environment itself is left as it was (not reset).
-    ``filestore_dest`` overrides the filestore target — a restore stages
-    into a scratch sibling directory instead of the live filestore.
+    ``creds`` is the production's scoped role, which owns ``env_db`` and
+    restores the copy into it. ``filestore_dest`` overrides the filestore
+    target — a restore stages into a scratch sibling directory instead of the
+    live filestore.
     Returns user-facing notes (e.g. when the env could not be restarted)."""
     container = source_env["container"]
     # The cached SDK object may be minutes old (fetched before infra checks
@@ -1221,7 +1262,7 @@ def _copy_env_data_into_production(
         container.stop(timeout=60)
     notes: list[str] = []
     try:
-        _seed_db_from_environment(client, settings, team, source, env_db)
+        _seed_db_from_environment(client, settings, team, source, env_db, creds)
         src_filestore = get_filestore_paths(source, team.workspaces_dir)["merged"]
         if not os.path.isdir(src_filestore):
             # A dead overlay mount (or missing dir) would silently promote a
@@ -1722,8 +1763,30 @@ def create_production(
             f'CREATE DATABASE "{env_db}";',
             container_name=settings.prod_db_container,
         )
+        # The role comes before the data: a seed is the content of a tenant's
+        # database, and it is restored by the production's own role, never by
+        # the cluster superuser (see _copy_db_into_prod_cluster).
+        env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
+        _create_pg_role(
+            client,
+            settings,
+            env_creds["pg_user"],
+            env_creds["pg_password"],
+            env_db,
+            container_name=settings.prod_db_container,
+        )
+        if template_name is not None or source_env is not None:
+            _own_public_schema(
+                client,
+                settings,
+                env_db,
+                env_creds["pg_user"],
+                container_name=settings.prod_db_container,
+            )
         if template_name is not None:
-            _seed_db_from_template(client, settings, team, template_name, env_db)
+            _seed_db_from_template(
+                client, settings, team, template_name, env_db, env_creds
+            )
         if source_env is not None:
             assert from_environment is not None
             # The source env is only touched here; scope its lock (when the
@@ -1738,18 +1801,10 @@ def create_production(
                         from_environment,
                         name,
                         env_db,
+                        env_creds,
                     )
                 )
 
-        env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
-        _create_pg_role(
-            client,
-            settings,
-            env_creds["pg_user"],
-            env_creds["pg_password"],
-            env_db,
-            container_name=settings.prod_db_container,
-        )
         if template_name is not None or source_env is not None:
             reassign_db_ownership(
                 client,

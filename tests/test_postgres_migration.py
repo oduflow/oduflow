@@ -545,23 +545,56 @@ class TestEnvironments:
 
 
 class TestInventory:
-    def _run(self, settings, kind, present, *, templates=(), sizes=None):
+    def _run(
+        self,
+        settings,
+        kind,
+        present,
+        *,
+        templates=(),
+        sizes=None,
+        credentials=None,
+        extensions=None,
+    ):
+        queries = []
+
         def sql(client, settings_, query, db="postgres", **kwargs):
+            queries.append((db, query))
             if query.startswith("SELECT datname"):
                 return "\n".join(present)
             if query.startswith("SELECT count(*)"):
                 return "0"
             if query.startswith("SELECT extname"):
-                return {
-                    "oduflow_1_prod-shop": "pg_trgm",
-                    "oduflow_template_1_base": "unaccent",
-                }.get(db, "")
+                return (
+                    extensions
+                    or {
+                        "oduflow_1_prod-shop": "pg_trgm",
+                        "oduflow_template_1_base": "unaccent",
+                    }
+                ).get(db, "")
             return str((sizes or {}).get(query, 10))
 
         records = {
-            "n8n": {"database": "oduflow_service_1_n8n", "cluster": "dev"},
-            "pay": {"database": "oduflow_service_1_pay", "cluster": "prod"},
+            "n8n": {
+                "database": "oduflow_service_1_n8n",
+                "cluster": "dev",
+                "username": "svc_n8n",
+                "password": "n8n-pw",
+            },
+            "pay": {
+                "database": "oduflow_service_1_pay",
+                "cluster": "prod",
+                "username": "svc_pay",
+                "password": "pay-pw",
+            },
         }
+
+        def load_credentials(env_name, workspaces_dir, user, password):
+            return (credentials or {}).get(
+                env_name, {"pg_user": f"u_1_{env_name}", "pg_password": "pw"}
+            )
+
+        self.queries = queries
         with (
             patch.object(pm.system_ops, "_exec_sql", side_effect=sql),
             patch.object(
@@ -575,12 +608,13 @@ class TestInventory:
             patch.object(
                 pm.production_registry, "list_productions", return_value={"shop": {}}
             ),
+            patch.object(pm, "load_credentials", side_effect=load_credentials),
         ):
             return pm._inventory(MagicMock(), settings, _cluster(kind), list(templates))
 
     def test_dev_carries_service_databases_and_allows_templates(self, tmp_path):
         settings = _settings(tmp_path)
-        databases, extensions, size = self._run(
+        databases, extensions, restricted, size = self._run(
             settings,
             "dev",
             ["postgres", "odoo", "oduflow_service_1_n8n", "oduflow_template_1_base"],
@@ -589,6 +623,8 @@ class TestInventory:
         assert databases == ["oduflow_service_1_n8n"]
         # Templates are not dumped, but the new image must still serve them.
         assert extensions == {"unaccent"}
+        # ...and are not among what a carried database's role must create.
+        assert restricted == set()
         assert size == 10
 
     def test_prod_carries_registered_and_kept_productions(self, tmp_path):
@@ -597,7 +633,7 @@ class TestInventory:
         os.makedirs(os.path.join(settings.teams["1"].workspaces_dir, "prod-old"))
         # A development branch prod/Feature_X is no production.
         os.makedirs(os.path.join(settings.teams["1"].workspaces_dir, "prod-Feature_X"))
-        databases, extensions, size = self._run(
+        databases, extensions, restricted, size = self._run(
             settings,
             "prod",
             [
@@ -613,6 +649,7 @@ class TestInventory:
             "oduflow_service_1_pay",
         ]
         assert extensions == {"pg_trgm"}
+        assert restricted == {"pg_trgm"}
         assert size == 10  # one query for all databases
 
     def test_unknown_databases_are_refused(self, tmp_path):
@@ -628,11 +665,62 @@ class TestInventory:
         assert "oduflow cleanup --force" in message
         assert "back to 'postgres:15'" in message
 
+    def test_the_superuser_reads_a_tenants_catalog_by_full_names(self, tmp_path):
+        """A database's owner may put a schema of its own ahead of pg_catalog
+        (ALTER DATABASE ... SET search_path); nothing here resolves through it."""
+        settings = _settings(tmp_path)
+        self._run(settings, "prod", ["postgres", "oduflow_1_prod-shop"])
+        (query,) = [q for db, q in self.queries if db == "oduflow_1_prod-shop"]
+        assert "FROM pg_catalog.pg_extension" in query
+        assert "OPERATOR(pg_catalog.<>)" in query
+        assert "'plpgsql'::pg_catalog.name" in query
+
+    def test_a_database_without_a_scoped_role_is_refused_up_front(self, tmp_path):
+        """Nobody but the superuser could restore it, and the superuser does
+        not: the upgrade says so while every old cluster is still there."""
+        settings = _settings(tmp_path, db_user="odoo", db_password="super")
+        with pytest.raises(PrerequisiteNotMetError) as exc_info:
+            self._run(
+                settings,
+                "prod",
+                ["postgres", "oduflow_1_prod-shop", "oduflow_service_1_pay"],
+                # What load_credentials returns without a credentials file.
+                credentials={"prod-shop": {"pg_user": "odoo", "pg_password": "super"}},
+            )
+        message = str(exc_info.value)
+        assert "without a scoped role on record: oduflow_1_prod-shop." in message
+        assert "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=oduflow_1_prod-shop" in message
+        assert "Nothing has been changed." in message
+
+    def test_the_operator_may_leave_a_database_to_the_superuser(
+        self, tmp_path, monkeypatch
+    ):
+        settings = _settings(tmp_path, db_user="odoo", db_password="super")
+        monkeypatch.setenv(
+            pm.SUPERUSER_RESTORE_ENV, "oduflow_1_prod-shop, oduflow_other"
+        )
+        databases, extensions, restricted, _size = self._run(
+            settings,
+            "prod",
+            ["postgres", "oduflow_1_prod-shop", "oduflow_service_1_pay"],
+            credentials={"prod-shop": {"pg_user": "odoo", "pg_password": "super"}},
+            extensions={
+                "oduflow_1_prod-shop": "postgis",
+                "oduflow_service_1_pay": "pgcrypto",
+            },
+        )
+        assert databases == ["oduflow_1_prod-shop", "oduflow_service_1_pay"]
+        assert extensions == {"postgis", "pgcrypto"}
+        # Its extensions need not be trusted: the superuser creates them.
+        assert restricted == {"pgcrypto"}
+
 
 class TestCheckExtensions:
-    def _check(self, listing, needed):
+    def _check(self, listing, needed, restricted=frozenset()):
         with patch.object(pm, "run_for_output", return_value=listing) as run:
-            pm._check_extensions(MagicMock(), "postgres:16", "sha256:new", needed)
+            pm._check_extensions(
+                MagicMock(), "postgres:16", "sha256:new", needed, restricted
+            )
         return run
 
     def test_nothing_needed_runs_nothing(self):
@@ -652,6 +740,70 @@ class TestCheckExtensions:
     def test_empty_listing_means_the_probe_failed(self):
         with pytest.raises(PrerequisiteNotMetError, match="Cannot list"):
             self._check(b"", {"pg_trgm"})
+
+    _LISTING = (
+        b"/x/extension/plpgsql.control\n"
+        b"/x/extension/pg_trgm.control\n"
+        b"/x/extension/postgis.control\n"
+        b"---trusted---\n"
+        b"/x/extension/plpgsql.control\n"
+        b"/x/extension/pg_trgm.control\n"
+    )
+
+    def test_the_image_is_asked_which_extensions_it_marks_trusted(self):
+        run = self._check(self._LISTING, {"pg_trgm"}, {"pg_trgm"})
+        (script,) = run.call_args.args[2][1:]
+        assert run.call_args.args[2][0] == "-c"
+        assert run.call_args.kwargs == {"entrypoint": "sh", "network_disabled": True}
+        assert "echo ---trusted---" in script
+        assert "-exec grep -lEi" in script
+        assert pm._TRUSTED_CONTROL_RE in script
+
+    @pytest.mark.parametrize(
+        ("line", "trusted"),
+        [
+            ("trusted = true", True),
+            ("trusted=true", True),
+            ("  trusted = 'true'", True),
+            ("trusted = on", True),
+            ("TRUSTED = TRUE", True),
+            ("trusted = false", False),
+            ("trusted = off", False),
+            ("trusted = no", False),
+            ("trusted = 0", False),
+            ("# trusted = true", False),
+            ("superuser = true", False),
+        ],
+    )
+    def test_trusted_pattern_reads_a_control_file_line(self, line, trusted):
+        import re
+
+        # grep -E -i: POSIX classes spelled the way Python's re knows them.
+        pattern = pm._TRUSTED_CONTROL_RE.replace("[[:space:]]", r"\s")
+        assert bool(re.search(pattern, line, re.IGNORECASE)) is trusted
+
+    def test_an_untrusted_extension_of_a_carried_database_is_refused(self):
+        """Its database is restored by a role that is no superuser, and the old
+        cluster is still there to keep."""
+        with pytest.raises(PrerequisiteNotMetError) as exc_info:
+            self._check(self._LISTING, {"pg_trgm", "postgis"}, {"pg_trgm", "postgis"})
+        message = str(exc_info.value)
+        assert "does not mark as trusted: postgis." in message
+        assert "trusted = true" in message
+        assert pm.SUPERUSER_RESTORE_ENV in message
+        assert "Nothing has been changed." in message
+
+    def test_an_untrusted_extension_elsewhere_is_not_this_checks_business(self):
+        # A template's, or one in a database left to the superuser.
+        self._check(self._LISTING, {"pg_trgm", "postgis"}, {"pg_trgm"})
+
+    def test_an_image_that_cannot_be_asked_is_refused(self):
+        with pytest.raises(PrerequisiteNotMetError, match="Cannot tell which"):
+            self._check(
+                b"/x/extension/plpgsql.control\n/x/extension/pg_trgm.control\n",
+                {"pg_trgm"},
+                {"pg_trgm"},
+            )
 
 
 class TestPlan:
@@ -691,7 +843,9 @@ class TestPlan:
             ),
             patch.object(pm.system_ops, "_wait_pg_ready"),
             patch.object(
-                pm, "_inventory", return_value=(["db"], {"pg_trgm"}, 5)
+                pm,
+                "_inventory",
+                return_value=(["db"], {"pg_trgm", "x"}, {"pg_trgm"}, 5),
             ) as inventory,
             patch.object(pm, "_pull_target", return_value=("sha256:new", 16)) as pull,
             patch.object(pm, "_check_extensions") as extensions,
@@ -718,7 +872,7 @@ class TestPlan:
         )
         assert (state["image_id"], state["major"]) == ("sha256:new", 16)
         extensions.assert_called_once_with(
-            client, settings.postgres_image, "sha256:new", {"pg_trgm"}
+            client, settings.postgres_image, "sha256:new", {"pg_trgm", "x"}, {"pg_trgm"}
         )
         disk.assert_called_once_with(settings, 5)
 
@@ -789,8 +943,21 @@ class TestStopApplications:
 
 
 class TestRestoreCluster:
+    """A database is restored into the new cluster by its own role.
+
+    What a database contains is its tenant's: a function in a CHECK constraint
+    runs for every row ``COPY`` loads, as whoever restores. The superuser used
+    to restore everything (``pg_restore --create`` of the whole archive).
+    """
+
+    SUPERUSER = "odoo"
+    SUPERUSER_PASSWORD = "cluster-superuser-secret"
+    ROLES = {"a": ("u_a", "pw-a"), "b": ("u_b", "pw-b")}
+
     def _setup(self, tmp_path, kind="prod"):
-        settings = _settings(tmp_path)
+        settings = _settings(
+            tmp_path, db_user=self.SUPERUSER, db_password=self.SUPERUSER_PASSWORD
+        )
         directory = pm._dump_path(settings, kind)
         os.makedirs(directory)
         with open(os.path.join(directory, "roles.sql"), "w") as f:
@@ -798,23 +965,101 @@ class TestRestoreCluster:
         cluster = _cluster(kind, phase="restore", databases=["a", "b"])
         return settings, cluster, _state([cluster])
 
+    def _restore(self, settings, state, cluster, *, roles=None, helper=None, times=1):
+        steps = []
+
+        def sql(client, settings_, statement, db="postgres", **kwargs):
+            steps.append(("sql", kwargs.get("user"), db, statement))
+            return ""
+
+        def run_helper(client, settings_, image, container, command, *args, **kwargs):
+            steps.append(("helper", command, kwargs))
+            if helper:
+                helper(command)
+
+        with (
+            patch.object(pm.system_ops, "_exec_sql", side_effect=sql),
+            patch.object(pm.system_ops, "ensure_team_tablespace"),
+            patch.object(pm.system_ops, "_pg_restore_jobs", return_value=4),
+            patch.object(pm, "_run_helper", side_effect=run_helper),
+            patch.object(
+                pm,
+                "_carried_roles",
+                return_value=self.ROLES if roles is None else roles,
+            ),
+        ):
+            for _ in range(times):
+                pm._restore_cluster(MagicMock(), settings, state, cluster)
+        return steps
+
     def test_roles_once_then_each_database_dropped_and_restored(self, tmp_path):
         settings, cluster, state = self._setup(tmp_path)
         cluster["restored_databases"] = ["a"]
-        with (
-            patch.object(pm.system_ops, "_exec_sql") as sql,
-            patch.object(pm, "_run_helper") as helper,
-        ):
-            pm._restore_cluster(MagicMock(), settings, state, cluster)
-            pm._restore_cluster(MagicMock(), settings, state, cluster)
 
-        statements = [c.args[2] for c in sql.call_args_list]
+        steps = self._restore(settings, state, cluster, times=2)
+
+        statements = [step[3] for step in steps if step[0] == "sql"]
         assert statements.count("ALTER ROLE x;") == 1
         assert statements.count('DROP DATABASE IF EXISTS "b" WITH (FORCE);') == 1
-        (command,) = [c.args[4] for c in helper.call_args_list]
-        assert command[0] == "pg_restore" and "--create" in command
-        assert command[-1] == "/dump/b.pgdump"
+        commands = [step[1] for step in steps if step[0] == "helper"]
+        assert [command[-1] for command in commands] == ["/dump/b.pgdump"] * 2
         assert _journal(settings)["clusters"][0]["restored_databases"] == ["a", "b"]
+
+    def test_the_superuser_creates_the_database_and_its_role_fills_it(self, tmp_path):
+        settings, cluster, state = self._setup(tmp_path)
+        cluster["databases"] = ["b"]
+
+        steps = self._restore(settings, state, cluster)
+
+        assert steps == [
+            ("sql", None, "postgres", "ALTER ROLE x;"),
+            ("sql", None, "postgres", 'DROP DATABASE IF EXISTS "b" WITH (FORCE);'),
+            # 1. The superuser restores what describes the database itself and
+            #    nothing inside it: no schema of the archive has this name.
+            (
+                "helper",
+                ["pg_restore", "-h", "127.0.0.1", "-U", self.SUPERUSER]
+                + ["-d", "postgres", "--create", "--exit-on-error"]
+                + ["-n", "pg_oduflow_no_such_schema", "/dump/b.pgdump"],
+                {"writable": False},
+            ),
+            # 2. ...and hands it to the role on record, whoever owned it before.
+            ("sql", None, "postgres", 'ALTER DATABASE "b" OWNER TO "u_b";'),
+            # 3. That role restores the content, with its own password.
+            (
+                "helper",
+                ["pg_restore", "-h", "127.0.0.1", "-U", "u_b", "-d", "b"]
+                + ["--no-owner", "--exit-on-error", "-j", "4", "/dump/b.pgdump"],
+                {"password": "pw-b", "writable": False},
+            ),
+        ]
+        # The superuser never opens a session inside the restored database.
+        assert {step[2] for step in steps if step[0] == "sql"} == {"postgres"}
+        # No schema can be called what the first pass filters on.
+        assert pm._NO_SCHEMA.startswith("pg_")
+
+    def test_no_whole_archive_is_restored_by_the_superuser(self, tmp_path):
+        settings, cluster, state = self._setup(tmp_path)
+
+        steps = self._restore(settings, state, cluster)
+
+        commands = [step[1:] for step in steps if step[0] == "helper"]
+        assert len(commands) == 4
+        for command, kwargs in commands:
+            user = command[command.index("-U") + 1]
+            if user == self.SUPERUSER:
+                assert command[command.index("-n") + 1] == pm._NO_SCHEMA
+                assert "--create" in command
+                # It gets the superuser's password, by _run_helper's default.
+                assert "password" not in kwargs
+            else:
+                database = command[command.index("-d") + 1]
+                assert (user, kwargs["password"]) == self.ROLES[database]
+                assert "--create" not in command
+                assert "--no-owner" in command
+            assert "--exit-on-error" in command
+            # Nothing in a restore writes to the directory holding every dump.
+            assert kwargs["writable"] is False
 
     def test_dev_tablespaces_exist_before_restoring(self, tmp_path):
         settings, cluster, state = self._setup(tmp_path, kind="dev")
@@ -826,26 +1071,151 @@ class TestRestoreCluster:
                 side_effect=lambda *a: order.append("tablespace"),
             ),
             patch.object(pm.system_ops, "_exec_sql"),
+            patch.object(pm, "_carried_roles", return_value=self.ROLES),
             patch.object(
                 pm, "_run_helper", side_effect=lambda *a, **k: order.append("restore")
             ),
         ):
             pm._restore_cluster(MagicMock(), settings, state, cluster)
-        assert order == ["tablespace", "restore", "restore"]
+        # Two passes per database: its definition, then its content.
+        assert order == ["tablespace"] + ["restore"] * 4
 
     def test_failure_names_the_kept_dump(self, tmp_path):
         settings, cluster, state = self._setup(tmp_path)
+
+        def fail(command):
+            raise ExternalCommandError("pg_restore", 1, "boom")
+
+        with pytest.raises(PrerequisiteNotMetError, match=r"boom.*a\.pgdump") as exc:
+            self._restore(settings, state, cluster, helper=fail)
+        assert cluster["restored_databases"] == []
+        # The way out for content only a superuser can recreate.
+        assert "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=a " in str(exc.value)
+
+    def test_a_failed_content_restore_is_not_retried_by_the_superuser(self, tmp_path):
+        """A fallback would be the hole again: content that fails for its own
+        role on purpose would get the superuser."""
+        settings, cluster, state = self._setup(tmp_path)
+
+        attempted = []
+
+        def fail(command):
+            attempted.append(command)
+            if "--no-owner" in command:
+                raise ExternalCommandError(
+                    "pg_restore", 1, "permission denied to create extension"
+                )
+
+        with pytest.raises(PrerequisiteNotMetError, match="permission denied"):
+            self._restore(settings, state, cluster, helper=fail)
+
+        # The definition, the content as its role, and then nothing.
+        assert [c[c.index("-U") + 1] for c in attempted] == [self.SUPERUSER, "u_a"]
+        assert attempted[0][attempted[0].index("-n") + 1] == pm._NO_SCHEMA
+        assert cluster["restored_databases"] == []
+        assert _journal(settings)["clusters"][0]["restored_databases"] == []
+
+    def test_a_database_without_a_scoped_role_is_not_restored(self, tmp_path):
+        settings, cluster, state = self._setup(tmp_path)
+
+        with pytest.raises(PrerequisiteNotMetError) as exc:
+            self._restore(settings, state, cluster, roles={"a": None, "b": None})
+
+        message = str(exc.value)
+        assert "Database a has no scoped role on record" in message
+        assert os.path.join(pm._dump_path(settings, "prod"), "a.pgdump") in message
+        assert "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=a " in message
+        assert cluster["restored_databases"] == []
+
+    def test_the_operator_may_leave_a_database_to_the_superuser(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        settings, cluster, state = self._setup(tmp_path)
+        monkeypatch.setenv(pm.SUPERUSER_RESTORE_ENV, "a")
+
+        with caplog.at_level(logging.WARNING, logger="oduflow"):
+            steps = self._restore(
+                settings, state, cluster, roles={"b": ("u_b", "pw-b")}
+            )
+
+        commands = [step[1] for step in steps if step[0] == "helper"]
+        # "a" the way every database was restored before, and only "a".
+        assert commands[0] == (
+            ["pg_restore", "-h", "127.0.0.1", "-U", self.SUPERUSER]
+            + ["-d", "postgres", "--create", "--exit-on-error"]
+            + ["-j", "4", "/dump/a.pgdump"]
+        )
+        assert [c[c.index("-U") + 1] for c in commands[1:]] == [self.SUPERUSER, "u_b"]
+        assert commands[1][commands[1].index("-n") + 1] == pm._NO_SCHEMA
+        assert "Restoring database a as the PostgreSQL superuser" in caplog.text
+        assert cluster["restored_databases"] == ["a", "b"]
+
+
+class TestCarriedRoles:
+    def _settings(self, tmp_path):
+        return _settings(tmp_path, db_user="odoo", db_password="super")
+
+    def test_roles_come_from_the_credential_records(self, tmp_path):
+        from oduflow.env_credentials import create_credentials
+
+        settings = self._settings(tmp_path)
+        team = settings.teams["1"]
+        shop = create_credentials("prod-shop", "1", team.workspaces_dir)
+        # Deleted with its data kept, and its credentials file lost.
+        os.makedirs(os.path.join(team.workspaces_dir, "prod-old"))
+        records = {
+            "pay": {
+                "database": "oduflow_service_1_pay",
+                "cluster": "prod",
+                "username": "svc_pay",
+                "password": "pay-pw",
+            },
+            "n8n": {
+                "database": "oduflow_service_1_n8n",
+                "username": "svc_n8n",
+                "password": "n8n-pw",
+            },
+        }
         with (
-            patch.object(pm.system_ops, "_exec_sql"),
             patch.object(
-                pm,
-                "_run_helper",
-                side_effect=ExternalCommandError("pg_restore", 1, "boom"),
+                pm.service_database_credentials, "list_names", return_value=records
+            ),
+            patch.object(
+                pm.service_database_credentials,
+                "load",
+                side_effect=lambda team, name: records[name],
+            ),
+            patch.object(
+                pm.production_registry, "list_productions", return_value={"shop": {}}
             ),
         ):
-            with pytest.raises(PrerequisiteNotMetError, match=r"boom.*a\.pgdump"):
-                pm._restore_cluster(MagicMock(), settings, state, cluster)
-        assert cluster["restored_databases"] == []
+            prod = pm._carried_roles(settings, "prod")
+            dev = pm._carried_roles(settings, "dev")
+            assert pm._carried_databases(settings, "prod") == set(prod)
+
+        assert prod == {
+            "oduflow_service_1_pay": ("svc_pay", "pay-pw"),
+            "oduflow_1_prod-shop": (shop["pg_user"], shop["pg_password"]),
+            # load_credentials falls back to the superuser; that is no role
+            # to restore tenant content as.
+            "oduflow_1_prod-old": None,
+        }
+        assert dev == {"oduflow_service_1_n8n": ("svc_n8n", "n8n-pw")}
+
+    @pytest.mark.parametrize(
+        ("user", "password"),
+        [("odoo", "super"), ("", "pw"), ("u", ""), (None, "pw"), ("u", None)],
+    )
+    def test_the_superuser_or_half_a_record_is_no_scoped_role(
+        self, tmp_path, user, password
+    ):
+        assert pm._scoped(self._settings(tmp_path), user, password) is None
+
+    def test_superuser_restores_are_named_in_the_environment(self, monkeypatch):
+        monkeypatch.delenv(pm.SUPERUSER_RESTORE_ENV, raising=False)
+        assert pm._superuser_restores() == set()
+        monkeypatch.setenv(pm.SUPERUSER_RESTORE_ENV, " a ,b,, ")
+        assert pm._superuser_restores() == {"a", "b"}
 
 
 class TestRunHelper:
@@ -873,6 +1243,38 @@ class TestRunHelper:
         assert kwargs["network_mode"] == "container:oduflow-db"
         assert kwargs["volumes"] == {"/d": {"bind": "/dump", "mode": "rw"}}
         helper.remove.assert_called_once_with(force=True)
+
+    def test_the_superusers_password_is_the_default_and_only_that(self, tmp_path):
+        settings = _settings(tmp_path, db_password="cluster-superuser-secret")
+        client, _helper = self._client(0)
+        pm._run_helper(
+            client, settings, "img", "oduflow-db", ["pg_dump", "x"], "/d", "L"
+        )
+        assert client.containers.run.call_args.kwargs["environment"] == {
+            "PGPASSWORD": "cluster-superuser-secret"
+        }
+
+    def test_a_restore_as_a_role_holds_that_roles_password_and_reads_only(
+        self, tmp_path
+    ):
+        settings = _settings(tmp_path, db_password="cluster-superuser-secret")
+        client, _helper = self._client(0)
+        pm._run_helper(
+            client,
+            settings,
+            "img",
+            "oduflow-prod-db",
+            ["pg_restore", "-U", "u_b"],
+            "/d",
+            "L",
+            password="pw-b",
+            writable=False,
+        )
+        kwargs = client.containers.run.call_args.kwargs
+        assert kwargs["environment"] == {"PGPASSWORD": "pw-b"}
+        assert kwargs["volumes"] == {"/d": {"bind": "/dump", "mode": "ro"}}
+        assert kwargs["network_mode"] == "container:oduflow-prod-db"
+        assert "cluster-superuser-secret" not in repr(client.containers.run.call_args)
 
     def test_failure_carries_the_tool_output(self, tmp_path):
         settings = _settings(tmp_path)
