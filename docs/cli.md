@@ -386,8 +386,10 @@ The `cleanup` command detects and removes resources that no longer have a corres
 - **Orphan databases** — PostgreSQL databases with the `oduflow_` prefix that have no matching environment container
 - **Orphan workspaces** — workspace directories on disk that have no matching environment container
 - **Orphan port entries** — entries in `ports.json` that have no matching environment container
+- **Orphan PostgreSQL roles** — per-environment login roles that have no matching environment container
+- **Unused extra-addons checkouts** — per-commit shared checkouts under `shared_extra_checkouts/` that no container (running or stopped) mounts or pins, that are not the current tip of a downloaded branch, and that were last handed out more than 6 hours ago. These accumulate as upstream branches move; the dry run lists each one with its size. A repository whose branches cannot be read, or that another operation (such as a long fetch) is using, is skipped with an `Error:` line and keeps all its checkouts
 
-By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images.
+By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. `--force` takes the team lock that a running server also honours: it waits up to five minutes for the team's environment operations to finish and fails with a busy error if they do not. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images.
 
 ## Systemd Service
 

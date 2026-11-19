@@ -5168,7 +5168,12 @@ def cleanup_orphans(
     unreadable.
 
     Returns a dict with keys: orphan_databases, orphan_workspaces, orphan_ports,
-    and orphan_roles, each a list of removed (or would-be-removed) names.
+    orphan_roles and orphan_extra_checkouts (unused shared extra-addons
+    checkouts, named ``<repo>/<revision>``), each a list of removed (or
+    would-be-removed) names. Dry runs add ``orphan_extra_checkout_sizes``
+    (bytes per checkout); removals add ``extra_checkouts_freed_bytes``.
+    ``errors`` lists what could not be removed and, in both modes, extra repos
+    whose checkouts could not be examined (those are kept).
 
     ``only`` maps those keys to names the caller reviewed: when given, only
     reviewed names that are still orphaned are removed.
@@ -5275,6 +5280,12 @@ def cleanup_orphans(
         if not role.startswith(prod_role_prefix) and role not in live_roles
     ]
 
+    # 6. Unused shared extra-addons checkouts (per-SHA directories a moving
+    # branch left behind; see extra_addons.list_unused_checkouts for the rules).
+    # Only a dry run scans (and sizes) them: a removal recomputes the unused
+    # set itself, under each repo's lock.
+    from oduflow import extra_addons
+
     if only is not None:
         orphan_dbs = [n for n in orphan_dbs if n in only.get("orphan_databases", [])]
         orphan_workspaces = [
@@ -5284,12 +5295,21 @@ def cleanup_orphans(
         orphan_roles = [n for n in orphan_roles if n in only.get("orphan_roles", [])]
 
     if dry_run:
+        # Contains its own failures (reported in "errors"), so a repo that
+        # cannot be examined never takes the rest of the report down.
+        checkout_scan = extra_addons.list_unused_checkouts(settings, team)
+        orphan_checkouts: list[str] = checkout_scan["checkouts"]
+        if only is not None:
+            reviewed = only.get("orphan_extra_checkouts", [])
+            orphan_checkouts = [n for n in orphan_checkouts if n in reviewed]
         logger.info(
-            "Cleanup dry-run: %d orphan DBs, %d orphan workspaces, %d orphan ports, %d orphan roles",
+            "Cleanup dry-run: %d orphan DBs, %d orphan workspaces, %d orphan ports, "
+            "%d orphan roles, %d unused extra checkouts",
             len(orphan_dbs),
             len(orphan_workspaces),
             len(orphan_ports),
             len(orphan_roles),
+            len(orphan_checkouts),
         )
         return {
             "dry_run": True,
@@ -5297,6 +5317,9 @@ def cleanup_orphans(
             "orphan_workspaces": orphan_workspaces,
             "orphan_ports": orphan_ports,
             "orphan_roles": orphan_roles,
+            "orphan_extra_checkouts": orphan_checkouts,
+            "orphan_extra_checkout_sizes": checkout_scan["sizes"],
+            "errors": checkout_scan["errors"],
         }
 
     # --- Actually remove ---
@@ -5348,12 +5371,21 @@ def cleanup_orphans(
             logger.warning("Failed to drop orphan PG role %s: %s", role, exc)
             errors.append(f"PostgreSQL role {role}: removal failed. Check server logs.")
 
+    checkout_result = extra_addons.remove_unused_checkouts(
+        settings,
+        team,
+        only=None if only is None else only.get("orphan_extra_checkouts", []),
+    )
+    errors.extend(checkout_result["errors"])
+
     return {
         "dry_run": False,
         "orphan_databases": removed_dbs,
         "orphan_workspaces": removed_workspaces,
         "orphan_ports": removed_ports,
         "orphan_roles": removed_roles,
+        "orphan_extra_checkouts": checkout_result["removed"],
+        "extra_checkouts_freed_bytes": checkout_result["freed_bytes"],
         "errors": errors,
     }
 

@@ -4660,7 +4660,8 @@ var cleanupGroups = [
   ['orphan_databases', 'Databases'],
   ['orphan_workspaces', 'Workspaces'],
   ['orphan_ports', 'Port registry entries'],
-  ['orphan_roles', 'PostgreSQL roles']
+  ['orphan_roles', 'PostgreSQL roles'],
+  ['orphan_extra_checkouts', 'Extra-addons checkouts']
 ];
 
 function cleanupCount(result) {
@@ -4687,12 +4688,19 @@ function setCleanupBusy(busy, applying) {
 
 function renderCleanup(result) {
   var lines = [result.dry_run ? '[DRY RUN] Orphaned resources:' : '[CLEANUP] Removed resources:'];
+  var checkoutSizes = result.orphan_extra_checkout_sizes || {};
   cleanupGroups.forEach(function(group) {
     var names = result[group[0]] || [];
     if (!names.length) return;
     lines.push('  ' + group[1] + ' (' + names.length + '):');
-    names.forEach(function(name) { lines.push('    - ' + name); });
+    names.forEach(function(name) {
+      var size = checkoutSizes[name];
+      lines.push('    - ' + name + (size !== undefined ? ' — ' + fmtBytes(size) : ''));
+    });
   });
+  if (typeof result.extra_checkouts_freed_bytes === 'number' && result.extra_checkouts_freed_bytes > 0) {
+    lines.push('  Extra-addons checkouts freed ' + fmtBytes(result.extra_checkouts_freed_bytes) + '.');
+  }
   var count = cleanupCount(result);
   lines.push(count ? '\n' + count + ' resource(s) ' + (result.dry_run ? 'would be removed.' : 'removed.') :
     (result.dry_run ? 'No orphaned resources found.' : 'No orphaned resources removed.'));

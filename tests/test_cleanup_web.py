@@ -97,6 +97,17 @@ def test_any_team_can_confirm_image_cleanup_and_worker_holds_locks(setup):
         pass
 
 
+def test_extra_checkouts_group_is_accepted(setup):
+    client, settings, _, cleanup, _, remove = setup
+    orphans = {"orphan_extra_checkouts": ["enterprise/" + "a" * 40]}
+    response = client.post("/api/cleanup", json={"force": True, "orphans": orphans})
+    assert response.status_code == 200
+    cleanup.assert_called_once_with(
+        settings, settings.teams["2"], dry_run=False, only=orphans
+    )
+    remove.assert_not_called()
+
+
 def test_confirm_without_reviewed_orphans_removes_none(setup):
     client, _, _, cleanup, _, remove = setup
     response = client.post("/api/cleanup", json={"force": True})

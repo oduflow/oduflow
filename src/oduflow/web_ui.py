@@ -511,7 +511,13 @@ _EXTERNAL_COMMAND_UI_ERROR = "Operation failed. Check server logs for details."
 
 # Result groups of system_ops.cleanup_orphans that Confirm may name.
 _CLEANUP_ORPHAN_KEYS = frozenset(
-    {"orphan_databases", "orphan_workspaces", "orphan_ports", "orphan_roles"}
+    {
+        "orphan_databases",
+        "orphan_workspaces",
+        "orphan_ports",
+        "orphan_roles",
+        "orphan_extra_checkouts",
+    }
 )
 
 

@@ -10,8 +10,12 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from oduflow import server
 from oduflow.docker_ops import system_ops
+from oduflow.errors import BusyError
+from oduflow.locking import LockManager
 from oduflow.settings import Settings, TeamSettings
 
 
@@ -119,6 +123,63 @@ def test_run_cleanup_prints_removal_errors(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "No orphaned resources removed." in output
     assert "Error: Workspace feature-x: removal failed" in output
+
+
+def test_run_cleanup_force_takes_the_team_lock(tmp_path):
+    # The CLI shares the server's file lock space: while an environment
+    # operation of the team runs in another process (here: another
+    # LockManager), --force must not delete anything.
+    team, settings = _team_and_settings(tmp_path)
+    server_locks = LockManager(os.path.join(settings.base_data_dir, ".locks"))
+    server_locks.acquire_env("feature-x", team.team_id, operation="update_environment")
+    try:
+        with (
+            patch.object(system_ops, "cleanup_orphans") as cleanup,
+            patch.object(server, "ATTACH_SWAP_LOCK_TIMEOUT", 0.05),
+            pytest.raises(BusyError),
+        ):
+            server._run_cleanup(settings, team, dry_run=False)
+        cleanup.assert_not_called()
+
+        # A dry run reads only and stays lock-free.
+        preview = {
+            "dry_run": True,
+            "orphan_databases": [],
+            "orphan_workspaces": [],
+            "orphan_ports": [],
+            "orphan_roles": [],
+        }
+        with patch.object(system_ops, "cleanup_orphans", return_value=preview):
+            server._run_cleanup(settings, team)
+    finally:
+        server_locks.release_env("feature-x")
+
+
+def test_run_cleanup_prints_scaled_checkout_sizes(tmp_path, capsys):
+    team, settings = _team_and_settings(tmp_path)
+    result = {
+        "dry_run": True,
+        "orphan_databases": [],
+        "orphan_workspaces": [],
+        "orphan_ports": [],
+        "orphan_roles": [],
+        "orphan_extra_checkouts": ["enterprise/aaa", "enterprise/bbb", "themes/ccc"],
+        "orphan_extra_checkout_sizes": {
+            "enterprise/aaa": 300 * 1024,
+            "enterprise/bbb": 42 * 1024**2,
+            "themes/ccc": 3 * 1024**3,
+        },
+        "errors": ["Extra-addons checkouts of broken: scan failed, all are kept."],
+    }
+
+    with patch.object(system_ops, "cleanup_orphans", return_value=result):
+        server._run_cleanup(settings, team)
+
+    output = capsys.readouterr().out
+    assert "enterprise/aaa (300 KB)" in output
+    assert "enterprise/bbb (42.0 MB)" in output
+    assert "themes/ccc (3.0 GB)" in output
+    assert "Error: Extra-addons checkouts of broken" in output
 
 
 def test_cleanup_orphans_unmount_receives_teamsettings(tmp_path):
