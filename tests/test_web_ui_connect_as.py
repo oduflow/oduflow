@@ -8,7 +8,7 @@ delegate to odoo_ops and are exercised here with the docker layer mocked,
 mirroring test_web_ui_create_lock's TestClient harness.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -358,3 +358,21 @@ def test_env_users_lists(tmp_path):
     data = resp.json()
     assert data["ok"] is True
     assert data["result"]["users"] == users
+
+
+def test_env_users_reports_a_legacy_environment_instead_of_listing(tmp_path):
+    """Without a scoped role the picker gets the reason, shown as an error;
+    the list is never read as the cluster superuser."""
+    from oduflow.docker_ops import odoo_ops
+
+    client = _client(_open_settings(tmp_path))
+    database = MagicMock()
+    docker_client = MagicMock()
+    docker_client.containers.get.return_value = database
+    with patch.object(odoo_ops, "get_client", return_value=docker_client):
+        resp = client.get("/api/environments/18.0/users")
+
+    data = resp.json()
+    assert data["ok"] is False
+    assert "no scoped database credentials" in data["error"]
+    database.exec_run.assert_not_called()

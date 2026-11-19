@@ -20,6 +20,7 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pg_helpers import psql_call
 
 from oduflow import backup_ops
 from oduflow.docker_ops import production_ops, system_ops
@@ -68,9 +69,9 @@ class _FakeDocker:
         raise docker.errors.NotFound(name)
 
     def _exec(self, container, cmd):
-        if cmd[:2] == ["psql", "-U"] and cmd[3] == "-d" and cmd[5] == "-tAc":
-            assert len(cmd) == 7
-            self.steps.append(("sql", container, cmd[2], cmd[4], cmd[6]))
+        call = psql_call(cmd, SUPERUSER)
+        if call is not None:
+            self.steps.append(("sql", container, *call))
             return 0, b""
         self.steps.append(("exec", container, cmd))
         return 0, b""
@@ -315,6 +316,14 @@ def test_a_load_database_is_created_for_its_owner_in_the_named_cluster(tmp_path)
             SUPERUSER,
             "postgres",
             'CREATE DATABASE "db__restore" OWNER "u_7_prod-erp";',
+        ),
+        # Before the owner loads anything: no other role of the cluster may
+        # connect to the staged copy of a production.
+        (
+            PROD,
+            SUPERUSER,
+            "postgres",
+            'REVOKE ALL ON DATABASE "db__restore" FROM PUBLIC;',
         ),
         (
             PROD,

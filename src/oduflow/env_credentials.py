@@ -64,13 +64,15 @@ def load_credentials(
 ) -> dict[str, str]:
     """Load an environment's scoped PostgreSQL credentials.
 
-    When the per-environment credentials file is missing, callers that perform
-    *arbitrary* SQL/shell against the environment (interactive psql, run_db_query,
-    run_odoo_shell) must pass ``allow_fallback=False``: the fallback is the
-    cluster **superuser**, and handing it to those surfaces would let a tenant
-    ``\\c`` into another team's database or ``COPY ... FROM PROGRAM`` for RCE.
-    Fixed, admin-time operations keep the fallback so legacy environments still
-    work.
+    When the per-environment credentials file is missing, the fallback is the
+    cluster **superuser**. Whatever runs SQL in the environment's database, or
+    hands the credential to code a tenant controls, must pass
+    ``allow_fallback=False``: interactive psql, run_db_query and run_odoo_shell
+    would let a tenant ``\\c`` into another team's database or ``COPY ... FROM
+    PROGRAM`` for RCE, and even a fixed query resolves the tenant's own tables,
+    functions and operators with the rights of the role that runs it. The
+    fallback is left for callers that only name the role (to drop or report
+    it) or recreate a legacy container with the credential it already holds.
     """
     workspace_path = get_workspace_path(env_name, workspaces_dir)
     creds_path = os.path.join(workspace_path, _CREDENTIALS_FILE)
@@ -81,11 +83,33 @@ def load_credentials(
     if not allow_fallback:
         raise MissingCredentialsError(
             f"Environment '{env_name}' has no scoped database credentials. "
-            "Recreate or update the environment to provision a per-environment "
-            "PostgreSQL role (the shared superuser is never used for interactive "
-            "or arbitrary queries)."
+            "Recreate the environment to provision a per-environment PostgreSQL "
+            "role (the cluster superuser is never used in its place)."
         )
     return {"pg_user": fallback_user, "pg_password": fallback_password}
+
+
+def recorded_roles(workspaces_dir: str) -> dict[str, str]:
+    """``{workspace directory name: role}`` for every workspace with credentials.
+
+    The directory name stands in for the environment name: it differs only in
+    ``/`` being ``-``, which every name derived from it (the database, the
+    role) folds the same way. Unreadable files are skipped.
+    """
+    roles: dict[str, str] = {}
+    try:
+        entries = os.listdir(workspaces_dir)
+    except OSError:
+        return roles
+    for entry in entries:
+        try:
+            with open(os.path.join(workspaces_dir, entry, _CREDENTIALS_FILE)) as f:
+                role = json.load(f).get("pg_user")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(role, str) and role:
+            roles[entry] = role
+    return roles
 
 
 def delete_credentials(env_name: str, workspaces_dir: str) -> None:

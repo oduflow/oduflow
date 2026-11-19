@@ -872,14 +872,60 @@ def _exec_sql(
     # confines SQL only: psql runs here inside the PostgreSQL container, so the
     # caller must keep psql meta-commands out of ``sql`` (the sanitizer rejects
     # them; caller-written SQL goes through odoo_ops.run_db_query instead).
+    #
+    # Without ``user`` (or with the superuser named as it) the statement runs
+    # as the superuser, and then nothing in it may resolve to an object a
+    # tenant controls: an unqualified operator or function is looked up along
+    # ``search_path``, where the owner of a database can plant a closer match
+    # (``public.!~~(name, name)`` beats the built-in ``LIKE`` for a ``name``
+    # column) and set the path itself with ``ALTER DATABASE ... SET``. So
+    # every superuser session pins the path before the statement; see
+    # _superuser_psql.
     container = client.containers.get(container_name or settings.shared_db_container)
-    exit_code, output = container.exec_run(
-        ["psql", "-U", user or settings.db_user, "-d", db, "-tAc", sql]
+    cmd = (
+        ["psql", "-U", user, "-d", db, "-tAc", sql]
+        if user and user != settings.db_user
+        else _superuser_psql(settings, db, sql)
     )
+    exit_code, output = container.exec_run(cmd)
     result = output.decode("utf-8") if isinstance(output, bytes) else str(output)
     if exit_code != 0:
         raise ExternalCommandError("psql", exit_code, result)
     return result.strip()
+
+
+# Session setting for every statement the superuser runs. pg_temp is named so
+# that it comes last: left out, it would be searched before pg_catalog.
+SUPERUSER_SEARCH_PATH_SQL = "SET search_path = pg_catalog, pg_temp"
+
+
+def _superuser_psql(settings: Settings, db: str, sql: str) -> list[str]:
+    """``psql`` argv running *sql* as the superuser with a pinned search_path.
+
+    The pin is a statement of its own, issued once the session exists:
+    ``ALTER DATABASE/ROLE ... SET search_path`` takes effect while
+    connecting, and a ``SET`` sent afterwards is what replaces it whatever
+    the database or the role says. Each ``-c`` is a separate transaction in
+    one session, which keeps statements such as CREATE DATABASE outside a
+    transaction block.
+    ``ON_ERROR_STOP`` makes a failed pin fail the call instead of letting the
+    statement run without it, and ``-q`` keeps the pin's ``SET`` tag out of
+    the result.
+    """
+    return [
+        "psql",
+        "-q",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        settings.db_user,
+        "-d",
+        db,
+        "-c",
+        SUPERUSER_SEARCH_PATH_SQL,
+        "-tAc",
+        sql,
+    ]
 
 
 def get_team_db_usage_bytes(
@@ -1508,6 +1554,132 @@ def drop_signaling_sequences(
     )
 
 
+def restrict_database_access(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> None:
+    """Take away what PostgreSQL gives every role on a new *database*.
+
+    A new database lets PUBLIC connect and create temporary tables, and a
+    copy of a template starts with those defaults again whatever the template
+    had. Every role of a cluster reaches it over the team networks, so
+    another tenant could read this database's catalog (table and column
+    names, function bodies), call what it leaves executable by PUBLIC, fill
+    its tablespace with temporary tables, or hold a session on a template
+    and block every clone of it. The owner's own rights are not PUBLIC's and
+    stay; they follow the database when its owner changes.
+
+    Call it right after CREATE DATABASE, while the superuser still owns the
+    database or its future owner has not connected yet.
+    """
+    _exec_sql(
+        client,
+        settings,
+        f'REVOKE ALL ON DATABASE "{_quote_ident(database)}" FROM PUBLIC;',
+        container_name=container_name,
+    )
+
+
+def _quote_ident(name: str) -> str:
+    """*name* for use between double quotes in SQL."""
+    return name.replace('"', '""')
+
+
+# Managed databases PUBLIC still has a privilege on. grantee 0 is PUBLIC; a
+# database nobody ran GRANT or REVOKE on has no ACL and its defaults apply.
+_PUBLIC_DATABASE_ACCESS_SQL = (
+    "SELECT d.datname FROM pg_catalog.pg_database d WHERE EXISTS ("
+    "SELECT 1 FROM pg_catalog.aclexplode(COALESCE(d.datacl, "
+    "pg_catalog.acldefault('d', d.datdba))) a "
+    "WHERE a.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid);"
+)
+# Everything Oduflow creates in a cluster: environments and productions
+# (oduflow_<team>_), templates, service databases, staged and build copies.
+_MANAGED_DATABASE_PREFIX = "oduflow_"
+
+
+def restrict_managed_databases(
+    client: DockerClient,
+    settings: Settings,
+    *,
+    container_name: str | None = None,
+) -> list[str]:
+    """Close managed databases that PUBLIC may still connect to; return them.
+
+    Databases created before :func:`restrict_database_access` existed keep
+    PostgreSQL's defaults, and a cluster restored to a point in time gets its
+    old privileges back, so this runs on every start rather than once. It
+    finds nothing to do afterwards: one catalog query per cluster.
+
+    The owner keeps its access. A database whose role on record is *not* its
+    owner — a production an older version restored stays owned by the
+    superuser — reached it through PUBLIC, so that role is granted the same
+    two privileges first, in the same transaction as the revoke. Databases
+    outside the ``oduflow_`` namespace are an operator's own and are left
+    alone. Failures are logged per database and do not stop the others.
+    """
+    from oduflow.env_credentials import recorded_roles
+
+    rows = _exec_sql(
+        client, settings, _PUBLIC_DATABASE_ACCESS_SQL, container_name=container_name
+    )
+    databases = [
+        name for name in rows.splitlines() if name.startswith(_MANAGED_DATABASE_PREFIX)
+    ]
+    if not databases:
+        return []
+    on_record = {
+        get_db_name(entry, team.team_id): role
+        for team in settings.teams.values()
+        for entry, role in recorded_roles(team.workspaces_dir).items()
+    }
+    existing = set(
+        _exec_sql(
+            client,
+            settings,
+            "SELECT rolname FROM pg_catalog.pg_roles;",
+            container_name=container_name,
+        ).splitlines()
+    )
+    cluster = container_name or settings.shared_db_container
+    restricted: list[str] = []
+    for database in sorted(databases):
+        role = on_record.get(database)
+        keep = (
+            f'GRANT CONNECT, TEMPORARY ON DATABASE "{_quote_ident(database)}" '
+            f'TO "{_quote_ident(role)}"; '
+            if role and role != settings.db_user and role in existing
+            else ""
+        )
+        try:
+            _exec_sql(
+                client,
+                settings,
+                f'{keep}REVOKE ALL ON DATABASE "{_quote_ident(database)}" FROM PUBLIC;',
+                container_name=container_name,
+            )
+        except ExternalCommandError as exc:
+            logger.warning(
+                "Could not revoke PUBLIC access to database %s in %s: %s",
+                database,
+                cluster,
+                exc,
+            )
+            continue
+        restricted.append(database)
+    if restricted:
+        logger.info(
+            "Revoked PUBLIC access to %d database(s) in %s: %s",
+            len(restricted),
+            cluster,
+            ", ".join(restricted),
+        )
+    return restricted
+
+
 def _db_exists(
     client: DockerClient,
     settings: Settings,
@@ -2102,6 +2274,7 @@ def _create_load_db(
         f'CREATE DATABASE "{database}" OWNER "{owner}"{placement};',
         container_name=container_name,
     )
+    restrict_database_access(client, settings, database, container_name=container_name)
     _own_public_schema(client, settings, database, owner, container_name=container_name)
 
 
@@ -3128,6 +3301,21 @@ def _ensure_iptables_accept(client: DockerClient, network_name: str) -> None:
             logger.warning("Could not add iptables rule for %s: %s", bridge_iface, exc)
 
 
+def _restrict_cluster_databases(
+    client: DockerClient, settings: Settings, container_name: str
+) -> None:
+    """restrict_managed_databases for one cluster, never failing the start."""
+    try:
+        restrict_managed_databases(client, settings, container_name=container_name)
+    except Exception:
+        logger.exception(
+            "Could not check database privileges in %s; managed databases "
+            "created by an older version may still accept connections from "
+            "every role of the cluster",
+            container_name,
+        )
+
+
 def init_system(
     settings: Settings,
 ) -> dict[str, str]:
@@ -3163,6 +3351,7 @@ def init_system(
         settings,
         container_name=settings.shared_db_container,
     )
+    _restrict_cluster_databases(client, settings, settings.shared_db_container)
 
     # Production hosting is a strict opt-in. Disabled installations stop all
     # managed production workloads without deleting them; enabled installations
@@ -3172,6 +3361,13 @@ def init_system(
         reconcile_prod_workloads(client, settings)
     except Exception:
         logger.exception("Production workload reconciliation failed")
+    # Not while the WAL guard holds the cluster: it must not be written to.
+    from oduflow import wal_monitor
+
+    if _prod_pg_running(client, settings) and not wal_monitor.state(settings).get(
+        "latched"
+    ):
+        _restrict_cluster_databases(client, settings, settings.prod_db_container)
 
     # A server that died mid-deploy leaves deploy_in_progress flags behind.
     # This belongs to startup and only to startup: ensure_prod_infra is also

@@ -316,6 +316,86 @@ it, and that turned out to be the weaker half of the boundary:
   tables as the superuser, and legacy environments without a credentials file
   still fall back to it for fixed reads.
 
+- (2026-11-19) — **the superuser stops resolving names a tenant controls,
+  and stops sharing databases with every role.** The previous entries moved
+  *content* (dumps, restores) away from the superuser; what remained was the
+  superuser *querying* inside tenant databases. Fixed SQL is not safe there:
+  the tenant owns what the names in it mean. `res_users` can be a view over
+  the tenant's function, an operator `public.!~~(name, name)` beats the
+  built-in `LIKE` for a `name` column, and `ALTER DATABASE ... SET
+  search_path` decides where any unqualified name is looked up — each of them
+  tenant code run with the rights of whoever sent the query. Three rules came
+  out of auditing every `psql` the server starts.
+  *Tenant tables are read as the tenant's role.* The "Connect as" user picker
+  (`list_env_users`) ran its `SELECT` over `res_users` / `res_partner` as the
+  superuser for every environment; it now goes through
+  `run_internal_db_query`, like the module checks, and its JSON answer is
+  treated as data the tenant shaped (non-list answers and rows without a
+  login are dropped). The superuser **fallback for legacy environments** on
+  that path is gone, which withdraws a line from the SQL-console entry above
+  ("so they still work on a stopped *or legacy* environment"): the module
+  state checks and the installed-modules list refuse an environment without
+  a credentials file with `MissingCredentialsError`. Degrading was weighed —
+  skip the check, keep installing — and rejected for the same reason
+  `reset_admin_password` refuses: such an environment has to be recreated
+  anyway, and a verification that silently does not run is worse than an
+  error. `install_odoo_modules` checks for the role *before* running Odoo, so
+  a finished installation is never reported as a failure; `upgrade all`
+  reads nothing and still works; `pull_and_apply`'s plan narrowing was
+  best-effort already and its apply step reports the refusal.
+  *What the superuser still runs, it runs with a pinned `search_path`.*
+  `system_ops._exec_sql` now starts every superuser `psql` with a statement
+  of its own, `SET search_path = pg_catalog, pg_temp`, ahead of the caller's
+  (`psql -q -v ON_ERROR_STOP=1 … -c '<pin>' -tAc '<sql>'`). It is a
+  statement rather than a connection option on purpose: database and role
+  settings take effect while connecting, and a `SET` issued afterwards, in a
+  session where nothing of the tenant's has run yet, replaces them whatever
+  they say. Two `-c` rather
+  than one prefixed string keeps `CREATE DATABASE` and friends outside a
+  transaction block, which is what allowed pinning *every* superuser
+  statement instead of only those inside tenant databases — the maintenance
+  database is safe today because PostgreSQL 15+ lets nobody create in its
+  `public`, and with the pin it no longer depends on that. What is left
+  inside tenant databases is catalog-only or utility: the ownership and
+  signaling-sequence blocks (pinned since the template entry),
+  `ALTER SCHEMA public OWNER`, `REASSIGN OWNED` / `DROP OWNED`, and the
+  upgrade plan's `pg_extension` read and bootstrap-database object count.
+  Statements that run as a scoped role (`user=`) are deliberately not
+  pinned; they are the tenant's and expect its schemas.
+  *A database accepts its own role only.* PostgreSQL grants `CONNECT` and
+  `TEMPORARY` on every new database to `PUBLIC`, pg_hba admits every role
+  from every team network, and only service databases revoked it. So any
+  tenant role could open another team's database: not its tables, but its
+  catalog (table and column names, view and function source), whatever it
+  leaves executable by `PUBLIC`, temporary tables against the other team's
+  tablespace — and a session held on a *template* blocks every
+  `CREATE DATABASE ... TEMPLATE` of it. `restrict_database_access` now issues
+  `REVOKE ALL ... FROM PUBLIC` right after each `CREATE DATABASE`
+  (environments, the staged copy of a scheduled sync, template loads,
+  productions and their staged restores). It is repeated per database on
+  purpose: a copy does **not** inherit its template's privileges. The owner's
+  rights are not `PUBLIC`'s and follow the database through `ALTER DATABASE
+  ... OWNER` and `REASSIGN OWNED`, so cloning, the loader hand-over and the
+  template owner's reads work unchanged. For existing databases a startup
+  reconcile (`restrict_managed_databases`, from `init_system`) was chosen
+  over a one-shot step in `migrations.py`: migrations run before the
+  PostgreSQL containers are ensured, so a cluster that is down at that
+  moment (production hosting switched off, a held WAL guard) would be
+  skipped for good, and a cluster PITR brings old privileges back long after
+  a one-shot step is stamped. The reconcile is one catalog query per cluster
+  once nothing is left. It touches only the `oduflow_` namespace, and it
+  grants `CONNECT, TEMPORARY` to the role on record before revoking, in one
+  transaction — a production restored by an older version is still *owned by
+  the superuser* and its Odoo reached it through `PUBLIC` alone. Accepted
+  cost: a role an operator added by hand loses access to environment
+  databases until granted `CONNECT` explicitly.
+  Still open, same family: `pg_dump` as the superuser, the superuser
+  credential inside legacy tenant containers (`update_environment`,
+  `reconfigure_production`), `init_template`'s build database, and event
+  triggers in a template loaded as the superuser before the template entry
+  above (they fire on the superuser's DDL in its clones until the template
+  is reloaded).
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -384,3 +464,11 @@ native neutralization, rather than re-implementing what Odoo already ships:
   `postgres_migration._restore_database`), closing superuser code execution in
   the production cluster through a seeded, promoted or snapshot-restored
   database, and in a new cluster through the upgrade (see Evolution).
+- (2026-11-19) — **tenant tables are read as the tenant's role, every
+  superuser statement pins `search_path`, and managed databases refuse
+  `PUBLIC`** (`odoo_ops.list_env_users` / `run_internal_db_query`,
+  `system_ops._superuser_psql`, `restrict_database_access`,
+  `restrict_managed_databases`), closing superuser code execution through
+  names a tenant controls and cross-tenant connections to another team's
+  database; legacy environments without a credentials file are refused on
+  those paths (see Evolution).

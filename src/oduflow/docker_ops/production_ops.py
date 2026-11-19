@@ -68,6 +68,7 @@ from oduflow.docker_ops.system_ops import (
     reassign_db_ownership,
     require_postgres_for_odoo,
     restore_archive_as_role,
+    restrict_database_access,
 )
 from oduflow.domains import (
     NameIndex,
@@ -1762,6 +1763,9 @@ def create_production(
             settings,
             f'CREATE DATABASE "{env_db}";',
             container_name=settings.prod_db_container,
+        )
+        restrict_database_access(
+            client, settings, env_db, container_name=settings.prod_db_container
         )
         # The role comes before the data: a seed is the content of a tenant's
         # database, and it is restored by the production's own role, never by

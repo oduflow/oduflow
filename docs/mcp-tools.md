@@ -640,6 +640,11 @@ oduflow call pull_and_apply '{"env_name": "main", "upgrade": "sale_custom"}'
 
 Install Odoo modules (`odoo -i`) in an environment.
 
+After a successful run the module states are read back from the database, as
+the environment's own database role. An environment without one (created
+before per-environment database roles existed) is refused before Odoo runs —
+see [Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -662,7 +667,10 @@ Upgrade already-installed Odoo modules (`odoo -u`).
 
 Unknown or uninstalled modules are rejected with a suggestion to use
 [`install_odoo_modules`](#install_odoo_modules) or
-`pull_and_apply(install=...)` instead.
+`pull_and_apply(install=...)` instead. That check reads the database as the
+environment's own database role, so naming modules on an environment without
+one is refused; `"all"` needs no check and still runs. See
+[Database isolation](environments.md#database-isolation).
 
 Lock: environment.
 { .odu-tool-meta }
@@ -725,6 +733,10 @@ oduflow call run_odoo_tests '{
 
 List Odoo modules and their states as a table of name, state and installed
 version. By default only installed modules are shown.
+
+The list is read as the environment's own database role, directly from the
+shared PostgreSQL, so it works on a stopped environment; one without its own
+role is refused (see [Database isolation](environments.md#database-isolation)).
 
 **Parameters**
 

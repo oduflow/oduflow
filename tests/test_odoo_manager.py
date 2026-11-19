@@ -14,6 +14,7 @@ import pytest
 import docker
 from oduflow import agent_uids, po_tools
 from oduflow.docker_ops import env_ops, odoo_ops, system_ops
+from oduflow.env_credentials import MissingCredentialsError
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -350,6 +351,12 @@ class TestAdoptExistingEnvironment:
 
 
 class TestCreateEnvironment:
+    @pytest.fixture(autouse=True)
+    def _restrict(self):
+        with patch("oduflow.docker_ops.env_ops.restrict_database_access") as restrict:
+            self.restrict = restrict
+            yield
+
     @patch(
         "oduflow.extra_addons.generate_odoo_conf",
         return_value="/tmp/flow-test/workspaces/feature-payments/odoo.conf",
@@ -635,6 +642,58 @@ class TestCreateEnvironment:
         assert mock_configure.call_args.args[-1] == {
             "zipfit_delivery_email_rfq": ("18.0.1.17.0", "18.0.1.18.0")
         }
+
+    def test_create_closes_the_cloned_database_before_its_role_exists(
+        self, mock_docker_client, tmp_path
+    ):
+        # CREATE DATABASE ... TEMPLATE does not copy the template's privileges:
+        # the copy lets PUBLIC connect again until it is revoked.
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+        mock_docker_client.containers.list.return_value = []
+        mock_docker_client.containers.run.return_value = MagicMock()
+        order = []
+
+        def exec_sql(client, settings, sql, db="postgres", **kwargs):
+            if sql.startswith("CREATE DATABASE"):
+                order.append(sql)
+            return "{}" if "ir_module_module" in sql else ""
+
+        self.restrict.side_effect = lambda *args, **kwargs: order.append("restrict")
+        with ExitStack() as stack:
+            mocks = [
+                stack.enter_context(provisioning_patch)
+                for provisioning_patch in self._template_create_patches(
+                    patch(
+                        "oduflow.docker_ops.env_ops._configure_serving_environment",
+                        side_effect=PrerequisiteNotMetError("stop here"),
+                    ),
+                    exec_sql=exec_sql,
+                )
+            ]
+            create_role = mocks[8]
+            create_role.side_effect = lambda *args, **kwargs: order.append("role")
+            stack.enter_context(
+                patch("oduflow.docker_ops.env_ops._rollback_partial_environment")
+            )
+            with pytest.raises(PrerequisiteNotMetError, match="stop here"):
+                env_ops.create_environment(
+                    TEST_SETTINGS,
+                    TEST_TEAM,
+                    "feature",
+                    "",
+                    "odoo:18.0",
+                    template_name="base",
+                    local_path=str(tmp_path),
+                )
+
+        assert len(order) == 3
+        assert order[0].startswith(
+            'CREATE DATABASE "oduflow_1_feature" TEMPLATE "oduflow_template_1_base"'
+        )
+        assert order[1:] == ["restrict", "role"]
+        self.restrict.assert_called_once_with(
+            mock_docker_client, TEST_SETTINGS, "oduflow_1_feature"
+        )
 
     def test_create_rejects_invalid_auto_install_module_before_provisioning(
         self, mock_docker_client
@@ -1853,7 +1912,7 @@ class TestAutoPlanNarrowing:
     def test_module_state_lookup_rejects_unsafe_names(self):
         from oduflow.docker_ops import odoo_ops
 
-        with patch.object(odoo_ops, "_execute_db_query") as query:
+        with patch.object(odoo_ops, "run_internal_db_query") as query:
             with pytest.raises(ValueError):
                 odoo_ops._get_module_states(
                     TEST_SETTINGS, TEST_TEAM, "env", ("a'); DROP TABLE x; --",)
@@ -1862,6 +1921,12 @@ class TestAutoPlanNarrowing:
 
 
 class TestCreateEnvironmentEnvVars:
+    @pytest.fixture(autouse=True)
+    def _restrict(self):
+        with patch("oduflow.docker_ops.env_ops.restrict_database_access") as restrict:
+            self.restrict = restrict
+            yield
+
     @patch(
         "oduflow.extra_addons.generate_odoo_conf",
         return_value="/tmp/flow-test/workspaces/feature-env/odoo.conf",
@@ -3404,6 +3469,16 @@ class TestGetEnvironmentInfo:
 _SCOPED_CREDS = {"pg_user": "u_1_main", "pg_password": "scoped-pw"}
 
 
+def _team_with_credentials(tmp_path, env_name="main"):
+    """A team whose *env_name* has a credentials file on disk."""
+    team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+    workspace = os.path.join(team.workspaces_dir, env_name)
+    os.makedirs(workspace)
+    with open(os.path.join(workspace, "env_credentials.json"), "w") as f:
+        json.dump(_SCOPED_CREDS, f)
+    return team
+
+
 def _odoo_and_db_containers(mock_docker_client, *, status="running", labels=None):
     """The environment's Odoo container and the shared PostgreSQL one."""
     odoo = MagicMock(status=status, labels={} if labels is None else labels)
@@ -3688,10 +3763,33 @@ class TestInternalDbQuery:
         mock_docker_client.containers.get.assert_not_called()
         db.exec_run.assert_not_called()
 
-    def test_fixed_module_listing_supports_legacy_credentials(
+    def test_tuples_format_returns_bare_rows(self, mock_docker_client):
+        _, db = _odoo_and_db_containers(mock_docker_client)
+        db.exec_run.return_value = (0, b"[]\n")
+
+        with patch(
+            "oduflow.docker_ops.odoo_ops.load_credentials",
+            return_value=dict(_SCOPED_CREDS),
+        ):
+            odoo_ops.run_internal_db_query(
+                TEST_SETTINGS, TEST_TEAM, "main", "SELECT '[]'", "tuples"
+            )
+
+        assert db.exec_run.call_args.args[0] == [
+            "psql",
+            "-U",
+            "u_1_main",
+            "-d",
+            "oduflow_1_main",
+            "-tA",
+            "-c",
+            "SELECT '[]'",
+        ]
+
+    def test_fixed_module_listing_runs_as_the_scoped_role(
         self, tmp_path, mock_docker_client
     ):
-        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        team = _team_with_credentials(tmp_path)
         db_container = MagicMock()
         db_container.exec_run.return_value = (
             0,
@@ -3709,12 +3807,26 @@ class TestInternalDbQuery:
         assert command[:6] == [
             "psql",
             "-U",
-            TEST_SETTINGS.db_user,
+            "u_1_main",
             "-d",
             "oduflow_1_main",
             "--csv",
         ]
         assert "state = 'installed'" in command[-1]
+
+    def test_fixed_module_listing_refuses_a_legacy_environment(
+        self, tmp_path, mock_docker_client
+    ):
+        # No credentials file: the only role left would be the superuser, and
+        # ir_module_module is the tenant's to turn into a view over a function.
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        db_container = MagicMock()
+        mock_docker_client.containers.get.return_value = db_container
+
+        with pytest.raises(MissingCredentialsError):
+            odoo_ops.list_installed_module_records(TEST_SETTINGS, team, "main")
+
+        db_container.exec_run.assert_not_called()
 
     @pytest.mark.parametrize("env_name", ["prod-erp", "Prod-erp", "pr.od-erp"])
     def test_fixed_module_listing_rejects_production_aliases(
@@ -3962,8 +4074,16 @@ class TestResetAdminPassword:
 
 
 class TestInstallModules:
+    @pytest.fixture(autouse=True)
+    def _scoped_credentials(self):
+        with patch(
+            "oduflow.docker_ops.odoo_ops.load_credentials",
+            return_value=dict(_SCOPED_CREDS),
+        ):
+            yield
+
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={
             "exit_code": 0,
             "output": "name,state\nsale,installed\ncrm,installed\n",
@@ -3983,40 +4103,8 @@ class TestInstallModules:
         assert "-d oduflow_1_main" in args
         assert "-i sale,crm" in args
 
-    def test_install_verification_allows_legacy_db_credentials(
-        self, tmp_path, mock_docker_client
-    ):
-        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
-        odoo_container = MagicMock()
-        odoo_container.exec_run.return_value = (0, b"OK")
-        db_container = MagicMock()
-        db_container.exec_run.return_value = (
-            0,
-            b"name,state\nsale,installed\n",
-        )
-
-        def get_container(name):
-            if name == TEST_SETTINGS.shared_db_container:
-                return db_container
-            return odoo_container
-
-        mock_docker_client.containers.get.side_effect = get_container
-
-        result = odoo_ops.install_odoo_modules(TEST_SETTINGS, team, "main", "sale")
-
-        assert result["exit_code"] == 0
-        query_cmd = db_container.exec_run.call_args.args[0]
-        assert query_cmd[:6] == [
-            "psql",
-            "-U",
-            TEST_SETTINGS.db_user,
-            "-d",
-            "oduflow_1_main",
-            "--csv",
-        ]
-
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={"exit_code": 0, "output": "name,state\n"},
     )
     def test_unknown_module_after_success_exit_is_refused(
@@ -4035,7 +4123,7 @@ class TestInstallModules:
             )
 
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={
             "exit_code": 0,
             "output": "name,state\nwebsite,uninstalled\n",
@@ -4055,7 +4143,7 @@ class TestInstallModules:
             odoo_ops.install_odoo_modules(TEST_SETTINGS, TEST_TEAM, "main", "website")
 
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={
             "exit_code": 0,
             "output": "name,state\nsale,installed\ncrm,uninstalled\n",
@@ -4073,7 +4161,7 @@ class TestInstallModules:
                 TEST_SETTINGS, TEST_TEAM, "main", "sale", "crm"
             )
 
-    @patch("oduflow.docker_ops.odoo_ops._execute_db_query")
+    @patch("oduflow.docker_ops.odoo_ops.run_internal_db_query")
     def test_failed_command_is_not_masked_by_state_verification(
         self, mock_query, mock_docker_client
     ):
@@ -4090,9 +4178,95 @@ class TestInstallModules:
         mock_query.assert_not_called()
 
 
+class TestModuleChecksUseTheScopedRole:
+    """install/upgrade read ir_module_module, a table the tenant owns: as the
+    environment's role, and not at all for an environment that has none."""
+
+    def _containers(self, mock_docker_client):
+        odoo_container = MagicMock()
+        odoo_container.exec_run.return_value = (0, b"OK")
+        db_container = MagicMock()
+        db_container.exec_run.return_value = (
+            0,
+            b"name,state\nsale,installed\n",
+        )
+
+        def get_container(name):
+            if name == TEST_SETTINGS.shared_db_container:
+                return db_container
+            return odoo_container
+
+        mock_docker_client.containers.get.side_effect = get_container
+        return odoo_container, db_container
+
+    def test_install_is_verified_as_the_scoped_role(self, tmp_path, mock_docker_client):
+        team = _team_with_credentials(tmp_path)
+        _, db_container = self._containers(mock_docker_client)
+
+        result = odoo_ops.install_odoo_modules(TEST_SETTINGS, team, "main", "sale")
+
+        assert result["exit_code"] == 0
+        query_cmd = db_container.exec_run.call_args.args[0]
+        assert query_cmd[:6] == [
+            "psql",
+            "-U",
+            "u_1_main",
+            "-d",
+            "oduflow_1_main",
+            "--csv",
+        ]
+
+    def test_install_refuses_a_legacy_environment_before_running(
+        self, tmp_path, mock_docker_client
+    ):
+        # The check after an install would have to read the database as the
+        # superuser. Refusing afterwards would report a finished installation
+        # as a failure, so nothing is run at all.
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        odoo_container, db_container = self._containers(mock_docker_client)
+
+        with pytest.raises(MissingCredentialsError):
+            odoo_ops.install_odoo_modules(TEST_SETTINGS, team, "main", "sale")
+
+        odoo_container.exec_run.assert_not_called()
+        db_container.exec_run.assert_not_called()
+
+    def test_upgrade_check_runs_as_the_scoped_role(self, tmp_path, mock_docker_client):
+        team = _team_with_credentials(tmp_path)
+        odoo_container, db_container = self._containers(mock_docker_client)
+
+        result = odoo_ops.upgrade_odoo_modules(TEST_SETTINGS, team, "main", "sale")
+
+        assert result["exit_code"] == 0
+        assert db_container.exec_run.call_args.args[0][:3] == ["psql", "-U", "u_1_main"]
+        assert "-u sale" in odoo_container.exec_run.call_args.args[0]
+
+    def test_upgrade_refuses_a_legacy_environment_before_running(
+        self, tmp_path, mock_docker_client
+    ):
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        odoo_container, db_container = self._containers(mock_docker_client)
+
+        with pytest.raises(MissingCredentialsError):
+            odoo_ops.upgrade_odoo_modules(TEST_SETTINGS, team, "main", "sale")
+
+        odoo_container.exec_run.assert_not_called()
+        db_container.exec_run.assert_not_called()
+
+    def test_upgrade_all_needs_no_database_read(self, tmp_path, mock_docker_client):
+        # Nothing is checked for "all", so a legacy environment still upgrades.
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        odoo_container, db_container = self._containers(mock_docker_client)
+
+        result = odoo_ops.upgrade_odoo_modules(TEST_SETTINGS, team, "main", "all")
+
+        assert result["exit_code"] == 0
+        db_container.exec_run.assert_not_called()
+
+
 class TestUpgradeModules:
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={"exit_code": 0, "output": "name,state\nsale,installed\n"},
     )
     def test_upgrade(self, mock_query, mock_docker_client):
@@ -4108,7 +4282,7 @@ class TestUpgradeModules:
         assert "-u sale" in args
 
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={"exit_code": 0, "output": "name,state\nwebsite,uninstalled\n"},
     )
     def test_uninstalled_module_is_refused(self, mock_query, mock_docker_client):
@@ -4123,7 +4297,7 @@ class TestUpgradeModules:
         container.exec_run.assert_not_called()
 
     @patch(
-        "oduflow.docker_ops.odoo_ops._execute_db_query",
+        "oduflow.docker_ops.odoo_ops.run_internal_db_query",
         return_value={"exit_code": 0, "output": "name,state\n"},
     )
     def test_unknown_module_is_refused(self, mock_query, mock_docker_client):
@@ -4137,7 +4311,7 @@ class TestUpgradeModules:
 
         container.exec_run.assert_not_called()
 
-    @patch("oduflow.docker_ops.odoo_ops._execute_db_query")
+    @patch("oduflow.docker_ops.odoo_ops.run_internal_db_query")
     def test_all_upgrades_every_installed_module(self, mock_query, mock_docker_client):
         container = MagicMock()
         container.exec_run.return_value = (0, b"OK")
@@ -4152,7 +4326,7 @@ class TestUpgradeModules:
         # such row, so a state check would reject a legitimate upgrade.
         mock_query.assert_not_called()
 
-    @patch("oduflow.docker_ops.odoo_ops._execute_db_query")
+    @patch("oduflow.docker_ops.odoo_ops.run_internal_db_query")
     def test_all_is_refused_next_to_module_names(self, mock_query, mock_docker_client):
         container = MagicMock()
         mock_docker_client.containers.get.return_value = container

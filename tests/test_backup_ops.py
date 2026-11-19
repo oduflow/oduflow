@@ -363,6 +363,7 @@ def test_env_restore_swaps_staged_pair_without_backup_config(tmp_path):
         for call in _client.containers.get.return_value.exec_run.call_args_list
     ] == [
         f'CREATE DATABASE "{db_name}__restore" OWNER "prod_user";',
+        f'REVOKE ALL ON DATABASE "{db_name}__restore" FROM PUBLIC;',
         'ALTER SCHEMA public OWNER TO "prod_user";',
     ]
     assert f'ALTER DATABASE "{db_name}" RENAME TO "{db_name}__old";' in statements

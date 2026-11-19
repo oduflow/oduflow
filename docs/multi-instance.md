@@ -157,6 +157,11 @@ database or a role.
 - Environment containers: `oduflow-{team_id}-{env}-{type}` (e.g. `oduflow-1-feature-login-odoo`)
 - Service containers: `oduflow-{team_id}-svc-{name}` (e.g. `oduflow-1-svc-redis`)
 
+Each database has one role that may connect to it — its environment's,
+template's, production's or service's own. Roles of other environments and
+teams share the PostgreSQL server but are refused at connection time; see
+[Database isolation](environments.md#database-isolation).
+
 Containers are additionally labeled with `oduflow.team={team_id}`; listing and
 filtering are label-based, and container names are team-scoped so two teams
 can use the same branch name without colliding. Containers created by older

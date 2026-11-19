@@ -299,6 +299,17 @@ def _run_odoo_module_command(
             f"Environment '{env_name}' does not exist. Use create_environment first."
         )
 
+    if flag == "-i":
+        # The check after the install reads the database as the environment's
+        # own role. Without one on record, refuse before Odoo changes anything
+        # instead of reporting a finished installation as a failure.
+        load_credentials(
+            env_name,
+            team.workspaces_dir,
+            settings.db_user,
+            settings.db_password,
+            allow_fallback=False,
+        )
     if flag == "-u":
         if ALL_MODULES in modules:
             if len(modules) > 1:
@@ -341,14 +352,13 @@ def _get_module_states(
     # trusting every caller to have done it first.
     _validate_module_names(modules)
     names = ", ".join(f"'{module}'" for module in modules)
-    # This is a fixed, validated SELECT, so legacy environments may safely use
-    # the cluster credential that their Odoo container already runs with.
-    result = _execute_db_query(
+    # As the environment's own role, like every read of its database: the
+    # text is fixed, but ir_module_module is the tenant's to redefine.
+    result = run_internal_db_query(
         settings,
         team,
         env_name,
         f"SELECT name, state FROM ir_module_module WHERE name IN ({names})",
-        allow_fallback=True,
     )
     states: dict[str, str] = {}
     for row in result["output"].splitlines()[1:]:
@@ -844,25 +854,31 @@ def require_psql_client(target: ScopedPsql, env_name: str) -> None:
         raise psql_client_missing(env_name, _decode(output))
 
 
-def _execute_db_query(
+def run_internal_db_query(
     settings: Settings,
     team: TeamSettings,
     env_name: str,
     query: str,
     output_format: str = "csv",
-    *,
-    allow_fallback: bool,
 ) -> dict[str, Any]:
-    """Execute server-built SQL with ``psql`` inside the PostgreSQL container.
+    """Run server-built SQL as the environment's scoped role.
 
-    For queries this server composes from fixed text and validated values
-    only — never for SQL text a caller supplies: ``psql`` in that container
-    is a root shell and a trust-authenticated socket away from the whole
-    cluster (see :class:`ScopedPsql`; arbitrary SQL goes through
-    :func:`run_db_query`). What it offers in return is independence from the
-    environment's Odoo container, so these checks work on a stopped
-    environment, and — with ``allow_fallback`` — on a legacy one whose only
-    credential is the cluster's own, which must not enter a tenant container.
+    ``psql`` runs inside the PostgreSQL container, so this is for queries the
+    server composes from fixed text and validated or quoted values only —
+    never for SQL text a caller supplies: ``psql`` in that container is a
+    root shell and a trust-authenticated socket away from the whole cluster
+    (see :class:`ScopedPsql`; arbitrary SQL goes through :func:`run_db_query`).
+    What it offers in return is independence from the environment's Odoo
+    container, so these checks work on a stopped environment.
+
+    The role is always the environment's own, however fixed the text: its
+    tables, operators and ``search_path`` are the tenant's to define, and a
+    query resolves them with the rights of whoever runs it. A legacy
+    environment without a credentials file therefore gets
+    ``MissingCredentialsError``, not the superuser.
+
+    ``output_format`` is ``csv`` (with a header row), ``human`` (psql's
+    table) or ``tuples`` (unaligned rows only).
     """
     if query[:1] == "\\":
         # ``psql -c`` treats a string that starts with a backslash as a
@@ -884,12 +900,10 @@ def _execute_db_query(
         team.workspaces_dir,
         settings.db_user,
         settings.db_password,
-        allow_fallback=allow_fallback,
+        allow_fallback=False,
     )
-    if output_format == "human":
-        cmd = ["psql", "-U", creds["pg_user"], "-d", env_db, "-c", query]
-    else:
-        cmd = ["psql", "-U", creds["pg_user"], "-d", env_db, "--csv", "-c", query]
+    layout = {"human": [], "tuples": ["-tA"]}.get(output_format, ["--csv"])
+    cmd = ["psql", "-U", creds["pg_user"], "-d", env_db, *layout, "-c", query]
 
     logger.info(
         "Running DB query",
@@ -905,18 +919,6 @@ def _execute_db_query(
         "exit_code": exit_code,
         "output": output_str,
     }
-
-
-def run_internal_db_query(
-    settings: Settings, team: TeamSettings, env_name: str, query: str
-) -> dict[str, Any]:
-    """Run server-built SQL as the environment's scoped role; CSV output.
-
-    Works on a stopped environment (see :func:`_execute_db_query`). The query
-    must be composed by the server — fixed text plus validated or quoted
-    values. SQL a caller wrote goes through :func:`run_db_query`.
-    """
-    return _execute_db_query(settings, team, env_name, query, allow_fallback=False)
 
 
 def run_db_query(
@@ -964,10 +966,10 @@ def run_db_query(
 def list_installed_module_records(
     settings: Settings, team: TeamSettings, env_name: str
 ) -> list[dict[str, str]]:
-    """Return installed module names and versions using a fixed safe query.
+    """Return installed module names and versions using a fixed query.
 
-    The query is server-controlled, so legacy environments may use the shared
-    database credential without exposing an arbitrary-query surface.
+    It runs as the environment's own role, so a legacy environment without a
+    credentials file is refused with ``MissingCredentialsError``.
     """
     validate_env_name(env_name)
     if slugify_branch(env_name).startswith(PROD_ENV_PREFIX):
@@ -975,13 +977,12 @@ def list_installed_module_records(
             f"'{env_name}' is a production environment. Use the production "
             "deployment workflow instead of dev module operations."
         )
-    result = _execute_db_query(
+    result = run_internal_db_query(
         settings,
         team,
         env_name,
         "SELECT name, latest_version FROM ir_module_module "
         "WHERE state = 'installed' ORDER BY name",
-        allow_fallback=True,
     )
     modules: list[dict[str, str]] = []
     for row in csv.DictReader(result.get("output", "").splitlines()):
@@ -1410,18 +1411,17 @@ def list_env_users(
     ``base.group_portal``). The UI uses this to offer separate internal
     (``share`` False) and portal (``portal`` True) pickers and to exclude the
     public/anonymous user from both.
+
+    The query names the tenant's own tables, so it runs as the environment's
+    scoped role and never as the superuser: ``res_users`` may be a view over
+    a function, and ``lower`` or ``<>`` an object the tenant put in
+    ``public``. A legacy environment without a credentials file raises
+    ``MissingCredentialsError``; ``connect_as_user`` refuses it as well. What
+    comes back is the tenant's data in a shape the tenant controls, so only
+    rows of the expected form are passed on.
     """
     import json
 
-    client = get_client()
-    env_db = get_db_name(env_name, team.team_id)
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
     # json_agg → a single JSON array so the value parses cleanly without CSV
     # quoting concerns (partner names may contain commas).
     # ``portal`` = membership in the base.group_portal user-type group, resolved
@@ -1439,17 +1439,27 @@ def list_env_users(
         "FROM res_users u JOIN res_partner p ON p.id = u.partner_id "
         "WHERE u.active AND u.login IS NOT NULL AND u.login <> '__system__'"
     )
-    exit_code, output = db_container.exec_run(
-        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    )
-    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, out)
+    result = run_internal_db_query(settings, team, env_name, sql, "tuples")
     try:
-        rows: list[dict[str, Any]] = json.loads(out or "[]")
-        return rows
+        rows = json.loads(str(result["output"]).strip() or "[]")
     except json.JSONDecodeError:
         return []
+    if not isinstance(rows, list):
+        return []
+    users: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("login"), str):
+            continue
+        name = row.get("name")
+        users.append(
+            {
+                "login": row["login"],
+                "name": name if isinstance(name, str) else "",
+                "share": row.get("share") is True,
+                "portal": row.get("portal") is True,
+            }
+        )
+    return users
 
 
 def search_in_environment(

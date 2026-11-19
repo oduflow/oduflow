@@ -434,6 +434,36 @@ anything — see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
 
 ---
 
+## `Environment '...' has no scoped database credentials`
+
+The environment was created before each environment had its own PostgreSQL
+role, so its workspace has no `env_credentials.json`. Oduflow reads and
+writes an environment's database only as that role and does not substitute
+the cluster superuser, so module installs and upgrades, the module and
+**Connect As** lists, direct SQL, the Odoo shell, tests and
+`reset_admin_password` are refused for it. Recreate the environment
+(`recreate_environment`, which rebuilds its database from its template) to
+give it a role. See [Database isolation](environments.md#database-isolation).
+
+---
+
+## A role of your own can no longer connect to an environment's database
+
+```
+FATAL:  permission denied for database "oduflow_1_main"
+DETAIL:  User does not have CONNECT privilege.
+```
+
+Oduflow revokes PostgreSQL's default "every role may connect" from the
+databases it manages, at creation and on each server start, so that one
+tenant's role cannot open another tenant's database. A database's own role is
+not affected. Grant a role you added yourself what it needs —
+`GRANT CONNECT ON DATABASE "oduflow_1_main" TO "reporting";` — and repeat it
+after the environment is recreated, since a new database starts closed again.
+See [Database isolation](environments.md#database-isolation).
+
+---
+
 ## A brand-new environment fails its first upgrade
 
 An environment is a *new* database cloned from a template plus *your* branch's

@@ -365,6 +365,7 @@ def refresh_environment(
         sql(
             f'CREATE DATABASE "{staged_db}" TEMPLATE "{tpl_db}"{strategy} TABLESPACE "{tablespace}" OWNER "{creds["pg_user"]}";'
         )
+        system_ops.restrict_database_access(client, settings, staged_db)
         system_ops.reassign_db_ownership(client, settings, staged_db, creds["pg_user"])
         system_ops.drop_signaling_sequences(client, settings, staged_db)
         volumes: dict[str, Any] = {}

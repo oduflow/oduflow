@@ -466,6 +466,8 @@ def _inventory(
         )
     # The automatically created databases must be empty: operators sometimes
     # use them for services without registering a managed service database.
+    # Whoever did could also have left an operator there; _exec_sql pins the
+    # superuser's search_path, so this catalog query resolves none of it.
     for name in bootstrap.intersection(present):
         count = system_ops._exec_sql(
             client,
@@ -499,9 +501,10 @@ def _inventory(
     restricted: set[str] = set()
     # Templates are restored from disk, but need the same extensions.
     for name in sorted(set(databases) | restored_from_disk.intersection(present)):
-        # The superuser reads a tenant's database here, so every name is
-        # spelled out: its owner may have put a schema of its own ahead of
-        # pg_catalog (ALTER DATABASE ... SET search_path).
+        # The superuser reads a tenant's database here: a catalog table only,
+        # with the session's search_path pinned by _exec_sql and every name
+        # spelled out besides. The owner may have put a schema of its own
+        # ahead of pg_catalog (ALTER DATABASE ... SET search_path).
         used = system_ops._exec_sql(
             client,
             settings,

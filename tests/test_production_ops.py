@@ -109,6 +109,9 @@ def _patch_create_stack(client, **overrides):
         "_exec_sql": patch.object(production_ops, "_exec_sql"),
         "_create_pg_role": patch.object(production_ops, "_create_pg_role"),
         "_own_public_schema": patch.object(production_ops, "_own_public_schema"),
+        "restrict_database_access": patch.object(
+            production_ops, "restrict_database_access"
+        ),
         "create_credentials": patch.object(
             production_ops,
             "create_credentials",
@@ -2493,6 +2496,7 @@ class TestSeedRunsAsTheProductionsRole:
             side_effect=lambda client, settings, sql, *a, **k: order.append(sql),
         )
         for name in (
+            "restrict_database_access",
             "_create_pg_role",
             "_own_public_schema",
             "reassign_db_ownership",
@@ -2532,14 +2536,21 @@ class TestSeedRunsAsTheProductionsRole:
             )
 
         db = production_ops.prod_db_name(team, "erp")
-        assert order[:6] == [
+        assert order[:7] == [
             f'CREATE DATABASE "{db}";',
+            "restrict_database_access",
             "_create_pg_role",
             "_own_public_schema",
             "_seed_db_from_template",
             "reassign_db_ownership",
             "drop_signaling_sequences",
         ]
+        # PUBLIC loses the database in the production cluster before any role
+        # owns it or anything is loaded into it.
+        assert mocks["restrict_database_access"].call_args.args[2:] == (db,)
+        assert mocks["restrict_database_access"].call_args.kwargs == {
+            "container_name": settings.prod_db_container
+        }
         mocks["_seed_db_from_template"].assert_called_once_with(
             client, settings, team, "tpl", db, self.CREDS
         )
@@ -2575,8 +2586,9 @@ class TestSeedRunsAsTheProductionsRole:
             )
 
         db = production_ops.prod_db_name(team, "erp")
-        assert order[:6] == [
+        assert order[:7] == [
             f'CREATE DATABASE "{db}";',
+            "restrict_database_access",
             "_create_pg_role",
             "_own_public_schema",
             "_seed_db_from_environment",
@@ -2602,7 +2614,11 @@ class TestSeedRunsAsTheProductionsRole:
             )
 
         db = production_ops.prod_db_name(team, "erp")
-        assert order[:2] == [f'CREATE DATABASE "{db}";', "_create_pg_role"]
+        assert order[:3] == [
+            f'CREATE DATABASE "{db}";',
+            "restrict_database_access",
+            "_create_pg_role",
+        ]
         mocks["_own_public_schema"].assert_not_called()
         mocks["_seed_db_from_template"].assert_not_called()
         mocks["reassign_db_ownership"].assert_not_called()

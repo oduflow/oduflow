@@ -18,6 +18,7 @@ import stat
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pg_helpers import psql_call
 
 from oduflow.docker_ops import system_ops
 from oduflow.errors import ExternalCommandError
@@ -53,11 +54,11 @@ class _FakeDocker:
     # -- the PostgreSQL container ------------------------------------------
 
     def _exec_in_db(self, cmd, **kwargs):
-        if cmd[:1] != ["psql"] or cmd[1] != "-U" or cmd[3] != "-d" or cmd[5] != "-tAc":
+        call = psql_call(cmd, SUPERUSER)
+        if call is None:
             self.steps.append(("db-exec", cmd))
             return 0, b""
-        role, database, sql = cmd[2], cmd[4], cmd[6]
-        assert len(cmd) == 7
+        role, database, sql = call
         self.steps.append(("sql", role, database, sql))
         for marker, error in self.fail_sql.items():
             if marker in sql:

@@ -3113,9 +3113,51 @@ What follows from running there:
   add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
   is no fallback to the PostgreSQL container.
 - **The environment needs its own database role.** One created before
-  per-environment credentials existed is refused until it is recreated or
-  updated; the cluster's own credential is never used for caller-written SQL.
+  per-environment credentials existed is refused until it is recreated; the
+  cluster's own credential is never used for it — see
+  [Database isolation](#database-isolation).
 - **Productions are not reachable** through either surface.
+
+### Database isolation
+
+Every environment has its own PostgreSQL role, which owns the environment's
+database, and **no other role of the cluster may connect to that database**.
+PostgreSQL by default lets every role connect to every database; Oduflow
+revokes that when it creates a database — an environment's, a template's, a
+production's or a service database — and, on each server start, on databases
+an older version created. The owner keeps its access; a production whose
+database is still owned by the superuser (one restored by an older version)
+has its role granted access first, so nothing running is cut off. Databases
+outside the `oduflow_` namespace are yours and are left as they are.
+
+If you connected to an environment's database with a role of your own (a
+reporting or monitoring role, for example), grant it access explicitly:
+`GRANT CONNECT ON DATABASE "oduflow_<team>_<env>" TO "<role>";`. A copy made
+from a template starts without it again.
+
+Oduflow reads an environment's database the same way your code does: as the
+environment's own role, never as the cluster superuser. That holds for the
+checks around `install_odoo_modules` and `upgrade_odoo_modules`, the installed
+modules list, the dashboard's **Connect As** user list, translation exports
+and `reset_admin_password`. The tables, functions and operators in a database
+are its tenant's to define, and a query resolves them with the rights of
+whoever runs it.
+
+**Environments without their own role.** An environment created before
+per-environment credentials existed has no role on record, and Oduflow does
+not fall back to the superuser for it. On such an environment:
+
+- `install_odoo_modules`, `upgrade_odoo_modules` with module names and
+  `pull_and_apply` with modules to install or upgrade are refused before Odoo
+  runs (`upgrade_odoo_modules all` reads nothing first and still works);
+- `list_installed_modules`, the dashboard's module picker and the **Connect
+  As** user list report the error instead of a list;
+- `run_db_query`, the SQL console, `run_odoo_shell`, `run_odoo_tests`,
+  `connect_as_user` and `reset_admin_password` are refused as before.
+
+The error is `Environment '<name>' has no scoped database credentials`.
+Recreate the environment (`recreate_environment`, or delete and create it —
+either way its database is rebuilt from its template) to give it a role.
 
 ## Interactive Terminal
 
@@ -5540,7 +5582,7 @@ than a JSON API. Production routes are registered only when
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
 | `POST` | `/api/environments/{branch}/sync` | Pull and automatically apply code changes |
-| `GET` | `/api/environments/{branch}/modules` | List installed modules (name and version) — the source for the dashboard's Upgrade modules picker |
+| `GET` | `/api/environments/{branch}/modules` | List installed modules (name and version) — the source for the dashboard's Upgrade modules picker. Read as the environment's own database role; an environment without one gets an error ([Database isolation](environments.md#database-isolation)) |
 | `POST` | `/api/environments/{branch}/modules` | Install or upgrade modules. Body: `action` (`install` or `upgrade`), `modules` (comma-separated string). A successful action returns `modules_installed` or `modules_upgraded` plus `container_restarted`; if the follow-up restart fails, the module action remains successful with `container_restarted: false` plus a warning. Every result includes `modules_attempted`; a non-zero Odoo exit code omits the success field and includes the command output |
 | `POST` | `/api/environments/{branch}/switch-branch` | Move the environment onto another git branch, keeping DB, filestore and URL, then apply the difference. Body: `branch`, optional `new_name` to rename the environment at the same time. The response's `env_name` is the name to address it by afterwards |
 | `POST` | `/api/environments/{branch}/update` | Recreate the container while preserving DB and filestore. Optional body: `env_vars` (full replacement of the user-supplied container variables — either an object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas; an empty object/string clears them, an absent key keeps them). The dashboard sends an object, so a value may contain commas, `odoo_image`, `new_name` (rename the environment; a pooled or explicit hostname is kept, its scoped MCP endpoint moves to `/mcp/<new name>`; productions and stack members are refused) |
@@ -5557,7 +5599,7 @@ than a JSON API. Production routes are registered only when
 | `POST` | `/api/environments/{branch}/share` | Start sharing the environment, or return the existing link |
 | `POST` | `/api/environments/{branch}/share/rotate` | Issue a new link; the previous one and every session opened with it stop working |
 | `POST` | `/api/environments/{branch}/share/revoke` | Stop sharing the environment |
-| `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As |
+| `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As. Read as the environment's own database role; an environment without one gets an error instead of a list, and the dashboard shows it |
 | `POST` | `/api/environments/{branch}/connect-as` | Mint an Odoo session for body `user` and return URL/cookie details |
 | `GET` | `/api/environments/{branch}/connect-open?user=` | Mint a session and redirect toward the environment login handoff |
 | `POST` | `/api/environments/{branch}/save-as-template` | Save the environment under body `template_name`; the UI never overwrites an existing template |
@@ -6442,6 +6484,11 @@ oduflow call pull_and_apply '{"env_name": "main", "upgrade": "sale_custom"}'
 
 Install Odoo modules (`odoo -i`) in an environment.
 
+After a successful run the module states are read back from the database, as
+the environment's own database role. An environment without one (created
+before per-environment database roles existed) is refused before Odoo runs —
+see [Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -6464,7 +6511,10 @@ Upgrade already-installed Odoo modules (`odoo -u`).
 
 Unknown or uninstalled modules are rejected with a suggestion to use
 [`install_odoo_modules`](#install_odoo_modules) or
-`pull_and_apply(install=...)` instead.
+`pull_and_apply(install=...)` instead. That check reads the database as the
+environment's own database role, so naming modules on an environment without
+one is refused; `"all"` needs no check and still runs. See
+[Database isolation](environments.md#database-isolation).
 
 Lock: environment.
 { .odu-tool-meta }
@@ -6527,6 +6577,10 @@ oduflow call run_odoo_tests '{
 
 List Odoo modules and their states as a table of name, state and installed
 version. By default only installed modules are shown.
+
+The list is read as the environment's own database role, directly from the
+shared PostgreSQL, so it works on a stopped environment; one without its own
+role is refused (see [Database isolation](environments.md#database-isolation)).
 
 **Parameters**
 
@@ -10227,6 +10281,11 @@ database or a role.
 - Environment containers: `oduflow-{team_id}-{env}-{type}` (e.g. `oduflow-1-feature-login-odoo`)
 - Service containers: `oduflow-{team_id}-svc-{name}` (e.g. `oduflow-1-svc-redis`)
 
+Each database has one role that may connect to it — its environment's,
+template's, production's or service's own. Roles of other environments and
+teams share the PostgreSQL server but are refused at connection time; see
+[Database isolation](environments.md#database-isolation).
+
 Containers are additionally labeled with `oduflow.team={team_id}`; listing and
 filtering are label-based, and container names are team-scoped so two teams
 can use the same branch name without colliding. Containers created by older
@@ -11978,6 +12037,36 @@ restore leaves the production's previous data in place. Use a
 
 The same rule holds for a PostgreSQL upgrade, which checks it before changing
 anything — see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
+## `Environment '...' has no scoped database credentials`
+
+The environment was created before each environment had its own PostgreSQL
+role, so its workspace has no `env_credentials.json`. Oduflow reads and
+writes an environment's database only as that role and does not substitute
+the cluster superuser, so module installs and upgrades, the module and
+**Connect As** lists, direct SQL, the Odoo shell, tests and
+`reset_admin_password` are refused for it. Recreate the environment
+(`recreate_environment`, which rebuilds its database from its template) to
+give it a role. See [Database isolation](environments.md#database-isolation).
+
+---
+
+## A role of your own can no longer connect to an environment's database
+
+```
+FATAL:  permission denied for database "oduflow_1_main"
+DETAIL:  User does not have CONNECT privilege.
+```
+
+Oduflow revokes PostgreSQL's default "every role may connect" from the
+databases it manages, at creation and on each server start, so that one
+tenant's role cannot open another tenant's database. A database's own role is
+not affected. Grant a role you added yourself what it needs —
+`GRANT CONNECT ON DATABASE "oduflow_1_main" TO "reporting";` — and repeat it
+after the environment is recreated, since a new database starts closed again.
+See [Database isolation](environments.md#database-isolation).
 
 ---
 

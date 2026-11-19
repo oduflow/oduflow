@@ -55,6 +55,7 @@ from oduflow.docker_ops.system_ops import (
     pg_clone_strategy_clause,
     reassign_db_ownership,
     require_postgres_for_odoo,
+    restrict_database_access,
 )
 from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
@@ -2784,6 +2785,9 @@ def _create_environment_impl(
             settings,
             f'CREATE DATABASE "{env_db}" TABLESPACE "{ts_name}";',
         )
+    # A copy does not inherit its template's privileges: PUBLIC may connect to
+    # it again. The role created next becomes the owner and keeps its access.
+    restrict_database_access(client, settings, env_db)
 
     env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
     _create_pg_role(

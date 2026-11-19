@@ -723,9 +723,51 @@ What follows from running there:
   add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
   is no fallback to the PostgreSQL container.
 - **The environment needs its own database role.** One created before
-  per-environment credentials existed is refused until it is recreated or
-  updated; the cluster's own credential is never used for caller-written SQL.
+  per-environment credentials existed is refused until it is recreated; the
+  cluster's own credential is never used for it — see
+  [Database isolation](#database-isolation).
 - **Productions are not reachable** through either surface.
+
+### Database isolation
+
+Every environment has its own PostgreSQL role, which owns the environment's
+database, and **no other role of the cluster may connect to that database**.
+PostgreSQL by default lets every role connect to every database; Oduflow
+revokes that when it creates a database — an environment's, a template's, a
+production's or a service database — and, on each server start, on databases
+an older version created. The owner keeps its access; a production whose
+database is still owned by the superuser (one restored by an older version)
+has its role granted access first, so nothing running is cut off. Databases
+outside the `oduflow_` namespace are yours and are left as they are.
+
+If you connected to an environment's database with a role of your own (a
+reporting or monitoring role, for example), grant it access explicitly:
+`GRANT CONNECT ON DATABASE "oduflow_<team>_<env>" TO "<role>";`. A copy made
+from a template starts without it again.
+
+Oduflow reads an environment's database the same way your code does: as the
+environment's own role, never as the cluster superuser. That holds for the
+checks around `install_odoo_modules` and `upgrade_odoo_modules`, the installed
+modules list, the dashboard's **Connect As** user list, translation exports
+and `reset_admin_password`. The tables, functions and operators in a database
+are its tenant's to define, and a query resolves them with the rights of
+whoever runs it.
+
+**Environments without their own role.** An environment created before
+per-environment credentials existed has no role on record, and Oduflow does
+not fall back to the superuser for it. On such an environment:
+
+- `install_odoo_modules`, `upgrade_odoo_modules` with module names and
+  `pull_and_apply` with modules to install or upgrade are refused before Odoo
+  runs (`upgrade_odoo_modules all` reads nothing first and still works);
+- `list_installed_modules`, the dashboard's module picker and the **Connect
+  As** user list report the error instead of a list;
+- `run_db_query`, the SQL console, `run_odoo_shell`, `run_odoo_tests`,
+  `connect_as_user` and `reset_admin_password` are refused as before.
+
+The error is `Environment '<name>' has no scoped database credentials`.
+Recreate the environment (`recreate_environment`, or delete and create it —
+either way its database is rebuilt from its template) to give it a role.
 
 ## Interactive Terminal
 
