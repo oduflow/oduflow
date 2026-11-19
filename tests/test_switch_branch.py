@@ -817,11 +817,9 @@ def dependency_switch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         env_ops,
         "load_credentials",
-        lambda *a: {
-            "pg_user": settings.db_user,
-            "pg_password": settings.db_password,
-        },
+        lambda *a: {"pg_user": "u_1_dev1", "pg_password": "scoped-pw"},
     )
+    monkeypatch.setattr(env_ops, "_create_pg_role", lambda *a, **kw: None)
     monkeypatch.setattr(env_ops, "_reapply_odoo_conf", lambda *a: False)
     monkeypatch.setattr(
         env_ops, "_reconcile_environment_hostname_for_update", lambda *a: False

@@ -171,7 +171,6 @@ def run_environment_tests(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     # Use -u (upgrade), not -i (install): the module is already installed in the
@@ -307,7 +306,6 @@ def _run_odoo_module_command(
             env_name,
             team.workspaces_dir,
             settings.db_user,
-            settings.db_password,
             allow_fallback=False,
         )
     if flag == "-u":
@@ -801,7 +799,6 @@ def scoped_psql(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     if container.status != "running":
@@ -899,7 +896,6 @@ def run_internal_db_query(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     layout = {"human": [], "tuples": ["-tA"]}.get(output_format, ["--csv"])
@@ -1150,7 +1146,6 @@ def run_odoo_shell(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
 
@@ -1312,7 +1307,6 @@ def connect_as_user(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
 
@@ -1713,7 +1707,6 @@ def _export_command(
             env_name,
             team.workspaces_dir,
             settings.db_user,
-            settings.db_password,
             allow_fallback=False,
         )
         conf = f"/tmp/oduflow-i18n-{token}.conf"

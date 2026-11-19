@@ -2132,13 +2132,17 @@ class TestUpdateEnvironment:
         assert result["env_name"] == "next"
         assert result["database"] == "oduflow_1_next"
 
+    @patch(
+        "oduflow.docker_ops.env_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "pw"},
+    )
     @patch("oduflow.docker_ops.env_ops.check_rename_target")
     @patch(
         "oduflow.docker_ops.env_ops._relocate_environment_state",
         side_effect=RuntimeError("database is being accessed by other users"),
     )
     def test_a_failed_relocation_reports_the_containerless_state(
-        self, mock_relocate, mock_check, mock_docker_client
+        self, mock_relocate, mock_check, mock_creds, mock_docker_client
     ):
         # The old container is removed before the relocation and cannot be
         # brought back; the error must say what the operation left behind

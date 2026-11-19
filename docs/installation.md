@@ -213,6 +213,8 @@ Two consequences are checked before anything is changed:
   `pg_stat_statements`) must be marked `trusted = true` in the new image's
   control file, or be dropped first;
 - a database whose credentials file is missing has no role to restore it.
+  For a production, `reconfigure_production` with no settings changed
+  provisions the role again and writes the file.
 
 If you trust everything a database contains, you can let the superuser restore
 it as before by starting Oduflow with

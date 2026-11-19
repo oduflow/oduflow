@@ -5,7 +5,7 @@ import secrets
 
 from oduflow.errors import PrerequisiteNotMetError
 from oduflow.fsutil import atomic_write_private_json
-from oduflow.naming import get_workspace_path, slugify_branch
+from oduflow.naming import PROD_ENV_PREFIX, get_workspace_path, slugify_branch
 
 logger = logging.getLogger("oduflow")
 
@@ -30,13 +30,15 @@ def generate_pg_password() -> str:
             return password
 
 
-def create_credentials(
-    env_name: str, team_id: str, workspaces_dir: str
-) -> dict[str, str]:
-    username = generate_pg_username(env_name, team_id)
-    password = generate_pg_password()
-    creds = {"pg_user": username, "pg_password": password}
+def new_credentials(env_name: str, team_id: str) -> dict[str, str]:
+    """A role name and a fresh password for *env_name*, not yet on disk."""
+    return {
+        "pg_user": generate_pg_username(env_name, team_id),
+        "pg_password": generate_pg_password(),
+    }
 
+
+def save_credentials(env_name: str, workspaces_dir: str, creds: dict[str, str]) -> None:
     workspace_path = get_workspace_path(env_name, workspaces_dir)
     os.makedirs(workspace_path, exist_ok=True)
     creds_path = os.path.join(workspace_path, _CREDENTIALS_FILE)
@@ -44,8 +46,16 @@ def create_credentials(
     # password, and a crash mid-write must not leave a half-written file.
     atomic_write_private_json(creds_path, creds)
 
+
+def create_credentials(
+    env_name: str, team_id: str, workspaces_dir: str
+) -> dict[str, str]:
+    creds = new_credentials(env_name, team_id)
+    save_credentials(env_name, workspaces_dir, creds)
     logger.info(
-        "Created PG credentials for environment '%s' (user=%s)", env_name, username
+        "Created PG credentials for environment '%s' (user=%s)",
+        env_name,
+        creds["pg_user"],
     )
     return creds
 
@@ -54,25 +64,48 @@ class MissingCredentialsError(PrerequisiteNotMetError):
     """No per-environment PostgreSQL credentials exist and fallback is disallowed."""
 
 
+def missing_credentials_message(env_name: str) -> str:
+    """What to tell the caller about an environment or production without a role.
+
+    Recreating the container is the remedy for both: it is the step that
+    provisions the role (system_ops.provision_scoped_role), and it keeps the
+    database.
+    """
+    if env_name.startswith(PROD_ENV_PREFIX):
+        return (
+            f"Production '{env_name[len(PROD_ENV_PREFIX) :]}' has no scoped "
+            "database credentials. Run reconfigure_production (no settings "
+            "need to change) to give it a PostgreSQL role of its own: the "
+            "container is recreated, the database and filestore are kept (the "
+            "cluster superuser is never used in the role's place)."
+        )
+    return (
+        f"Environment '{env_name}' has no scoped database credentials. "
+        "Run update_environment to give it a PostgreSQL role of its own: "
+        "the container is recreated, the database and filestore are kept "
+        "(the cluster superuser is never used in the role's place)."
+    )
+
+
 def load_credentials(
     env_name: str,
     workspaces_dir: str,
     fallback_user: str,
-    fallback_password: str,
     *,
     allow_fallback: bool = True,
 ) -> dict[str, str]:
     """Load an environment's scoped PostgreSQL credentials.
 
-    When the per-environment credentials file is missing, the fallback is the
-    cluster **superuser**. Whatever runs SQL in the environment's database, or
-    hands the credential to code a tenant controls, must pass
-    ``allow_fallback=False``: interactive psql, run_db_query and run_odoo_shell
-    would let a tenant ``\\c`` into another team's database or ``COPY ... FROM
-    PROGRAM`` for RCE, and even a fixed query resolves the tenant's own tables,
-    functions and operators with the rights of the role that runs it. The
-    fallback is left for callers that only name the role (to drop or report
-    it) or recreate a legacy container with the credential it already holds.
+    When the per-environment credentials file is missing, the fallback names
+    the cluster **superuser** and carries no password: there is nothing here
+    to connect with, and so nothing that could end up in a container whose
+    tenant is root in it. It is left for callers that only *name* the role —
+    to drop or report it, or to notice that there is none and provision one
+    (system_ops.provision_scoped_role). Whatever runs SQL in the environment's
+    database passes ``allow_fallback=False`` and gets an error instead: the
+    superuser's local socket needs no password, and even a fixed query
+    resolves the tenant's own tables, functions and operators with the rights
+    of the role that runs it.
     """
     workspace_path = get_workspace_path(env_name, workspaces_dir)
     creds_path = os.path.join(workspace_path, _CREDENTIALS_FILE)
@@ -81,12 +114,8 @@ def load_credentials(
             creds: dict[str, str] = json.load(f)
             return creds
     if not allow_fallback:
-        raise MissingCredentialsError(
-            f"Environment '{env_name}' has no scoped database credentials. "
-            "Recreate the environment to provision a per-environment PostgreSQL "
-            "role (the cluster superuser is never used in its place)."
-        )
-    return {"pg_user": fallback_user, "pg_password": fallback_password}
+        raise MissingCredentialsError(missing_credentials_message(env_name))
+    return {"pg_user": fallback_user, "pg_password": ""}
 
 
 def recorded_roles(workspaces_dir: str) -> dict[str, str]:

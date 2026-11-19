@@ -3957,7 +3957,7 @@ def reset_admin_password(
     Odoo stores) and written to the res_users record where login = 'admin', as
     the environment's own database role. A stopped environment is started
     first. An environment that predates per-environment database roles is
-    refused; recreate it to provision one.
+    refused; update_environment provisions one and keeps the database.
 
     Args:
         env_name: The name of the environment.

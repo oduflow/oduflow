@@ -589,7 +589,7 @@ class TestInventory:
             },
         }
 
-        def load_credentials(env_name, workspaces_dir, user, password):
+        def load_credentials(env_name, workspaces_dir, user):
             return (credentials or {}).get(
                 env_name, {"pg_user": f"u_1_{env_name}", "pg_password": "pw"}
             )
@@ -685,7 +685,7 @@ class TestInventory:
                 "prod",
                 ["postgres", "oduflow_1_prod-shop", "oduflow_service_1_pay"],
                 # What load_credentials returns without a credentials file.
-                credentials={"prod-shop": {"pg_user": "odoo", "pg_password": "super"}},
+                credentials={"prod-shop": {"pg_user": "odoo", "pg_password": ""}},
             )
         message = str(exc_info.value)
         assert "without a scoped role on record: oduflow_1_prod-shop." in message

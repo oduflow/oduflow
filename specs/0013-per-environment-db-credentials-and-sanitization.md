@@ -3,7 +3,7 @@
 **Status:** Adopted (still in force)
 **Type:** Architecture
 **First introduced:** `cd0b9ec` "two-tier database sanitization" (2026-02-24), `e4949b0` "per-environment PostgreSQL credentials" (2026-02-26)
-**Key code today:** `env_credentials.py` (generate / persist / load / delete per-env creds), `sanitizer.py` (`neutralize_environment` native baseline + two-tier script runner), `docker_ops/env_ops.py` (`_create_pg_role`, post-clone ownership fixup), `docker_ops/system_ops.py` (shared DB, role helpers), `server.py` (`_inject_db_password` — bootstrap superuser secret)
+**Key code today:** `env_credentials.py` (generate / persist / load / delete per-env creds), `sanitizer.py` (`neutralize_environment` native baseline + two-tier script runner), `docker_ops/env_ops.py` (`_create_pg_role`, post-clone ownership fixup), `docker_ops/system_ops.py` (shared DB, role helpers, `provision_scoped_role` for a database that predates its role), `server.py` (`_inject_db_password` — bootstrap superuser secret)
 
 ## Context
 
@@ -396,6 +396,87 @@ it, and that turned out to be the weaker half of the boundary:
   above (they fire on the superuser's DDL in its clones until the template
   is reloaded).
 
+- (2026-11-19) — **the superuser's password stops being handed to
+  containers, and the backward-compatible fallback from the Decision is
+  withdrawn.** "Old environments without a credentials file fall back to the
+  global user" meant, concretely, that `update_environment` recreated such
+  an environment's container with `USER` / `PASSWORD` set to the cluster
+  superuser, and `reconfigure_production` did the same for a production
+  whose credentials file was gone. A tenant is root in its Odoo container,
+  and from there every connection is a network connection authenticated by
+  password — so that one variable undid, for the tenants concerned, every
+  boundary the entries above draw. Refusing to recreate was weighed and
+  rejected: it would have left "recreate the environment", which rebuilds
+  the database from its template, as the only remedy, for environments
+  that are by definition the oldest and most lived-in.
+  Instead the recreate **provisions the role the environment never had**
+  (`system_ops.provision_scoped_role`): `REVOKE ... FROM PUBLIC`, create the
+  role, make it the owner of the database, hand over everything inside with
+  the pinned `reassign_db_ownership`, and only then write the credentials
+  file — last, so that a failure leaves no record of a role that does not
+  own its database and a retry starts over (every statement is idempotent).
+  The end state is the one `create_environment` produces; the signaling
+  sequences are *not* dropped as after a clone, because that fixup exists
+  for sequences the new role could not see, and here it owns them.
+  *Where* it runs was decided by failure, not convenience: between the stop
+  of the old container and its removal. Before the stop, the ownership
+  block would take an exclusive lock on every relation under a live Odoo;
+  after the removal, a failure would leave the environment with no
+  container and no way to describe one (its configuration lives in the
+  container's labels). In between, a failure restarts the old container if
+  it was running and raises — the old container is the state the operator
+  already had, and no *new* container is created with the superuser's login
+  under any outcome. Every path that recreates goes through it
+  (`update_environment`, `switch_branch`, the extra-checkout switch of
+  `pull_and_apply`); `recreate_environment` is delete + create and always
+  made a role.
+  *Productions* never lacked a role by design, so "legacy" there means a
+  lost file, and usually a container still running as the role. Two things
+  follow. A missing record is **drift**, so a plain `reconfigure_production`
+  repairs it instead of reporting a no-op — as is a container that an older
+  version already recreated as the superuser, since what Odoo created
+  meanwhile is the superuser's. And the running container's own `USER` /
+  `PASSWORD` are **kept** when the name is the derived one: a fresh password
+  would lock that container out the moment it is set, and it is the
+  container a failed provisioning falls back to. (Not so for development
+  environments, where `USER` / `PASSWORD` can be overridden by the tenant's
+  own variables and are therefore not evidence of anything; they always get
+  a new password.) The WAL guard is checked again right before the
+  production goes down, and a held guard also keeps the fallback from
+  restarting anything. `_container_spec` refuses the superuser as a last
+  line, so the two callers cannot drift apart.
+  Two smaller placements went the same way. `init_template`'s build
+  container ran the operator-chosen image — which may be one a tenant built
+  — as the superuser; it now gets a one-off role that owns the build
+  database, reusing the template loader. And `load_credentials` itself no
+  longer returns the superuser's password: its fallback names the role and
+  nothing else, which turns "no caller may pass this on" from a convention
+  into something the API cannot do. What still reads `Settings.db_password`
+  is pinned by a test to four functions: the two that initialise a cluster,
+  the upgrade's dump/restore helper, and the check below.
+  *Existing containers* are the part a code change cannot reach: a
+  container's environment is fixed at creation. An automatic repair on
+  start was weighed against the reconcile that closes databases to
+  `PUBLIC`, and rejected — that one is a catalog statement nobody notices,
+  this one stops a container, rewrites the ownership of a database and
+  recreates the container, with failure modes (an image that is gone, a
+  failing dependency install) an operator has to see, and it would run for
+  every old environment at once. So the start **reports**
+  (`superuser_credential_holders`: environment and production containers
+  whose `USER` and `PASSWORD` are the superuser's) and the next recreate
+  repairs. `start_environment` and the restarts are left alone on purpose:
+  they start a container that already holds the password and place nothing.
+  The consequence is spelled out for operators rather than hidden: once the
+  listed containers are recreated, the superuser's password has to be
+  changed, because it has been readable there all along. That costs nothing
+  in Oduflow itself, which reaches both clusters through their local
+  sockets. The tools' refusals now name the real remedy —
+  `update_environment`, which d408fb1 had to stop suggesting while it did
+  not provision a role, or `reconfigure_production`.
+  Still open, same family: `pg_dump` as the superuser, the `postgres:17`
+  conversion helper, and event triggers in a template loaded as the
+  superuser before the template entry above.
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -472,3 +553,11 @@ native neutralization, rather than re-implementing what Odoo already ships:
   names a tenant controls and cross-tenant connections to another team's
   database; legacy environments without a credentials file are refused on
   those paths (see Evolution).
+- (2026-11-19) — **no Odoo container is created with the superuser's login**:
+  an environment or production without a role of its own gets one when its
+  container is recreated (`system_ops.provision_scoped_role`, from
+  `env_ops.update_environment` and `production_ops.reconfigure_production`),
+  the template build runs as a one-off role, `load_credentials` stops
+  returning the superuser's password, and the start reports the containers
+  that still hold it (`superuser_credential_holders`); this withdraws the
+  Decision's fallback for old environments (see Evolution).

@@ -30,6 +30,10 @@ This will:
 4. Extract the filestore to `{data_dir}/team_{ID}/templates/{name}/filestore/`
 5. Load the dump into the template database automatically
 
+The temporary Odoo container connects as a one-off PostgreSQL role that owns
+only the build database, not as the cluster superuser: the build runs whatever
+the image contains. The role and the build database are removed afterwards.
+
 ### Install additional modules during generation
 
 ```bash

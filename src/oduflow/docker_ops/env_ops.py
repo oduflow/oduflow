@@ -53,6 +53,7 @@ from oduflow.docker_ops.system_ops import (
     ensure_team_tablespace,
     estimate_new_db_bytes,
     pg_clone_strategy_clause,
+    provision_scoped_role,
     reassign_db_ownership,
     require_postgres_for_odoo,
     restrict_database_access,
@@ -1944,9 +1945,7 @@ def _cleanup_old_environment(
     env_db = get_db_name(env_name, team.team_id)
 
     try:
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
+        creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
         _drop_pg_role(client, settings, creds["pg_user"])
     except Exception:
         pass
@@ -4107,9 +4106,7 @@ def delete_environment(
         logger.warning(msg, extra={"env_name": env_name})
         warnings.append(msg)
 
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
     try:
         _drop_pg_role(client, settings, creds["pg_user"])
     except Exception as exc:
@@ -4781,9 +4778,7 @@ def get_environment_info(
     except docker.errors.NotFound:
         pass
 
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
     result["db_user"] = creds["pg_user"]
 
     result["all_running"] = result["odoo"]["running"] and result["db"]["running"]
@@ -6324,7 +6319,11 @@ def update_environment(
     SHA mounts during pull_and_apply; that path disables image pulls and
     restores dependencies from the new mounts. The PostgreSQL connection variables
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
-    and image-baked env comes from the image itself.
+    and image-baked env comes from the image itself. An environment without
+    credentials of its own (one created before per-environment roles existed)
+    is given a role first, while its container is stopped: the cluster
+    superuser's login is never put into the new container. A failure there
+    leaves the old container in place and raises.
 
     Dependency installer failures are returned as a nonzero ``exit_code`` with
     setup logs and the resulting identity, after rename bookkeeping finishes.
@@ -6509,6 +6508,16 @@ def update_environment(
             client, settings, team, env_name, labels
         )
 
+    # The connection variables of the new container. Without a role of its own
+    # on record the environment would have to connect as the cluster
+    # superuser, which is how environments older than per-environment roles
+    # were created — and its password must not enter a container whose tenant
+    # is root in it. Such an environment gets its role below, once Odoo is
+    # stopped.
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
+    role_provisioned = False
+    was_running = container.status == "running"
+
     logger.info(
         "Updating environment – stopping old container",
         extra={"env_name": env_name, "container": odoo_container_name},
@@ -6521,6 +6530,25 @@ def update_environment(
         container.stop()
     except Exception:
         pass
+    if creds["pg_user"] == settings.db_user:
+        # Between the stop and the removal: the ownership transfer wants no
+        # Odoo session in the database, and a failure can still leave the
+        # environment as it was.
+        try:
+            creds = provision_scoped_role(client, settings, team, env_name)
+        except Exception as exc:
+            if was_running:
+                with contextlib.suppress(Exception):
+                    container.start()
+            raise PrerequisiteNotMetError(
+                f"Environment '{env_name}' has no PostgreSQL role of its own, "
+                f"and one could not be provisioned: {exc} The environment was "
+                "left as it was. Its container is not recreated with the "
+                "cluster superuser's credentials; fix the cause and retry, or "
+                "use recreate_environment to rebuild the environment from "
+                "its template."
+            ) from exc
+        role_provisioned = True
     try:
         container.remove(v=True)
     except docker.errors.APIError:
@@ -6602,10 +6630,7 @@ def update_environment(
                 logger.warning("Could not re-mount filestore overlay: %s", exc)
 
     # Re-create PG role in case PG container was recreated
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
-    if creds["pg_user"] != settings.db_user:
+    if not role_provisioned:
         env_db = get_db_name(env_name, team.team_id)
         try:
             _create_pg_role(
@@ -6733,6 +6758,12 @@ def update_environment(
     # 5. Re-install apt packages and pip requirements
     # ------------------------------------------------------------------
     setup_logs: list[str] = []
+    if role_provisioned:
+        setup_logs.append(
+            f"[DB-ROLE] The environment now connects as its own PostgreSQL "
+            f"role '{creds['pg_user']}' instead of the cluster superuser; its "
+            "database and everything in it were handed to that role."
+        )
     deps_installed = False
     dep_exit = 0
     if install_dependencies:
@@ -6821,4 +6852,5 @@ def update_environment(
         "image_updated": image_updated,
         "env_vars": user_env,
         "setup_logs": setup_logs,
+        "db_role_provisioned": role_provisioned,
     }

@@ -292,7 +292,6 @@ def refresh_environment(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     system_ops.check_disk_space(

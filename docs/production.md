@@ -411,7 +411,9 @@ What this means for the data:
   the restore the same way.
 - **A production without its credentials file**
   (`env_credentials.json` in its workspace) is not restored at all, instead of
-  being restored as the superuser.
+  being restored as the superuser. Run `reconfigure_production` on it first,
+  with no settings changed — see
+  [Reconfiguring a production](#reconfiguring-a-production).
 
 The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
 and is not affected.
@@ -458,6 +460,23 @@ replacing a secret's value in the dashboard, call
 container when one differs and lists the affected variables by name. A
 reference to a deleted secret is not treated as a change; the next recreate
 reports it. `recreate=true` recreates the container even when nothing differs.
+
+**A production without its database role on record.** A production connects
+to PostgreSQL as its own role, recorded in `env_credentials.json` in its
+workspace. If that file is lost, restores are refused and earlier versions
+recreated the container with the cluster superuser's login. Now
+`reconfigure_production(name="erp")` treats it as drift and repairs it during
+the same container swap: with Odoo stopped, the role is made the owner of the
+database and of everything in it, the database is closed to other roles, and
+the credentials are written back. If the old container still connects as the
+role, its password is kept; otherwise the role gets a new one. The response's
+notes say that a role was provisioned. If it cannot be — PostgreSQL is not
+reachable, or WAL protection is holding the cluster — nothing is recreated:
+the old container is left in place and started again if it was running. No
+production container is ever created with the superuser's login; if the server
+log names a production among the containers that still hold it, reconfigure it
+and then change the superuser's password as described under
+[Database isolation](environments.md#database-isolation).
 
 Two things reconfigure deliberately does **not** do:
 

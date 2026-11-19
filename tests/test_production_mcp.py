@@ -236,7 +236,12 @@ def test_managed_addon_is_mounted_and_kept_in_generated_config(configured, monke
     (module / "__manifest__.py").write_text("{}")
     record = production_registry.get_production(team, "erp")
     env, volumes, labels = production_ops._container_spec(
-        settings, team, "erp", record, {"pg_user": "odoo", "pg_password": "db-test"}, []
+        settings,
+        team,
+        "erp",
+        record,
+        {"pg_user": "u_1_prod-erp", "pg_password": "db-test"},
+        [],
     )
     assert volumes[str(module)] == {"bind": connector.MOUNT + "/odumcp", "mode": "ro"}
     assert team.production_token not in json.dumps([env, volumes, labels])
@@ -290,7 +295,12 @@ def test_repository_module_disables_the_managed_mount(configured, monkeypatch):
     record = production_registry.get_production(team, "erp")
 
     _, volumes, _ = production_ops._container_spec(
-        settings, team, "erp", record, {"pg_user": "odoo", "pg_password": "db-test"}, []
+        settings,
+        team,
+        "erp",
+        record,
+        {"pg_user": "u_1_prod-erp", "pg_password": "db-test"},
+        [],
     )
 
     assert str(module) not in volumes
@@ -321,7 +331,7 @@ def test_extra_repository_module_disables_the_managed_mount(configured, monkeypa
         team,
         "erp",
         record,
-        {"pg_user": "odoo", "pg_password": "db-test"},
+        {"pg_user": "u_1_prod-erp", "pg_password": "db-test"},
         [(str(worktree), "/mnt/extra-addons-fleet")],
     )
 

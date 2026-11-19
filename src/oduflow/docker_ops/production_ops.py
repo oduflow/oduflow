@@ -65,6 +65,7 @@ from oduflow.docker_ops.system_ops import (
     drop_signaling_sequences,
     ensure_prod_infra,
     ensure_team_network,
+    provision_scoped_role,
     reassign_db_ownership,
     require_postgres_for_odoo,
     restore_archive_as_role,
@@ -77,7 +78,12 @@ from oduflow.domains import (
     default_production_domain,
     validate_production_domain,
 )
-from oduflow.env_credentials import create_credentials, load_credentials
+from oduflow.env_credentials import (
+    create_credentials,
+    generate_pg_username,
+    load_credentials,
+    new_credentials,
+)
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -1012,23 +1018,54 @@ def production_db_credentials(
 
     Database content is never restored by the cluster superuser (see
     system_ops.restore_archive_as_role), so a production whose credentials
-    file is gone is refused instead of falling back to it.
+    file is gone is refused instead of falling back to it. Recreating its
+    container is what gives it a role again (see _credentials_for_recreate).
     """
     creds = load_credentials(
         prod_env_name(name),
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
     )
     if creds["pg_user"] == settings.db_user:
         raise PrerequisiteNotMetError(
             f"Production '{name}' has no scoped database credentials "
             f"(env_credentials.json is missing from {_workspace(team, name)}). "
             "Its data is restored by the production's own PostgreSQL role, "
-            "never by the cluster superuser; restore the credentials file "
-            "before retrying."
+            "never by the cluster superuser. Run reconfigure_production (no "
+            "settings need to change) to give the production its role back, "
+            "or restore the credentials file, then retry."
         )
     return creds
+
+
+def _credentials_for_recreate(
+    settings: Settings, team: TeamSettings, name: str, container: Any
+) -> tuple[dict[str, str], bool]:
+    """The role a recreated container connects as, and whether to provision it.
+
+    A production is created with a role of its own, on record in its
+    workspace. Without the record a recreated container would have had to
+    connect as the cluster superuser, whose password does not go into an Odoo
+    container; the role is provisioned again instead
+    (system_ops.provision_scoped_role), which this reports as the second
+    value. So it does for a container an older version recreated as the
+    superuser: what Odoo created since belongs to the superuser.
+
+    While the record is gone, the container usually still runs as the role.
+    Its name and password are then kept: a new password would lock that
+    container out the moment it is set, and it is the container a failed
+    provisioning falls back to. Only the derived role name is accepted from
+    it. Otherwise the role gets a new password.
+    """
+    env_name = prod_env_name(name)
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
+    held = container_env(container) if container is not None else {}
+    if creds["pg_user"] != settings.db_user:
+        return creds, held.get("USER") == settings.db_user
+    role = generate_pg_username(env_name, team.team_id)
+    if held.get("USER") == role and held.get("PASSWORD"):
+        return {"pg_user": role, "pg_password": held["PASSWORD"]}, True
+    return new_credentials(env_name, team.team_id), True
 
 
 def _copy_db_into_prod_cluster(
@@ -1420,6 +1457,13 @@ def _container_spec(
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
     repo_path = get_repo_path(env_name, team.workspaces_dir)
+    if env_creds["pg_user"] == settings.db_user:
+        # Every caller hands over the production's own role; this is the last
+        # point before a container would exist with the superuser's login.
+        raise PrerequisiteNotMetError(
+            f"Production '{name}' has no PostgreSQL role of its own; its "
+            "container is not created with the cluster superuser's credentials."
+        )
     odoo_env = {
         "HOST": settings.prod_db_container,
         "USER": env_creds["pg_user"],
@@ -2161,6 +2205,10 @@ def reconfigure_production(
     whose Traefik routing no longer matches the record (e.g. one created
     before the bus route existed), or a checkout/container still on a
     branch the record has moved away from, instead of reporting a no-op.
+    The same goes for a production without a PostgreSQL role of its own on
+    record (or whose container connects as the cluster superuser): the role
+    is provisioned while the container is stopped, and a failure there puts
+    the old container back and raises (see _credentials_for_recreate).
     Changing
     ``server_mode`` re-tunes odoo.conf and re-points Traefik at the other
     Odoo port. Changing ``odoo_image`` does NOT migrate the
@@ -2305,6 +2353,13 @@ def reconfigure_production(
             or (bool(checked_out) and checked_out != target_branch)
         )
     )
+    # The role the container connects as. A production without one on record
+    # (its credentials file is gone), or one an older version recreated as
+    # the cluster superuser for that reason, is drift like the rest: this
+    # call gives it its role back while the container is replaced.
+    env_creds, provision_role = _credentials_for_recreate(
+        settings, team, name, container
+    )
     drift = (
         force_recreate
         or container is None
@@ -2312,6 +2367,7 @@ def reconfigure_production(
         or routing_drift(settings, team, name, record, container.labels or {})
         or bool(secret_drift)
         or branch_drift
+        or provision_role
     )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
@@ -2440,9 +2496,6 @@ def reconfigure_production(
         )
 
     # Built after the addon refresh above: both mount the managed checkout.
-    env_creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
     generated_conf = _build_prod_odoo_conf(
         settings,
         team,
@@ -2456,11 +2509,48 @@ def reconfigure_production(
     )
 
     container = _get_container(client, settings, team, name)
+    was_running = container is not None and container.status == "running"
+    if provision_role:
+        # Checked again right before the downtime starts: the role is written
+        # to the production cluster.
+        assert_writable(settings)
     if container is not None:
         try:
             container.stop(timeout=30)
         except Exception as exc:
             logger.warning("Stopping old container failed (removing anyway): %s", exc)
+    if provision_role:
+        # With Odoo stopped and its container still there: the ownership
+        # transfer wants no session in the database, and a failure can still
+        # put the production back the way it was.
+        try:
+            env_creds = provision_scoped_role(
+                client,
+                settings,
+                team,
+                env_name,
+                creds=env_creds,
+                container_name=settings.prod_db_container,
+            )
+        except Exception as exc:
+            if container is not None and was_running:
+                try:
+                    assert_writable(settings)
+                    container.start()
+                except Exception as restart_exc:
+                    logger.warning(
+                        "Could not restart production container after a "
+                        "failed role provisioning: %s",
+                        restart_exc,
+                    )
+            raise PrerequisiteNotMetError(
+                f"Production '{name}' has no PostgreSQL role of its own on "
+                f"record, and one could not be provisioned: {exc} The "
+                "container was left as it was, and is not recreated with the "
+                "cluster superuser's credentials. Fix the cause and run "
+                "reconfigure_production again."
+            ) from exc
+    if container is not None:
         container.remove(force=True)
 
     if staged_clone_path is not None:
@@ -2515,6 +2605,12 @@ def reconfigure_production(
         )
 
     notes: list[str] = []
+    if provision_role:
+        notes.append(
+            "The production had no PostgreSQL role of its own in use or on "
+            f"record. It now connects as '{env_creds['pg_user']}', which owns "
+            "its database, and the credentials are recorded in its workspace."
+        )
     if rotated_secrets:
         notes.append(
             "Recreated to apply rotated secret values: "
@@ -2523,7 +2619,7 @@ def reconfigure_production(
         )
     if force_recreate and not updates:
         notes.append("The container was recreated on request.")
-    elif not updates and not rotated_secrets:
+    elif not updates and not rotated_secrets and not provision_role:
         notes.append(
             "No settings changed, but drifted state was repaired (the "
             "container, its Traefik routing, the repo checkout and/or its "
@@ -2574,6 +2670,7 @@ def reconfigure_production(
         "healthy": healthy,
         "setup_logs": setup_logs,
         "notes": notes,
+        "db_role_provisioned": provision_role,
         "elapsed_seconds": round(time.time() - start_time, 1),
     }
 
@@ -2677,9 +2774,7 @@ def _destroy_leftovers(
     if require_db_drop and not db_dropped:
         return False, warnings
     try:
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
+        creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
         _drop_pg_role(
             client,
             settings,

@@ -328,25 +328,27 @@ class TestModuleNameValidation:
 
 
 class TestCredentialFallback:
-    def test_fallback_returns_shared_when_allowed(self, tmp_path):
-        creds = load_credentials(
-            "env", str(tmp_path), "odoo", "secret", allow_fallback=True
-        )
-        assert creds == {"pg_user": "odoo", "pg_password": "secret"}
+    def test_fallback_names_the_superuser_without_its_password(self, tmp_path):
+        # Nothing to connect with: the fallback is for naming the role only,
+        # so the superuser's password cannot travel on into a container.
+        creds = load_credentials("env", str(tmp_path), "odoo", allow_fallback=True)
+        assert creds == {"pg_user": "odoo", "pg_password": ""}
 
     def test_no_fallback_raises_when_missing(self, tmp_path):
-        with pytest.raises(MissingCredentialsError):
-            load_credentials(
-                "env", str(tmp_path), "odoo", "secret", allow_fallback=False
-            )
+        with pytest.raises(MissingCredentialsError, match="update_environment"):
+            load_credentials("env", str(tmp_path), "odoo", allow_fallback=False)
+
+    def test_a_production_is_pointed_at_its_own_tool(self, tmp_path):
+        with pytest.raises(
+            MissingCredentialsError, match="Production 'erp'.*reconfigure_production"
+        ):
+            load_credentials("prod-erp", str(tmp_path), "odoo", allow_fallback=False)
 
     def test_no_fallback_uses_scoped_creds_when_present(self, tmp_path):
         create_credentials("env", "1", str(tmp_path))
-        creds = load_credentials(
-            "env", str(tmp_path), "odoo", "secret", allow_fallback=False
-        )
+        creds = load_credentials("env", str(tmp_path), "odoo", allow_fallback=False)
         assert creds["pg_user"] != "odoo"
-        assert creds["pg_password"] != "secret"
+        assert creds["pg_password"]
 
 
 class TestSetupRepoAuthSSRF:

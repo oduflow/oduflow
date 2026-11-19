@@ -455,6 +455,13 @@ setup logs together with the resulting environment identity. A completed rename
 is retained, including the agent checkout and its MCP configuration; use the
 reported new name and endpoint even when dependency setup failed.
 
+An environment without a database role of its own (created before
+per-environment database roles existed) is given one during the update: the
+role becomes the owner of the database and its content, and the new container
+connects as it. The setup log says so. If the role cannot be provisioned, the
+update fails and the old container stays. See
+[Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -480,6 +487,7 @@ Lock: environment.
 - Bumping the Odoo image (e.g. `odoo:18.0` → `odoo:19.0`) while keeping the data.
 - Changing container environment variables or wiring in a new secret.
 - The container is damaged and you want a fresh one on the same data.
+- A tool refused the environment with `has no scoped database credentials`.
 - The environment's name no longer describes what it holds. (If it should also move onto another branch, use [`switch_branch`](#switch_branch) — it renames along the way.)
 
 ```bash
@@ -642,8 +650,9 @@ Install Odoo modules (`odoo -i`) in an environment.
 
 After a successful run the module states are read back from the database, as
 the environment's own database role. An environment without one (created
-before per-environment database roles existed) is refused before Odoo runs —
-see [Database isolation](environments.md#database-isolation).
+before per-environment database roles existed) is refused before Odoo runs,
+until [`update_environment`](#update_environment) has given it one — see
+[Database isolation](environments.md#database-isolation).
 
 Lock: environment.
 { .odu-tool-meta }
@@ -1303,7 +1312,8 @@ record where `login = 'admin'`, as the environment's own database role.
 
 Nothing is executed in the Odoo container and the cluster's own credential is
 not used. An environment created before per-environment database roles existed
-is therefore refused with an error; recreate it to provision a role.
+is therefore refused with an error; [`update_environment`](#update_environment)
+provisions a role and keeps the database.
 
 Lock: environment.
 { .odu-tool-meta }
@@ -2726,8 +2736,9 @@ domains, the Odoo image, the deployed branch or repository URL, the git
 credential user, the extra addon repos, the user environment variables, and
 the server mode. A call that changes nothing still recreates a container whose
 state drifted from the record (missing container or checkout, outdated
-Traefik routing, or a team secret whose value changed since the container was
-created).
+Traefik routing, a team secret whose value changed since the container was
+created, or a production without a database role of its own on record — see
+[Reconfiguring a production](production.md#reconfiguring-a-production)).
 
 Lock: production.
 { .odu-tool-meta }

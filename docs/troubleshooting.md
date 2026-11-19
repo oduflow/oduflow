@@ -441,9 +441,36 @@ role, so its workspace has no `env_credentials.json`. Oduflow reads and
 writes an environment's database only as that role and does not substitute
 the cluster superuser, so module installs and upgrades, the module and
 **Connect As** lists, direct SQL, the Odoo shell, tests and
-`reset_admin_password` are refused for it. Recreate the environment
-(`recreate_environment`, which rebuilds its database from its template) to
-give it a role. See [Database isolation](environments.md#database-isolation).
+`reset_admin_password` are refused for it. Run `update_environment` on it: the
+container is recreated with a role of its own, and the database and filestore
+are kept. See [Database isolation](environments.md#database-isolation).
+
+For a production the error reads `Production '<name>' has no scoped database
+credentials` (its `env_credentials.json` is gone); `reconfigure_production`
+with no settings changed gives it its role back.
+
+---
+
+## `... run with the PostgreSQL superuser's credentials` in the server log
+
+Environments created before per-environment roles existed were given the
+cluster superuser's login, and their containers still hold it. Update each
+container named in the warning (`update_environment`, or
+`reconfigure_production` for a production), then change the superuser's
+password. The steps are in
+[Database isolation](environments.md#database-isolation).
+
+---
+
+## `... has no PostgreSQL role of its own, and one could not be provisioned`
+
+`update_environment` (or `reconfigure_production`) found no database role on
+record and could not create one; the text after the colon is PostgreSQL's
+reason. Nothing was recreated: the old container is still there, and running
+again if it was running. Fix the cause — most often the database server is not
+running, or the environment's database no longer exists — and repeat the call.
+An environment whose database is gone can only be rebuilt with
+`recreate_environment`.
 
 ---
 

@@ -723,8 +723,8 @@ What follows from running there:
   add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
   is no fallback to the PostgreSQL container.
 - **The environment needs its own database role.** One created before
-  per-environment credentials existed is refused until it is recreated; the
-  cluster's own credential is never used for it — see
+  per-environment credentials existed is refused until `update_environment`
+  has given it one; the cluster's own credential is never used for it — see
   [Database isolation](#database-isolation).
 - **Productions are not reachable** through either surface.
 
@@ -766,8 +766,63 @@ not fall back to the superuser for it. On such an environment:
   `connect_as_user` and `reset_admin_password` are refused as before.
 
 The error is `Environment '<name>' has no scoped database credentials`.
-Recreate the environment (`recreate_environment`, or delete and create it —
-either way its database is rebuilt from its template) to give it a role.
+Run `update_environment` on it (no arguments needed): the environment gets a
+role and keeps its database and filestore. While the container is stopped for
+the recreate, Oduflow creates the role, makes it the owner of the database and
+of everything in it, closes the database to other roles and records the
+credentials; the new container connects as that role. The result is the state
+a newly created environment starts in, and the response says that a role was
+provisioned. Everything that recreates the container does the same — the
+dashboard's **Update**, `switch_branch`, and a `pull_and_apply` that changes
+extra-addon checkouts. `recreate_environment` works too, but rebuilds the
+database from its template.
+
+If the role cannot be provisioned (the database is missing, PostgreSQL is
+down), the update fails with the cause, the old container is left in place and
+started again if it was running, and nothing is recreated.
+
+**The superuser's password in old containers.** Such an environment's
+container was created with the cluster superuser's login in its `USER` and
+`PASSWORD` variables, and whoever has a shell in the container can read them.
+Oduflow no longer creates any Odoo container that way, but a container's
+variables are fixed when it is created, so an existing one keeps them until it
+is recreated — starting or restarting it changes nothing. On every start the
+server log names the containers concerned:
+
+```
+2 container(s) run with the PostgreSQL superuser's credentials, which anyone
+with a shell in them can read: oduflow-1-legacy-odoo, oduflow-1-old-odoo. …
+```
+
+They are reported rather than repaired on start, because the repair recreates
+the container, which interrupts whoever works in the environment and can fail
+for reasons you need to see (an image that can no longer be pulled, a failing
+dependency install). To clear the list:
+
+1. Run `update_environment` for each environment named (and
+   `reconfigure_production` for a production — see
+   [Reconfiguring a production](production.md#reconfiguring-a-production)):
+
+    ```bash
+    oduflow call update_environment '{"env_name": "legacy"}'
+    ```
+
+2. Then change the superuser's password, since it has been readable in those
+   containers: set a new one in PostgreSQL — in the development cluster and,
+   with production hosting enabled, in the production cluster — and put the
+   same value in `[database].password`:
+
+    ```bash
+    docker exec -it oduflow-db psql -U odoo -d postgres -c '\password odoo'
+    docker exec -it oduflow-prod-db psql -U odoo -d postgres -c '\password odoo'
+    ```
+
+   (`odoo` is `[database].user`.) Restart Oduflow after editing the file.
+   Oduflow itself reaches PostgreSQL through the containers' local socket
+   and does not need the password to keep working; environments, productions
+   and services connect with their own roles and are not affected. A
+   container that still holds the old password stops connecting, which is
+   the point — update it.
 
 ## Interactive Terminal
 

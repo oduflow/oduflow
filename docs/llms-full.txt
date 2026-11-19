@@ -874,6 +874,8 @@ Two consequences are checked before anything is changed:
   `pg_stat_statements`) must be marked `trusted = true` in the new image's
   control file, or be dropped first;
 - a database whose credentials file is missing has no role to restore it.
+  For a production, `reconfigure_production` with no settings changed
+  provisions the role again and writes the file.
 
 If you trust everything a database contains, you can let the superuser restore
 it as before by starting Oduflow with
@@ -1808,6 +1810,10 @@ This will:
 3. Dump the database to `{data_dir}/team_{ID}/templates/{name}/dump.pgdump`
 4. Extract the filestore to `{data_dir}/team_{ID}/templates/{name}/filestore/`
 5. Load the dump into the template database automatically
+
+The temporary Odoo container connects as a one-off PostgreSQL role that owns
+only the build database, not as the cluster superuser: the build runs whatever
+the image contains. The role and the build database are removed afterwards.
 
 ### Install additional modules during generation
 
@@ -3113,8 +3119,8 @@ What follows from running there:
   add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
   is no fallback to the PostgreSQL container.
 - **The environment needs its own database role.** One created before
-  per-environment credentials existed is refused until it is recreated; the
-  cluster's own credential is never used for it — see
+  per-environment credentials existed is refused until `update_environment`
+  has given it one; the cluster's own credential is never used for it — see
   [Database isolation](#database-isolation).
 - **Productions are not reachable** through either surface.
 
@@ -3156,8 +3162,63 @@ not fall back to the superuser for it. On such an environment:
   `connect_as_user` and `reset_admin_password` are refused as before.
 
 The error is `Environment '<name>' has no scoped database credentials`.
-Recreate the environment (`recreate_environment`, or delete and create it —
-either way its database is rebuilt from its template) to give it a role.
+Run `update_environment` on it (no arguments needed): the environment gets a
+role and keeps its database and filestore. While the container is stopped for
+the recreate, Oduflow creates the role, makes it the owner of the database and
+of everything in it, closes the database to other roles and records the
+credentials; the new container connects as that role. The result is the state
+a newly created environment starts in, and the response says that a role was
+provisioned. Everything that recreates the container does the same — the
+dashboard's **Update**, `switch_branch`, and a `pull_and_apply` that changes
+extra-addon checkouts. `recreate_environment` works too, but rebuilds the
+database from its template.
+
+If the role cannot be provisioned (the database is missing, PostgreSQL is
+down), the update fails with the cause, the old container is left in place and
+started again if it was running, and nothing is recreated.
+
+**The superuser's password in old containers.** Such an environment's
+container was created with the cluster superuser's login in its `USER` and
+`PASSWORD` variables, and whoever has a shell in the container can read them.
+Oduflow no longer creates any Odoo container that way, but a container's
+variables are fixed when it is created, so an existing one keeps them until it
+is recreated — starting or restarting it changes nothing. On every start the
+server log names the containers concerned:
+
+```
+2 container(s) run with the PostgreSQL superuser's credentials, which anyone
+with a shell in them can read: oduflow-1-legacy-odoo, oduflow-1-old-odoo. …
+```
+
+They are reported rather than repaired on start, because the repair recreates
+the container, which interrupts whoever works in the environment and can fail
+for reasons you need to see (an image that can no longer be pulled, a failing
+dependency install). To clear the list:
+
+1. Run `update_environment` for each environment named (and
+   `reconfigure_production` for a production — see
+   [Reconfiguring a production](production.md#reconfiguring-a-production)):
+
+    ```bash
+    oduflow call update_environment '{"env_name": "legacy"}'
+    ```
+
+2. Then change the superuser's password, since it has been readable in those
+   containers: set a new one in PostgreSQL — in the development cluster and,
+   with production hosting enabled, in the production cluster — and put the
+   same value in `[database].password`:
+
+    ```bash
+    docker exec -it oduflow-db psql -U odoo -d postgres -c '\password odoo'
+    docker exec -it oduflow-prod-db psql -U odoo -d postgres -c '\password odoo'
+    ```
+
+   (`odoo` is `[database].user`.) Restart Oduflow after editing the file.
+   Oduflow itself reaches PostgreSQL through the containers' local socket
+   and does not need the password to keep working; environments, productions
+   and services connect with their own roles and are not affected. A
+   container that still holds the old password stops connecting, which is
+   the point — update it.
 
 ## Interactive Terminal
 
@@ -3632,7 +3693,9 @@ What this means for the data:
   the restore the same way.
 - **A production without its credentials file**
   (`env_credentials.json` in its workspace) is not restored at all, instead of
-  being restored as the superuser.
+  being restored as the superuser. Run `reconfigure_production` on it first,
+  with no settings changed — see
+  [Reconfiguring a production](#reconfiguring-a-production).
 
 The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
 and is not affected.
@@ -3679,6 +3742,23 @@ replacing a secret's value in the dashboard, call
 container when one differs and lists the affected variables by name. A
 reference to a deleted secret is not treated as a change; the next recreate
 reports it. `recreate=true` recreates the container even when nothing differs.
+
+**A production without its database role on record.** A production connects
+to PostgreSQL as its own role, recorded in `env_credentials.json` in its
+workspace. If that file is lost, restores are refused and earlier versions
+recreated the container with the cluster superuser's login. Now
+`reconfigure_production(name="erp")` treats it as drift and repairs it during
+the same container swap: with Odoo stopped, the role is made the owner of the
+database and of everything in it, the database is closed to other roles, and
+the credentials are written back. If the old container still connects as the
+role, its password is kept; otherwise the role gets a new one. The response's
+notes say that a role was provisioned. If it cannot be — PostgreSQL is not
+reachable, or WAL protection is holding the cluster — nothing is recreated:
+the old container is left in place and started again if it was running. No
+production container is ever created with the superuser's login; if the server
+log names a production among the containers that still hold it, reconfigure it
+and then change the superuser's password as described under
+[Database isolation](environments.md#database-isolation).
 
 Two things reconfigure deliberately does **not** do:
 
@@ -6299,6 +6379,13 @@ setup logs together with the resulting environment identity. A completed rename
 is retained, including the agent checkout and its MCP configuration; use the
 reported new name and endpoint even when dependency setup failed.
 
+An environment without a database role of its own (created before
+per-environment database roles existed) is given one during the update: the
+role becomes the owner of the database and its content, and the new container
+connects as it. The setup log says so. If the role cannot be provisioned, the
+update fails and the old container stays. See
+[Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -6324,6 +6411,7 @@ Lock: environment.
 - Bumping the Odoo image (e.g. `odoo:18.0` → `odoo:19.0`) while keeping the data.
 - Changing container environment variables or wiring in a new secret.
 - The container is damaged and you want a fresh one on the same data.
+- A tool refused the environment with `has no scoped database credentials`.
 - The environment's name no longer describes what it holds. (If it should also move onto another branch, use [`switch_branch`](#switch_branch) — it renames along the way.)
 
 ```bash
@@ -6486,8 +6574,9 @@ Install Odoo modules (`odoo -i`) in an environment.
 
 After a successful run the module states are read back from the database, as
 the environment's own database role. An environment without one (created
-before per-environment database roles existed) is refused before Odoo runs —
-see [Database isolation](environments.md#database-isolation).
+before per-environment database roles existed) is refused before Odoo runs,
+until [`update_environment`](#update_environment) has given it one — see
+[Database isolation](environments.md#database-isolation).
 
 Lock: environment.
 { .odu-tool-meta }
@@ -7147,7 +7236,8 @@ record where `login = 'admin'`, as the environment's own database role.
 
 Nothing is executed in the Odoo container and the cluster's own credential is
 not used. An environment created before per-environment database roles existed
-is therefore refused with an error; recreate it to provision a role.
+is therefore refused with an error; [`update_environment`](#update_environment)
+provisions a role and keeps the database.
 
 Lock: environment.
 { .odu-tool-meta }
@@ -8570,8 +8660,9 @@ domains, the Odoo image, the deployed branch or repository URL, the git
 credential user, the extra addon repos, the user environment variables, and
 the server mode. A call that changes nothing still recreates a container whose
 state drifted from the record (missing container or checkout, outdated
-Traefik routing, or a team secret whose value changed since the container was
-created).
+Traefik routing, a team secret whose value changed since the container was
+created, or a production without a database role of its own on record — see
+[Reconfiguring a production](production.md#reconfiguring-a-production)).
 
 Lock: production.
 { .odu-tool-meta }
@@ -12047,9 +12138,36 @@ role, so its workspace has no `env_credentials.json`. Oduflow reads and
 writes an environment's database only as that role and does not substitute
 the cluster superuser, so module installs and upgrades, the module and
 **Connect As** lists, direct SQL, the Odoo shell, tests and
-`reset_admin_password` are refused for it. Recreate the environment
-(`recreate_environment`, which rebuilds its database from its template) to
-give it a role. See [Database isolation](environments.md#database-isolation).
+`reset_admin_password` are refused for it. Run `update_environment` on it: the
+container is recreated with a role of its own, and the database and filestore
+are kept. See [Database isolation](environments.md#database-isolation).
+
+For a production the error reads `Production '<name>' has no scoped database
+credentials` (its `env_credentials.json` is gone); `reconfigure_production`
+with no settings changed gives it its role back.
+
+---
+
+## `... run with the PostgreSQL superuser's credentials` in the server log
+
+Environments created before per-environment roles existed were given the
+cluster superuser's login, and their containers still hold it. Update each
+container named in the warning (`update_environment`, or
+`reconfigure_production` for a production), then change the superuser's
+password. The steps are in
+[Database isolation](environments.md#database-isolation).
+
+---
+
+## `... has no PostgreSQL role of its own, and one could not be provisioned`
+
+`update_environment` (or `reconfigure_production`) found no database role on
+record and could not create one; the text after the colon is PostgreSQL's
+reason. Nothing was recreated: the old container is still there, and running
+again if it was running. Fix the cause — most often the database server is not
+running, or the environment's database no longer exists — and repeat the call.
+An environment whose database is gone can only be rebuilt with
+`recreate_environment`.
 
 ---
 

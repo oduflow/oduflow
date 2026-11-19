@@ -27,7 +27,12 @@ import docker
 from docker import DockerClient
 from oduflow import pg_hba, service_database_credentials
 from oduflow.docker_ops import image_cleanup
-from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
+from oduflow.docker_ops.client import (
+    chown_recursive,
+    container_env,
+    get_client,
+    get_odoo_uid_gid,
+)
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.errors import (
     ConflictError,
@@ -1586,6 +1591,133 @@ def restrict_database_access(
 def _quote_ident(name: str) -> str:
     """*name* for use between double quotes in SQL."""
     return name.replace('"', '""')
+
+
+def provision_scoped_role(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    creds: dict[str, str] | None = None,
+    container_name: str | None = None,
+) -> dict[str, str]:
+    """Give the existing database of *env_name* a role of its own; return it.
+
+    For an environment created before per-environment roles existed, and for
+    a production whose credentials file is gone: both would otherwise have to
+    connect as the cluster superuser, whose password must not enter a
+    container a tenant has a shell in. The result is what create_environment
+    leaves a new environment in — the role owns the database and everything
+    in it, nobody else may connect, the credentials are on record — reached
+    without rebuilding the database.
+
+    Call it with the database's Odoo container stopped: the ownership
+    transfer locks every relation it moves, and until now the content was the
+    superuser's, which nothing takes away from a session already open. The
+    superuser runs utility statements and the pinned catalog blocks only
+    (see reassign_db_ownership); nothing here resolves a name of the tenant's.
+
+    The credentials file is written last, so a failure leaves no record of a
+    role that may not own its database, and a retry starts over: every
+    statement is idempotent. ``creds`` reuses a role name and password (the
+    ones a production's container already runs with) instead of generating
+    new ones; ``container_name`` selects the cluster.
+    """
+    from oduflow.env_credentials import new_credentials, save_credentials
+
+    database = get_db_name(env_name, team.team_id)
+    if not _db_exists(client, settings, database, container_name=container_name):
+        raise PrerequisiteNotMetError(
+            f"Database '{database}' does not exist, so there is nothing to "
+            "give a PostgreSQL role of its own."
+        )
+    creds = dict(creds) if creds else new_credentials(env_name, team.team_id)
+    role = creds["pg_user"]
+    if role == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Refusing to record the cluster superuser as the role of '{database}'."
+        )
+    restrict_database_access(client, settings, database, container_name=container_name)
+    _create_pg_role(
+        client,
+        settings,
+        role,
+        creds["pg_password"],
+        database,
+        container_name=container_name,
+    )
+    reassign_db_ownership(
+        client, settings, database, role, container_name=container_name
+    )
+    save_credentials(env_name, team.workspaces_dir, creds)
+    logger.info(
+        "Provisioned PG role '%s' for existing database '%s'",
+        role,
+        database,
+        extra={"env_name": env_name},
+    )
+    return creds
+
+
+def superuser_credential_holders(client: DockerClient, settings: Settings) -> list[str]:
+    """Environment and production containers created with the superuser's login.
+
+    An environment created before per-environment roles existed connects as
+    the cluster superuser, and so does a production recreated by an older
+    version after its credentials file was lost. A container's environment
+    is fixed when it is created, so each keeps the password until it is
+    recreated — which is when provision_scoped_role gives it a role of its
+    own. The PostgreSQL containers themselves are not listed: they are not a
+    tenant's.
+    """
+    holders: list[str] = []
+    for container in client.containers.list(
+        all=True, filters={"label": f"{settings.managed_label}=true"}
+    ):
+        labels = container.labels or {}
+        if labels.get(settings.system_label) == "true" or not (
+            labels.get(settings.branch_label) or labels.get("oduflow.prod") == "true"
+        ):
+            continue
+        env = container_env(container)
+        if (
+            env.get("USER") == settings.db_user
+            and env.get("PASSWORD") == settings.db_password
+        ):
+            holders.append(str(container.name))
+    return sorted(holders)
+
+
+def _warn_superuser_credential_holders(
+    client: DockerClient, settings: Settings
+) -> None:
+    """Name the containers a tenant can read the superuser's password in.
+
+    Reported, not repaired, on start: the repair recreates a container and
+    rewrites the ownership of its database, which interrupts whoever works in
+    it and can fail for reasons an operator has to see (an image that is no
+    longer pullable, a failing dependency install). It happens with the next
+    update_environment / reconfigure_production of each one instead.
+    """
+    try:
+        holders = superuser_credential_holders(client, settings)
+    except Exception:
+        logger.warning(
+            "Could not check containers for the PostgreSQL superuser's credentials",
+            exc_info=True,
+        )
+        return
+    if holders:
+        logger.warning(
+            "%d container(s) run with the PostgreSQL superuser's credentials, "
+            "which anyone with a shell in them can read: %s. Recreate each "
+            "(update_environment, or reconfigure_production for a production) "
+            "to give it a role of its own, then change the superuser's "
+            "password (ALTER ROLE in each cluster, then [database].password).",
+            len(holders),
+            ", ".join(holders),
+        )
 
 
 # Managed databases PUBLIC still has a privilege on. grantee 0 is PUBLIC; a
@@ -3379,6 +3511,8 @@ def init_system(
     for team in settings.teams.values():
         production_registry.clear_stale_deploy_flags(team)
 
+    _warn_superuser_credential_holders(client, settings)
+
     # Per-team coding-agent containers. init_system runs on every server
     # start, so oduflow.toml is applied here: enabled teams get their container
     # ensured (recreated on config drift), disabled teams get a leftover
@@ -3682,9 +3816,29 @@ def init_template(
     temp_container_name = "flow-template-builder"
 
     if _db_exists(client, settings, build_db):
+        stale_builder = _stale_template_loader(client, settings, build_db)
         _exec_sql(client, settings, f"DROP DATABASE {build_db} WITH (FORCE);")
+        if stale_builder:
+            _retire_template_loader(client, settings, stale_builder)
 
-    _exec_sql(client, settings, f"CREATE DATABASE {build_db};")
+    # The build runs whatever the image holds, as root in its container, and
+    # the image may be one a tenant built. It gets a one-off role that owns
+    # the build database and nothing else, like a template load, instead of
+    # the superuser's login. The public schema keeps its owner, as in an
+    # environment created without a template: the dump below then carries no
+    # privilege that names a role dropped at the end of the build.
+    builder, builder_password = _create_template_loader(client, settings)
+
+    def drop_build_db() -> None:
+        _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
+        _retire_template_loader(client, settings, builder)
+
+    try:
+        _exec_sql(client, settings, f'CREATE DATABASE {build_db} OWNER "{builder}";')
+        restrict_database_access(client, settings, build_db)
+    except Exception:
+        drop_build_db()
+        raise
     logger.info("Created temporary database %s", build_db)
 
     try:
@@ -3713,8 +3867,8 @@ def init_template(
         **default_env_limits(),
         environment={
             "HOST": settings.shared_db_container,
-            "USER": settings.db_user,
-            "PASSWORD": settings.db_password,
+            "USER": builder,
+            "PASSWORD": builder_password,
         },
         volumes=volumes,
         # Odoo 19 made --without-demo a boolean; "=all" (the pre-19 module
@@ -3740,7 +3894,7 @@ def init_template(
     if exit_code != 0:
         logs = temp_container.logs(tail=50).decode("utf-8", errors="replace")
         temp_container.remove(v=True)
-        _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
+        drop_build_db()
         raise ExternalCommandError(
             "odoo --stop-after-init",
             exit_code,
@@ -3761,7 +3915,7 @@ def init_template(
         )
     except ExternalCommandError:
         temp_container.remove(v=True)
-        _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
+        drop_build_db()
         raise
 
     logger.info("Dump saved to %s", template_sql_path)
@@ -3798,7 +3952,7 @@ def init_template(
     temp_container.remove(v=True)
     logger.info("Temporary container removed")
 
-    _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
+    drop_build_db()
     logger.info("Temporary database dropped")
 
     logger.info("Template generation complete, loading into template DB")
@@ -5762,7 +5916,6 @@ def cleanup_orphans(
             branch,
             team.workspaces_dir,
             settings.db_user,
-            settings.db_password,
         )
         live_roles.add(credentials["pg_user"])
     orphan_roles = [

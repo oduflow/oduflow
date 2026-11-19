@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from oduflow.docker_ops.system_ops import SUPERUSER_SEARCH_PATH_SQL
 
 # What the superuser's psql carries before the role: no command tags in the
@@ -28,3 +30,44 @@ def psql_call(cmd: list[str], superuser: str) -> tuple[str, str, str] | None:
         assert role == superuser, cmd
         return role, database, cmd[11]
     return None
+
+
+class PgContainer:
+    """A fake PostgreSQL container that logs every ``psql`` it is asked to run.
+
+    ``answers`` and ``failures`` map a fragment of a statement to the output
+    or the error of the statements containing it. ``events``, when given, is a
+    log shared with other fakes: each statement appends ``sql:<name>``, which
+    lets a test place the statements between a container's stop and removal.
+    """
+
+    def __init__(
+        self, superuser, *, name="dev", events=None, answers=None, failures=None
+    ):
+        self.calls: list[tuple[str, str, str]] = []
+        self.name = name
+        self._superuser = superuser
+        self._events = events if events is not None else []
+        self._answers = answers or {}
+        self._failures = failures or {}
+        self.container = MagicMock(name=name)
+        self.container.status = "running"
+        self.container.exec_run.side_effect = self._exec
+
+    def _exec(self, cmd, **kwargs):
+        call = psql_call(cmd, self._superuser)
+        assert call is not None, cmd
+        self.calls.append(call)
+        self._events.append(f"sql:{self.name}")
+        sql = call[2]
+        for marker, error in self._failures.items():
+            if marker in sql:
+                return 1, error.encode()
+        for marker, answer in self._answers.items():
+            if marker in sql:
+                return 0, answer.encode()
+        return 0, b""
+
+    def sql(self, database=None):
+        """Statements run so far, optionally only those in *database*."""
+        return [sql for _role, db, sql in self.calls if database in (None, db)]

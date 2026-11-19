@@ -391,7 +391,6 @@ def _carried_roles(settings: Settings, kind: str) -> dict[str, tuple[str, str] |
                     env_name,
                     team.workspaces_dir,
                     settings.db_user,
-                    settings.db_password,
                 )
             except (OSError, ValueError):
                 creds = {}  # an unreadable file is no role on record either
