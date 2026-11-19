@@ -155,6 +155,32 @@ it, and that turned out to be the weaker half of the boundary:
   password-based): an install initialised before `#74` with the published
   default should rotate it, since any tenant container can reach the server.
 
+- (2026-11-19) — **`reset_admin_password` stops trusting the tenant's container
+  and stops using the superuser.** It asked a `python3` *inside the
+  environment's Odoo container* for the passlib hash, pasted that output into
+  an `UPDATE res_users ...` string, and ran it with `psql -U <superuser>` in
+  the shared PostgreSQL container. The Odoo container is the tenant's (root via
+  `run_odoo_command`), so "the hash" was tenant-written SQL executed as the
+  cluster superuser: `x' WHERE false; ALTER ROLE <own role> SUPERUSER; --`.
+  Both halves were wrong independently, so both changed. The hash is now
+  computed **in the Oduflow process** (`odoo_ops.hash_odoo_password`:
+  `hashlib.pbkdf2_hmac` + passlib's adapted base64, emitting the
+  `$pbkdf2-sha512$<rounds>$<salt>$<checksum>` string Odoo's `CryptContext`
+  reads; 600,000 rounds, the value Odoo 15–20 hard-code, so Odoo does not
+  rewrite it on first login) — passlib was not added as a dependency for one
+  KDF call the standard library already has. And the `UPDATE` runs as the
+  environment's **scoped role** through the server-built-query path
+  (`run_internal_db_query`), after the hash is matched against its exact
+  shape. Running as the scoped role matters even with a trustworthy hash: the
+  tenant owns `res_users`, and a trigger on it would otherwise fire with
+  superuser rights. A legacy environment without a credentials file is
+  **refused** rather than served with the superuser; it has to be recreated.
+  The general rule this instance stands for: output of a tenant container is
+  untrusted input, and the superuser should not touch tenant-owned objects.
+  Fixed-SQL superuser reads of environment databases that predate this rule
+  (the "Connect as" user picker, template manifest checks) remain to be moved
+  to the scoped role.
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -209,3 +235,6 @@ native neutralization, rather than re-implementing what Odoo already ships:
   Odoo container** (`odoo_ops.ScopedPsql`), not in the shared PostgreSQL
   container, closing the `\!` / `\c` escalation to cluster superuser (see
   Evolution).
+- (2026-11-19) — **`reset_admin_password` hashes in the Oduflow process and
+  updates as the scoped role**, closing an SQL injection into a superuser
+  `psql` through the output of the tenant's Odoo container (see Evolution).

@@ -3953,8 +3953,11 @@ def reset_admin_password(
     """
     Reset the admin user password in the environment's Odoo database.
 
-    Hashes the password using passlib (pbkdf2_sha512) inside the Odoo container
-    and updates the res_users record where login = 'admin'.
+    The password is hashed by the Oduflow server (pbkdf2_sha512, the format
+    Odoo stores) and written to the res_users record where login = 'admin', as
+    the environment's own database role. A stopped environment is started
+    first. An environment that predates per-environment database roles is
+    refused; recreate it to provision one.
 
     Args:
         env_name: The name of the environment.

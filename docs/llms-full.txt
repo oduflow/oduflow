@@ -6962,8 +6962,13 @@ container's mapped port.
 ### `reset_admin_password`
 
 Reset the `admin` user's password in the environment's Odoo database. The
-password is hashed with passlib (pbkdf2_sha512) inside the container and
-written to the `res_users` record where `login = 'admin'`.
+Oduflow server hashes the password itself (`pbkdf2_sha512`, 600,000 rounds —
+the format and work factor Odoo 15–20 store) and writes it to the `res_users`
+record where `login = 'admin'`, as the environment's own database role.
+
+Nothing is executed in the Odoo container and the cluster's own credential is
+not used. An environment created before per-environment database roles existed
+is therefore refused with an error; recreate it to provision a role.
 
 Lock: environment.
 { .odu-tool-meta }

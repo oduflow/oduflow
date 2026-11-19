@@ -3832,6 +3832,241 @@ class TestInternalDbQuery:
         mock_docker_client.containers.get.assert_not_called()
 
 
+_ADMIN_UPDATE_RE = re.compile(
+    r"UPDATE res_users SET password = "
+    r"'(\$pbkdf2-sha512\$600000\$[A-Za-z0-9./]{22}\$[A-Za-z0-9./]{86})' "
+    r"WHERE login = 'admin'"
+)
+# What a tenant who replaced python3/passlib in their Odoo container used to be
+# able to hand to a superuser psql.
+_HOSTILE_HASH = "x' WHERE false; ALTER ROLE u_1_main SUPERUSER; --"
+
+
+def _ab64_decode(text):
+    import base64
+
+    return base64.b64decode(text.replace(".", "+") + "=" * (-len(text) % 4))
+
+
+class TestHashOdooPassword:
+    """The hash Odoo stores, computed without the tenant's container."""
+
+    # Produced by passlib 1.7.4 itself:
+    # pbkdf2_sha512.using(rounds=..., salt=...).hash(password)
+    @pytest.mark.parametrize(
+        "password,rounds,salt,expected",
+        [
+            (
+                "test",
+                600_000,
+                bytes(range(16)),
+                "$pbkdf2-sha512$600000$AAECAwQFBgcICQoLDA0ODw$xdLC8/F/61K63s0o4jq"
+                "58tWa2tCtk1CK4Sms7lur.6nZmAphVuFGhcANWeWIQxOBFbTKOSYOTthC0c5LzgF"
+                "sCA",
+            ),
+            (
+                # A non-ASCII password, and a salt whose encoding needs both
+                # characters that differ from plain base64 ("." and "/").
+                "pässwörd",
+                1000,
+                b"\xfb\xef\xbe\xff" + bytes(range(12)),
+                "$pbkdf2-sha512$1000$..../wABAgMEBQYHCAkKCw$in8r1nzC4V/0SdBGnhYOn"
+                "vjuEdXJ3iH43a4ZBHuIXk1YvK.b2XCXc6ygO.5t09xDMOVaByvK73yoNcYub3ukq"
+                "Q",
+            ),
+        ],
+    )
+    def test_matches_passlib_reference_vectors(self, password, rounds, salt, expected):
+        assert (
+            odoo_ops.hash_odoo_password(password, rounds=rounds, salt=salt) == expected
+        )
+
+    def test_default_is_odoos_format_and_work_factor(self):
+        first = odoo_ops.hash_odoo_password("test")
+        second = odoo_ops.hash_odoo_password("test")
+
+        scheme, rounds, salt, checksum = first.split("$")[1:]
+        assert (scheme, rounds) == ("pbkdf2-sha512", "600000")
+        assert len(_ab64_decode(salt)) == 16
+        assert len(_ab64_decode(checksum)) == 64
+        assert "=" not in first and "+" not in first
+        assert first != second  # a fresh random salt per call
+
+    def test_verifies_with_passlib_as_odoo_configures_it(self):
+        context = pytest.importorskip("passlib.context")
+        # Odoo's own context (res_users._crypt_context on 16+).
+        crypt = context.CryptContext(
+            ["pbkdf2_sha512", "plaintext"],
+            deprecated=["auto"],
+            pbkdf2_sha512__rounds=600_000,
+        )
+        hashed = odoo_ops.hash_odoo_password("s3cret ' \\ pässwörd")
+
+        # Accepted, and not flagged for a rewrite on first login.
+        assert crypt.verify_and_update("s3cret ' \\ pässwörd", hashed) == (True, None)
+        assert crypt.verify("something else", hashed) is False
+
+    @pytest.mark.parametrize(
+        "password", ["", "a'b", 'a"b', "a\\b", "a b\nc", "$(id)", _HOSTILE_HASH]
+    )
+    def test_password_text_never_shapes_the_hash(self, password):
+        hashed = odoo_ops.hash_odoo_password(password, rounds=1)
+
+        assert re.fullmatch(
+            r"\$pbkdf2-sha512\$1\$[A-Za-z0-9./]{22}\$[A-Za-z0-9./]{86}", hashed
+        )
+
+
+class TestResetAdminPassword:
+    """The tenant owns the Odoo container, so its output is tenant-written
+    text: nothing from it may reach SQL, and nothing here may run as the
+    cluster superuser (``TEST_SETTINGS.db_user``)."""
+
+    def _reset(self, mock_docker_client, password="test", env_name="main"):
+        with patch(
+            "oduflow.docker_ops.odoo_ops.load_credentials",
+            return_value=dict(_SCOPED_CREDS),
+        ) as load:
+            result = odoo_ops.reset_admin_password(
+                TEST_SETTINGS, TEST_TEAM, env_name, password
+            )
+        return result, load
+
+    @staticmethod
+    def _assert_stores(sql, password):
+        match = _ADMIN_UPDATE_RE.fullmatch(sql)
+        assert match, sql
+        hashed = match.group(1)
+        salt = _ab64_decode(hashed.split("$")[3])
+        assert odoo_ops.hash_odoo_password(password, salt=salt) == hashed
+
+    def test_hashes_in_process_and_updates_as_the_scoped_role(self, mock_docker_client):
+        odoo, db = _odoo_and_db_containers(mock_docker_client)
+        # Whatever the tenant's container would print is never asked for.
+        odoo.exec_run.return_value = (0, _HOSTILE_HASH.encode())
+        db.exec_run.return_value = (0, b"UPDATE 1\n")
+
+        result, load = self._reset(mock_docker_client, "s3cret")
+
+        assert result == {"status": "ok", "login": "admin", "psql_output": "UPDATE 1"}
+        assert odoo.mock_calls == []  # no exec, no file copied in, no start
+        assert load.call_args.kwargs == {"allow_fallback": False}
+        db.exec_run.assert_called_once()
+        assert db.exec_run.call_args.kwargs == {}
+        (argv,) = db.exec_run.call_args.args
+        assert argv[:-1] == [
+            "psql",
+            "-U",
+            "u_1_main",
+            "-d",
+            "oduflow_1_main",
+            "--csv",
+            "-c",
+        ]
+        assert TEST_SETTINGS.db_user not in argv
+        self._assert_stores(argv[-1], "s3cret")
+        assert "ALTER ROLE" not in argv[-1]
+
+    def test_needs_no_running_odoo_container(self, mock_docker_client):
+        odoo, db = _odoo_and_db_containers(mock_docker_client, status="exited")
+        db.exec_run.return_value = (0, b"UPDATE 1\n")
+
+        result, _ = self._reset(mock_docker_client)
+
+        assert result["status"] == "ok"
+        assert odoo.mock_calls == []
+
+    @pytest.mark.parametrize(
+        "password",
+        [_HOSTILE_HASH, "a'; DROP TABLE res_users; --", "\\! id", "a\nb", ""],
+    )
+    def test_hostile_password_is_only_ever_hashed(self, mock_docker_client, password):
+        _, db = _odoo_and_db_containers(mock_docker_client)
+        db.exec_run.return_value = (0, b"UPDATE 1\n")
+
+        self._reset(mock_docker_client, password)
+
+        self._assert_stores(db.exec_run.call_args.args[0][-1], password)
+
+    @pytest.mark.parametrize(
+        "bad_hash",
+        [
+            _HOSTILE_HASH,
+            "",
+            "test",
+            "$pbkdf2-sha512$600000$" + "A" * 22 + "$" + "B" * 86 + "\n",
+            "$pbkdf2-sha512$600000$" + "A" * 22 + "$" + "B" * 86 + "' OR '1'='1",
+            "$pbkdf2-sha512$600000$" + "A" * 21 + "'$" + "B" * 86,
+            "$pbkdf2-sha512$600000$" + "A" * 22 + "$" + "B" * 85 + "\\",
+            "$pbkdf2-sha512$0$" + "A" * 22 + "$" + "B" * 86,
+            "$pbkdf2-sha256$600000$" + "A" * 22 + "$" + "B" * 43,
+        ],
+    )
+    def test_anything_but_a_well_formed_hash_never_reaches_sql(
+        self, mock_docker_client, bad_hash
+    ):
+        """The last line of defence, independent of where the hash came from."""
+        odoo, db = _odoo_and_db_containers(mock_docker_client)
+
+        with (
+            patch(
+                "oduflow.docker_ops.odoo_ops.hash_odoo_password", return_value=bad_hash
+            ),
+            pytest.raises(ValueError, match="malformed password hash"),
+        ):
+            self._reset(mock_docker_client)
+
+        db.exec_run.assert_not_called()
+        assert odoo.mock_calls == []
+
+    def test_legacy_environment_is_refused_not_served_as_superuser(
+        self, tmp_path, mock_docker_client
+    ):
+        """No scoped role: the cluster's own credential is not used instead."""
+        team = TeamSettings(team_id="1", data_dir=str(tmp_path))
+        odoo, db = _odoo_and_db_containers(mock_docker_client)
+
+        with pytest.raises(
+            PrerequisiteNotMetError, match="no scoped database credentials"
+        ):
+            odoo_ops.reset_admin_password(TEST_SETTINGS, team, "main", "test")
+
+        db.exec_run.assert_not_called()
+        assert odoo.mock_calls == []
+
+    def test_missing_environment(self, mock_docker_client):
+        _, db = _odoo_and_db_containers(mock_docker_client)
+
+        with pytest.raises(NotFoundError, match="does not exist"):
+            self._reset(mock_docker_client, env_name="other")
+
+        db.exec_run.assert_not_called()
+
+    def test_other_teams_container_is_not_found(self, mock_docker_client):
+        _, db = _odoo_and_db_containers(
+            mock_docker_client, labels={TEST_SETTINGS.team_label: "2"}
+        )
+
+        with pytest.raises(NotFoundError, match="does not exist"):
+            self._reset(mock_docker_client)
+
+        db.exec_run.assert_not_called()
+
+    @pytest.mark.parametrize("env_name", ["prod-erp", "Prod-erp", "pr.od-erp"])
+    def test_production_namespace_is_rejected(self, mock_docker_client, env_name):
+        with pytest.raises(ValueError, match="production environment"):
+            self._reset(mock_docker_client, env_name=env_name)
+
+        mock_docker_client.containers.get.assert_not_called()
+
+    def test_psql_failure_is_reported(self, mock_docker_client):
+        _, db = _odoo_and_db_containers(mock_docker_client)
+        db.exec_run.return_value = (1, b'ERROR:  relation "res_users" does not exist')
+
+        with pytest.raises(ExternalCommandError, match="res_users"):
+            self._reset(mock_docker_client)
+
+
 class TestInstallModules:
     @patch(
         "oduflow.docker_ops.odoo_ops._execute_db_query",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import csv
+import hashlib
 import logging
 import os
 import re
@@ -608,59 +610,115 @@ def run_command_in_environment(
     }
 
 
+# Odoo's own work factor for ``res.users`` passwords: ``pbkdf2_sha512__rounds``
+# is 600_000 in ``odoo/addons/base/models/res_users.py`` on every supported
+# version (hard-coded on 15.0, ``MIN_ROUNDS`` from 16.0 on). passlib treats a
+# hash with any other round count as needing an update, so matching it keeps
+# Odoo from rewriting the hash on the first login.
+ODOO_PASSWORD_ROUNDS = 600_000
+# passlib's defaults for ``pbkdf2_sha512``: a 16-byte salt and the full
+# 64-byte SHA-512 digest.
+_ODOO_PASSWORD_SALT_BYTES = 16
+_ODOO_PASSWORD_DIGEST_BYTES = 64
+# The exact shape hash_odoo_password emits — 22 and 86 characters are 16 and
+# 64 bytes in unpadded base64. Nothing in this alphabet can end an SQL string
+# literal (no quote, no backslash, no whitespace).
+_ODOO_PASSWORD_HASH_RE = re.compile(
+    r"\$pbkdf2-sha512\$[1-9][0-9]{0,9}\$[A-Za-z0-9./]{22}\$[A-Za-z0-9./]{86}"
+)
+
+
+def _ab64(data: bytes) -> str:
+    """passlib's "adapted base64": ``.`` instead of ``+``, no ``=`` padding."""
+    return base64.b64encode(data, altchars=b"./").decode("ascii").rstrip("=")
+
+
+def hash_odoo_password(
+    password: str,
+    *,
+    rounds: int = ODOO_PASSWORD_ROUNDS,
+    salt: bytes | None = None,
+) -> str:
+    """Hash *password* the way Odoo stores it in ``res_users.password``.
+
+    The result is passlib's ``pbkdf2_sha512`` modular-crypt string,
+    ``$pbkdf2-sha512$<rounds>$<salt>$<checksum>``, which is the first scheme of
+    Odoo's ``CryptContext`` on 15–20. It is computed here, in the Oduflow
+    process: the environment's Odoo container belongs to the tenant, so
+    whatever a ``python3`` in there prints is tenant-written text, not a hash.
+
+    ``salt`` is for tests against known vectors; leave it out otherwise.
+    """
+    if salt is None:
+        salt = secrets.token_bytes(_ODOO_PASSWORD_SALT_BYTES)
+    checksum = hashlib.pbkdf2_hmac(
+        "sha512",
+        password.encode("utf-8"),
+        salt,
+        rounds,
+        dklen=_ODOO_PASSWORD_DIGEST_BYTES,
+    )
+    return f"$pbkdf2-sha512${rounds}${_ab64(salt)}${_ab64(checksum)}"
+
+
+def _admin_password_update_sql(hashed: str) -> str:
+    """The one statement ``reset_admin_password`` runs, for a well-formed hash.
+
+    The hash is produced by :func:`hash_odoo_password` and is checked again
+    here, where it meets SQL text, so the statement can only ever carry a
+    string of the hash alphabet whatever a future caller passes in.
+    """
+    if not _ODOO_PASSWORD_HASH_RE.fullmatch(hashed):
+        raise ValueError("Refusing to store a malformed password hash.")
+    return f"UPDATE res_users SET password = '{hashed}' WHERE login = 'admin'"
+
+
 def reset_admin_password(
     settings: Settings, team: TeamSettings, env_name: str, new_password: str = "test"
 ) -> dict[str, str]:
+    """Set the ``admin`` user's password in a dev environment's database.
+
+    Nothing here trusts the environment's Odoo container, and nothing runs as
+    the cluster superuser: the hash is computed in this process and the
+    ``UPDATE`` runs as the environment's scoped role (which owns the database,
+    as Odoo itself connects with it). An environment without a scoped role is
+    refused rather than served with the cluster's own credential.
+    """
+    validate_env_name(env_name)
+    if slugify_branch(env_name).startswith(PROD_ENV_PREFIX):
+        raise ValueError(
+            f"'{env_name}' is a production environment. The admin password can "
+            "be reset for dev environments only."
+        )
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
     )
-    env_db = get_db_name(env_name, team.team_id)
-
+    missing = NotFoundError(
+        f"Environment '{env_name}' does not exist. Use create_environment first."
+    )
+    # Looked up for existence only — nothing is executed in this container.
     try:
         container = client.containers.get(odoo_container_name)
     except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Environment '{env_name}' does not exist. Use create_environment first."
-        )
+        raise missing from None
+    # Defence in depth on top of team-scoped names (issue #39).
+    label = container.labels.get(settings.team_label)
+    if label is not None and label != team.team_id:
+        raise missing
 
-    # Hash the password using passlib inside the Odoo container
-    hash_cmd = [
-        "python3",
-        "-c",
-        "from passlib.context import CryptContext; "
-        f"print(CryptContext(['pbkdf2_sha512']).hash({new_password!r}))",
-    ]
-    exit_code, output = container.exec_run(hash_cmd)
-    hashed = (
-        output.decode("utf-8") if isinstance(output, bytes) else str(output)
-    ).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("python3 (passlib hash)", exit_code, hashed)
-
-    # Update the password in the database
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
-
-    sql = f"UPDATE res_users SET password = '{hashed}' WHERE login = 'admin'"
-    psql_cmd = ["psql", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    exit_code, output = db_container.exec_run(psql_cmd)
-    output_str = (
-        output.decode("utf-8") if isinstance(output, bytes) else str(output)
-    ).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, output_str)
+    sql = _admin_password_update_sql(hash_odoo_password(new_password))
+    result = run_internal_db_query(settings, team, env_name, sql)
 
     logger.info(
         "Admin password reset",
         extra={"env_name": env_name},
     )
-    return {"status": "ok", "login": "admin", "psql_output": output_str}
+    return {
+        "status": "ok",
+        "login": "admin",
+        "psql_output": str(result["output"]).strip(),
+    }
 
 
 # PostgreSQL listens on its default port inside the Docker network; the Odoo
@@ -1346,12 +1404,12 @@ def list_env_users(
     """Active login users of an environment (login, name, share, portal).
 
     Powers the dashboard's "Connect as" picker. Reads the environment database
-    directly via psql on the shared DB container (like ``reset_admin_password``),
-    so it works regardless of whether the Odoo HTTP server is up. ``share`` is
-    True for both portal and public users; ``portal`` is True only for real
-    portal users (members of ``base.group_portal``). The UI uses this to offer
-    separate internal (``share`` False) and portal (``portal`` True) pickers and
-    to exclude the public/anonymous user from both.
+    directly via psql on the shared DB container, so it works regardless of
+    whether the Odoo HTTP server is up. ``share`` is True for both portal and
+    public users; ``portal`` is True only for real portal users (members of
+    ``base.group_portal``). The UI uses this to offer separate internal
+    (``share`` False) and portal (``portal`` True) pickers and to exclude the
+    public/anonymous user from both.
     """
     import json
 
