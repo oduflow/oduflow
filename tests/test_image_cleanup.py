@@ -6,8 +6,10 @@ import pytest
 import docker
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.image_cleanup import (
+    build_cache_usage,
     list_unused_images,
     note_image_requested,
+    prune_build_cache,
     remove_unused_images,
 )
 
@@ -165,3 +167,75 @@ def test_already_removed_image_is_skipped():
     assert result["removed"] == []
     assert result["errors"] == []
     assert result["skipped"][0]["reason"] == "Already removed."
+
+
+def _cache_record(size, in_use=False, shared=False):
+    return {"ID": f"rec{size}", "Size": size, "InUse": in_use, "Shared": shared}
+
+
+def test_build_cache_usage_reports_total_and_reclaimable_size():
+    client = MagicMock()
+    client.api.df.return_value = {
+        "Images": [],
+        "BuildCache": [
+            _cache_record(1000),
+            _cache_record(300, in_use=True),
+            # Layers shared with the image store are accounted for as images.
+            _cache_record(5000, shared=True),
+            _cache_record(7000, in_use=True, shared=True),
+            {"ID": "sizeless"},
+        ],
+    }
+    with _patched(client):
+        assert build_cache_usage() == {"size_bytes": 1300, "reclaimable_bytes": 1000}
+
+
+@pytest.mark.parametrize("payload", [{}, {"BuildCache": None}, {"BuildCache": []}])
+def test_build_cache_usage_is_zero_when_the_daemon_reports_no_cache(payload):
+    # An API older than BuildKit omits the key; some report an empty cache as null.
+    client = MagicMock()
+    client.api.df.return_value = payload
+    with _patched(client):
+        assert build_cache_usage() == {"size_bytes": 0, "reclaimable_bytes": 0}
+
+
+def test_build_cache_usage_failure_does_not_fail_the_preview():
+    client = MagicMock()
+    client.api.df.side_effect = docker.errors.APIError("private daemon details")
+    with _patched(client):
+        usage = build_cache_usage()
+    assert (usage["size_bytes"], usage["reclaimable_bytes"]) == (0, 0)
+    assert usage["error"]
+    assert "private daemon details" not in str(usage)
+
+
+def test_prune_build_cache_removes_all_unused_records():
+    client = MagicMock()
+    client.api.prune_builds.return_value = {
+        "CachesDeleted": ["rec1000"],
+        "SpaceReclaimed": 1000,
+    }
+    with _patched(client):
+        assert prune_build_cache() == {"reclaimed_bytes": 1000}
+    # all=True: every record not in use, not only dangling ones.
+    client.api.prune_builds.assert_called_once_with(all=True)
+    client.images.remove.assert_not_called()
+
+
+def test_prune_build_cache_with_nothing_to_reclaim():
+    client = MagicMock()
+    client.api.prune_builds.return_value = {"CachesDeleted": None}
+    with _patched(client):
+        assert prune_build_cache() == {"reclaimed_bytes": 0}
+
+
+def test_prune_build_cache_failure_is_reported_not_raised():
+    client = MagicMock()
+    client.api.prune_builds.side_effect = docker.errors.APIError(
+        "private daemon details"
+    )
+    with _patched(client):
+        result = prune_build_cache()
+    assert result["reclaimed_bytes"] == 0
+    assert result["error"]
+    assert "private daemon details" not in str(result)

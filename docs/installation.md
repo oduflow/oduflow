@@ -7,6 +7,7 @@
 - **Git**
 - **fuse-overlayfs** (Linux only, for filestore overlay mounting) — auto-installed on first launch; see below
 - **rsync** (all platforms, for incremental filestore copies) — auto-installed on first launch; see below
+- **docker CLI with the buildx plugin** (optional, for [container image builds](mcp-tools.md#container-image-builds)) — included in the official Oduflow image. Without it images are built by the Docker Engine's legacy builder, which fails on Dockerfiles that need BuildKit
 
 !!! note "macOS support"
     On macOS, Docker Desktop runs containers inside a Linux VM and projects
@@ -366,8 +367,9 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 # ANTHROPIC_API_KEY = ""
 # OPENAI_API_KEY = ""
 # OPENCODE_API_KEY = ""              # OpenCode Zen; arbitrary provider vars also work
-# [team.1.image_registry]            # enables the image build/publish MCP tools for this team
-# repository_prefix = "acme"         # registry namespace all published images live under (required)
+# [team.1.image_registry]            # image build limits and the registry builds are published to
+# builds_enabled = true              # false refuses new image builds for this team
+# repository_prefix = "acme"         # registry namespace published images live under; omit to build without publishing
 # host = "docker.io"                 # plain registry hostname, optionally with :port
 # username = "acme-ci"               # optional; with token, request-scoped push credentials
 # token = "<registry-token>"         # registry token/password stored in this config
@@ -506,7 +508,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
 | `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` or `tls = {}` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
-| `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
+| `[team.X.image_registry]` | *(absent — default limits, no publishing)* | Sub-table for the container image build MCP tools. Building works without it; the section tunes the build limits, enables publishing, and can switch building off. `builds_enabled` (default `true`) is the operator switch: a build runs a Dockerfile on the host's Docker daemon, so set it to `false` to refuse new builds for the team — `start_image_build` on both the team and the scoped `/mcp/<env>` endpoint, and `build` on a Stack service. `repository_prefix` is the registry namespace agents may publish under — the authorization boundary; leave it out to build and run images on this host without a registry. `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together, and only with a prefix) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline that includes fetching a repository source), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
 
 `environment_hostname_mode = "slots"` requires Traefik and a hostname with a
 distinct host prefix and parent domain, such as `dev.example.com`. A bare

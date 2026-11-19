@@ -98,6 +98,13 @@ a thin control plane over the host Docker daemon:
   from a build to a running service went through the registry, and a locally
   configured registry (or none) left the agent stuck.
 
+- **2026-11-19 — builds without an environment or a registry.** A build may
+  name a repository URL instead of an environment, runs under BuildKit when
+  available, and no longer needs the registry section — only publishing does.
+  The "Config is the gate" and "source pin is HEAD-at-admission" points above
+  describe environment builds as first shipped; see
+  [[0085-repository-image-builds]].
+
 ## Shelved alternative — the multi-tenant builder
 
 Recorded because it is the design to return to if Oduflow is ever hosted for

@@ -371,7 +371,7 @@ oduflow call delete_service_database '{"name":"events"}'
 ## Maintenance Commands
 
 ```bash
-# Show orphaned databases, workspaces, and port entries (dry-run by default)
+# Show orphaned databases, workspaces, port entries, roles and stale image build jobs (dry-run by default)
 oduflow cleanup [--team 1]
 
 # Same as above — only show what would be removed
@@ -389,7 +389,14 @@ The `cleanup` command detects and removes resources that no longer have a corres
 - **Orphan PostgreSQL roles** — per-environment login roles that have no matching environment container
 - **Unused extra-addons checkouts** — per-commit shared checkouts under `shared_extra_checkouts/` that no container (running or stopped) mounts or pins, that are not the current tip of a downloaded branch, and that were last handed out more than 6 hours ago. These accumulate as upstream branches move; the dry run lists each one with its size. A repository whose branches cannot be read, or that another operation (such as a long fetch) is using, is skipped with an `Error:` line and keeps all its checkouts
 
-By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. `--force` takes the team lock that a running server also honours: it waits up to five minutes for the team's environment operations to finish and fails with a busy error if they do not. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images.
+It also removes the records of **image build jobs** that nothing can use any more (the job directory under the team's data dir, with `job.json` and the build log):
+
+- builds that **failed**, were **cancelled**, or were **interrupted** — including a build still recorded as running whose Oduflow process has died, which `--force` first marks interrupted;
+- **succeeded** builds whose staging image is no longer in the Docker daemon.
+
+A build that is still running — in the server or in an `oduflow stack apply` process — is never touched, and a succeeded build whose staging image still exists is kept: a Stack reuses it and [`publish_image_build`](mcp-tools.md#publish_image_build) needs it. After removal, [`get_image_build`](mcp-tools.md#get_image_build) no longer finds the build.
+
+By default, `cleanup` runs in **dry-run mode** and only reports what would be removed. Use `--force` to actually delete the orphaned resources; anything that could not be removed is reported on an `Error:` line. `--force` takes the team lock that a running server also honours: it waits up to five minutes for the team's environment operations to finish and fails with a busy error if they do not. The dashboard's **Cleanup** button shows the same preview and can also remove unused Docker images and the Docker build cache, each as its own opt-in — both are shared by all teams, so the CLI leaves them alone.
 
 ## Systemd Service
 

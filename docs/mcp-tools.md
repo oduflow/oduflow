@@ -2243,7 +2243,25 @@ configuration keeps the reference.
 
 ## Container Image Builds
 
-Requires a `[team.X.image_registry]` section in `oduflow.toml`.
+Build a container image from a git revision, run it as an auxiliary service,
+and optionally publish it to a registry. Oduflow keeps the Docker socket and
+the registry credentials; the agent only names what to build.
+
+A build has one of two sources:
+
+- **a repository URL** (`repo_url` + `ref`) — any git repository, with no
+  environment involved. This is how to build a service whose repository holds
+  no Odoo code at all. Available on the team endpoint (`/mcp`) only;
+- **an environment** (`env_name`) — that environment's managed checkout. On the
+  scoped `/mcp/<env>` endpoint this is the only source, and it is implied.
+
+Building needs no configuration. **Publishing** needs a registry namespace:
+`repository_prefix` in the team's `[team.X.image_registry]` section of
+`oduflow.toml`, which also holds the optional build limits. A build runs its
+Dockerfile on the host's Docker daemon; an operator who does not want that for
+a team sets `builds_enabled = false` in the same section, and
+[`start_image_build`](#start_image_build) then refuses with a prerequisite
+error on both endpoints.
 
 A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 `oduflow-build/team-<id>:<build-id>` (reported by
@@ -2252,26 +2270,57 @@ A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 [`update_service`](#update_service): it is resolved from the local daemon, not
 pulled from a registry, so a build can be run and checked as an auxiliary
 service *before* [`publish_image_build`](#publish_image_build) pushes it
-anywhere. These service operations accept only the team's own staging images.
-Automatic build retention preserves tags referenced by running or stopped
-containers. Unused staging tags remain temporary and can be pruned; use a
-published tag to restore a service after pruning or move it to a new host.
+anywhere — or without ever publishing it. These service operations accept only
+the team's own staging images. Automatic build retention preserves tags
+referenced by running or stopped containers. Unused staging tags remain
+temporary and can be pruned; use a published tag to restore a service after
+pruning or move it to a new host.
+
+Build records (status, log, publication history) are kept until an operator
+runs cleanup — `oduflow cleanup --force` or the dashboard's **Cleanup**. It
+removes the records of failed, cancelled and interrupted builds — a build
+whose Oduflow process died counts as interrupted — and of succeeded builds
+whose staging image is gone, after which
+[`get_image_build`](#get_image_build) reports them as not found. Running
+builds, and succeeded builds whose staging image still exists, are kept. The
+dashboard's cleanup can also prune the Docker **build cache**, as its own
+opt-in; the cache is shared by every team on the server, so the next build of
+any image then runs without it. The legacy builder keeps its cache as
+intermediate images instead. Unused-image cleanup removes those only
+gradually: it never prunes an image's parents, so roughly one layer level goes
+per cleanup pass.
+
+Dockerfiles run under **BuildKit** when the `docker` CLI and its `buildx`
+plugin are installed next to Oduflow (the official Oduflow image ships both).
+Without the plugin Oduflow falls back to the Docker Engine's legacy builder,
+which fails on Dockerfiles that use `$BUILDPLATFORM`, `RUN --mount` or
+`COPY --link`; [`get_image_build`](#get_image_build) reports which builder ran.
+
+A Stack can declare the same build on a service — see
+[Building a service image](stacks.md#building-a-service-image).
 
 ### `start_image_build`
 
-Build a container image from the environment checkout's **current HEAD commit**
-— sealed with `git archive` under the environment lock, so the source cannot
-shift mid-build. The build runs asynchronously server-side and this call
-returns a `build_id` immediately. Hard timeouts, log-size caps and per-team
-concurrency limits apply.
+Build a container image from one git commit. The source is pinned before
+anything runs: a `ref` is resolved to a commit when the call is made, and an
+environment's checkout is sealed at its **current HEAD** under the environment
+lock, so the source cannot shift mid-build. The build runs asynchronously
+server-side and this call returns a `build_id` immediately. Hard timeouts,
+log-size caps and per-team concurrency limits apply.
 
-Lock: environment.
+Lock: environment (environment builds only).
 { .odu-tool-meta }
 
 **Parameters**
 
 `env_name`
-:   *str · required* — The environment whose checkout to build from.
+:   *str · default empty* — The environment whose checkout to build from. Pass this **or** `repo_url`, not both.
+
+`repo_url`
+:   *str · default empty* — Repository to build instead — HTTPS or SSH URL. Private repositories use the team's git credentials ([`setup_repo_auth`](#setup_repo_auth)) or its SSH deploy key ([`get_ssh_public_key`](#get_ssh_public_key)). Not available on the scoped endpoint.
+
+`ref`
+:   *str · default empty* — With `repo_url`: branch, tag or full commit SHA. Empty builds the repository's default branch.
 
 `dockerfile`
 :   *str · default `"Dockerfile"`* — Dockerfile path relative to the context.
@@ -2287,25 +2336,32 @@ Lock: environment.
 
 **Use it when**
 
-- Producing a deployable image from the exact code you just tested.
+- Building an auxiliary service from its own repository, e.g. `repo_url="https://github.com/acme/gateway"`, `dockerfile="docker/Dockerfile"`.
+- Producing a deployable image from the exact code you just tested in an environment.
 - Building a release candidate from a tagged commit.
 
 !!! warning "Build arguments are not secret"
     Their values reach the Dockerfile and the image history. Never pass
-    credentials. Push your commits and [`pull_and_apply`](#pull_and_apply)
-    first — the build uses the checkout's HEAD at call time.
+    credentials. For an environment build, push your commits and
+    [`pull_and_apply`](#pull_and_apply) first — the build uses the checkout's
+    HEAD at call time.
+
+!!! note "What the context contains"
+    The context is `git archive` of the pinned commit: tracked files only, no
+    `.git` directory, no submodule contents and no Git LFS objects.
 
 ### `get_image_build`
 
-Status, source commit, publication history and a build log tail for one build.
+Status, source commit, builder, publication history and a build log tail for
+one build.
 
 **Parameters**
 
-`env_name`
-:   *str · required* — The environment the build belongs to.
-
 `build_id`
 :   *str · required* — The build to inspect.
+
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
 
 `tail_lines`
 :   *int · default `100`* — Trailing build log lines to include.
@@ -2318,7 +2374,8 @@ Status, source commit, publication history and a build log tail for one build.
 ### `publish_image_build`
 
 Push a **succeeded** build's exact image — never a rebuild — to one or more
-tags under the team's configured registry namespace.
+tags under the team's configured registry namespace. Requires
+`repository_prefix` in `[team.X.image_registry]`.
 
 Any syntactically valid tag is accepted, including `latest` and semver.
 Overwriting an existing tag is intentional and last-writer-wins. Tags are
@@ -2326,9 +2383,6 @@ pushed one by one, so partial success is possible and each tag reports its own
 outcome.
 
 **Parameters**
-
-`env_name`
-:   *str · required* — The environment the build belongs to.
 
 `build_id`
 :   *str · required* — A build in status `succeeded`.
@@ -2339,6 +2393,9 @@ outcome.
 `tags`
 :   *str · required* — Comma-separated tags to publish, e.g. `"1.4.0,latest"`.
 
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
+
 **Use it when**
 
 - Promoting a verified build to `latest` and a version tag in one call.
@@ -2347,15 +2404,17 @@ outcome.
 ### `cancel_image_build`
 
 Terminate a running build and its Docker connection — even when the current
-Dockerfile step produces no output — and move the job to `cancelled`.
+Dockerfile step produces no output — and move the job to `cancelled`. A build
+that `oduflow stack apply` started runs inside that command and is cancelled by
+interrupting it, not through this tool.
 
 **Parameters**
 
-`env_name`
-:   *str · required* — The environment the build belongs to.
-
 `build_id`
 :   *str · required* — The build to cancel.
+
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
 
 **Use it when**
 
