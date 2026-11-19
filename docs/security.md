@@ -195,6 +195,24 @@ listing other environments) are **not exposed and cannot be called**. The
 environment is taken from the URL, so the agent never passes — and cannot
 override — which environment it operates on.
 
+The four [container image build](image-builds.md) tools
+(`start_image_build`, `get_image_build`, `publish_image_build`,
+`cancel_image_build`) are also on this endpoint. Building needs no
+configuration, so they work by default; on this endpoint the build source is
+always the environment's own checkout — `repo_url` and `ref` are neither
+listed nor accepted, so building an arbitrary repository stays a team-level
+capability. A Dockerfile runs on the host Docker daemon with the same reach as
+the environment containers the endpoint already runs code in; an operator who
+does not want that for a team sets `builds_enabled = false` in
+`[team.X.image_registry]`.
+
+Where that section configures a `repository_prefix`, an environment-scoped
+credential can additionally **push images to the team's registry namespace** —
+confined to that prefix, which Oduflow enforces on every publish. The agent
+receives neither the Docker socket nor the registry credentials; Oduflow
+builds and pushes on its behalf. Keep the registry token in `oduflow.toml`
+least-privilege, scoped to that prefix.
+
 ### Per-environment Secret Key
 
 Every environment gets its own access token, minted at creation time and kept

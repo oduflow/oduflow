@@ -507,6 +507,74 @@ suspect module's assets.
 
 ---
 
+## An image build fails or hangs
+
+Tool-level causes (a missing `[team.X.image_registry]` section, a context over
+`max_context_mb`, a Dockerfile that is not in the commit, a pruned staging tag,
+a partially published tag set) are listed in the
+[Container Image Builds troubleshooting table](image-builds.md#troubleshooting).
+What follows is the host-side half.
+
+Every build keeps its state and full log on disk, which is the first place to
+look when `get_image_build` is not enough:
+
+```bash
+# Jobs for team 1, newest last
+ls -lt /srv/oduflow/team_1/image_builds/
+
+# Final state of one job (status, commit, error, publications)
+cat /srv/oduflow/team_1/image_builds/bld-9f3c1a7b22e4/job.json
+
+# The complete build log (get_image_build only returns a tail)
+less /srv/oduflow/team_1/image_builds/bld-9f3c1a7b22e4/build.log
+```
+
+A job stuck in `building` with no log progress is usually a Dockerfile step
+waiting on the network — an `apt-get` or `pip install` against an unreachable
+mirror. It is bounded by `build_timeout_seconds` and can be ended immediately
+with `cancel_image_build`; the builder's whole process group is terminated even
+when the step prints nothing. A build that `oduflow stack apply` started runs
+inside that command instead, so interrupting the command is how to cancel it.
+
+Builds run on the **host Docker daemon**, so they compete with everything else
+for disk. A failure with `no space left on device` is a host problem, not a
+build one — see [Disk full](#disk-full). Layer cache and staging images are the
+usual culprits:
+
+```bash
+# What the builds are costing
+docker system df
+
+# Staging images of team 1 (retention keeps the newest keep_images builds)
+docker images 'oduflow-build/team-1'
+```
+
+Do not clear the layer cache reflexively: it is what makes a retried build
+cheap. Lowering `keep_images`, or publishing and then letting retention untag
+the staging builds, reclaims space without that cost. Staging tags used by a
+running or stopped service container are always preserved, so a `docker rmi` by
+hand can break a service that was created from a build — recreate such a
+service from a published tag instead.
+
+After an Oduflow restart, builds are never resumed. The process running a build
+holds a file lock in the job directory, so a job whose lock is free was
+abandoned by a dead process and is declared `interrupted`, while a job whose
+lock is held is left alone — a `stack apply` building beside the server is not
+mistaken for a crashed one. Succeeded builds stay publishable while their
+staging image exists.
+
+Job directories are not cleaned up on their own. `oduflow cleanup --force` and
+the dashboard's **Cleanup** remove the records of failed, cancelled and
+interrupted builds, and of succeeded builds whose staging image is gone:
+
+```bash
+# Preview (dry run by default), then remove
+oduflow cleanup --team 1
+oduflow cleanup --force --team 1
+```
+
+---
+
 ## Reporting a bug or sending feedback
 
 If none of the above helps — or Oduflow itself is at fault — file an issue on

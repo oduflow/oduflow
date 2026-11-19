@@ -2263,6 +2263,8 @@ a team sets `builds_enabled = false` in the same section, and
 [`start_image_build`](#start_image_build) then refuses with a prerequisite
 error on both endpoints.
 
+See [Container Image Builds](image-builds.md) for the end-to-end workflow, the limits and retention, and the trust model.
+
 A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 `oduflow-build/team-<id>:<build-id>` (reported by
 [`get_image_build`](#get_image_build)). That tag can be passed directly as the
