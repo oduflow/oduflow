@@ -353,8 +353,9 @@ class BackupSettings:
     basebackup_time: str = "03:30"
     # Snapshot retention: "interval_days:older_than_days" pairs, duplicacy
     # -keep style, largest age first. Default: keep everything younger than
-    # 7 days, one per day up to 30 days, one per week up to a year, one per
-    # month beyond that is not kept (0:365 would drop older ones entirely).
+    # 7 days, one per day up to 30 days, one per week up to 180 days, and one
+    # per 30 days beyond that, indefinitely (add "0:365" to drop snapshots
+    # older than a year entirely).
     keep: tuple[str, ...] = ("30:180", "7:30", "1:7")
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
