@@ -40,7 +40,11 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
+from oduflow.fsutil import (
+    atomic_write_private_json,
+    atomic_write_private_text,
+    copy_tenant_tree,
+)
 from oduflow.module_versions import odoo_series
 from oduflow.naming import (
     PROD_ENV_PREFIX,
@@ -1933,62 +1937,304 @@ def _copy_file_to_container(
         raise producer_error[0]
 
 
-def _convert_custom_dump_to_sql_with_helper(
+# An archive the cluster's own pg_restore cannot read — one written by a newer
+# pg_dump — is first rewritten as plain SQL by a newer client. That client
+# parses a file its tenant supplied, so a flaw in the parser is the tenant's to
+# use. It is therefore held tighter than the restore client: it connects to
+# nothing, so it gets no network; it is never root and has no capabilities; it
+# sees the archive read-only and, to write to, one scratch directory made for
+# this conversion and nothing else of the host. What it leaves there is not
+# trusted either: Oduflow takes the one file it expects out of the helper's
+# reach and checks it before anything reads it.
+_CONVERT_INPUT = "/convert/in"
+_CONVERT_OUTPUT_DIR = "/convert/out"
+_CONVERT_SQL_NAME = "dump.sql"
+_CONVERT_SCRATCH_DIRNAME = ".dump_convert"
+_CONVERT_TIMEOUT_SECONDS = 6 * 3600
+_CONVERT_POLL_SECONDS = 1.0
+_CONVERT_HEARTBEAT_SECONDS = 60.0
+# A scratch directory changes when its conversion starts and when the SQL is
+# taken out of the helper's reach, so one untouched for this long was left by
+# a crash — or belongs to a load that already holds its SQL open.
+_CONVERT_STALE_SECONDS = 24 * 3600
+# pg_restore writing SQL is one process; the gzip pipeline adds two.
+_CONVERT_PIDS_LIMIT = 64
+
+
+def sweep_dump_conversions(settings: Settings) -> None:
+    """Remove, for every team, what interrupted dump conversions left behind."""
+    for team in settings.teams.values():
+        _sweep_conversion_scratch(os.path.join(team.data_dir, _CONVERT_SCRATCH_DIRNAME))
+
+
+def _sweep_conversion_scratch(root: str) -> None:
+    """Remove the scratch directories of conversions a crash interrupted.
+
+    Each can hold the whole database as SQL, counted against the team's disk.
+    A CLI command may be converting while a server starts, so only directories
+    older than any conversion can run are treated as abandoned.
+    """
+    cutoff = time.time() - _CONVERT_STALE_SECONDS
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (
+                not entry.is_dir(follow_symlinks=False)
+                or entry.stat(follow_symlinks=False).st_mtime > cutoff
+            ):
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        logger.info("Removed stale dump conversion directory %s", entry.path)
+
+
+def _conversion_helper_account(dump_path: str) -> tuple[int, int, bool]:
+    """The uid and gid the conversion helper runs as, and whether the archive
+    has to be copied for it.
+
+    Never root. The helper has no capabilities, so it reads the archive by
+    plain permissions: as ``nobody`` when anyone may read it, else as its
+    owner. Root's own private archive is the one case with no such account;
+    the helper then gets a copy it may read rather than root's uid.
+    """
+    euid = os.geteuid()
+    if euid != 0:
+        # Oduflow cannot give the scratch directory to another account, so the
+        # helper is this one: it reads what Oduflow reads and owns the scratch
+        # directory Oduflow just made.
+        return euid, os.getegid(), False
+    nobody_uid, nobody_gid = (int(part) for part in _RESTORE_CLIENT_NOBODY.split(":"))
+    st = os.stat(dump_path)
+    if st.st_mode & stat.S_IROTH:
+        return nobody_uid, nobody_gid, False
+    if st.st_uid != 0:
+        return st.st_uid, st.st_gid, False
+    return nobody_uid, nobody_gid, True
+
+
+def _await_conversion(helper: Any, out_dir: str) -> tuple[int, str]:
+    """Wait for the conversion helper; return its exit code and its output.
+
+    The helper is stopped when it runs past its deadline, and when the disk it
+    writes to is nearly full: an archive of a few megabytes can expand without
+    bound, and the helper must not be what fills the host.
+    """
+    produced = os.path.join(out_dir, _CONVERT_SQL_NAME)
+    started = last_beat = time.monotonic()
+    while True:
+        helper.reload()
+        if helper.status not in ("created", "running", "restarting"):
+            break
+        now = time.monotonic()
+        stopped = ""
+        if now - started > _CONVERT_TIMEOUT_SECONDS:
+            stopped = (
+                f"it did not finish within {_CONVERT_TIMEOUT_SECONDS // 3600} hours"
+            )
+        elif shutil.disk_usage(out_dir).free < _DISK_RECOVERY_FLOOR_BYTES:
+            stopped = (
+                "less than "
+                f"{_DISK_RECOVERY_FLOOR_BYTES // 1024**3} GiB of disk space is left"
+            )
+        if stopped:
+            with contextlib.suppress(Exception):
+                helper.kill()
+            raise ExternalCommandError(
+                "pg_restore", -1, f"The dump conversion was stopped: {stopped}."
+            )
+        if now - last_beat >= _CONVERT_HEARTBEAT_SECONDS:
+            written = 0.0
+            with contextlib.suppress(OSError):
+                written = os.lstat(produced).st_size / 1024**2
+            logger.info(
+                "Converting the dump to SQL for %.0fs, %.0f MiB written",
+                now - started,
+                written,
+            )
+            last_beat = now
+        time.sleep(_CONVERT_POLL_SECONDS)
+    exit_code = int(helper.wait().get("StatusCode", -1))
+    output = helper.logs(stdout=True, stderr=True, tail=200).decode(
+        "utf-8", errors="replace"
+    )
+    return exit_code, output
+
+
+def _take_converted_sql(scratch: str, out_dir: str) -> str:
+    """Move the helper's SQL out of its reach, check it, and return its path.
+
+    The directory the helper wrote to is as untrusted as the archive: where
+    the SQL should be there may be a link to a host file, a FIFO, or nothing.
+    The entry is renamed into the private parent first — a rename moves a link
+    as a link — and only then looked at, so what is checked is what is used.
+    """
+    produced = os.path.join(out_dir, _CONVERT_SQL_NAME)
+    taken = os.path.join(scratch, _CONVERT_SQL_NAME)
+    try:
+        os.rename(produced, taken)
+        st = os.lstat(taken)
+    except OSError as exc:
+        raise ExternalCommandError(
+            "pg_restore", -1, f"The dump conversion produced no SQL file: {exc}"
+        ) from exc
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise ExternalCommandError(
+            "pg_restore",
+            -1,
+            "The dump conversion left something other than a regular file "
+            "where its SQL was expected; it was not used.",
+        )
+    if st.st_size == 0:
+        raise ExternalCommandError(
+            "pg_restore", -1, "The dump conversion produced an empty SQL file."
+        )
+    # The helper's account owns it; from here on it is an ordinary dump.
+    if (st.st_uid, st.st_gid) != (os.geteuid(), os.getegid()):
+        os.chown(taken, os.geteuid(), os.getegid(), follow_symlinks=False)
+    os.chmod(taken, 0o644)
+    return taken
+
+
+def _convert_dump_in_helper(
     client: DockerClient,
     settings: Settings,
     dump_path: str,
+    scratch: str,
     *,
     is_gzipped: bool,
-) -> tuple[int, str, str]:
-    """Convert a custom dump to plain SQL with a newer pg_restore client."""
-    dump_dir = os.path.abspath(os.path.dirname(dump_path))
-    dump_name = os.path.basename(dump_path)
-    container_path = f"/backup/{dump_name}"
-    sql_path = os.path.join(dump_dir, "dump.sql")
-    container_sql_path = "/backup/dump.sql"
+) -> str:
+    """Convert the archive at *dump_path* to SQL in *scratch*; return its path."""
+    uid, gid, needs_copy = _conversion_helper_account(dump_path)
+    out_dir = os.path.join(scratch, "out")
+    os.mkdir(out_dir, 0o700)
+    source = os.path.abspath(dump_path)
+    if needs_copy:
+        # Readable by anyone, but only through the mount: the scratch
+        # directory around it is closed to every other account on the host.
+        source = os.path.join(scratch, "in")
+        shutil.copyfile(dump_path, source)
+        os.chmod(source, 0o644)
+    if (uid, gid) != (os.geteuid(), os.getegid()):
+        os.chown(out_dir, uid, gid)
+
+    target = f"{_CONVERT_OUTPUT_DIR}/{_CONVERT_SQL_NAME}"
     if is_gzipped:
         command = [
             "bash",
             "-c",
-            "set -o pipefail; "
-            f"gunzip -c {shlex.quote(container_path)} | "
-            "pg_restore --no-owner "
-            f"-f {shlex.quote(container_sql_path)}",
+            f"set -o pipefail; gunzip -c {_CONVERT_INPUT} | "
+            f"pg_restore --no-owner -f {target}",
         ]
     else:
-        command = [
-            "pg_restore",
-            "--no-owner",
-            "-f",
-            container_sql_path,
-            container_path,
-        ]
+        command = ["pg_restore", "--no-owner", "-f", target, _CONVERT_INPUT]
 
     image_cleanup.note_image_requested(_PG_RESTORE_HELPER_IMAGE)
     with contextlib.suppress(Exception):
         client.images.pull(_PG_RESTORE_HELPER_IMAGE)
 
-    helper_name = f"{settings.prefix}pg-restore-helper-{time.time_ns()}"
     helper = None
     try:
         helper = client.containers.run(
             _PG_RESTORE_HELPER_IMAGE,
-            name=helper_name,
+            command[1:],
+            # Not the image's entrypoint, which prepares a server.
+            entrypoint=command[0],
+            name=f"{settings.prefix}pg-restore-helper-{uuid.uuid4().hex[:12]}",
             detach=True,
-            volumes={dump_dir: {"bind": "/backup", "mode": "rw"}},
-            command=command,
+            user=f"{uid}:{gid}",
+            network_mode="none",
+            read_only=True,
+            tmpfs={"/tmp": "rw,noexec,nosuid,nodev,size=16m"},
+            # An arbitrary uid has no home directory to look up.
+            environment={"HOME": "/tmp"},
+            volumes={
+                source: {"bind": _CONVERT_INPUT, "mode": "ro"},
+                out_dir: {"bind": _CONVERT_OUTPUT_DIR, "mode": "rw"},
+            },
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            mem_limit=default_env_limits()["mem_limit"],
+            pids_limit=_CONVERT_PIDS_LIMIT,
+            # The output is read back below, whatever the daemon's default.
+            log_config={"type": "json-file"},
             labels={settings.managed_label: "true", settings.system_label: "true"},
         )
-        wait_result = helper.wait()
-        exit_code = int(wait_result.get("StatusCode", -1))
-        logs = helper.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
-        return exit_code, logs, sql_path
+        exit_code, output = _await_conversion(helper, out_dir)
     except docker.errors.APIError as exc:
-        return -1, str(exc), sql_path
+        raise ExternalCommandError(
+            "pg_restore",
+            -1,
+            f"The {_PG_RESTORE_HELPER_IMAGE} conversion helper could not run: {exc}",
+        ) from exc
     finally:
+        # Before its output is looked at: nothing may still be writing there.
         if helper is not None:
             with contextlib.suppress(Exception):
                 helper.remove(force=True)
+    if exit_code != 0:
+        raise ExternalCommandError("pg_restore", exit_code, output)
+    return _take_converted_sql(scratch, out_dir)
+
+
+@contextlib.contextmanager
+def _converted_sql_dump(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    dump_path: str,
+    *,
+    is_gzipped: bool,
+) -> Iterator[str]:
+    """Yield the path of plain SQL converted from the archive at *dump_path*.
+
+    The conversion runs in a throwaway ``postgres:17`` container (see the
+    notes above) and fails with ExternalCommandError. The SQL lives in a
+    scratch directory under the team's data directory — where the Docker
+    daemon can mount it from and the team's disk quota counts it — and is
+    removed on exit, so a caller that wants to keep it moves it away first.
+    """
+    root = os.path.join(team.data_dir, _CONVERT_SCRATCH_DIRNAME)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    _sweep_conversion_scratch(root)
+    scratch = os.path.join(root, uuid.uuid4().hex)
+    os.mkdir(scratch, 0o700)
+    try:
+        yield _convert_dump_in_helper(
+            client, settings, dump_path, scratch, is_gzipped=is_gzipped
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _keep_converted_dump(sql_path: str, archive_path: str) -> None:
+    """Make the converted SQL the template's dump, in place of its archive.
+
+    The cluster cannot read the archive, so keeping it would repeat the
+    conversion on every reload. Best effort: when the SQL cannot be moved the
+    archive stays the template's dump, which is still correct.
+    """
+    dest = os.path.join(os.path.dirname(os.path.abspath(archive_path)), "dump.sql")
+    try:
+        try:
+            os.replace(sql_path, dest)
+        except OSError:
+            # Both sit under the team data dir, so this is normally a rename;
+            # XFS refuses it across quota projects (see _staged_db_dump).
+            shutil.move(sql_path, dest)
+    except OSError as exc:
+        logger.warning(
+            "Could not keep the converted dump as %s (%s); the archive stays",
+            dest,
+            exc,
+        )
+        return
+    if os.path.abspath(archive_path) != dest:
+        with contextlib.suppress(OSError):
+            os.remove(archive_path)
 
 
 def _is_pg_restore_archive_version_error(output: str) -> bool:
@@ -3834,26 +4080,15 @@ def reload_template(
             helper_start = time.monotonic()
             # The helper only rewrites the archive as SQL; it connects to
             # nothing. Loading that SQL is the same restricted restore.
-            exit_code, output_str, helper_sql_path = (
-                _convert_custom_dump_to_sql_with_helper(
-                    client, settings, resolved_dump, is_gzipped=is_gzipped
-                )
-            )
-            if exit_code == 0:
+            with _converted_sql_dump(
+                client, settings, team, resolved_dump, is_gzipped=is_gzipped
+            ) as converted_sql:
                 exit_code, output_str = restore(
-                    helper_sql_path, text_dump=True, gzipped=False
+                    converted_sql, text_dump=True, gzipped=False
                 )
                 restore_tool = "psql"
-                template_dir = os.path.abspath(team.get_template_dir(template_name))
-                if (
-                    exit_code == 0
-                    and dump_path is None
-                    and os.path.abspath(resolved_dump).startswith(template_dir + os.sep)
-                    and os.path.abspath(helper_sql_path)
-                    != os.path.abspath(resolved_dump)
-                ):
-                    with contextlib.suppress(OSError):
-                        os.remove(resolved_dump)
+                if exit_code == 0 and dump_path is None:
+                    _keep_converted_dump(converted_sql, resolved_dump)
             restore_elapsed += time.monotonic() - helper_start
 
         output_str = _summarize_restore_output(output_str)
@@ -4289,13 +4524,24 @@ def _snapshot_filestore(
         # Never silent: falling back here costs exactly the full-size copy this
         # function exists to avoid, so it must be visible in the logs.
         logger.warning("Filestore snapshot fell back to a full copy: %s", reason)
-        shutil.copytree(source, dest)
+        copy_tenant_tree(source, dest)
 
     if not shutil.which("rsync"):
         _full_copy("rsync not found on PATH")
         return None
 
-    cmd = ["rsync", "-a", "--delete", "--out-format=%n"]
+    # -a keeps a symbolic link as a link (the copies made from a template do
+    # too, see copy_tenant_tree). Device nodes, FIFOs and sockets are left out:
+    # an Odoo filestore has none, and as root rsync would recreate a device
+    # node a tenant made in its container on the host.
+    cmd = [
+        "rsync",
+        "-a",
+        "--no-devices",
+        "--no-specials",
+        "--delete",
+        "--out-format=%n",
+    ]
     for link_dest in link_dests:
         if os.path.isdir(link_dest):
             # Relative paths would be resolved against dest, not the cwd.
@@ -4381,7 +4627,8 @@ def _chown_filestore(
         for rel in rel_paths:
             target = os.path.join(root, rel)
             if _is_within_directory(root, target) and os.path.lexists(target):
-                os.chown(target, uid, gid)
+                # A link pointing back into the tree is given away as a link.
+                os.chown(target, uid, gid, follow_symlinks=False)
     except PermissionError:
         # macOS and other non-root hosts: fall back to the container-based chown.
         chown_recursive(root, uid, gid, client, image)
@@ -4498,7 +4745,7 @@ def _install_filestore_snapshot(
             exc,
             snapshot_dir,
         )
-        shutil.copytree(snapshot_dir, template_filestore_path)
+        copy_tenant_tree(snapshot_dir, template_filestore_path)
         shutil.rmtree(snapshot_dir)
     logger.info("Template filestore replaced from %s", source_label)
 

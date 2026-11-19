@@ -94,6 +94,9 @@ oduflow template-from-env my-branch --template-name default --reset-env-changes
 !!! info "Copy-mode templates"
     Environments created from a small (copy-mode, `use_overlay=false`) template have an independent filestore copy, not an overlay. They are not affected by template filestore updates and are left untouched.
 
+!!! info "Symbolic links and special files in a filestore"
+    An Odoo filestore holds regular files and directories. If an environment's filestore contains anything else, Oduflow never follows it: a symbolic link is carried into the template — and from there into environments and productions created from it — as a link, not as a copy of what it points to on the Oduflow host, and ownership is changed on the link itself. Device nodes, FIFOs and sockets are left out of the template.
+
 ## Create a Template from Production
 
 A [production](production.md) can be published as a dev template — the reverse of seeding a production from a template. The production database is dumped out of the production cluster and restored into the dev cluster as the template database, and the production filestore becomes the template's baseline:
@@ -543,6 +546,36 @@ What this means for a dump:
 A template database loaded by an older Oduflow keeps its previous owner until
 it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
 an environment over it).
+
+### Archives from a newer `pg_dump`
+
+A custom-format archive written by a newer `pg_dump` than the cluster's
+PostgreSQL cannot be read by the cluster's own `pg_restore`
+(`unsupported version ... in file header`). Oduflow then converts it to plain
+SQL with `pg_restore -f` from a short-lived `postgres:17` **conversion helper**
+container and loads that SQL through the same loader role and restore client.
+
+The helper reads a file from outside, so it is confined on its own terms: it
+has no network (it connects to nothing), is never root, holds no capabilities
+and no password, has a read-only root filesystem, and sees exactly two things
+of the host — the archive, read-only, and a scratch directory created for this
+conversion under `team_<ID>/.dump_convert/`. It does not see the template
+directory. Oduflow moves the SQL out of that scratch directory and checks that
+it is one regular, non-empty file before anything reads it; the scratch
+directory is removed afterwards.
+
+- When a template is reloaded from its own archive (`import-template --refresh`,
+  a database-only pull from a running Odoo, a push import from Odoo.sh), the
+  SQL replaces the archive as the template's `dump.sql`, so the conversion is
+  not repeated. An archive you import from S3 or a local path is stored as it
+  is; nothing is written next to it.
+- The SQL is several times the size of the archive and counts against the
+  team's disk while the load runs. The helper is stopped if it runs longer than
+  six hours or the disk holding the team's data falls below 1 GiB free, and the
+  import fails with that reason.
+- A private archive owned by root (mode `0600`) is copied into the scratch
+  directory for the helper instead of being read as root, which needs the
+  archive's size once more for the duration of the conversion.
 
 ## How a database is dumped
 

@@ -106,3 +106,9 @@ plain copy for small templates, **fuse-overlayfs** above a threshold.
   non-superuser role from a throwaway client container, and the template
   database belongs to a per-team owner role instead of the superuser. Rationale
   and trade-offs in [[0013-per-environment-db-credentials-and-sanitization]].
+- (2026-11-19) — a filestore is tenant input as well: copying a template's
+  filestore into an environment or a production, snapshotting an
+  environment's into a template, and fixing ownership no longer follow
+  symbolic links (`fsutil.copy_tenant_tree`), and the helper that converts an
+  archive from a newer `pg_dump` no longer has the template directory mounted.
+  Rationale in [[0013-per-environment-db-credentials-and-sanitization]].

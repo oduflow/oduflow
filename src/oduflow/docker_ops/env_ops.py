@@ -70,6 +70,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
     ProtectedError,
 )
+from oduflow.fsutil import copy_tenant_tree
 from oduflow.git_ops import RepoAuthError, git_env_for_team
 from oduflow.hostname_registry import (
     CAPACITY_RESERVATION,
@@ -758,7 +759,7 @@ def _mount_filestore(
         merged = paths["merged"]
         if os.path.exists(merged):
             shutil.rmtree(merged)
-        shutil.copytree(template_filestore, merged)
+        copy_tenant_tree(template_filestore, merged)
         odoo_uid_gid = get_odoo_uid_gid(client, odoo_image)
         uid_str, gid_str = odoo_uid_gid.split(":")
         chown_recursive(merged, int(uid_str), int(gid_str), client, odoo_image)

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from oduflow.errors import PrerequisiteNotMetError
-from oduflow.fsutil import atomic_write_private_json
+from oduflow.fsutil import atomic_write_private_json, copy_tenant_tree
 from oduflow.naming import (
     get_db_name,
     get_filestore_paths,
@@ -151,7 +151,11 @@ def snapshot(team: TeamSettings, template: str) -> str:
         if source.is_dir():
             # Odoo attachment names are content hashes. Our imports replace
             # files by rename and never edit these inodes in place.
-            shutil.copytree(source, root / "filestore", copy_function=os.link)
+            # Links stay links: followed, a link out of the filestore would
+            # hardlink whatever host file it names into the generation.
+            copy_tenant_tree(
+                str(source), str(root / "filestore"), copy_function=os.link
+            )
         else:
             (root / "filestore").mkdir()
         metadata = Path(team.get_template_metadata_path(template))

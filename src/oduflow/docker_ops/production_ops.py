@@ -101,6 +101,7 @@ from oduflow.extra_addons import (
     LISTEN_INTERFACE_CONF,
     validate_extra_repo_name,
 )
+from oduflow.fsutil import copy_tenant_tree
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     PRODUCTION_TEMPLATE_PREFIX,
@@ -1347,7 +1348,7 @@ def _copy_env_data_into_production(
             )
         filestore_path = filestore_dest or prod_filestore_dir(team, name)
         os.makedirs(filestore_path, mode=0o777, exist_ok=True)
-        shutil.copytree(src_filestore, filestore_path, dirs_exist_ok=True)
+        copy_tenant_tree(src_filestore, filestore_path, dirs_exist_ok=True)
     finally:
         if was_running:
             try:
@@ -1912,7 +1913,7 @@ def create_production(
         if template_name is not None:
             tpl_filestore = team.get_template_filestore_path(template_name)
             if os.path.isdir(tpl_filestore):
-                shutil.copytree(tpl_filestore, filestore_path, dirs_exist_ok=True)
+                copy_tenant_tree(tpl_filestore, filestore_path, dirs_exist_ok=True)
         uid_str, gid_str = get_odoo_uid_gid(client, odoo_image).split(":")
         chown_recursive(filestore_path, int(uid_str), int(gid_str), client, odoo_image)
 

@@ -577,6 +577,69 @@ it, and that turned out to be the weaker half of the boundary:
   superuser before the template entry above — on PostgreSQL 17 that includes
   `ON login` triggers, which fire for the superuser's sessions in such a
   template, its dump among them.
+- (2026-11-19) — **the conversion helper is confined, and a tenant's files
+  are never followed on the host.** Two places where the tenant's *files*,
+  rather than its SQL, met Oduflow's privileges.
+  *The helper.* An archive written by a newer `pg_dump` than the cluster's is
+  rewritten as SQL by `pg_restore -f` in a `postgres:17` container before the
+  restricted load. That container ran with Docker's defaults: root, the
+  default capabilities, the bridge network, no limits and no deadline — and
+  with the *directory the archive lay in* mounted read-write, because that is
+  where it wrote `dump.sql`. Depending on the caller that directory was the
+  template's (its dump, filestore and metadata), an import's staging tree
+  (where a local-path import *hardlinks* the operator's source files), or the
+  team's dump exchange directory. So a flaw in `pg_restore`'s archive parser,
+  reachable by whoever names the archive, was root with a writable view of a
+  team's data and a network. Nothing in the conversion needs any of that: it
+  connects to nothing and writes one file.
+  It now gets what the conversion needs and no more: no network; a uid that is
+  never 0, no capabilities, `no-new-privileges`; a read-only root filesystem;
+  memory and pids limits; the archive as a single read-only file; and one
+  scratch directory, created per conversion under the team's data directory
+  (where the daemon can mount it and the team's quota counts it), as the only
+  place it can write. *Who it runs as* follows from having no capabilities —
+  it reads by plain permission: `nobody` for a world-readable archive, the
+  owner for a private one, and for root's own private archive a copy in the
+  scratch directory, because the alternative was the one thing ruled out,
+  uid 0. An Oduflow that is not root cannot give a directory away, so there
+  the helper is Oduflow's own account, which inside the container owns
+  nothing but the two mounts.
+  *Its output is input too.* The scratch directory is the helper's to
+  arrange, so the SQL is renamed into its private parent first (a rename
+  moves a link as a link) and only then examined: one regular, non-empty file
+  with a single name, or the load fails. It is re-owned and then read by the
+  same restricted client as any other dump. The helper is removed before
+  that, is stopped at a deadline, and is stopped when the disk nearly fills —
+  an archive of megabytes expands without bound, and the helper should not be
+  what fills the host. The SQL is kept as the template's dump only when the
+  template is being reloaded from its own archive, as before; otherwise it
+  goes with the scratch directory, where it used to be left beside the
+  caller's archive.
+  *Files.* The audit of the other places tenant files are handled found the
+  archive unpackers sound (members are vetted, links are skipped, targets
+  are fresh directories) and the gap elsewhere: a filestore is mounted
+  read-write into its tenant's container, so the tenant can leave a symbolic
+  link in it, and Oduflow handled such trees on the host as root with calls
+  that follow links. `shutil.copytree` copied what a link pointed to — so
+  publishing an environment and creating one from that template in copy
+  mode, or seeding a production, returned any host file to the tenant as an
+  attachment-shaped regular file — and `os.chown` gave what a link pointed
+  to to the Odoo account. Every such copy now goes through one function that
+  keeps links as links and leaves out device nodes, FIFOs and sockets
+  (`fsutil.copy_tenant_tree`; a test pins that `shutil.copytree` is called
+  nowhere else for these trees), and the recursive chown changes the link
+  itself, addressing each entry through its directory's descriptor. Links
+  were kept rather than dropped: inside a container they resolve against the
+  container's own filesystem, which is the tenant's business, and dropping
+  them would have changed what a template holds for no gain once nothing on
+  the host follows them.
+  Still open, same family: a **local path or rsync source** named in
+  `import_template` / `attach_filestore` is read with Oduflow's rights and
+  is not confined to the caller's team — on a hosted server that is another
+  team's template directory for the asking, and wants a policy decision
+  (operator-only, or an allow-listed import root) rather than a patch; the
+  chunkstore restore trusts its manifest, which only the operator's storage
+  can forge; and the event triggers named above.
 
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
@@ -671,3 +734,11 @@ native neutralization, rather than re-implementing what Odoo already ships:
   operator-named databases, with `restrict_nonsystem_relation_kind` sent to
   servers that know it, and the upgrade's helper holds the superuser's
   password only for the steps the superuser itself takes (see Evolution).
+- (2026-11-19) — **the `postgres:17` conversion helper is confined and a
+  tenant's files are not followed on the host**
+  (`system_ops._converted_sql_dump`, `_take_converted_sql`,
+  `fsutil.copy_tenant_tree`, `client.chown_recursive`): the helper loses root,
+  its capabilities, the network and the read-write mount of the directory
+  holding the archive, and filestore copies and ownership changes stop
+  following the symbolic links a tenant can leave in its filestore (see
+  Evolution).

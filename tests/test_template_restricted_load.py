@@ -12,6 +12,7 @@ it is read by a client in a throwaway container, never by a process in the
 PostgreSQL container.
 """
 
+import contextlib
 import os
 import re
 import stat
@@ -36,9 +37,11 @@ class _FakeDocker:
     """The shared PostgreSQL container, the restore clients, and one ordered
     log of everything either of them is asked to do."""
 
-    def __init__(self, *, clients=((0, b""),), database_owner=None):
+    def __init__(self, *, clients=((0, b""),), database_owner=None, converted=None):
         self.steps: list[tuple] = []
         self._clients = list(clients)
+        # What the conversion helper writes as SQL, when one is expected.
+        self._converted = converted
         # The template database, when it already exists: its owner's name.
         self._databases = {TPL_DB: database_owner} if database_owner else {}
         self.fail_sql: dict[str, str] = {}
@@ -85,6 +88,8 @@ class _FakeDocker:
     # -- restore clients ---------------------------------------------------
 
     def _run_container(self, image, command=None, **kwargs):
+        if kwargs.get("network_mode") == "none":
+            return self._run_conversion_helper(image, command, **kwargs)
         exit_code, output = self._clients.pop(0)
         self.steps.append(("client", {"image": image, "command": command, **kwargs}))
         container = MagicMock(name=kwargs.get("name"))
@@ -92,6 +97,25 @@ class _FakeDocker:
         container.logs.return_value = output
         container.remove.side_effect = lambda **kw: self.steps.append(
             ("client-removed", kwargs.get("name"))
+        )
+        return container
+
+    def _run_conversion_helper(self, image, command, **kwargs):
+        assert self._converted is not None, "no conversion was expected"
+        self.steps.append(("helper", {"image": image, "command": command, **kwargs}))
+        (out_dir,) = [
+            host
+            for host, mount in kwargs["volumes"].items()
+            if mount["bind"] == "/convert/out"
+        ]
+        with open(os.path.join(out_dir, "dump.sql"), "wb") as fh:
+            fh.write(self._converted)
+        container = MagicMock(name=kwargs.get("name"))
+        container.status = "exited"
+        container.wait.return_value = {"StatusCode": 0}
+        container.logs.return_value = b""
+        container.remove.side_effect = lambda **kw: self.steps.append(
+            ("helper-removed", kwargs.get("name"))
         )
         return container
 
@@ -412,8 +436,8 @@ def test_an_unreadable_archive_is_converted_and_loaded_by_the_same_loader(tmp_pa
 
     with patch.object(
         system_ops,
-        "_convert_custom_dump_to_sql_with_helper",
-        return_value=(0, "converted", converted),
+        "_converted_sql_dump",
+        return_value=contextlib.nullcontext(converted),
     ):
         result, dump = _reload(tmp_path, docker, "dump.pgdump", b"PGDMP")
 
@@ -437,6 +461,101 @@ def test_an_unreadable_archive_is_converted_and_loaded_by_the_same_loader(tmp_pa
         * 2
     )
     assert not [step for step in docker.steps if step[0] == "db-exec"]
+
+
+UNREADABLE = (1, b"pg_restore: error: unsupported version (1.16) in file header")
+
+
+def test_the_conversion_helper_gets_neither_the_template_directory_nor_a_role(
+    tmp_path,
+):
+    docker = _FakeDocker(clients=[UNREADABLE, (0, b"")], converted=b"-- converted")
+
+    result, dump = _reload(tmp_path, docker, "dump.pgdump", b"PGDMP", mode=0o644)
+
+    assert result["status"] == "reloaded"
+    loader, loader_password = _loader(docker)
+    (helper,) = [step[1] for step in docker.steps if step[0] == "helper"]
+    template_dir = os.path.dirname(dump)
+    scratch_root = str(tmp_path / "team_7" / ".dump_convert")
+    # The archive, read-only, and a directory of its own — not the directory
+    # the archive lies in, which holds the template's other files.
+    assert helper["volumes"][dump] == {"bind": "/convert/in", "mode": "ro"}
+    (out_dir,) = [h for h in helper["volumes"] if h != dump]
+    assert helper["volumes"][out_dir] == {"bind": "/convert/out", "mode": "rw"}
+    assert out_dir.startswith(scratch_root + os.sep)
+    assert template_dir not in helper["volumes"]
+    # It connects to nothing: no network, and no role's password to leak.
+    assert helper["network_mode"] == "none"
+    assert "network" not in helper
+    assert loader_password not in str(helper)
+    assert SUPERUSER_PASSWORD not in str(helper)
+    assert helper["cap_drop"] == ["ALL"]
+    assert helper["security_opt"] == ["no-new-privileges"]
+    assert helper["read_only"] is True
+    assert not helper["user"].startswith("0:")
+
+    # Its SQL is loaded like any other dump: by the loader, from a client
+    # that sees that one file read-only.
+    first, second = docker.clients()
+    assert second["entrypoint"] == "psql"
+    assert second["environment"]["PGUSER"] == loader
+    ((sql_path, mount),) = second["volumes"].items()
+    assert mount == {"bind": "/restore/dump", "mode": "ro"}
+    assert sql_path == os.path.join(os.path.dirname(out_dir), "dump.sql")
+    # The helper is gone before its output is used.
+    assert docker.index("helper-removed") < docker.index("client", "psql")
+
+    # A dump handed in by a caller stays that caller's: nothing is written
+    # next to it, and the scratch directory is gone.
+    assert os.listdir(template_dir) == ["dump.pgdump"]
+    assert os.listdir(scratch_root) == []
+
+
+def test_a_template_reloaded_from_its_own_archive_keeps_the_sql_instead(tmp_path):
+    docker = _FakeDocker(clients=[UNREADABLE, (0, b"")], converted=b"-- converted")
+    settings, team = _settings(tmp_path)
+    archive = _dump(team, "dump.pgdump", b"PGDMP", mode=0o644)
+
+    with (
+        patch.object(system_ops, "get_client", return_value=docker.client),
+        patch.object(system_ops, "_wait_pg_ready"),
+        patch.object(system_ops, "_update_template_sizes"),
+    ):
+        result = system_ops.reload_template(settings, team, "prod")
+
+    assert result["status"] == "reloaded"
+    template_dir = os.path.dirname(archive)
+    # The cluster cannot read the archive, so the SQL takes its place.
+    assert os.listdir(template_dir) == ["dump.sql"]
+    with open(os.path.join(template_dir, "dump.sql"), "rb") as fh:
+        assert fh.read() == b"-- converted"
+    assert team.get_template_sql_path("prod") == os.path.join(template_dir, "dump.sql")
+    assert os.listdir(tmp_path / "team_7" / ".dump_convert") == []
+
+
+def test_sql_that_fails_to_load_is_not_kept(tmp_path):
+    docker = _FakeDocker(
+        clients=[UNREADABLE, (3, b"psql: error: connection refused")],
+        converted=b"-- converted",
+    )
+    settings, team = _settings(tmp_path)
+    archive = _dump(team, "dump.pgdump", b"PGDMP", mode=0o644)
+
+    with (
+        patch.object(system_ops, "get_client", return_value=docker.client),
+        patch.object(system_ops, "_wait_pg_ready"),
+        patch.object(system_ops, "_update_template_sizes"),
+        pytest.raises(ExternalCommandError) as failure,
+    ):
+        system_ops.reload_template(settings, team, "prod")
+
+    assert failure.value.cmd == "psql"
+    assert os.listdir(os.path.dirname(archive)) == ["dump.pgdump"]
+    assert os.listdir(tmp_path / "team_7" / ".dump_convert") == []
+    # The loader of the failed load is retired all the same.
+    loader, _password = _loader(docker)
+    assert (SUPERUSER, "postgres", f'DROP ROLE IF EXISTS "{loader}";') in docker.sql()
 
 
 def test_reload_drops_the_loader_a_crashed_load_left_behind(tmp_path):

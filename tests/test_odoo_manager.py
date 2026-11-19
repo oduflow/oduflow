@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import json
 import logging
@@ -1077,7 +1078,7 @@ class TestReloadTemplate:
     def test_restore_retries_unsupported_archive_with_helper(self, mock_docker_client):
         db_container = MagicMock()
         mock_docker_client.containers.get.return_value = db_container
-        helper_sql = "/tmp/flow-test/templates/mytpl/dump.sql"
+        helper_sql = "/tmp/flow-test/.dump_convert/0f/dump.sql"
 
         with (
             patch("oduflow.docker_ops.system_ops.os.path.isfile", return_value=True),
@@ -1098,9 +1099,10 @@ class TestReloadTemplate:
                 ],
             ) as restore,
             patch(
-                "oduflow.docker_ops.system_ops._convert_custom_dump_to_sql_with_helper",
-                return_value=(0, "converted", helper_sql),
+                "oduflow.docker_ops.system_ops._converted_sql_dump",
+                return_value=contextlib.nullcontext(helper_sql),
             ) as helper,
+            patch("oduflow.docker_ops.system_ops._keep_converted_dump") as keep,
         ):
             result = system_ops.reload_template(TEST_SETTINGS, TEST_TEAM, "mytpl")
 
@@ -1113,6 +1115,10 @@ class TestReloadTemplate:
         assert second.args[4] == ["psql", "-X", "-q", "-w", "-f", "/restore/dump"]
         assert second.kwargs["dump_path"] == helper_sql
         assert second.kwargs["role"] == first.kwargs["role"]
+        # Reloaded from the template's own archive, which the cluster cannot
+        # read: the SQL replaces it.
+        keep.assert_called_once()
+        assert keep.call_args.args[0] == helper_sql
         db_container.exec_run.assert_not_called()
         statements = [call.args[2] for call in sql.call_args_list]
         assert any(

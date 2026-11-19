@@ -8672,6 +8672,7 @@ def _run_cli() -> None:
             # XFS project setup refreshes inode ctime, which the staging sweep
             # uses to distinguish abandoned files from active restores.
             system_ops.sweep_pg_exchange(_settings)
+            system_ops.sweep_dump_conversions(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
                 from oduflow.stack_loader import load_stack, stack_environ
