@@ -2738,6 +2738,9 @@
       <button class="modal-close" onclick="closeShare()">&times;</button>
     </div>
     <div class="modal-body">
+      <!-- This security disclosure is duplicated in docs/security.md
+           ("Scoped environment sharing"), docs/web-api.md and
+           specs/0055-scoped-environment-ui-sharing.md — keep them in sync. -->
       <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As, Agent Chat and Agent CLI. Other team environments and team-wide pages are unavailable. Agent Chat and Agent CLI run as this environment's own user in the team's coder container, so they cannot reach other environments' checkouts or conversations. Important: they still use the team's Git credentials and deploy key, the team-wide agent provider keys, any agent login made in this environment and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
       <div class="form-group" id="share-link-group">
         <label for="share-url">Share link</label>
@@ -3769,7 +3772,11 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
     '<div class="env-menu-separator" role="separator"></div>' +
     '<button role="menuitem" class="danger" onclick="doRecreate(\'' + escAttr(env.branch) + '\')" ' + dis +
       (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>';
-  var root = '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
+  // env-vars may carry secrets, so GET …/env-vars is not in the
+  // scoped allowlist (ui_scope.py) — don't render a dead item.
+  var root = (SCOPED_ENV
+      ? ''
+      : '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>') +
     group('consoles', 'Consoles', consoles) +
     group('modules', 'Modules', modules) +
     group('access', 'Access', access) +

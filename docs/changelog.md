@@ -13,7 +13,10 @@
   credentials and deploy key, provider credentials, any agent login made in
   the environment, and the container network. For shared environments, set
   provider credentials in `[team.X.agent_env]` instead of signing in with a
-  personal subscription.
+  personal subscription. Share links minted before this release gain the CLI
+  too after upgrading — it grants nothing an existing link's Agent Chat did
+  not already allow, but rotate or revoke a share if even that terminal form
+  of the access is unwanted.
 
 ### Documentation
 
