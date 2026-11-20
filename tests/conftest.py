@@ -59,6 +59,54 @@ def _no_label_scan(monkeypatch):
     monkeypatch.setattr(env_tokens, "_scan_labels", lambda settings: {})
 
 
+# The release fake PostgreSQL clusters answer to: the default image's.
+FAKE_SERVER_VERSION_NUM = 160004
+# The real questions, for the tests that are about them. Taken here, where no
+# fixture has replaced them yet.
+_REAL_SERVER_VERSION_NUM = system_ops._server_version_num
+_REAL_ENABLED_EVENT_TRIGGERS = system_ops.enabled_event_triggers
+
+
+@pytest.fixture(autouse=True)
+def _fake_clusters_are_plain_postgres_16(monkeypatch, request):
+    """Two questions the superuser asks a cluster before it acts inside a
+    tenant's database, answered here for every fake cluster at once:
+
+    - its release (``SHOW server_version_num``, once per container), to learn
+      whether event triggers can be switched off for the session: PostgreSQL
+      16;
+    - the database's enabled event triggers, before DDL: none.
+
+    So tests about something else see only the statements they are about,
+    and their fakes need not know either question. The tests of the
+    questions themselves ask for ``real_cluster_questions``. Tests against
+    live Docker ask the real cluster.
+    """
+    system_ops._SERVER_VERSIONS.clear()
+    if any(
+        request.node.get_closest_marker(name) for name in ("integration", "heavyweight")
+    ):
+        return
+    monkeypatch.setattr(
+        system_ops,
+        "_server_version_num",
+        lambda settings, container: FAKE_SERVER_VERSION_NUM,
+    )
+    monkeypatch.setattr(
+        system_ops, "enabled_event_triggers", lambda *args, **kwargs: []
+    )
+
+
+@pytest.fixture
+def real_cluster_questions(monkeypatch):
+    """Both questions are put to the test's own fake cluster again."""
+    system_ops._SERVER_VERSIONS.clear()
+    monkeypatch.setattr(system_ops, "_server_version_num", _REAL_SERVER_VERSION_NUM)
+    monkeypatch.setattr(
+        system_ops, "enabled_event_triggers", _REAL_ENABLED_EVENT_TRIGGERS
+    )
+
+
 def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
     """Settings whose Docker resources cannot reach a developer's own server.
 

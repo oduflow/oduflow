@@ -879,7 +879,12 @@ checked before anything is changed:
   restore it. For a production, `reconfigure_production` with no settings
   changed provisions the role again and writes the file;
 - a database that contains a subscription or a user mapping is refused:
-  `pg_dump` leaves those out of a dump it does not take as a superuser.
+  `pg_dump` leaves those out of a dump it does not take as a superuser;
+- a database that contains an event trigger is refused: its dump includes the
+  trigger, and only a superuser could create it again in the new cluster. Drop
+  it (`DROP EVENT TRIGGER <name>;`) unless you need it — one that came with a
+  template loaded by an older version is described under
+  [What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
 
 The role also has to be able to read everything in its database. If it cannot
 — a table that still belongs to another role, a table with
@@ -891,9 +896,11 @@ If you trust everything a database contains, you can let the superuser dump
 and restore it as before by starting Oduflow with
 `ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
 environment. The same variable is the way out when a restore stops on content
-that only a superuser can recreate (an event trigger, a publication
-`FOR ALL TABLES`): the error names the database and its kept dump; set the
-variable and restart to resume.
+that only a superuser can recreate (a publication `FOR ALL TABLES`, a function
+in an untrusted language): the error names the database and its kept dump; set
+the variable and restart to resume. On PostgreSQL 17 and newer the superuser
+restores such a database with event triggers switched off for the session, so
+one that the archive creates does not fire during the rest of the restore.
 
 A failure before an old cluster is removed, including a refused S3 delete,
 leaves everything as it was, and setting the image back cancels the upgrade; if
@@ -2338,6 +2345,70 @@ A template database loaded by an older Oduflow keeps its previous owner until
 it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
 an environment over it).
 
+### What an older load may have left behind
+
+Older versions loaded dumps as the PostgreSQL superuser, so a dump could
+create what only a superuser can. Such objects stay in the template database
+until it is rebuilt, and `CREATE DATABASE ... TEMPLATE` copies most of them
+into every environment made from it. A template loaded by a current version
+cannot contain them: the loader role is refused each one.
+
+**Event triggers** are the ones that matter to Oduflow itself. An event trigger
+runs its function with the rights of whoever issues the statement that fires
+it — any DDL statement in that database and, since PostgreSQL 17, any login to
+it — and in an environment the function belongs to the environment's role,
+which can rewrite it. Oduflow's superuser still runs a few statements inside
+such databases (handing a copy's objects to its role, giving an old
+environment or production a role of its own). So:
+
+- **Before the superuser runs DDL inside a database, Oduflow disables the
+  event triggers that are enabled there** and writes
+  `Disabled N event trigger(s) in database ...` to the server log, with each
+  trigger's name, event and function. They are disabled, not dropped, and stay
+  disabled: only a superuser can alter an event trigger. This happens in the
+  database those statements run in (the environment, the staged database of
+  a scheduled sync, a production being given its role) and on every
+  PostgreSQL release; an existing template is left as it is. A database
+  without event triggers pays one catalog query for it.
+- **On PostgreSQL 17 and newer, every superuser session that enters a database
+  other than `postgres` also connects with `event_triggers=off`**, so that an
+  `ON login` trigger cannot run before Oduflow's first statement. This covers
+  the `pg_dump` of a template the superuser still owns. PostgreSQL 15 and 16
+  have neither that setting nor login triggers.
+
+If you rely on an event trigger in an environment, an operator can turn it
+back on as the superuser (`ALTER EVENT TRIGGER <name> ENABLE;`); Oduflow
+disables it again the next time its superuser has DDL to run in that database.
+A rebuilt template does not bring it back: `CREATE EVENT TRIGGER` in a dump is
+refused like everything else reserved for superusers.
+
+**On each start Oduflow reports**, per cluster, which managed databases hold
+such objects. It reads catalog tables only and changes nothing; the statements
+in the last column are yours to run, as the superuser, in the database named
+(`docker exec <postgres container> psql -U <superuser> -d <database>`):
+
+| In the server log | What it is | What to do |
+|---|---|---|
+| `event triggers` (enabled) | Fires for every DDL statement or login, as whoever issues it. | Rebuild the template; or `DROP EVENT TRIGGER <name>;` in that database. |
+| `functions in an untrusted language` | A C, `internal` or `plpython3u`-style function outside any extension: no role's limits apply to what it does, whoever calls it. | Check what it does. Drop it, or revoke `EXECUTE` from the environment's role. |
+| `SECURITY DEFINER functions owned by a superuser`, `views owned by a superuser` | Run, or read their tables, with the superuser's rights for whoever may use them. Left in an environment by a version that did not hand functions and views to its role. | `ALTER FUNCTION ... OWNER TO "<role>";` / `ALTER VIEW ... OWNER TO "<role>";` with the role from `get_environment_info`, or recreate the environment. |
+| `foreign servers`, `user mappings`, `subscriptions` | Decide where, and as whom, a foreign table or a subscription connects. | Drop them unless you set them up yourself. |
+| `casts between built-in types`, `libraries preloaded by ALTER DATABASE ... SET` | Change how every session in that database behaves, Oduflow's included. | Drop the cast; `ALTER DATABASE ... RESET <setting>;`. |
+
+These are logged as warnings, one line per database. Extensions the image
+does not mark trusted, operators, rules and publications that are the
+superuser's, and event triggers that are already disabled hand nothing to
+anybody; they are listed in one informational line because a rebuild of the
+template will refuse them. Templates that still belong to the superuser and
+hold none of the above are named in one informational line as well.
+
+The remedy for a template is always the same: rebuild it
+(`import-template ... --overwrite` or `--refresh`, or save an environment over
+it), fixing the dump first if the load now refuses something in it. Existing
+environments keep what they were copied with until they are recreated
+(`recreate_environment`); one that still carries an event trigger, disabled or
+not, cannot be saved as a template until the trigger is dropped.
+
 ### Archives from a newer `pg_dump`
 
 A custom-format archive written by a newer `pg_dump` than the cluster's
@@ -3228,6 +3299,13 @@ and a production seeded from the environment. The tables, functions and
 operators in a database are its tenant's to define, and a query resolves them
 with the rights of whoever runs it.
 
+The few statements the superuser still runs inside an environment's database
+(handing a new copy's tables and functions to the environment's role) are
+catalog-only, and before them Oduflow disables any enabled **event trigger**
+in that database: one runs its function with the rights of whoever issues
+DDL. In practice only a template loaded by an older version contains one — see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
 **Environments without their own role.** An environment created before
 per-environment credentials existed has no role on record, and Oduflow does
 not fall back to the superuser for it. On such an environment:
@@ -3867,7 +3945,11 @@ the same container swap: with Odoo stopped, the role is made the owner of the
 database and of everything in it, the database is closed to other roles, and
 the credentials are written back. If the old container still connects as the
 role, its password is kept; otherwise the role gets a new one. The response's
-notes say that a role was provisioned. If it cannot be — PostgreSQL is not
+notes say that a role was provisioned. Event triggers that are enabled in the
+database are disabled first, because the hand-over is DDL run by the
+superuser and an event trigger would run its function with those rights (see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind));
+the server log names them. If the role cannot be provisioned — PostgreSQL is not
 reachable, or WAL protection is holding the cluster — nothing is recreated:
 the old container is left in place and started again if it was running. No
 production container is ever created with the superuser's login; if the server
@@ -12233,7 +12315,8 @@ HINT:  Must be superuser to create this extension.
 Template dumps are loaded by a restricted PostgreSQL role, never by the
 cluster superuser, so a dump can only create the extensions PostgreSQL marks
 as trusted (`pg_trgm`, `unaccent` and the like). The same applies to
-`must be owner of extension` and `must be superuser` errors during an import.
+`must be owner of extension` and `must be superuser` errors during an import,
+and to `permission denied to create event trigger`.
 See [How a dump is loaded](templates.md#how-a-dump-is-loaded) for what is
 allowed and how to make a further extension available.
 
@@ -12292,6 +12375,22 @@ database, and the databases named for an upgrade are ones you declared
 trusted, so the dump went ahead. To clear it, move the cluster to a current
 minor release of its PostgreSQL image, and import or publish the template
 again so that it stops being the superuser's.
+
+---
+
+## `Disabled N event trigger(s) in database ...` in the server log
+
+The database was copied from a template that an older version loaded as the
+PostgreSQL superuser, and that dump created an event trigger. An event trigger
+runs its function with the rights of whoever issues a DDL statement, Oduflow's
+superuser included, so Oduflow disabled it before running its own DDL there
+(handing the copy to its role, or giving an old environment or production a
+role). Nothing else in the database was changed, and the trigger is still
+there, disabled. Rebuild the template to stop new environments from getting a
+copy. See
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind),
+also for the `Database ... holds what only a PostgreSQL superuser can create
+or still owns` warning written on each start.
 
 ---
 

@@ -502,7 +502,11 @@ the same container swap: with Odoo stopped, the role is made the owner of the
 database and of everything in it, the database is closed to other roles, and
 the credentials are written back. If the old container still connects as the
 role, its password is kept; otherwise the role gets a new one. The response's
-notes say that a role was provisioned. If it cannot be — PostgreSQL is not
+notes say that a role was provisioned. Event triggers that are enabled in the
+database are disabled first, because the hand-over is DDL run by the
+superuser and an event trigger would run its function with those rights (see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind));
+the server log names them. If the role cannot be provisioned — PostgreSQL is not
 reachable, or WAL protection is holding the cluster — nothing is recreated:
 the old container is left in place and started again if it was running. No
 production container is ever created with the superuser's login; if the server

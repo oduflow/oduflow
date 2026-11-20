@@ -690,6 +690,8 @@ class TestInventory:
         [
             ("a subscription", "a subscription"),
             ("a subscription\na user mapping", "a subscription and a user mapping"),
+            # Dumped by its role, but only a superuser could create it again.
+            ("an event trigger", "an event trigger"),
         ],
     )
     def test_what_a_roles_dump_would_leave_out_is_refused_up_front(
@@ -708,6 +710,7 @@ class TestInventory:
             )
         message = str(exc_info.value)
         assert f"'oduflow_service_1_pay' in oduflow-prod-db contains {named}" in message
+        assert "only a superuser can carry into the new cluster" in message
         assert "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=oduflow_service_1_pay" in message
         assert "Nothing has been changed." in message
 

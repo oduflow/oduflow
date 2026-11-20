@@ -3,7 +3,7 @@
 **Status:** Adopted (still in force)
 **Type:** Architecture
 **First introduced:** `cd0b9ec` "two-tier database sanitization" (2026-02-24), `e4949b0` "per-environment PostgreSQL credentials" (2026-02-26)
-**Key code today:** `env_credentials.py` (generate / persist / load / delete per-env creds), `sanitizer.py` (`neutralize_environment` native baseline + two-tier script runner), `docker_ops/env_ops.py` (`_create_pg_role`, post-clone ownership fixup), `docker_ops/system_ops.py` (shared DB, role helpers, `provision_scoped_role` for a database that predates its role), `server.py` (`_inject_db_password` — bootstrap superuser secret)
+**Key code today:** `env_credentials.py` (generate / persist / load / delete per-env creds), `sanitizer.py` (`neutralize_environment` native baseline + two-tier script runner), `docker_ops/env_ops.py` (`_create_pg_role`, post-clone ownership fixup), `docker_ops/system_ops.py` (shared DB, role helpers, `provision_scoped_role` for a database that predates its role, `_exec_sql` / `disable_event_triggers` for what the superuser may run inside a tenant's database), `server.py` (`_inject_db_password` — bootstrap superuser secret)
 
 ## Context
 
@@ -640,6 +640,96 @@ it, and that turned out to be the weaker half of the boundary:
   (operator-only, or an allow-listed import root) rather than a patch; the
   chunkstore restore trusts its manifest, which only the operator's storage
   can forge; and the event triggers named above.
+- (2026-11-20) — **the superuser fires no event trigger of a tenant's
+  database.** The item every entry since the template one carried forward,
+  and the one object the earlier defences do not reach. An event trigger runs
+  its function *because of who issues a statement*, not because of what the
+  statement names: on every DDL statement of its database and, since
+  PostgreSQL 17, on every login to it, with the rights of the session, called
+  by OID — so neither the pinned `search_path` nor qualified names come into
+  it. Only a superuser can create one, which is exactly what a dump could do
+  while dumps were loaded as the superuser. `CREATE DATABASE ... TEMPLATE`
+  copies it into every clone, and the post-clone hand-over then gives the
+  function behind it to the environment's role, which may rewrite its body.
+  The first statement of that very hand-over (`ALTER SCHEMA public OWNER`)
+  already fired it.
+  *Which sessions.* The audit of every `psql`, `pg_dump` and `pg_restore` the
+  server starts found the superuser inside a tenant's database in few
+  places: DDL in four (`reassign_db_ownership`, `drop_signaling_sequences`,
+  `_own_public_schema`, the loader hand-over's `REASSIGN OWNED` / `DROP
+  OWNED`), catalog reads in the upgrade plan, and the two dumps the previous
+  entries left to it. Everything else — `ALTER DATABASE ... OWNER`, roles,
+  `REVOKE ... ON DATABASE`, `CREATE` / `DROP DATABASE` — runs in the
+  maintenance database on shared objects, for which PostgreSQL fires no event
+  trigger, and where nothing is a tenant's.
+  *Two defences, because there are two events.* A **login** trigger fires
+  while the session is being set up, before any statement could switch it
+  off, so the switch has to arrive with the connection: `event_triggers=off`
+  in `PGOPTIONS`, a setting PostgreSQL 17 introduced together with login
+  triggers, which only a superuser may set and which outranks `ALTER DATABASE
+  ... SET`. `_exec_sql` sends it for every superuser session outside the
+  maintenance database, the superuser's dumps and the upgrade's
+  operator-vouched restore send it too. PostgreSQL 15 and 16 would refuse a
+  connection over a setting they do not know, and have no login triggers, so
+  the cluster is asked its release — once per container, in the maintenance
+  database, which is why sessions there go without.
+  **DDL** triggers exist on every release, and before 17 no session setting
+  silences them (`session_replication_role = replica` leaves `ENABLE ALWAYS`
+  and `ENABLE REPLICA` ones firing). So before the superuser runs DDL inside
+  a database, `disable_event_triggers` reads `pg_event_trigger` and disables
+  what is enabled, then looks again; an answer it cannot read, or a trigger
+  that stays enabled, stops the DDL. Commands on event triggers fire no event
+  trigger themselves, and altering one takes a superuser, so a tenant can
+  neither watch this happen nor undo it. *Disabling* was chosen over the
+  alternatives on their merits. *Refusing* would have stopped every
+  environment made from such a template, and the remedy it would have had to
+  name — loading the template again — fails on the same statement, since the
+  loader cannot create an event trigger. *Dropping* destroys what an operator
+  may want to look at, silently. Disabled is also what a rebuilt template
+  amounts to. It is done in the copy, at the moment DDL is due, not in the
+  template and not on start: a template stays what its dump made it, and the
+  cost is one catalog query per guarded function when there is nothing to
+  disable (two for a clone). And it is done on 17 as well, where the session
+  setting alone would do: one behaviour on every release, and a database that
+  is safe for the superuser sessions that are not Oduflow's. A test pins the
+  rule by reading the source: every superuser statement that names a database
+  is either preceded by the guard in its function or on a short list of
+  reads.
+  *What else an older load could have left.* The same question for every
+  kind of object only a superuser can create, or that stayed the
+  superuser's: functions in an untrusted language (no role's limits apply to
+  what they do, whoever calls them), `SECURITY DEFINER` functions and views
+  still owned by a superuser in a database that has a role (left by versions
+  whose hand-over did not cover them), foreign servers and user mappings
+  (where, and as whom, a foreign table connects), subscriptions, casts
+  between built-in types, `ALTER DATABASE ... SET` of preloaded libraries —
+  and, of no consequence beyond a rebuild refusing them, untrusted
+  extensions, operators, rules and publications. None of these runs for
+  Oduflow's superuser: its statements are catalog-only and pinned, and it
+  executes nothing a tenant defined. They matter to the tenant's and the
+  operator's sessions, and what to do with one is a judgement about content.
+  So the start **reports** them (`superuser_only_objects`, from
+  `init_system`, after the `PUBLIC` reconcile) and repairs nothing, for the
+  reason the credential-holder check reports: a repair here would change or
+  drop a tenant's objects. It is one catalog query per managed database, all
+  of them in a single exec per cluster rather than a round trip through
+  Docker each, bounded in time; connecting briefly to a template does not get
+  in a clone's way, since `CREATE DATABASE` waits for its template to be left
+  alone. Templates that still belong to the superuser and hold nothing else
+  are named once, at a lower level: they work, and rebuilding them is the
+  remedy for everything above.
+  *The upgrade.* A carried database with an event trigger is now refused when
+  the upgrade is planned, next to subscriptions and user mappings: its role's
+  dump includes the trigger and its role's restore cannot create it, which
+  until now surfaced after the old cluster was gone.
+  Accepted costs: an event trigger an operator installed on purpose (in
+  `template1`, or through an extension their image marks trusted) is
+  disabled in new databases like any other, with a log line; and on 17 the
+  superuser's own sessions in a tenant's database do not fire it either.
+  Still open, same family: the local path or rsync source and the chunkstore
+  manifest named in the previous entry; and nothing hands a superuser-owned
+  function or view in an *existing* environment to its role short of
+  recreating the environment — the start names them, the operator decides.
 
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
@@ -742,3 +832,11 @@ native neutralization, rather than re-implementing what Odoo already ships:
   holding the archive, and filestore copies and ownership changes stop
   following the symbolic links a tenant can leave in its filestore (see
   Evolution).
+- (2026-11-20) — **the superuser's sessions fire no event trigger**
+  (`system_ops.superuser_session_environment`, `disable_event_triggers`,
+  `superuser_only_objects`): `event_triggers=off` with every superuser
+  connection into a tenant's database on PostgreSQL 17+, enabled event
+  triggers disabled before superuser DDL on every release, a report on start
+  of what else only a superuser could have left in managed databases, and a
+  PostgreSQL upgrade that refuses a database with an event trigger up front
+  (see Evolution).

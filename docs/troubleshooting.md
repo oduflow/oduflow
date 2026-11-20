@@ -411,7 +411,8 @@ HINT:  Must be superuser to create this extension.
 Template dumps are loaded by a restricted PostgreSQL role, never by the
 cluster superuser, so a dump can only create the extensions PostgreSQL marks
 as trusted (`pg_trgm`, `unaccent` and the like). The same applies to
-`must be owner of extension` and `must be superuser` errors during an import.
+`must be owner of extension` and `must be superuser` errors during an import,
+and to `permission denied to create event trigger`.
 See [How a dump is loaded](templates.md#how-a-dump-is-loaded) for what is
 allowed and how to make a further extension available.
 
@@ -470,6 +471,22 @@ database, and the databases named for an upgrade are ones you declared
 trusted, so the dump went ahead. To clear it, move the cluster to a current
 minor release of its PostgreSQL image, and import or publish the template
 again so that it stops being the superuser's.
+
+---
+
+## `Disabled N event trigger(s) in database ...` in the server log
+
+The database was copied from a template that an older version loaded as the
+PostgreSQL superuser, and that dump created an event trigger. An event trigger
+runs its function with the rights of whoever issues a DDL statement, Oduflow's
+superuser included, so Oduflow disabled it before running its own DDL there
+(handing the copy to its role, or giving an old environment or production a
+role). Nothing else in the database was changed, and the trigger is still
+there, disabled. Rebuild the template to stop new environments from getting a
+copy. See
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind),
+also for the `Database ... holds what only a PostgreSQL superuser can create
+or still owns` warning written on each start.
 
 ---
 

@@ -890,13 +890,31 @@ def _exec_sql(
     # column) and set the path itself with ``ALTER DATABASE ... SET``. So
     # every superuser session pins the path before the statement; see
     # _superuser_psql.
+    #
+    # A session that enters a database other than the maintenance one also
+    # switches event triggers off where the server can (PostgreSQL 17+): one
+    # ``ON login`` runs its function while the session is being set up, before
+    # any statement of ours. See superuser_session_environment, and
+    # disable_event_triggers for the statements that are DDL.
     container = client.containers.get(container_name or settings.shared_db_container)
+    as_superuser = not user or user == settings.db_user
     cmd = (
-        ["psql", "-U", user, "-d", db, "-tAc", sql]
-        if user and user != settings.db_user
-        else _superuser_psql(settings, db, sql)
+        _superuser_psql(settings, db, sql)
+        if as_superuser
+        else ["psql", "-U", str(user), "-d", db, "-tAc", sql]
     )
-    exit_code, output = container.exec_run(cmd)
+    environment = (
+        superuser_session_environment(settings, container)
+        if as_superuser and db != MAINTENANCE_DATABASE
+        else {}
+    )
+    # Passed only when there is something to pass: the option is a superuser's
+    # to set, so a scoped role's session must never carry it.
+    exit_code, output = (
+        container.exec_run(cmd, environment=environment)
+        if environment
+        else container.exec_run(cmd)
+    )
     result = output.decode("utf-8") if isinstance(output, bytes) else str(output)
     if exit_code != 0:
         raise ExternalCommandError("psql", exit_code, result)
@@ -935,6 +953,218 @@ def _superuser_psql(settings: Settings, db: str, sql: str) -> list[str]:
         "-tAc",
         sql,
     ]
+
+
+# The database every cluster is born with. Oduflow connects to it for what
+# concerns the cluster (roles, CREATE / DROP DATABASE); no tenant owns it.
+MAINTENANCE_DATABASE = "postgres"
+
+# An event trigger runs its function with the rights of whoever issues the
+# statement that fires it — every DDL statement of that database, and since
+# PostgreSQL 17 every login to it (``ON login``). Only a superuser can create
+# one, but a dump loaded as the superuser by an older version could, and
+# ``CREATE DATABASE ... TEMPLATE`` copies it into every clone, where the
+# function it calls ends up owned by the clone's tenant. It is called by OID,
+# so the pinned search_path does not come into it.
+#
+# PostgreSQL 17 has a switch for the session, which only a superuser may set.
+# Sent with the connection, it is in force before a login trigger would fire,
+# and it outranks whatever ALTER DATABASE / ALTER ROLE ... SET says. Older
+# servers do not know the setting and would refuse the connection over it;
+# they have no login triggers either, and DDL is covered by
+# disable_event_triggers on every release.
+EVENT_TRIGGERS_OFF_OPTIONS = "-c event_triggers=off"
+_EVENT_TRIGGER_SWITCH_VERSION = 170000
+
+# server_version_num per PostgreSQL container id. A container never changes
+# its image, so neither does the answer; an upgraded cluster is a new one.
+_SERVER_VERSIONS: dict[str, int] = {}
+
+
+def _server_version_num(settings: Settings, container: Any) -> int:
+    """``server_version_num`` of the cluster in *container*, asked for once.
+
+    Asked in the maintenance database, which is why sessions there go
+    without the event trigger switch: this one could not know yet.
+    """
+    key = getattr(container, "id", None)
+    if isinstance(key, str) and key in _SERVER_VERSIONS:
+        return _SERVER_VERSIONS[key]
+    exit_code, output = container.exec_run(
+        _superuser_psql(settings, MAINTENANCE_DATABASE, "SHOW server_version_num;")
+    )
+    result = output.decode("utf-8") if isinstance(output, bytes) else str(output)
+    if exit_code != 0:
+        raise ExternalCommandError("psql", exit_code, result)
+    try:
+        version = int(result.strip())
+    except ValueError:
+        raise ExternalCommandError(
+            "psql", exit_code, f"Unexpected server_version_num: {result.strip()!r}"
+        ) from None
+    if isinstance(key, str) and key:
+        _SERVER_VERSIONS[key] = version
+    return version
+
+
+def event_trigger_switch_supported(version_num: int) -> bool:
+    """Whether a server (``server_version_num``) knows ``event_triggers``."""
+    return version_num >= _EVENT_TRIGGER_SWITCH_VERSION
+
+
+def superuser_session_environment(settings: Settings, container: Any) -> dict[str, str]:
+    """Environment of a superuser client entering a tenant's database.
+
+    For ``psql``, ``pg_dump`` and ``pg_restore`` alike: ``PGOPTIONS`` that
+    keeps event triggers from firing in the session, on a server that has
+    the setting, and nothing on one that does not.
+    """
+    if event_trigger_switch_supported(_server_version_num(settings, container)):
+        return {"PGOPTIONS": EVENT_TRIGGERS_OFF_OPTIONS}
+    return {}
+
+
+def _json_answer(output: str, kind: type) -> Any:
+    """The JSON value of type *kind* a query printed, else None.
+
+    psql's stderr arrives in the same stream as the row (a collation version
+    warning on connect, for one), so the row is looked for, not assumed.
+    """
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith(("[", "{")):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, kind):
+            return value
+    return None
+
+
+# Catalog only, every name spelled out: this is the superuser reading a
+# database whose content is a tenant's. Names go through text on their way
+# into JSON, which looks up a cast for no built-in type.
+_ENABLED_EVENT_TRIGGERS_SQL = (
+    "SELECT COALESCE(pg_catalog.json_agg(pg_catalog.json_build_object("
+    "'name', t.evtname::pg_catalog.text, "
+    "'event', t.evtevent::pg_catalog.text, "
+    "'function', t.evtfoid::pg_catalog.regprocedure::pg_catalog.text)), "
+    "'[]'::pg_catalog.json) FROM pg_catalog.pg_event_trigger t "
+    "WHERE t.evtenabled OPERATOR(pg_catalog.<>) 'D';"
+)
+# The names are quoted by the server (%I): they are whatever a dump said.
+_DISABLE_EVENT_TRIGGERS_SQL = (
+    "DO $$ DECLARE r RECORD; BEGIN "
+    "SET LOCAL search_path = pg_catalog; "
+    "FOR r IN SELECT t.evtname FROM pg_event_trigger t WHERE t.evtenabled <> 'D' "
+    "LOOP EXECUTE format('ALTER EVENT TRIGGER %I DISABLE', r.evtname); "
+    "END LOOP; END $$;"
+)
+
+
+def enabled_event_triggers(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> list[dict[str, str]]:
+    """Event triggers of *database* that would fire: name, event, function.
+
+    A read of one catalog table, which fires nothing itself. An answer that
+    cannot be read is an error, not "none": the callers are about to run DDL
+    as the superuser on the strength of it.
+    """
+    output = _exec_sql(
+        client,
+        settings,
+        _ENABLED_EVENT_TRIGGERS_SQL,
+        database,
+        container_name=container_name,
+    )
+    found = _json_answer(output, list)
+    if found is None:
+        raise ExternalCommandError(
+            "psql",
+            0,
+            f"Could not read the event triggers of database '{database}': "
+            f"{output[-500:] or 'no answer'}",
+        )
+    return [
+        {key: str(entry.get(key, "")) for key in ("name", "event", "function")}
+        for entry in found
+        if isinstance(entry, dict)
+    ]
+
+
+def disable_event_triggers(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> list[str]:
+    """Disable the event triggers of *database* that would fire; return them.
+
+    Call it before the superuser runs DDL inside a database that holds, or
+    was copied from, a tenant's content: ``ALTER ... OWNER``, ``REASSIGN
+    OWNED``, ``DROP OWNED`` and ``DROP SEQUENCE`` all fire
+    ``ddl_command_start``, and the function behind an event trigger is the
+    tenant's to rewrite once the clone's objects are handed to its role. One
+    catalog query when there is nothing to do, which is every database loaded
+    since dumps stopped being the superuser's.
+
+    Disabled, not dropped and not refused. Dropping would destroy something
+    the operator may want to look at. Refusing would stop every environment
+    made from such a template, and the remedy it would name — loading the
+    template again — fails on the very same statement, since the role that
+    loads dumps now cannot create an event trigger. Disabled is also what a
+    rebuilt template amounts to, and it lasts: altering an event trigger takes
+    a superuser, so no tenant can turn one back on. Commands on event
+    triggers fire no event trigger themselves, on any release.
+    """
+    found = enabled_event_triggers(
+        client, settings, database, container_name=container_name
+    )
+    if not found:
+        return []
+    _exec_sql(
+        client,
+        settings,
+        _DISABLE_EVENT_TRIGGERS_SQL,
+        database,
+        container_name=container_name,
+    )
+    left = enabled_event_triggers(
+        client, settings, database, container_name=container_name
+    )
+    if left:
+        raise PrerequisiteNotMetError(
+            f"Database '{database}' still has enabled event triggers "
+            f"({', '.join(_plain(entry['name']) for entry in left)}), which would run "
+            "with the PostgreSQL superuser's rights. Drop them as the "
+            "superuser (DROP EVENT TRIGGER ...) and retry."
+        )
+    logger.warning(
+        "Disabled %d event trigger(s) in database %s of %s before running DDL "
+        "there as the PostgreSQL superuser: %s. An event trigger runs its "
+        "function with the rights of whoever issues the statement, and only a "
+        "superuser can create one, so these came with a dump that an older "
+        "version loaded as the superuser. They stay disabled; rebuild the "
+        "template they came from to be rid of them (see 'What an older load "
+        "may have left behind' in the templates guide).",
+        len(found),
+        database,
+        container_name or settings.shared_db_container,
+        "; ".join(
+            f"{_plain(entry['name'])} (on {_plain(entry['event'])}, "
+            f"runs {_plain(entry['function'])})"
+            for entry in found
+        ),
+    )
+    return [entry["name"] for entry in found]
 
 
 def get_team_db_usage_bytes(
@@ -1479,8 +1709,11 @@ def reassign_db_ownership(
     objects, so the block pins ``search_path`` first: with ``public`` on the
     path, an operator such as ``public.!~~(name, name)`` from a template dump
     is a better match for ``rolname NOT LIKE '...'`` than the built-in one and
-    would run with superuser rights.
+    would run with superuser rights. Every statement here is DDL, so the
+    database's event triggers are disabled first (see disable_event_triggers):
+    they fire for the superuser like for anyone else.
     """
+    disable_event_triggers(client, settings, db_name, container_name=container_name)
     _exec_sql(
         client,
         settings,
@@ -1544,8 +1777,10 @@ def drop_signaling_sequences(
     EXISTS), so leftovers cause DuplicateTable errors.
 
     Like reassign_db_ownership, this is the superuser inside tenant content:
-    ``search_path`` is pinned, and the sequences are named with their schema.
+    ``search_path`` is pinned, the sequences are named with their schema, and
+    event triggers are disabled before the DROP that would fire them.
     """
+    disable_event_triggers(client, settings, db_name, container_name=container_name)
     _exec_sql(
         client,
         settings,
@@ -1814,6 +2049,390 @@ def restrict_managed_databases(
             ", ".join(restricted),
         )
     return restricted
+
+
+# What a dump could create only because an older version loaded it as the
+# superuser, and what is still the superuser's in a database that has a role
+# of its own. Template dumps are loaded by a role that can create none of it
+# nowadays (see reload_template), but a database loaded before that keeps it,
+# and CREATE DATABASE ... TEMPLATE copies most of it into every clone.
+#
+# One row of JSON per database, catalog tables only. The session's
+# search_path is pinned to pg_catalog before this runs, which is what the
+# unqualified names rely on. 16384 is the first OID a user's object can have.
+# Members of an extension are the image's code, not a dump's, and are left
+# out; the extension itself is listed when the image does not mark it trusted.
+_NOT_EXTENSION_MEMBER = (
+    "NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '{catalog}'::regclass "
+    "AND d.objid = {oid} AND d.deptype = 'e')"
+)
+
+
+def _json_list(query: str) -> str:
+    """Subquery aggregating up to 20 values ``v`` of *query* into a JSON array."""
+    return (
+        "(SELECT COALESCE(json_agg(x.v), '[]'::json) "
+        f"FROM ({query} ORDER BY 1 LIMIT 20) x)"
+    )
+
+
+_SUPERUSER_ONLY_OBJECTS_SQL = (
+    "SELECT json_build_object("
+    "'database', current_database()::text, "
+    # Fired by DDL or a login, as whoever issues it.
+    "'event_triggers', (SELECT COALESCE(json_agg(json_build_object("
+    "'name', t.evtname::text, 'event', t.evtevent::text, "
+    "'enabled', t.evtenabled <> 'D', "
+    "'function', t.evtfoid::regprocedure::text, "
+    "'function_owner', pg_get_userbyid(p.proowner)::text)), '[]'::json) "
+    "FROM pg_event_trigger t JOIN pg_proc p ON p.oid = t.evtfoid), "
+    # C, internal and untrusted procedural languages: no role's limits apply
+    # to what they do, whoever calls them.
+    "'untrusted_functions', "
+    + _json_list(
+        "SELECT p.oid::regprocedure::text || ' in ' || l.lanname::text AS v "
+        "FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang "
+        "WHERE p.oid >= 16384 AND NOT l.lanpltrusted AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_proc", oid="p.oid")
+    )
+    # Run with the superuser's rights for whoever may call them.
+    + ", 'definer_functions', "
+    + _json_list(
+        "SELECT p.oid::regprocedure::text AS v "
+        "FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner "
+        "WHERE p.oid >= 16384 AND p.prosecdef AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_proc", oid="p.oid")
+    )
+    # Read their tables with the superuser's rights.
+    + ", 'superuser_views', "
+    + _json_list(
+        "SELECT c.oid::regclass::text AS v "
+        "FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner "
+        "WHERE c.oid >= 16384 AND c.relkind IN ('v', 'm') AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_class", oid="c.oid")
+    )
+    + ", 'untrusted_extensions', "
+    + _json_list(
+        "SELECT e.extname::text AS v FROM pg_extension e "
+        "WHERE e.extname <> 'plpgsql' AND NOT EXISTS ("
+        "SELECT 1 FROM pg_available_extension_versions a "
+        "WHERE a.name = e.extname AND a.version = e.extversion AND a.trusted)"
+    )
+    # A cast between two built-in types takes the owner of one of them.
+    + ", 'casts', "
+    + _json_list(
+        "SELECT format_type(c.castsource, NULL) || ' to ' || "
+        "format_type(c.casttarget, NULL) AS v FROM pg_cast c "
+        "WHERE c.oid >= 16384 AND c.castsource < 16384 AND c.casttarget < 16384"
+    )
+    + ", 'superuser_operators', "
+    + _json_list(
+        "SELECT o.oid::regoperator::text AS v "
+        "FROM pg_operator o JOIN pg_roles r ON r.oid = o.oprowner "
+        "WHERE o.oid >= 16384 AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_operator", oid="o.oid")
+        + " UNION ALL SELECT 'operator class ' || c.opcname::text "
+        "FROM pg_opclass c JOIN pg_roles r ON r.oid = c.opcowner "
+        "WHERE c.oid >= 16384 AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_opclass", oid="c.oid")
+    )
+    # Libraries loaded into every session of this database, ours included.
+    + ", 'preload_settings', "
+    + _json_list(
+        "SELECT DISTINCT split_part(cfg, '=', 1) AS v "
+        "FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase "
+        "CROSS JOIN LATERAL unnest(s.setconfig) AS cfg "
+        "WHERE d.datname = current_database() AND split_part(cfg, '=', 1) "
+        "IN ('session_preload_libraries', 'local_preload_libraries')"
+    )
+    + ", 'publications', "
+    + _json_list(
+        "SELECT p.pubname::text AS v "
+        "FROM pg_publication p JOIN pg_roles r ON r.oid = p.pubowner "
+        "WHERE p.puballtables OR r.rolsuper"
+    )
+    + ", 'subscriptions', "
+    + _json_list(
+        "SELECT s.subname::text AS v "
+        "FROM pg_subscription s JOIN pg_database d ON d.oid = s.subdbid "
+        "WHERE d.datname = current_database()"
+    )
+    # A server and a mapping decide where, and as whom, a foreign table
+    # connects for whoever may read it.
+    + ", 'foreign_servers', "
+    + _json_list("SELECT s.srvname::text AS v FROM pg_foreign_server s")
+    + ", 'user_mappings', (SELECT count(*) FROM pg_user_mapping)"
+    # A rule's actions are checked against the rights of its table's owner.
+    + ", 'rules', "
+    + _json_list(
+        "SELECT w.ev_class::regclass::text || ': ' || w.rulename::text AS v "
+        "FROM pg_rewrite w JOIN pg_class c ON c.oid = w.ev_class "
+        "JOIN pg_roles r ON r.oid = c.relowner "
+        "WHERE w.rulename <> '_RETURN' AND c.oid >= 16384 AND r.rolsuper"
+    )
+    + ")::text;"
+)
+# Managed databases that accept connections, whether each is a template, and
+# whether its owner is a superuser (a template an older version loaded).
+_SCAN_DATABASES_SQL = (
+    "SELECT d.datname, d.datistemplate, r.rolsuper FROM pg_catalog.pg_database d "
+    "JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) d.datdba "
+    "WHERE d.datallowconn;"
+)
+# Names Oduflow gives its databases; anything else is not passed to a shell.
+_SCANNED_DATABASE_RE = re.compile(rf"^{_MANAGED_DATABASE_PREFIX}[A-Za-z0-9_.-]+$")
+_SCAN_FAILED_MARKER = "oduflow-scan-failed"
+# For the whole cluster, and for one database: a session waits while its
+# database is being copied (CREATE DATABASE ... TEMPLATE locks the source
+# against new connections), and one large clone must not hold up the rest.
+_SCAN_TIMEOUT_SECONDS = 120
+_SCAN_DATABASE_TIMEOUT_SECONDS = 10
+# One psql per database, all of them in a single exec: a start should not
+# cost a round trip through Docker for every environment. The query and the
+# names reach the shell as environment and arguments, never as its text.
+# A session of a few milliseconds does not get in a clone's way either:
+# CREATE DATABASE waits five seconds for its template to be left alone.
+_SCAN_SCRIPT = (
+    'for db in "$@"; do '
+    f"timeout {_SCAN_DATABASE_TIMEOUT_SECONDS} "
+    'psql -X -q -tA -v ON_ERROR_STOP=1 -U "$ODUFLOW_SCAN_ROLE" -d "$db" '
+    '-c "$ODUFLOW_SCAN_PIN" -c "$ODUFLOW_SCAN_SQL" 2>&1 '
+    f'|| echo "{_SCAN_FAILED_MARKER} $db"; done'
+)
+
+# kind -> how a report names it. Those in _RISK_KINDS can hand a tenant, or
+# code a tenant controls, rights it should not have, and are warned about;
+# the rest only cannot be recreated by a rebuild and are mentioned.
+_OBJECT_KINDS = {
+    "event_triggers": "event triggers",
+    "untrusted_functions": "functions in an untrusted language",
+    "definer_functions": "SECURITY DEFINER functions owned by a superuser",
+    "superuser_views": "views owned by a superuser",
+    "casts": "casts between built-in types",
+    "preload_settings": "libraries preloaded by ALTER DATABASE ... SET",
+    "subscriptions": "subscriptions",
+    "foreign_servers": "foreign servers",
+    "user_mappings": "user mappings",
+    "untrusted_extensions": "extensions the image does not mark trusted",
+    "superuser_operators": "operators owned by a superuser",
+    "publications": "publications of a superuser",
+    "rules": "rules on tables owned by a superuser",
+}
+_RISK_KINDS = frozenset(
+    {
+        "event_triggers",
+        "untrusted_functions",
+        "definer_functions",
+        "superuser_views",
+        "casts",
+        "preload_settings",
+        "subscriptions",
+        "foreign_servers",
+        "user_mappings",
+    }
+)
+# In a template the superuser still owns, everything is the superuser's;
+# these say nothing more than that.
+_OWNERSHIP_KINDS = frozenset(
+    {"definer_functions", "superuser_views", "superuser_operators", "rules"}
+)
+
+
+def _plain(value: object, limit: int = 120) -> str:
+    """*value* for a log line: it is a name out of a tenant's catalog."""
+    text = "".join(ch if ch.isprintable() else "?" for ch in str(value))
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def superuser_only_objects(
+    client: DockerClient,
+    settings: Settings,
+    *,
+    container_name: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """What only a superuser could have left in each managed database.
+
+    Per database of the ``oduflow_`` namespace that accepts connections:
+    ``template`` and ``superuser_owned`` (a template an older version loaded
+    is both), ``checked``, and ``objects`` — the kinds of _OBJECT_KINDS found
+    there, each a list of names (a count for user mappings; name, event,
+    function and state for event triggers).
+
+    Read-only. The superuser reads catalog tables in every database, with
+    its search_path pinned and, on PostgreSQL 17+, event triggers off for the
+    session, so that looking runs nothing of what it is looking for.
+    """
+    cluster = container_name or settings.shared_db_container
+    rows = _exec_sql(
+        client, settings, _SCAN_DATABASES_SQL, container_name=container_name
+    )
+    databases: dict[str, dict[str, Any]] = {}
+    for line in rows.splitlines():
+        parts = line.rsplit("|", 2)
+        if len(parts) == 3 and _SCANNED_DATABASE_RE.match(parts[0]):
+            databases[parts[0]] = {
+                "template": parts[1] == "t",
+                "superuser_owned": parts[2] == "t",
+                "checked": False,
+                "objects": {},
+            }
+    if not databases:
+        return {}
+    container = client.containers.get(cluster)
+    exit_code, output = container.exec_run(
+        [
+            "timeout",
+            str(_SCAN_TIMEOUT_SECONDS),
+            "sh",
+            "-c",
+            _SCAN_SCRIPT,
+            "sh",
+            *sorted(databases),
+        ],
+        environment={
+            **superuser_session_environment(settings, container),
+            "ODUFLOW_SCAN_ROLE": settings.db_user,
+            "ODUFLOW_SCAN_PIN": SUPERUSER_SEARCH_PATH_SQL,
+            "ODUFLOW_SCAN_SQL": _SUPERUSER_ONLY_OBJECTS_SQL,
+        },
+    )
+    text = _container_output(output)
+    for line in text.splitlines():
+        found = _json_answer(line, dict)
+        entry = databases.get(str(found.get("database"))) if found else None
+        if entry is None:
+            continue
+        entry["checked"] = True
+        entry["objects"] = {
+            kind: found[kind] for kind in _OBJECT_KINDS if found.get(kind)
+        }
+    if exit_code != 0 and not any(entry["checked"] for entry in databases.values()):
+        raise ExternalCommandError("psql", exit_code, text[-2000:])
+    return databases
+
+
+def _describe_objects(objects: dict[str, Any]) -> str:
+    """The findings of one database, for a log line."""
+    parts = []
+    for kind, label in _OBJECT_KINDS.items():
+        found = objects.get(kind)
+        if not found:
+            continue
+        if kind == "event_triggers":
+            names = [
+                f"{_plain(t.get('name'))} (on {_plain(t.get('event'))}, runs "
+                f"{_plain(t.get('function'))} of {_plain(t.get('function_owner'))}, "
+                f"{'enabled' if t.get('enabled') else 'disabled'})"
+                for t in found
+                if isinstance(t, dict)
+            ]
+        elif isinstance(found, list):
+            names = [_plain(name) for name in found]
+        else:
+            names = [_plain(found)]
+        shown = ", ".join(names[:5])
+        if len(names) > 5:
+            shown += f" and {len(names) - 5} more"
+        parts.append(f"{label}: {shown}")
+    return "; ".join(parts)
+
+
+def _is_risk(kind: str, found: Any) -> bool:
+    """Whether a finding is warned about rather than mentioned."""
+    if kind == "event_triggers":
+        # A disabled one fires for nobody, and only a superuser enables it.
+        return any(isinstance(t, dict) and t.get("enabled") for t in found)
+    return kind in _RISK_KINDS
+
+
+def _report_superuser_only_objects(
+    client: DockerClient, settings: Settings, container_name: str
+) -> None:
+    """Name the managed databases of one cluster that hold such objects.
+
+    Reported on start, never repaired: what to do with a function in an
+    untrusted language or a view of the superuser's is the operator's call,
+    and nothing here is needed for Oduflow's own safety — its superuser
+    sessions do not fire event triggers (see disable_event_triggers) and
+    resolve no name of a tenant's. Never fails the start.
+    """
+    try:
+        _log_superuser_only_objects(
+            superuser_only_objects(client, settings, container_name=container_name),
+            container_name,
+        )
+    except Exception:
+        logger.warning(
+            "Could not check the databases of %s for objects only a "
+            "PostgreSQL superuser can create",
+            container_name,
+            exc_info=True,
+        )
+
+
+def _log_superuser_only_objects(
+    databases: dict[str, dict[str, Any]], container_name: str
+) -> None:
+    """One warning per database with a finding that matters, the rest in brief."""
+    legacy_templates: list[str] = []
+    mentioned: list[str] = []
+    for name in sorted(databases):
+        entry = databases[name]
+        legacy = entry["template"] and entry["superuser_owned"]
+        objects = {
+            kind: found
+            for kind, found in entry["objects"].items()
+            if not (legacy and kind in _OWNERSHIP_KINDS)
+        }
+        if any(_is_risk(kind, found) for kind, found in objects.items()):
+            logger.warning(
+                "Database %s in %s holds what only a PostgreSQL superuser can "
+                "create or still owns: %s.%s See 'What an older load may have "
+                "left behind' in the templates guide.",
+                name,
+                container_name,
+                _describe_objects(objects),
+                " It is a template an older version loaded as the superuser, "
+                "and every environment created from it gets a copy: rebuild "
+                "the template."
+                if legacy
+                else "",
+            )
+            continue
+        if objects:
+            mentioned.append(f"{name} ({_describe_objects(objects)})")
+        if legacy:
+            legacy_templates.append(name)
+    if mentioned:
+        logger.info(
+            "%d database(s) in %s hold what a rebuild cannot recreate, because "
+            "only a PostgreSQL superuser can create it: %s",
+            len(mentioned),
+            container_name,
+            "; ".join(mentioned[:10])
+            + (f" and {len(mentioned) - 10} more" if len(mentioned) > 10 else ""),
+        )
+    if legacy_templates:
+        logger.info(
+            "%d template database(s) in %s were loaded by an older version and "
+            "still belong to the PostgreSQL superuser: %s. They work as before; "
+            "rebuild each when convenient (import it again with --overwrite or "
+            "--refresh, or publish an environment over it).",
+            len(legacy_templates),
+            container_name,
+            ", ".join(legacy_templates),
+        )
+    unchecked = sorted(
+        name for name, entry in databases.items() if not entry["checked"]
+    )
+    if unchecked:
+        logger.info(
+            "%d database(s) in %s could not be checked for objects only a "
+            "PostgreSQL superuser can create: %s",
+            len(unchecked),
+            container_name,
+            ", ".join(unchecked[:10]),
+        )
 
 
 def _db_exists(
@@ -2524,25 +3143,35 @@ def superuser_dump_environment(
     server whatever the client's release. A server too old to know the
     setting cannot be given it (the connection would fail), so that is
     reported instead.
+
+    A dump runs no DDL, but it logs in, and since PostgreSQL 17 a database
+    can hold an event trigger ``ON login`` — which a template loaded as the
+    superuser may have brought along, and which runs its function as whoever
+    connects. Such a server is told to fire no event trigger in the session
+    (see superuser_session_environment); older ones have no login triggers.
     """
     version = int(
         _exec_sql(
             client, settings, "SHOW server_version_num;", container_name=container_name
         )
     )
+    options = []
     if pg_dump_guard_supported(version):
-        return {"PGOPTIONS": PG_DUMP_GUARD_OPTIONS}
-    logger.warning(
-        "Dumping database %s as the PostgreSQL superuser on PostgreSQL %d.%d "
-        "(%s), a release without the fix for CVE-2024-7348: an open session in "
-        "that database could run SQL as the superuser during the dump. Move "
-        "the cluster to a current minor release of its PostgreSQL image.",
-        database,
-        version // 10000,
-        version % 10000,
-        container_name or settings.shared_db_container,
-    )
-    return {}
+        options.append(PG_DUMP_GUARD_OPTIONS)
+    else:
+        logger.warning(
+            "Dumping database %s as the PostgreSQL superuser on PostgreSQL %d.%d "
+            "(%s), a release without the fix for CVE-2024-7348: an open session in "
+            "that database could run SQL as the superuser during the dump. Move "
+            "the cluster to a current minor release of its PostgreSQL image.",
+            database,
+            version // 10000,
+            version % 10000,
+            container_name or settings.shared_db_container,
+        )
+    if event_trigger_switch_supported(version):
+        options.append(EVENT_TRIGGERS_OFF_OPTIONS)
+    return {"PGOPTIONS": " ".join(options)} if options else {}
 
 
 def scoped_dump_role(
@@ -2763,9 +3392,9 @@ _RESTRICTED_LOAD_HINT = (
     "\n\nTemplate dumps are loaded by a restricted PostgreSQL role, never by "
     "the cluster superuser, so a dump cannot use what only a superuser may: "
     "an extension PostgreSQL does not mark as trusted (pg_trgm, unaccent and "
-    "the other trusted extensions load fine), an untrusted language, or a "
-    "comment on an extension it did not create. See 'How a dump is loaded' "
-    "in the templates guide."
+    "the other trusted extensions load fine), an untrusted language, an event "
+    "trigger, or a comment on an extension it did not create. See 'How a dump "
+    "is loaded' in the templates guide."
 )
 _RESTRICTED_RESTORE_HINT = (
     "\n\nDatabase content is restored by the database's own PostgreSQL role, "
@@ -2868,8 +3497,11 @@ def _own_public_schema(
 
     A dump may grant on, comment on or re-own the public schema, which takes
     its owner. Nothing from the dump is in the database yet, so the superuser
-    runs this utility statement over no tenant content.
+    runs this utility statement over no tenant content. It is DDL all the
+    same, and the rule has no exceptions: event triggers are disabled first,
+    which here means whatever ``template1`` handed down.
     """
+    disable_event_triggers(client, settings, database, container_name=container_name)
     _exec_sql(
         client,
         settings,
@@ -2916,7 +3548,11 @@ def _retire_template_loader(
     if handover is not None and _db_exists(client, settings, handover[0]):
         # Both are utility statements: they run no code from the database, so
         # the superuser can issue them over tenant content. DROP OWNED only
-        # has privileges and default privileges left to remove.
+        # has privileges and default privileges left to remove. What they do
+        # fire is an event trigger. The loader cannot create one, but an
+        # extension the operator's image marks trusted can, since its script
+        # runs as the bootstrap superuser; so they are disabled first.
+        disable_event_triggers(client, settings, handover[0])
         _exec_sql(
             client,
             settings,
@@ -3930,6 +4566,7 @@ def init_system(
         container_name=settings.shared_db_container,
     )
     _restrict_cluster_databases(client, settings, settings.shared_db_container)
+    _report_superuser_only_objects(client, settings, settings.shared_db_container)
 
     # Production hosting is a strict opt-in. Disabled installations stop all
     # managed production workloads without deleting them; enabled installations
@@ -3946,6 +4583,7 @@ def init_system(
         "latched"
     ):
         _restrict_cluster_databases(client, settings, settings.prod_db_container)
+        _report_superuser_only_objects(client, settings, settings.prod_db_container)
 
     # A server that died mid-deploy leaves deploy_in_progress flags behind.
     # This belongs to startup and only to startup: ensure_prod_infra is also

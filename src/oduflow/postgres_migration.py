@@ -79,18 +79,24 @@ SUPERUSER_RESTORE_ENV = "ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE"
 # this one: PostgreSQL reserves the ``pg_`` prefix, so nobody can create it.
 _NO_SCHEMA = "pg_oduflow_no_such_schema"
 _TRUSTED_MARKER = "---trusted---"
-# What pg_dump leaves out, with a warning at most, when it is not run by a
-# superuser: subscriptions, and the options of user mappings it may not see
-# (a password, usually). Neither exists without something a superuser set up
-# (the right to subscribe, a foreign-data wrapper). Every name is spelled
-# out: the superuser reads a tenant's database here.
+# What a database's own role cannot carry over. pg_dump leaves two things
+# out, with a warning at most, when it is not run by a superuser:
+# subscriptions, and the options of user mappings it may not see (a password,
+# usually). An event trigger it does dump, and then no role but a superuser
+# can create it again, which would stop the restore after the old cluster is
+# gone. None of the three exists without something a superuser set up (the
+# right to subscribe, a foreign-data wrapper, a dump an older version loaded
+# as the superuser). Every name is spelled out: the superuser reads a
+# tenant's database here.
 _ROLE_DUMP_OMISSIONS_SQL = (
     "SELECT 'a subscription' WHERE EXISTS ("
     "SELECT 1 FROM pg_catalog.pg_subscription s "
     "JOIN pg_catalog.pg_database d ON d.oid OPERATOR(pg_catalog.=) s.subdbid "
     "WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()) "
     "UNION ALL SELECT 'a user mapping' WHERE EXISTS ("
-    "SELECT 1 FROM pg_catalog.pg_user_mapping);"
+    "SELECT 1 FROM pg_catalog.pg_user_mapping) "
+    "UNION ALL SELECT 'an event trigger' WHERE EXISTS ("
+    "SELECT 1 FROM pg_catalog.pg_event_trigger);"
 )
 # Control files that mark their extension trusted: its database's owner may
 # create it without being a superuser.
@@ -531,7 +537,8 @@ def _inventory(
         if name in databases and name not in by_superuser:
             restricted.update(used)
             # The dump is all that is left of a database once its cluster is
-            # removed, and its role takes it (see _dump_database).
+            # removed, and its role takes it (see _dump_database) and has to
+            # be able to restore all of it (see _restore_database).
             omitted = system_ops._exec_sql(
                 client,
                 settings,
@@ -542,9 +549,10 @@ def _inventory(
             if omitted:
                 raise PrerequisiteNotMetError(
                     f"Database '{name}' in {container} contains "
-                    f"{' and '.join(omitted)}, which only a superuser's dump "
-                    "carries over. A database is dumped and restored by its "
-                    "own role, never by the superuser. "
+                    f"{' and '.join(omitted)}, which only a superuser can "
+                    "carry into the new cluster. A database is dumped and "
+                    "restored by its own role, never by the superuser. Drop "
+                    "what the database does not need, or: "
                     + _superuser_restore_hint(name)
                     + " Nothing has been changed."
                 )
@@ -1287,6 +1295,13 @@ def _restore_database(
             name,
             SUPERUSER_RESTORE_ENV,
         )
+        # An archive the superuser restores may create event triggers, and
+        # what follows them in it (a materialized view's refresh, every
+        # further connection of a parallel restore) would fire them. A
+        # server that can keep them quiet for the session is told to.
+        quiet = system_ops.superuser_session_environment(
+            settings, client.containers.get(container)
+        )
         _run_helper(
             client,
             settings,
@@ -1296,6 +1311,7 @@ def _restore_database(
             directory,
             f"Restoring database {name}",
             superuser=True,
+            options=quiet.get("PGOPTIONS", ""),
             writable=False,
         )
         return

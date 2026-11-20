@@ -218,7 +218,12 @@ checked before anything is changed:
   restore it. For a production, `reconfigure_production` with no settings
   changed provisions the role again and writes the file;
 - a database that contains a subscription or a user mapping is refused:
-  `pg_dump` leaves those out of a dump it does not take as a superuser.
+  `pg_dump` leaves those out of a dump it does not take as a superuser;
+- a database that contains an event trigger is refused: its dump includes the
+  trigger, and only a superuser could create it again in the new cluster. Drop
+  it (`DROP EVENT TRIGGER <name>;`) unless you need it — one that came with a
+  template loaded by an older version is described under
+  [What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
 
 The role also has to be able to read everything in its database. If it cannot
 — a table that still belongs to another role, a table with
@@ -230,9 +235,11 @@ If you trust everything a database contains, you can let the superuser dump
 and restore it as before by starting Oduflow with
 `ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
 environment. The same variable is the way out when a restore stops on content
-that only a superuser can recreate (an event trigger, a publication
-`FOR ALL TABLES`): the error names the database and its kept dump; set the
-variable and restart to resume.
+that only a superuser can recreate (a publication `FOR ALL TABLES`, a function
+in an untrusted language): the error names the database and its kept dump; set
+the variable and restart to resume. On PostgreSQL 17 and newer the superuser
+restores such a database with event triggers switched off for the session, so
+one that the archive creates does not fire during the rest of the restore.
 
 A failure before an old cluster is removed, including a refused S3 delete,
 leaves everything as it was, and setting the image back cancels the upgrade; if

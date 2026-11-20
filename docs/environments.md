@@ -754,6 +754,13 @@ and a production seeded from the environment. The tables, functions and
 operators in a database are its tenant's to define, and a query resolves them
 with the rights of whoever runs it.
 
+The few statements the superuser still runs inside an environment's database
+(handing a new copy's tables and functions to the environment's role) are
+catalog-only, and before them Oduflow disables any enabled **event trigger**
+in that database: one runs its function with the rights of whoever issues
+DDL. In practice only a template loaded by an older version contains one — see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
 **Environments without their own role.** An environment created before
 per-environment credentials existed has no role on record, and Oduflow does
 not fall back to the superuser for it. On such an environment:

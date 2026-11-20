@@ -478,6 +478,8 @@ def _clusters_checked_by_init_system(tmp_path, *, guard):
         restrict = stack.enter_context(
             patch.object(system_ops, "_restrict_cluster_databases")
         )
+        # Reported on in test_event_trigger_boundary.py.
+        stack.enter_context(patch.object(system_ops, "_report_superuser_only_objects"))
         stack.enter_context(patch("oduflow.wal_monitor.state", return_value=guard))
         # What follows the database steps is not these tests' subject.
         stack.enter_context(
