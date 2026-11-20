@@ -3531,7 +3531,7 @@ class TestRunDbQuery:
         self, mock_docker_client
     ):
         odoo, db = _odoo_and_db_containers(mock_docker_client)
-        odoo.exec_run.return_value = (0, b"?column?\n1\n")
+        odoo.exec_run.return_value = (0, (b"?column?\n1\n", b"psql: warning\n"))
 
         result, load = self._run(mock_docker_client)
 
@@ -3559,7 +3559,11 @@ class TestRunDbQuery:
         ]
         # The image's unprivileged user, and the password only in the exec's
         # environment.
-        assert kwargs == {"user": "odoo", "environment": {"PGPASSWORD": "scoped-pw"}}
+        assert kwargs == {
+            "user": "odoo",
+            "environment": {"PGPASSWORD": "scoped-pw"},
+            "demux": True,
+        }
         assert "scoped-pw" not in argv
         # The scoped role only: never the cluster superuser fallback.
         assert load.call_args.kwargs == {"allow_fallback": False}
@@ -3567,7 +3571,7 @@ class TestRunDbQuery:
 
     def test_human_format_drops_only_the_csv_flag(self, mock_docker_client):
         odoo, _ = _odoo_and_db_containers(mock_docker_client)
-        odoo.exec_run.return_value = (0, b" ?column? \n----------\n 1\n")
+        odoo.exec_run.return_value = (0, (b" ?column? \n----------\n 1\n", None))
 
         self._run(mock_docker_client, output_format="human")
 
@@ -3589,7 +3593,7 @@ class TestRunDbQuery:
     ):
         """Not filtered: confined. They run where the caller has a shell."""
         odoo, db = _odoo_and_db_containers(mock_docker_client)
-        odoo.exec_run.return_value = (0, b"")
+        odoo.exec_run.return_value = (0, (None, None))
 
         self._run(mock_docker_client, query=query)
 
@@ -3601,7 +3605,7 @@ class TestRunDbQuery:
 
     def test_password_stays_out_of_logs_and_reprs(self, mock_docker_client, caplog):
         odoo, _ = _odoo_and_db_containers(mock_docker_client)
-        odoo.exec_run.return_value = (0, b"")
+        odoo.exec_run.return_value = (0, (None, None))
 
         with (
             caplog.at_level(logging.DEBUG, logger="oduflow"),
@@ -3624,7 +3628,10 @@ class TestRunDbQuery:
 
     def test_query_error_is_reported_as_before(self, mock_docker_client):
         odoo, _ = _odoo_and_db_containers(mock_docker_client)
-        odoo.exec_run.return_value = (1, b'ERROR:  relation "nope" does not exist\n')
+        odoo.exec_run.return_value = (
+            1,
+            (None, b'ERROR:  relation "nope" does not exist\n'),
+        )
 
         with pytest.raises(ExternalCommandError, match="does not exist") as excinfo:
             self._run(mock_docker_client, query="SELECT * FROM nope")
@@ -3638,7 +3645,7 @@ class TestRunDbQuery:
         odoo, db = _odoo_and_db_containers(mock_docker_client)
         odoo.exec_run.return_value = (
             exit_code,
-            b'OCI runtime exec failed: exec: "psql": executable file not found',
+            (None, b'OCI runtime exec failed: exec: "psql": executable file not found'),
         )
 
         with pytest.raises(PrerequisiteNotMetError, match="postgresql-client"):
