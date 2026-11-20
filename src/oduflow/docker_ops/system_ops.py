@@ -4234,11 +4234,26 @@ def ensure_team_tablespace(
                 else str(output)
             )
             raise ExternalCommandError(cmd[0], exit_code, out)
-    _exec_sql(
-        client,
-        settings,
-        f"CREATE TABLESPACE \"{ts_name}\" LOCATION '{target}';",
-    )
+    try:
+        _exec_sql(
+            client,
+            settings,
+            f"CREATE TABLESPACE \"{ts_name}\" LOCATION '{target}';",
+        )
+    except ExternalCommandError as exc:
+        # Another branch may have created it after our initial catalog check.
+        try:
+            location = _exec_sql(
+                client,
+                settings,
+                f"SELECT pg_tablespace_location(oid) FROM pg_tablespace "
+                f"WHERE spcname = '{ts_name}';",
+            )
+        except ExternalCommandError:
+            raise exc from None
+        if location != target:
+            raise
+        return ts_name
     logger.info("Created tablespace %s at %s", ts_name, target)
     return ts_name
 
