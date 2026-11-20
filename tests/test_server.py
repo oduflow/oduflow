@@ -65,9 +65,10 @@ class TestMCPBootstrapInstructions:
 
 
 class TestCLIInitDestroy:
-    def test_cli_transport_short_flag_starts_http(self, tmp_path):
+    def test_cli_transport_short_flag_starts_http(self, tmp_path, monkeypatch):
         from oduflow import server
 
+        monkeypatch.setattr(server.settings_module, "TRANSPORT", "stdio")
         settings = replace(TEST_SETTINGS, base_data_dir=str(tmp_path))
         with (
             patch.object(sys, "argv", ["oduflow", "--no-telemetry", "-t", "http"]),

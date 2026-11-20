@@ -1091,7 +1091,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[server].bind` | `0.0.0.0` | HTTP server listener address. The legacy key `[server].host` remains accepted with a deprecation warning; if both are present they must have the same value |
 | `[server].host` | *(legacy)* | Deprecated alias for `[server].bind` |
 | `[server].port` | `8000` | HTTP server port |
-| `[server].allow_local_path` | `true` | Allow trusted local-development live-mounts that bind a host checkout read/write. Set `false` on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required |
+| `[server].allow_local_path` | `true` | Allow local CLI and stdio MCP to bind a host checkout read/write. HTTP MCP and the dashboard cannot create or rebuild live-mounted environments, regardless of this setting |
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
 | `[server].trace` | `false` | Enable detailed trace logging for git analysis and environment operations |
 | `[server].disable_telemetry` | `false` | Disable anonymous usage telemetry (see [Telemetry](#telemetry)) |
@@ -2367,10 +2367,10 @@ What this means for a dump:
   usually contains `COMMENT ON EXTENSION plpgsql`, which now fails the same way
   (`must be owner of extension plpgsql`): convert it with
   `pg_restore --no-owner -f dump.sql dump.pgdump` and import the SQL instead.
-- **Plain-SQL dumps stay tolerant**: a refused statement is skipped and the
-  rest loads. Ownership statements (`ALTER ... OWNER TO`) are among the skipped
-  ones — the template has one owner — and are reported as a single summary
-  line.
+- **Plain SQL and SQL.gz fail on statement errors**, except for known
+  compatibility errors: refused ownership changes, a comment on the existing
+  `plpgsql` extension, and `transaction_timeout` on older PostgreSQL versions.
+  Skipped ownership changes are reported as a single summary line.
 
 A template database loaded by an older Oduflow keeps its previous owner until
 it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
@@ -7123,7 +7123,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.
 
 `local_path`
-:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow skips the clone and bind-mounts the directory live, so file edits are visible instantly with no git round-trip. `repo_url` is not required. Gated by `allow_local_path`.
+:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow bind-mounts it read/write instead of cloning. Available only through the local CLI or stdio MCP, with `allow_local_path` enabled. HTTP MCP and the dashboard require a Git source instead, including when a template records a local path.
 
 **Use it when**
 
@@ -8535,7 +8535,7 @@ Lock: team + template. Destructive and irreversible.
 ### `import_template`
 
 Import or refresh a template from an Odoo database manager, an S3 prefix,
-a local directory, or a local dump file. See [Templates](templates.md)
+a local directory, or a local dump file. Local sources require the local CLI or stdio MCP. See [Templates](templates.md)
 for the raw dump plus `filestore/` layout and migration examples.
 
 Lock: template; overwrite and refresh also take the team lock to protect live
@@ -8619,7 +8619,7 @@ Lock: template throughout; the team lock only for the remount-and-swap, so stagi
 :   *str · required* — Template profile to attach the filestore to.
 
 `source`
-:   *str · required* — A local directory, a local `.zip` / `.tar` / `.tar.gz` archive, an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`.
+:   *str · required* — A local directory or archive (local CLI or stdio MCP only), an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`. Use stdio MCP only with trusted local clients: file access uses the Oduflow process's host permissions, not the team's token.
 
 `reset_env_changes`
 :   *bool · default `False`* — Discard environments' filestore deltas (destructive).
