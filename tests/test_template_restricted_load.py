@@ -335,7 +335,7 @@ def test_plain_sql_is_run_by_psql_in_the_client(tmp_path):
         (
             "dump.sql.gz",
             b"-- sql",
-            "set -o pipefail; gunzip -c /restore/dump | psql -X -q -w",
+            "set -o pipefail; gunzip -c /restore/dump | psql -X -q -w -f -",
         ),
         (
             "dump.pgdump.gz",
@@ -422,6 +422,34 @@ def test_a_dump_needing_superuser_rights_fails_with_the_reason(tmp_path):
     assert 'permission denied to create extension "postgis"' in failure.value.output
     assert "restricted PostgreSQL role" in failure.value.output
     assert "trusted" in failure.value.output
+
+
+@pytest.mark.parametrize(
+    ("dump", "source"), [("dump.sql", "/restore/dump"), ("dump.sql.gz", "<stdin>")]
+)
+def test_sql_statement_failure_is_not_a_successful_load(tmp_path, dump, source):
+    import gzip
+
+    warnings = (
+        f'psql:{source}:1: ERROR:  unrecognized configuration parameter "transaction_timeout"\n'
+        f'psql:{source}:2: ERROR:  must be able to SET ROLE "odoo"\n'
+        f"psql:{source}:3: ERROR:  must be owner of extension plpgsql\n"
+    )
+    denied = 'permission denied to create extension "pg_stat_statements"'
+    content = gzip.compress(b"-- sql") if dump.endswith(".gz") else b"-- sql"
+
+    result, _ = _reload(
+        tmp_path, _FakeDocker(clients=[(0, warnings.encode())]), dump, content
+    )
+    assert result["status"] == "reloaded"
+
+    failed = _FakeDocker(
+        clients=[(0, f"{warnings}psql:{source}:4: ERROR:  {denied}\n".encode())]
+    )
+    with pytest.raises(ExternalCommandError) as failure:
+        _reload(tmp_path, failed, dump, content)
+    assert denied in failure.value.output
+    assert "restricted PostgreSQL role" in failure.value.output
 
 
 def test_an_unreadable_archive_is_converted_and_loaded_by_the_same_loader(tmp_path):
@@ -536,7 +564,10 @@ def test_a_template_reloaded_from_its_own_archive_keeps_the_sql_instead(tmp_path
 
 def test_sql_that_fails_to_load_is_not_kept(tmp_path):
     docker = _FakeDocker(
-        clients=[UNREADABLE, (3, b"psql: error: connection refused")],
+        clients=[
+            UNREADABLE,
+            (0, b'psql:/restore/dump:42: ERROR:  relation "x" does not exist'),
+        ],
         converted=b"-- converted",
     )
     settings, team = _settings(tmp_path)

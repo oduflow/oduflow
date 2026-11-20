@@ -538,10 +538,10 @@ What this means for a dump:
   usually contains `COMMENT ON EXTENSION plpgsql`, which now fails the same way
   (`must be owner of extension plpgsql`): convert it with
   `pg_restore --no-owner -f dump.sql dump.pgdump` and import the SQL instead.
-- **Plain-SQL dumps stay tolerant**: a refused statement is skipped and the
-  rest loads. Ownership statements (`ALTER ... OWNER TO`) are among the skipped
-  ones — the template has one owner — and are reported as a single summary
-  line.
+- **Plain SQL and SQL.gz fail on statement errors**, except for known
+  compatibility errors: refused ownership changes, a comment on the existing
+  `plpgsql` extension, and `transaction_timeout` on older PostgreSQL versions.
+  Skipped ownership changes are reported as a single summary line.
 
 A template database loaded by an older Oduflow keeps its previous owner until
 it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving

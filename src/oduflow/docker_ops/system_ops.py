@@ -3383,6 +3383,13 @@ _RESTORE_CLIENT_NOBODY = "65534:65534"
 _OWNERSHIP_DENIED_RE = re.compile(
     r"ERROR:\s+(must be member of role|must be able to SET ROLE)\b"
 )
+_TEMPLATE_SQL_ERROR_RE = re.compile(
+    r"^psql:(?:/restore/dump|<stdin>):\d+: ERROR:\s+(.*)$"
+)
+_TOLERATED_TEMPLATE_SQL_ERRORS = {
+    'unrecognized configuration parameter "transaction_timeout"',
+    "must be owner of extension plpgsql",
+}
 _RESTRICTED_LOAD_MARKERS = (
     "permission denied to create extension",
     "must be owner of extension",
@@ -3599,6 +3606,8 @@ def _template_restore_command(
         if strict:
             tool += ["--no-acl", "--exit-on-error"]
     if gzipped:
+        if text_dump:
+            tool += ["-f", "-"]  # Keep file/line diagnostics for piped SQL.
         return [
             "bash",
             "-c",
@@ -4653,9 +4662,8 @@ def reload_template(
     ``persist_dump=False`` lets a caller install its staged file atomically
     after this restore succeeds instead of making a second full-size copy here.
     ``strict=True`` makes archive restores stop at the first error and omit
-    ACLs, which may name roles missing from a new cluster. Plain SQL keeps the
-    tolerant psql behaviour: dumps from newer clients contain settings older
-    servers reject (e.g. ``SET transaction_timeout``), which are harmless.
+    ACLs, which may name roles missing from a new cluster. Plain SQL continues
+    past known compatibility errors, but any other SQL error fails the load.
     """
     client = get_client()
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -4687,7 +4695,7 @@ def reload_template(
     loader, loader_password = _create_template_loader(client, settings)
 
     def restore(dump: str, *, text_dump: bool, gzipped: bool) -> tuple[int, str]:
-        return _run_restore_client(
+        exit_code, output = _run_restore_client(
             client,
             settings,
             team,
@@ -4700,6 +4708,18 @@ def reload_template(
             database=tpl_db,
             dump_path=dump,
         )
+        # ON_ERROR_STOP would abort on harmless errors before loading the rest
+        # of an older (ownership) or newer (transaction_timeout) dump.
+        if text_dump and exit_code == 0:
+            for line in output.splitlines():
+                error = _TEMPLATE_SQL_ERROR_RE.match(line)
+                if (
+                    error
+                    and error[1] not in _TOLERATED_TEMPLATE_SQL_ERRORS
+                    and not _OWNERSHIP_DENIED_RE.search(line)
+                ):
+                    return 1, output
+        return exit_code, output
 
     restore_tool = "psql" if use_psql else "pg_restore"
     try:
