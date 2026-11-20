@@ -1249,6 +1249,11 @@ def create_environment(
                     local_path_from_template = True
 
         if local_path:
+            if settings_module.TRANSPORT == "http":
+                raise ValueError(
+                    "HTTP MCP cannot use local_path. Use a Git repo_url or "
+                    "use the local CLI or stdio MCP for live-mount."
+                )
             if not settings.allow_local_path:
                 if local_path_from_template:
                     raise ValueError(
@@ -1277,7 +1282,7 @@ def create_environment(
                     "repo_url",
                     "template_name (which supplies repo_url from its metadata)",
                 ]
-                if settings.allow_local_path:
+                if settings.allow_local_path and settings_module.TRANSPORT != "http":
                     sources.append("local_path=<abs path> (live-mount fast-path)")
                 raise ValueError(
                     "No code source for the environment — provide one of: "
@@ -8958,7 +8963,6 @@ def _start_http() -> None:
     # ui_password for existing configs that still have none. The fail-closed
     # check below only trips if this could not write the config.
     settings = _ensure_web_ui_password(settings)
-    _warn_local_path_security(settings)
     host = "0.0.0.0" if settings.routing_mode == "traefik" else settings.bind_host
     port = settings.port
 

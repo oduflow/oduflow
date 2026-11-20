@@ -96,6 +96,27 @@ class TestSourceEnvMetadata:
 
 
 class TestCreateFromLiveMountTemplate:
+    @pytest.mark.parametrize("explicit", [False, True])
+    @patch("oduflow.docker_ops.env_ops.create_environment")
+    def test_http_rejects_live_mount(
+        self, mock_create, tool_env, tmp_path, monkeypatch, explicit
+    ):
+        from oduflow import settings as settings_module
+
+        _, team = tool_env
+        monkeypatch.setattr(settings_module, "TRANSPORT", "http")
+        code_dir = tmp_path / "addons"
+        code_dir.mkdir()
+        _write_template(
+            team,
+            "tpl",
+            {"odoo_image": "odoo:19.0", "repo_url": "", "local_path": str(code_dir)},
+        )
+        args = {"local_path": str(code_dir)} if explicit else {}
+        with pytest.raises(ToolError, match="HTTP MCP cannot use local_path"):
+            _call_tool("create_environment", branch="t", template_name="tpl", **args)
+        mock_create.assert_not_called()
+
     @patch("oduflow.docker_ops.env_ops.create_environment")
     def test_recreates_live_mount_when_allowed(self, mock_create, tool_env, tmp_path):
         settings, team = tool_env
@@ -183,7 +204,9 @@ def _web_app(settings):
 
 class TestWebUILiveMountTemplate:
     @patch("oduflow.docker_ops.env_ops.create_environment")
-    def test_create_passes_local_path_when_allowed(self, mock_create, tmp_path):
+    def test_create_with_explicit_git_repo_ignores_template_local_path(
+        self, mock_create, tmp_path
+    ):
         from starlette.testclient import TestClient
 
         settings, team = _make_env(tmp_path)
@@ -194,19 +217,26 @@ class TestWebUILiveMountTemplate:
             "tpl",
             {"odoo_image": "odoo:19.0", "repo_url": "", "local_path": str(code_dir)},
         )
-        mock_create.return_value = {**_CREATE_RESULT, "local_path": str(code_dir)}
+        mock_create.return_value = dict(_CREATE_RESULT)
         client = TestClient(_web_app(settings))
         resp = client.post(
             "/api/environments/create",
-            json={"env_name": "t", "template_name": "tpl"},
+            json={
+                "env_name": "t",
+                "template_name": "tpl",
+                "repo_url": "https://github.com/x/y.git",
+            },
         )
         assert resp.status_code == 200
-        assert mock_create.call_args.kwargs["local_path"] == str(code_dir)
+        assert mock_create.call_args.args[3] == "https://github.com/x/y.git"
+        assert not mock_create.call_args.kwargs.get("local_path")
 
-    def test_create_returns_clear_error_when_disabled(self, tmp_path):
+    def test_create_returns_clear_error_even_when_local_path_setting_is_enabled(
+        self, tmp_path
+    ):
         from starlette.testclient import TestClient
 
-        settings, team = _make_env(tmp_path, allow_local_path=False)
+        settings, team = _make_env(tmp_path)
         _write_template(
             team,
             "tpl",
@@ -226,7 +256,7 @@ class TestWebUILiveMountTemplate:
     @patch("oduflow.docker_ops.env_ops.create_environment")
     @patch("oduflow.docker_ops.env_ops.delete_environment")
     @patch("oduflow.docker_ops.client.get_client")
-    def test_recreate_passes_local_path(
+    def test_recreate_refuses_live_mount_without_deleting_environment(
         self,
         mock_client,
         mock_delete,
@@ -252,5 +282,7 @@ class TestWebUILiveMountTemplate:
         client = TestClient(_web_app(settings))
         resp = client.post("/api/environments/main/recreate")
 
-        assert resp.status_code == 200
-        assert mock_create.call_args.kwargs["local_path"] == "/x/addons"
+        assert resp.status_code == 400
+        assert "requires the local CLI or stdio MCP" in resp.json()["error"]
+        mock_delete.assert_not_called()
+        mock_create.assert_not_called()
