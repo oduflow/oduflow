@@ -64,7 +64,7 @@ are registered only when `[production].enabled = true`.
 | `POST` | `/api/environments/{branch}/update` | Recreate the container while preserving DB and filestore. Optional body: `env_vars` (full replacement of the user-supplied container variables — either an object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas; an empty object/string clears them, an absent key keeps them). The dashboard sends an object, so a value may contain commas, `odoo_image`, `new_name` (rename the environment; a pooled or explicit hostname is kept, its scoped MCP endpoint moves to `/mcp/<new name>`; productions and stack members are refused) |
 | `GET` | `/api/environments/{branch}/env-vars` | Return the user-supplied container environment variables |
 | `POST` | `/api/environments/{branch}/recreate` | Delete and recreate with the recorded parameters |
-| `POST` | `/api/environments/{branch}/delete` | Delete the environment |
+| `POST` | `/api/environments/{branch}/delete` | Delete the environment. Optional body `{"delete_branch": true}` also deletes its git branch on origin; the deletion is skipped with a warning (in the result's `warnings`) when the branch is used by another environment, is not merged into origin's default branch or the base branch named at creation (squash- and rebase-merges are not recognised), or the push is denied. An empty body keeps the previous behaviour; a body that is not a JSON object, or a non-boolean `delete_branch`, is a `400` |
 | `GET` | `/api/environments/{branch}/logs?n=200&container=` | Read environment logs; optionally select a container |
 | `POST` | `/api/environments/{branch}/protect` | Protect from stop/delete |
 | `POST` | `/api/environments/{branch}/unprotect` | Remove protection |

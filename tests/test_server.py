@@ -768,7 +768,17 @@ class TestDeleteEnvironmentTool:
         mock_delete.return_value = []
         result = _call_tool("delete_environment", env_name="main")
         assert "torn down" in result
-        mock_delete.assert_called_once_with(TEST_SETTINGS, TEST_TEAM, "main")
+        mock_delete.assert_called_once_with(
+            TEST_SETTINGS, TEST_TEAM, "main", delete_branch=False
+        )
+
+    @patch("oduflow.docker_ops.env_ops.delete_environment")
+    def test_delete_branch_flag_is_passed_through(self, mock_delete):
+        mock_delete.return_value = []
+        _call_tool("delete_environment", env_name="main", delete_branch=True)
+        mock_delete.assert_called_once_with(
+            TEST_SETTINGS, TEST_TEAM, "main", delete_branch=True
+        )
 
     @patch("oduflow.docker_ops.env_ops.delete_environment")
     def test_delete_with_warnings(self, mock_delete):

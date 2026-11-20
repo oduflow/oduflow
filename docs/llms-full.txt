@@ -2649,7 +2649,26 @@ oduflow call update_environment '{"env_name": "feature-login", "hostname": "qa"}
 
 # Tear down everything (container, database, filestore, workspace)
 oduflow call delete_environment feature-login
+
+# Tear down and also delete the git branch on origin (opt-in; skipped with a
+# warning if another environment uses the branch or it is not merged)
+oduflow call delete_environment '{"env_name": "feature-login", "delete_branch": true}'
 ```
+
+With `delete_branch` (the dashboard's **Also delete git branch** checkbox) the
+branch is removed from origin only when nothing is lost with it: its tip must
+be contained in origin's default branch or in the base branch named when the
+environment was created — so a feature branch started from `17.0` and merged
+back into `17.0` qualifies even when the default branch is `main`. A squash- or
+rebase-merge leaves the branch's own commits outside the target, so such a
+branch is reported as not merged and has to be deleted by hand. The check
+fetches a bounded slice of history (the most recent 1000 commits at most); a
+merge older than that is likewise reported instead of deleted. The delete is
+pinned to the exact commit that was checked (`--force-with-lease`), so if
+someone pushes to the branch in the meantime origin refuses it and the branch
+is kept with a warning. Whatever the
+outcome, the environment itself is torn down, and the branch is only touched
+after its container and database are gone.
 
 The `hostname` parameter of `update_environment` accepts the same short hostname
 as `create_environment`: for team `dev.example.com`, `qa` routes to
@@ -6039,7 +6058,7 @@ are registered only when `[production].enabled = true`.
 | `POST` | `/api/environments/{branch}/update` | Recreate the container while preserving DB and filestore. Optional body: `env_vars` (full replacement of the user-supplied container variables — either an object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas; an empty object/string clears them, an absent key keeps them). The dashboard sends an object, so a value may contain commas, `odoo_image`, `new_name` (rename the environment; a pooled or explicit hostname is kept, its scoped MCP endpoint moves to `/mcp/<new name>`; productions and stack members are refused) |
 | `GET` | `/api/environments/{branch}/env-vars` | Return the user-supplied container environment variables |
 | `POST` | `/api/environments/{branch}/recreate` | Delete and recreate with the recorded parameters |
-| `POST` | `/api/environments/{branch}/delete` | Delete the environment |
+| `POST` | `/api/environments/{branch}/delete` | Delete the environment. Optional body `{"delete_branch": true}` also deletes its git branch on origin; the deletion is skipped with a warning (in the result's `warnings`) when the branch is used by another environment, is not merged into origin's default branch or the base branch named at creation (squash- and rebase-merges are not recognised), or the push is denied. An empty body keeps the previous behaviour; a body that is not a JSON object, or a non-boolean `delete_branch`, is a `400` |
 | `GET` | `/api/environments/{branch}/logs?n=200&container=` | Read environment logs; optionally select a container |
 | `POST` | `/api/environments/{branch}/protect` | Protect from stop/delete |
 | `POST` | `/api/environments/{branch}/unprotect` | Remove protection |
@@ -6621,6 +6640,19 @@ Lock: environment.
 
 `env_name`
 :   *str · required* — The environment to tear down.
+
+`delete_branch`
+:   *bool · default `false`* — Also delete the environment's git branch on
+    origin (`git push origin --delete`), once the container and database are
+    gone. Skipped with a warning — the environment is still torn down — when
+    the branch is used by another environment, is not merged, received new
+    commits while it was being checked, is origin's default branch, or the
+    credential cannot push. *Merged* means the branch
+    tip is contained in origin's default branch or in the base branch named
+    when the environment was created; a squash- or rebase-merged branch is
+    not recognised as merged and has to be deleted by hand. Not applicable to
+    live-mounted environments, nor to an environment whose container is
+    already gone (the branch it tracked can no longer be confirmed).
 
 **Use it when**
 

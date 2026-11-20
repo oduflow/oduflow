@@ -322,6 +322,19 @@ Lock: environment.
 `env_name`
 :   *str · required* — The environment to tear down.
 
+`delete_branch`
+:   *bool · default `false`* — Also delete the environment's git branch on
+    origin (`git push origin --delete`), once the container and database are
+    gone. Skipped with a warning — the environment is still torn down — when
+    the branch is used by another environment, is not merged, received new
+    commits while it was being checked, is origin's default branch, or the
+    credential cannot push. *Merged* means the branch
+    tip is contained in origin's default branch or in the base branch named
+    when the environment was created; a squash- or rebase-merged branch is
+    not recognised as merged and has to be deleted by hand. Not applicable to
+    live-mounted environments, nor to an environment whose container is
+    already gone (the branch it tracked can no longer be confirmed).
+
 **Use it when**
 
 - A branch is merged and its environment is no longer needed.

@@ -201,6 +201,13 @@ class TestSwitchEnvironmentBranch:
 
         kwargs = switch_env["update"].call_args.kwargs
         assert kwargs["label_overrides"] == {"oduflow.git_branch": "feature/new"}
+        # What the container recorded about the previous branch is dropped: a
+        # switch target always already existed on origin (fetch_branch
+        # succeeded), and its base is unknown.
+        assert set(kwargs["remove_labels"]) == {
+            "oduflow.git_branch_created",
+            "oduflow.git_base_branch",
+        }
         assert kwargs["pull_image"] is False
         # The checkout is still on the old branch at that point, so a changed
         # requirements.txt belongs to the diff, not to this recreate.
@@ -375,6 +382,7 @@ class TestSwitchWithRename:
         kwargs = switch_env["update"].call_args.kwargs
         assert kwargs["rename_to"] == "dev2"
         assert kwargs["label_overrides"] == {"oduflow.git_branch": "feature/new"}
+        assert "oduflow.git_branch_created" in kwargs["remove_labels"]
         # The switch refreshes the agent checkout itself, with the target
         # branch; update_environment must not run clone-env.sh a first time.
         assert kwargs["sync_agent_checkout"] is False

@@ -1825,17 +1825,46 @@ def _build_routes(
                 locks.release_env(new_name)
             locks.release_env(branch)
 
-    def api_delete(request: Request) -> JSONResponse:
+    async def api_delete(request: Request) -> JSONResponse:
         branch = request.path_params["branch"]
         team = _get_ui_team(request)
+        # The body is optional (the pre-delete_branch dashboard and API
+        # clients POST with no body at all); when present it must be a JSON
+        # object, and delete_branch a real boolean — a string would silently
+        # mean "true-ish".
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "Request body must be a JSON object."},
+                status_code=400,
+            )
+        delete_branch = body.get("delete_branch", False)
+        if not isinstance(delete_branch, bool):
+            return JSONResponse(
+                {"ok": False, "error": "delete_branch must be a boolean."},
+                status_code=400,
+            )
         try:
             locks.acquire_env(branch, team.team_id)
         except BusyError as e:
             return _error_response(e)
         try:
             settings = get_settings()
-            env_ops.delete_environment(settings, team, branch)
-            return JSONResponse({"ok": True, "result": {"deleted": branch}})
+            warnings = await _offload(
+                env_ops.delete_environment,
+                settings,
+                team,
+                branch,
+                delete_branch=delete_branch,
+            )
+            return JSONResponse(
+                {"ok": True, "result": {"deleted": branch, "warnings": warnings}}
+            )
         except FlowError as e:
             return _error_response(e)
         except Exception:
