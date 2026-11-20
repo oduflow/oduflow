@@ -207,6 +207,7 @@ def test_startup_stack_is_applied_before_server(tmp_path):
     events = []
 
     with (
+        patch.object(server.settings_module, "TRANSPORT", "stdio"),
         patch.object(
             sys,
             "argv",

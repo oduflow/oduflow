@@ -72,6 +72,7 @@ def test_lock_ends_with_the_process(settings):
 def test_serve_registers_before_startup_touches_anything(settings):
     events = []
     with (
+        patch.object(server.settings_module, "TRANSPORT", "stdio"),
         patch.object(sys, "argv", ["oduflow", "--transport", "http"]),
         patch.object(server, "find_toml"),
         patch.object(server, "_get_settings", return_value=settings),

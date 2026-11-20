@@ -405,6 +405,7 @@ def test_startup_reclaims_abandoned_dumps_before_quota_setup(tmp_path):
         assert not staged.exists()
 
     with (
+        patch.object(server.settings_module, "TRANSPORT", "stdio"),
         patch.object(sys, "argv", ["oduflow", "--no-telemetry", "-t", "http"]),
         patch.object(server, "find_toml"),
         patch.object(server, "_get_settings", return_value=settings),
