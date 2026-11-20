@@ -1,5 +1,123 @@
 # Changelog
 
+## v1.93.0
+
+### Features
+
+- **Build service images from a repository** — `start_image_build` now
+  accepts a repository URL and ref, so building an image no longer needs an
+  environment checkout or a configured registry; only publishing needs
+  `[team.X.image_registry]`. Builds run under BuildKit (the Oduflow image now
+  ships the docker CLI and buildx) and fall back to the legacy builder when
+  buildx is missing. A team can opt out with `builds_enabled = false`. (#363)
+- **Stack `build:` on services** — a Stack service can declare a build instead
+  of a fixed image. `stack plan` and `apply` resolve the ref, reuse a
+  succeeded build of the same build key, and build only what is missing. The
+  builds run before the team lock is taken, and the plan is checked again
+  under the lock. Decision record `specs/0085-repository-image-builds.md`.
+  (#363)
+- **`connect_link` MCP tool** — `connect_link(env_name, user="")` returns a
+  single-use browser sign-in link (300 s, bound to the environment's host)
+  that opens the environment already logged in as `user`. The default user is
+  the database admin, resolved through `base.user_admin`. Another application
+  can put an "Open as admin" button on it, which a raw `connect_as_user`
+  cookie cannot do across origins. The Odoo session is created only when the
+  link is opened. A plain GET changes nothing, so link-preview bots do not
+  spend the link, and a failed or busy start keeps it valid. An unknown user
+  fails at the call, before a stopped environment is woken. The tool needs
+  Traefik routing and a running web UI. Decision record
+  `specs/0086-mcp-connect-link.md`. (#365)
+- **Share links include Agent CLI** — a shared environment (`/env/<name>`)
+  now offers the coding agent's terminal next to Agent Chat. Since every
+  environment runs as its own Linux user in the team's agent container
+  (v1.89.0), a CLI session reaches only that environment's checkout,
+  conversations and scoped MCP token, exactly like Chat. The Share modal and
+  the security docs now name what both still share with the team: its git
+  credentials and deploy key, provider credentials, any agent login made in
+  the environment, and the container network. For shared environments, set
+  provider credentials in `[team.X.agent_env]` instead of signing in with a
+  personal subscription. Share links minted before this release gain the CLI
+  too after upgrading — it grants nothing an existing link's Agent Chat did
+  not already allow, but rotate or revoke a share if even that terminal form
+  of the access is unwanted. (#347)
+- **Cleanup reclaims unused shared extra-addons checkouts** — `oduflow
+  cleanup` and the dashboard **Cleanup** action now remove
+  `shared_extra_checkouts/<repo>/<sha>` revisions that no container pins (by
+  label or bind mount), that are not any branch's current tip, and that are
+  older than the grace period. The preview lists them with sizes, and confirm
+  removes only the reviewed names. `cleanup --force` takes the same team lock
+  as the server. A repo whose refs cannot be read is skipped and reported
+  rather than guessed at. (#362)
+- **Image-build cleanup** — cleanup also removes stale image-build job
+  directories: failed, cancelled, interrupted and abandoned jobs, plus
+  succeeded jobs whose image is gone. The dashboard can prune the
+  server-wide Docker build cache as a separate opt-in. (#363)
+- **Production sizes in storage stats** — storage stats and `/api/usage` now
+  cover productions: each one reports its database size (production cluster)
+  and workspace disk size. The dashboard shows them on the production card
+  with its own refresh button (`POST /api/productions/{name}/storage/refresh`),
+  and the team refresh adds `team.prod_db_bytes`. `team.db_bytes` is still
+  the dev-cluster total that `db_quota_gb` applies to. If the production
+  cluster can't be reached, the refresh still succeeds and the production DB
+  sizes come back as `null`. (#358)
+
+### Bug Fixes
+
+- **Concurrent storage refreshes no longer lose updates** — read-modify-writes
+  of `storage_stats.json` are serialised per team and each write uses its own
+  temp file, which fixes lost updates and `os.replace` failures when refreshes
+  overlap. (#358)
+- **No zombie process per agent container** — the coder entrypoint's
+  background Claude Code refresh is now double-forked so `docker-init` reaps
+  it, instead of leaving one `<defunct>` process per container start. Coder
+  image bumped to `oduist/oduflow-coder:0.4.1`; agent containers are recreated
+  on 0.4.1 automatically at the next server start. (#359)
+- **A failed uid:gid lookup is no longer cached** — one transient Docker
+  failure used to pin the `100:101` fallback for an image until restart, and
+  every later filestore chown used it. Only real lookups are cached now. (#361)
+- **Template builds never leak the builder** — `init_template` now tears down
+  `flow-template-builder` and the build database on every exit path, including
+  a `wait()` timeout. (#361)
+- **Streamed S3 backups past ~156 GiB** — the multipart part size now grows
+  from 16 MiB up to 256 MiB as a stream goes on, so a large production
+  `pg_dump` no longer fails at the 10,001st part. Up to ~1.7 TiB fits within
+  S3's limit of 10,000 parts. Small backups are unchanged. (#361)
+- **`/healthz` reports an unreadable production registry** — a corrupt or
+  unreadable `productions.json` now fails the productions check, naming the
+  team, instead of reporting "ok". The exception goes to the server log only.
+  (#361)
+
+### Security
+
+- **Credentials kept out of logs** — tool results that carry credentials
+  (`connect_link`, `connect_as_user`, `reset_admin_password`, the
+  service-database tools, artifact URLs) are scrubbed from everything
+  `handle_errors` logs, including errors. Before, they could leak into the
+  200-character result preview. Env-var listings log as `[redacted]`, and the
+  `uvicorn.access` log masks `token`, `key` and `access_token` query
+  parameters. (#365)
+- **Generic errors on the Agent CLI WebSocket** — `ws_agent_console` no
+  longer sends raw exception text to a (possibly share-link) visitor. It logs
+  the error on the server and closes with a generic message, the same as
+  Agent Chat. Scoped sessions no longer see the dashboard's **Info** menu
+  item. (#347)
+
+### Documentation
+
+- **Container image builds** — new `docs/image-builds.md` page (trust model,
+  prerequisites, lifecycle, running a staging image as a service, publishing,
+  Stack `build:`, BuildKit, troubleshooting). It comes with an *Image registry
+  settings* table in the installation reference and a test that keeps every
+  `[team.X.image_registry]` key documented. (#364)
+- **How production backups and restores work** — `docs/production.md` now
+  explains the S3 layout, the snapshot commit order, how a restore stages and
+  swaps, restoring on a new server, schedule and retention semantics, bucket
+  permissions and cluster PITR. `docs/security.md` gains a *Backup data in S3*
+  section. (#360)
+- The Share modal and docs no longer claim that a shared visitor's Agent Chat
+  can read other environments' checkouts; that stopped being true in v1.89.0.
+  (#347)
+
 ## v1.92.0
 
 ### Features

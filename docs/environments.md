@@ -307,7 +307,26 @@ oduflow call update_environment '{"env_name": "feature-login", "hostname": "qa"}
 
 # Tear down everything (container, database, filestore, workspace)
 oduflow call delete_environment feature-login
+
+# Tear down and also delete the git branch on origin (opt-in; skipped with a
+# warning if another environment uses the branch or it is not merged)
+oduflow call delete_environment '{"env_name": "feature-login", "delete_branch": true}'
 ```
+
+With `delete_branch` (the dashboard's **Also delete git branch** checkbox) the
+branch is removed from origin only when nothing is lost with it: its tip must
+be contained in origin's default branch or in the base branch named when the
+environment was created — so a feature branch started from `17.0` and merged
+back into `17.0` qualifies even when the default branch is `main`. A squash- or
+rebase-merge leaves the branch's own commits outside the target, so such a
+branch is reported as not merged and has to be deleted by hand. The check
+fetches a bounded slice of history (the most recent 1000 commits at most); a
+merge older than that is likewise reported instead of deleted. The delete is
+pinned to the exact commit that was checked (`--force-with-lease`), so if
+someone pushes to the branch in the meantime origin refuses it and the branch
+is kept with a warning. Whatever the
+outcome, the environment itself is torn down, and the branch is only touched
+after its container and database are gone.
 
 The `hostname` parameter of `update_environment` accepts the same short hostname
 as `create_environment`: for team `dev.example.com`, `qa` routes to

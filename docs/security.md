@@ -195,6 +195,24 @@ listing other environments) are **not exposed and cannot be called**. The
 environment is taken from the URL, so the agent never passes — and cannot
 override — which environment it operates on.
 
+The four [container image build](image-builds.md) tools
+(`start_image_build`, `get_image_build`, `publish_image_build`,
+`cancel_image_build`) are also on this endpoint. Building needs no
+configuration, so they work by default; on this endpoint the build source is
+always the environment's own checkout — `repo_url` and `ref` are neither
+listed nor accepted, so building an arbitrary repository stays a team-level
+capability. A Dockerfile runs on the host Docker daemon with the same reach as
+the environment containers the endpoint already runs code in; an operator who
+does not want that for a team sets `builds_enabled = false` in
+`[team.X.image_registry]`.
+
+Where that section configures a `repository_prefix`, an environment-scoped
+credential can additionally **push images to the team's registry namespace** —
+confined to that prefix, which Oduflow enforces on every publish. The agent
+receives neither the Docker socket nor the registry credentials; Oduflow
+builds and pushes on its behalf. Keep the registry token in `oduflow.toml`
+least-privilege, scoped to that prefix.
+
 ### Per-environment Secret Key
 
 Every environment gets its own access token, minted at creation time and kept
@@ -254,24 +272,29 @@ renews it.
 
 A shared session sees that environment's card, logs, storage and status; can
 start, stop, restart and sync it, install and upgrade modules, open its Odoo
-shell and `psql` consoles, use Connect As and its **Agent Chat**, and read its
-`/mcp/<env>` URL and Secret Key. Everything else is refused server-side by a
-default-deny allowlist re-checked on every request: the full dashboard, any
-other environment, all team-wide surfaces (templates, services, volumes, extra
-addons, credentials, productions, host statistics, license), the provisioning
-actions on the environment itself (create, delete, update, recreate, switch
-branch, protect, save as template), the share routes themselves, and **Agent
-CLI**.
+shell and `psql` consoles, use Connect As, its **Agent Chat** and **Agent
+CLI**, and read its `/mcp/<env>` URL and Secret Key. Everything else is refused
+server-side by a default-deny allowlist re-checked on every request: the full
+dashboard, any other environment, all team-wide surfaces (templates, services,
+volumes, extra addons, credentials, productions, host statistics, license), the
+provisioning actions on the environment itself (create, delete, update,
+recreate, switch branch, protect, save as template), and the share routes
+themselves.
 
-Agent Chat runs in the *per-team* agent container, but as this environment's
-own Linux user: it reaches only this environment's checkout, attachments and
-HOME, and only this environment's scoped MCP token. Other environments'
-checkouts, conversations and tokens are closed to it (see
-[Coding Agent → Security model](agent.md#security-model)). What it still shares
-with the rest of the team is the git credential store and deploy key (below),
-the team-wide provider credentials in `[team.X.agent_env]`, and the container
-network. Agent CLI stays excluded from share links. Share with people you would
-let work in the environment, and revoke when they are done.
+Agent Chat and Agent CLI run in the *per-team* agent container, but as this
+environment's own Linux user: they reach only this environment's checkout,
+attachments and HOME, and only this environment's scoped MCP token. Other
+environments' checkouts, conversations and tokens are closed to them (see
+[Coding Agent → Security model](agent.md#security-model)). Chat already runs
+commands without approval prompts, so the CLI's terminal grants nothing more.
+What both still share with the rest of the team is the git credential store and
+deploy key (below), the team-wide provider credentials in
+`[team.X.agent_env]`, and the container network. Interactive agent logins
+(Claude `/login`, `codex login`, `opencode auth login`) live in the
+environment's HOME, so a visitor can read and replace a login made there. For a
+shared environment, set provider credentials in `[team.X.agent_env]` rather
+than signing in with a personal subscription. Share with people you would let
+work in the environment, and revoke when they are done.
 
 Share secrets live in the team's data directory (`shares.json`, mode 0600), not
 in a container label, so environments that already exist can be shared, and a
@@ -442,7 +465,7 @@ Like the team's git credential store, the private key is also provisioned
 into the team's coding-agent container (a copy in every environment's HOME) so
 agent-side clones work over SSH.
 Anyone who can drive that agent — including a visitor holding a scoped
-environment share link, via Agent Chat — can therefore read it. Treat the
+environment share link, via Agent Chat or Agent CLI — can therefore read it. Treat the
 deploy key as a team-level credential: prefer registering it read-only and
 per-repository, and regenerate it when a share should no longer grant repo
 access.
@@ -553,6 +576,40 @@ element was replaced (`updated` is the inverse). For example, an update returns:
 
 Recreate consumers with `update_service` / `update_environment` to apply the
 updated value to their containers.
+
+## Backup data in S3
+
+Production backups ([Production Hosting → Backups](production.md#backups))
+contain **unsanitized production data**: complete database dumps, every
+attachment, and the WAL stream. Protect the bucket as you would the
+production database.
+
+- **No client-side encryption.** Dumps (`pg_dump -Fc`, compressed but not
+  encrypted), filestore chunks (zstd) and WAL-G objects are stored as plain
+  data. Enable default server-side encryption on the bucket (SSE-S3 or
+  SSE-KMS, or the equivalent on MinIO/R2), and restrict access to the
+  credentials Oduflow uses. A format flag for client-side encryption is
+  reserved but not implemented. That is deliberate: losing a client-side key
+  would make every backup unrestorable.
+- **Object names reveal nothing.** Chunk object names are keyed hashes of
+  keyed content hashes, so a bucket listing does not reveal or confirm file
+  contents. The keys live in the chunkstore's `config` object in the same
+  bucket, so whoever can read the bucket can read the backups.
+- **One credential set for the whole server.** Teams are separated by path
+  (`snapshots/<team>/`, `filestore/<team>/`), not by credentials, and the
+  `[backup]` keys can read and delete every team's backups and the cluster
+  archive. Use a dedicated bucket, or at least a dedicated prefix and IAM user,
+  limited to the [permissions Oduflow needs](production.md#bucket-permissions).
+- **Where the keys are stored.** They are in `oduflow.toml`, and in
+  `<base_data_dir>/walg/walg.json` (mode `0600`, regenerated at every startup)
+  for WAL-G inside the production PostgreSQL container. They are never passed
+  as container environment variables, so `docker inspect` does not show them.
+  To rotate them, edit `[backup]` and restart Oduflow. PostgreSQL does not need
+  to be recreated.
+- **Versioning.** Bucket versioning protects against deletion through leaked
+  credentials. Prune deletes objects routinely, so pair versioning with a
+  lifecycle rule that expires noncurrent versions, or storage will keep
+  growing.
 
 ## iptables rule
 

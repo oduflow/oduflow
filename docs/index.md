@@ -136,6 +136,7 @@ The agent writes code, installs the module, reads the traceback, fixes the error
 ### Infrastructure
 - **Auxiliary services** — managed sidecar containers for Redis, Meilisearch, Elasticsearch, or any other service your Odoo setup needs
 - **Sidecar PostgreSQL storage** — persistent team-scoped databases with dedicated roles, password rotation, quota accounting, and declarative Stack wiring
+- **Container image builds** — build a service image from any git repository (or an environment's checkout) under BuildKit, run it as a service to verify it, then publish those exact bits to your registry — the agent never gets the Docker socket or registry credentials (see [Container Image Builds](image-builds.md))
 - **Traefik auto-HTTPS** — optional reverse proxy with Let's Encrypt certificates for production-like access
 - **Stable port registry** — port assignments are persisted in `ports.json` and survive container restarts
 - **Resource monitoring** — per-container CPU and RAM stats, plus system-level metrics (memory, load average)

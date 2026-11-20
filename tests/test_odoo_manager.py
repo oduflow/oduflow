@@ -434,6 +434,101 @@ class TestCreateEnvironment:
             }
         mock_alloc.assert_called_once()
 
+    @staticmethod
+    def _created_labels(mock_docker_client, branch_created, **create_kwargs):
+        """Run create_environment with the clone stubbed; return the serving
+        container's labels."""
+        create_kwargs.setdefault("base_branch", "main")
+        mock_odoo = MagicMock()
+        mock_odoo.exec_run.return_value = (0, b"OK")
+        mock_odoo.wait.return_value = {"StatusCode": 0}
+        mock_docker_client.containers.run.return_value = mock_odoo
+        mock_docker_client.containers.create.return_value.wait.return_value = {
+            "StatusCode": 0
+        }
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with ExitStack() as stack:
+            for p in (
+                patch(
+                    "oduflow.extra_addons.generate_odoo_conf",
+                    return_value="/tmp/flow-test/workspaces/f/odoo.conf",
+                ),
+                patch("oduflow.docker_ops.env_ops._copy_file_to_container"),
+                patch("oduflow.docker_ops.env_ops._create_pg_role"),
+                patch(
+                    "oduflow.docker_ops.env_ops.create_credentials",
+                    return_value={"pg_user": "u", "pg_password": "pw"},
+                ),
+                patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
+                patch(
+                    "oduflow.docker_ops.env_ops.get_odoo_uid_gid",
+                    return_value="100:101",
+                ),
+                patch("oduflow.docker_ops.env_ops._exec_sql"),
+                patch("oduflow.docker_ops.env_ops._db_exists", return_value=True),
+                patch("oduflow.docker_ops.env_ops._mount_filestore"),
+                patch("oduflow.docker_ops.env_ops._get_used_ports", return_value=set()),
+                patch("oduflow.docker_ops.env_ops.allocate_port", return_value=50000),
+                patch("oduflow.docker_ops.env_ops.subprocess.run"),
+                patch("oduflow.docker_ops.env_ops.os.chmod"),
+                patch("oduflow.docker_ops.env_ops.os.makedirs"),
+                patch("oduflow.docker_ops.env_ops.os.path.exists", return_value=False),
+                patch(
+                    "oduflow.docker_ops.env_ops._clone_or_start_branch",
+                    return_value=branch_created,
+                ),
+            ):
+                stack.enter_context(p)
+            env_ops.create_environment(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "feature/payments",
+                "https://github.com/org/repo.git",
+                "odoo:15.0",
+                **create_kwargs,
+            )
+        return mock_docker_client.containers.run.call_args.kwargs["labels"]
+
+    def test_a_branch_created_from_base_is_labelled(self, mock_docker_client):
+        labels = self._created_labels(mock_docker_client, branch_created=True)
+        assert labels["oduflow.git_branch_created"] == "true"
+        # delete_branch accepts "merged into the base" as merged.
+        assert labels["oduflow.git_base_branch"] == "main"
+
+    def test_a_cloned_existing_branch_is_not_labelled(self, mock_docker_client):
+        labels = self._created_labels(mock_docker_client, branch_created=False)
+        assert "oduflow.git_branch_created" not in labels
+        # The base named at creation is still recorded as a merge target.
+        assert labels["oduflow.git_base_branch"] == "main"
+
+    def test_no_base_branch_records_no_base_label(self, mock_docker_client):
+        labels = self._created_labels(
+            mock_docker_client, branch_created=False, base_branch=""
+        )
+        assert "oduflow.git_base_branch" not in labels
+        assert "oduflow.git_branch_created" not in labels
+
+    def test_recreate_provenance_is_carried_onto_the_new_container(
+        self, mock_docker_client
+    ):
+        # On a recreate the branch already exists (branch_created is False)
+        # and no base is named, so both labels come from the old container.
+        labels = self._created_labels(
+            mock_docker_client,
+            branch_created=False,
+            base_branch="",
+            branch_provenance={
+                "oduflow.git_branch_created": "true",
+                "oduflow.git_base_branch": "17.0",
+                # Anything else is not provenance and must not ride along.
+                "oduflow.template": "smuggled",
+            },
+        )
+        assert labels["oduflow.git_branch_created"] == "true"
+        assert labels["oduflow.git_base_branch"] == "17.0"
+        assert labels["oduflow.template"] == "none"
+
     @patch("oduflow.docker_ops.env_ops.release_port")
     @patch("oduflow.docker_ops.env_ops._cleanup_old_environment")
     @patch(
@@ -2080,6 +2175,53 @@ class TestUpdateEnvironment:
         assert result["image"] == "odoo:17.0"
         assert result["image_updated"] is True
         assert result["env_vars"] == {"FOO": "new"}
+
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
+    @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
+    @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
+    @patch("oduflow.docker_ops.env_ops._create_pg_role")
+    @patch(
+        "oduflow.docker_ops.env_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "pw"},
+    )
+    def test_remove_labels_drops_labels_on_the_recreate(
+        self,
+        mock_creds,
+        mock_role,
+        mock_isdir,
+        mock_isfile,
+        mock_reapply_conf,
+        mock_apt,
+        mock_pip,
+        mock_docker_client,
+    ):
+        # switch_branch relies on this to clear the branch provenance labels:
+        # labels are frozen at container creation, so the recreate is the only
+        # point where one can be dropped.
+        container = self._make_container()
+        container.labels["oduflow.git_branch_created"] = "true"
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        env_ops.update_environment(
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "main",
+            pull_image=False,
+            # An empty override value is an ordinary value, not a hidden
+            # "delete this label" request: removal is explicit.
+            label_overrides={"oduflow.git_branch": "feature/new", "x.empty": ""},
+            remove_labels=("oduflow.git_branch_created", "oduflow.not_there"),
+        )
+
+        labels = mock_docker_client.containers.run.call_args.kwargs["labels"]
+        assert labels["oduflow.git_branch"] == "feature/new"
+        assert labels["x.empty"] == ""
+        assert "oduflow.git_branch_created" not in labels
 
     @patch(
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
@@ -4837,6 +4979,104 @@ class TestConnectAsUser:
             "/tmp/_oduflow_connect_script_a1b2c3.py",
         ]
         assert container.exec_run.call_count == 2
+
+
+class TestResolveEnvUser:
+    """The session-free user check behind connect_link's call-time validation."""
+
+    @pytest.fixture(autouse=True)
+    def scoped_credentials(self):
+        with patch(
+            "oduflow.docker_ops.odoo_ops.load_credentials",
+            return_value={"pg_user": "u_1_main"},
+        ):
+            yield
+
+    @staticmethod
+    def _db(mock_docker_client, output: bytes, exit_code: int = 0):
+        db = MagicMock()
+        db.exec_run.return_value = (exit_code, output)
+        mock_docker_client.containers.get.return_value = db
+        return db
+
+    @staticmethod
+    def _sql(db) -> str:
+        cmd = db.exec_run.call_args.args[0]
+        assert cmd[:6] == ["psql", "-U", "u_1_main", "-d", "oduflow_1_main", "-tA"]
+        return cmd[cmd.index("-c") + 1]
+
+    def test_default_resolves_the_admin_through_its_xml_id(self, mock_docker_client):
+        # The admin's login was changed to an email address.
+        db = self._db(mock_docker_client, b'{"uid" : 2, "login" : "boss@acme.com"}\n')
+        result = odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "")
+
+        assert result == {"uid": 2, "login": "boss@acme.com"}
+        sql = self._sql(db)
+        assert "ir_model_data" in sql
+        assert "d.module = 'base' AND d.name = 'user_admin'" in sql
+        # The pitfall this avoids: looking the admin up by a literal login.
+        assert "login =" not in sql
+        # One query on the shared DB container; no Odoo registry is booted.
+        mock_docker_client.containers.get.assert_called_once_with(
+            TEST_SETTINGS.shared_db_container
+        )
+        assert db.exec_run.call_count == 1
+
+    def test_login_reaches_sql_only_as_hex(self, mock_docker_client):
+        hostile = "x'; DROP TABLE res_users; --"
+        db = self._db(mock_docker_client, b"")
+        with pytest.raises(NotFoundError, match="not found in environment 'main'"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", hostile)
+
+        sql = self._sql(db)
+        assert "DROP" not in sql and "--" not in sql
+        assert f"decode('{hostile.encode().hex()}', 'hex')" in sql
+        # Archived users are not sign-in targets, as in the mint script.
+        assert "u.active" in sql
+        assert "u.id =" not in sql  # not a number: no id branch
+
+    def test_numeric_selector_prefers_a_login_match_then_the_id(
+        self, mock_docker_client
+    ):
+        db = self._db(mock_docker_client, b'{"uid" : 7, "login" : "jane@acme.com"}')
+        result = odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", " 7 ")
+
+        assert result == {"uid": 7, "login": "jane@acme.com"}
+        sql = self._sql(db)
+        assert "OR u.id = 7)" in sql
+        # Same precedence as the mint script: login first, id as the fallback.
+        assert sql.index("ORDER BY (u.login =") < sql.index("DESC LIMIT 1")
+
+    @pytest.mark.parametrize("selector", ["٣", "²", "7 OR 1=1", "-1", "1e3"])
+    def test_only_plain_digits_take_the_id_branch(self, selector, mock_docker_client):
+        db = self._db(mock_docker_client, b"")
+        with pytest.raises(NotFoundError):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", selector)
+        assert "u.id =" not in self._sql(db)
+
+    def test_missing_admin_record_names_what_was_looked_up(self, mock_docker_client):
+        self._db(mock_docker_client, b"\n")
+        with pytest.raises(NotFoundError, match=r"admin \(base\.user_admin\)"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "")
+
+    @pytest.mark.parametrize("selector", ["a\x00b", "x" * 600])
+    def test_impossible_logins_never_reach_the_database(
+        self, selector, mock_docker_client
+    ):
+        db = self._db(mock_docker_client, b"")
+        with pytest.raises(NotFoundError):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", selector)
+        db.exec_run.assert_not_called()
+
+    def test_psql_failure_is_an_external_command_error(self, mock_docker_client):
+        self._db(mock_docker_client, b'FATAL: database "x" does not exist', 2)
+        with pytest.raises(ExternalCommandError, match="does not exist"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "admin")
+
+    def test_missing_db_container_is_reported(self, mock_docker_client):
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("gone")
+        with pytest.raises(NotFoundError, match="is not running"):
+            odoo_ops.resolve_env_user(TEST_SETTINGS, TEST_TEAM, "main", "admin")
 
 
 class TestGetLogs:

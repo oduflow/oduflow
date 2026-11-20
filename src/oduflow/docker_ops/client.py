@@ -159,12 +159,15 @@ def get_odoo_uid_gid(client: DockerClient, image: str) -> str:
         else:
             raise ValueError(f"unexpected id output: {raw}")
     except Exception as e:
+        # Not cached: a transient failure (daemon hiccup, image pull error)
+        # must not pin the fallback for this image until the server restarts —
+        # the next call gets another chance at the real lookup.
         logger.warning(
             "Could not detect UID:GID from image %s: %s, falling back to 100:101",
             image,
             e,
         )
-        result = "100:101"
+        return "100:101"
     _uid_gid_cache[image] = result
     logger.debug("Detected UID:GID for %s: %s", image, result)
     return result

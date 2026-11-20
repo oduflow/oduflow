@@ -24,6 +24,7 @@ SOURCES = (
     "production.md",
     "agent.md",
     "services.md",
+    "image-builds.md",
     "extra-addons.md",
     "stacks.md",
     "web-api.md",

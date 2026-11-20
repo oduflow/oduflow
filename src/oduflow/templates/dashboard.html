@@ -2582,13 +2582,17 @@
       <button class="modal-close" id="cleanup-close" aria-label="Close" onclick="closeCleanupModal()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Orphaned resources belong to this team. Docker images are shared across the server.</p>
+      <p class="modal-note">Orphaned resources belong to this team. Docker images and the build cache are shared across the server.</p>
       <pre id="cleanup-output" tabindex="-1" aria-live="polite"></pre>
       <div class="form-group check-row">
         <input type="checkbox" id="cleanup-images" onchange="updateCleanupConfirm()" disabled>
         <label for="cleanup-images">Remove unused Docker images</label>
       </div>
-      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed.</p>
+      <div class="form-group check-row">
+        <input type="checkbox" id="cleanup-build-cache" onchange="updateCleanupConfirm()" disabled>
+        <label for="cleanup-build-cache">Remove Docker build cache (shared by all teams)</label>
+      </div>
+      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed. Build cache in use by a running build is kept; the next build of each image runs without cache.</p>
       <div class="form-actions">
         <button class="btn" id="cleanup-cancel" onclick="closeCleanupModal()">Cancel</button>
         <button class="btn" id="cleanup-scan" onclick="scanCleanup()">Scan again</button>
@@ -2748,7 +2752,10 @@
       <button class="modal-close" onclick="closeShare()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As and Agent Chat. Other team environments and team-wide pages are unavailable, as is Agent CLI. Important: Agent Chat runs in the team's shared coder container, so the agent may read other team checkouts and Git credentials available there. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
+      <!-- This security disclosure is duplicated in docs/security.md
+           ("Scoped environment sharing"), docs/web-api.md and
+           specs/0055-scoped-environment-ui-sharing.md — keep them in sync. -->
+      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As, Agent Chat and Agent CLI. Other team environments and team-wide pages are unavailable. Agent Chat and Agent CLI run as this environment's own user in the team's coder container, so they cannot reach other environments' checkouts or conversations. Important: they still use the team's Git credentials and deploy key, the team-wide agent provider keys, any agent login made in this environment and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
       <div class="form-group" id="share-link-group">
         <label for="share-url">Share link</label>
         <div class="copy-row">
@@ -3138,6 +3145,10 @@ let containerStatsMap = {};
 // per-card refresh button (walking a filestore is too slow for the poll loop).
 let envStorageMap = {};
 let storageRefreshing = {};
+// Same for productions (DB lives on the production cluster, filestore is a
+// plain directory in the prod workspace).
+let prodStorageMap = {};
+let prodStorageRefreshing = {};
 let cachedTemplates = [];
 let cachedEnvs = [];
 let cachedServices = [];
@@ -3661,17 +3672,25 @@ function applyStats() {
   });
   document.querySelectorAll('[data-storage-for]').forEach(function(el) {
     var branch = el.getAttribute('data-storage-for');
-    var s = envStorageMap[branch];
-    var btn = storageRefreshing[branch]
-      ? '<span class="spinner" aria-hidden="true"></span>'
-      : '<button class="stat-refresh" onclick="refreshStorage(\'' + escAttr(branch) + '\')" ' +
-          'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
-          'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
-    el.innerHTML =
-      '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
-      '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
-      btn;
+    el.innerHTML = _storageHtml(
+      envStorageMap[branch], storageRefreshing[branch], 'refreshStorage', branch);
   });
+  document.querySelectorAll('[data-prod-storage-for]').forEach(function(el) {
+    var name = el.getAttribute('data-prod-storage-for');
+    el.innerHTML = _storageHtml(
+      prodStorageMap[name], prodStorageRefreshing[name], 'refreshProdStorage', name);
+  });
+}
+
+function _storageHtml(s, refreshing, fnName, key) {
+  var btn = refreshing
+    ? '<span class="spinner" aria-hidden="true"></span>'
+    : '<button class="stat-refresh" onclick="' + fnName + '(\'' + escAttr(key) + '\')" ' +
+        'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
+        'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
+  return '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
+    '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
+    btn;
 }
 
 async function refreshStorage(branch) {
@@ -3690,6 +3709,25 @@ async function refreshStorage(branch) {
     showToast('Failed to measure usage: ' + e, true);
   }
   delete storageRefreshing[branch];
+  applyStats();
+}
+
+async function refreshProdStorage(name) {
+  if (prodStorageRefreshing[name]) return;
+  prodStorageRefreshing[name] = true;
+  applyStats();
+  try {
+    const r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/storage/refresh', { method: 'POST' });
+    const data = await readResult(r);
+    if (data.ok) {
+      prodStorageMap[name] = data.storage;
+    } else {
+      showToast(data.error || 'Failed to measure usage', true);
+    }
+  } catch (e) {
+    showToast('Failed to measure usage: ' + e, true);
+  }
+  delete prodStorageRefreshing[name];
   applyStats();
 }
 
@@ -3858,7 +3896,7 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
       (allStopped ? 'disabled' : '') + '>Open console</button>' +
     '<button role="menuitem" title="psql session on the environment database" onclick="openSqlConsole(\'' + escAttr(env.branch) + '\')" ' +
       (allStopped ? 'disabled' : '') + '>Open SQL console</button>' +
-    (showAgent && !SCOPED_ENV
+    (showAgent
       ? '<button role="menuitem" title="Terminal session with the coding agent for this environment" onclick="openAgentConsole(\'' + escAttr(env.branch) + '\')">Agent CLI</button>'
       : '');
   var modules = '<button role="menuitem" title="Install modules with odoo -i, then restart" onclick="openInstallModules(\'' + escAttr(env.branch) + '\')" ' + dis +
@@ -3868,7 +3906,7 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
   var access = '<button role="menuitem" title="Scoped MCP endpoint and Secret Key for this environment only" onclick="openMcpAccess(\'' + escAttr(env.branch) + '\')">MCP Access</button>' +
     (SCOPED_ENV
       ? ''
-      : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and Agent Chat, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>');
+      : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and coding agent, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>');
   var management = SCOPED_ENV ? '' :
     '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
       (env.note ? 'Edit note' : 'Add note') + '</button>' +
@@ -3892,7 +3930,11 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
     '<div class="env-menu-separator" role="separator"></div>' +
     '<button role="menuitem" class="danger" onclick="doRecreate(\'' + escAttr(env.branch) + '\')" ' + dis +
       (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>';
-  var root = '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
+  // env-vars may carry secrets, so GET …/env-vars is not in the
+  // scoped allowlist (ui_scope.py) — don't render a dead item.
+  var root = (SCOPED_ENV
+      ? ''
+      : '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>') +
     group('consoles', 'Consoles', consoles) +
     group('modules', 'Modules', modules) +
     group('access', 'Access', access) +
@@ -4787,7 +4829,9 @@ var cleanupGroups = [
   ['orphan_databases', 'Databases'],
   ['orphan_workspaces', 'Workspaces'],
   ['orphan_ports', 'Port registry entries'],
-  ['orphan_roles', 'PostgreSQL roles']
+  ['orphan_roles', 'PostgreSQL roles'],
+  ['orphan_extra_checkouts', 'Extra-addons checkouts'],
+  ['orphan_build_jobs', 'Image build jobs']
 ];
 
 function cleanupCount(result) {
@@ -4796,9 +4840,13 @@ function cleanupCount(result) {
 
 function updateCleanupConfirm() {
   var images = document.getElementById('cleanup-images');
+  var buildCache = document.getElementById('cleanup-build-cache');
   images.disabled = cleanupBusy || !cleanupPreview || !cleanupPreview.images.length;
+  var cacheOffered = !!cleanupPreview && (cleanupPreview.build_cache || {}).reclaimable_bytes > 0;
+  if (!cacheOffered) buildCache.checked = false;
+  buildCache.disabled = cleanupBusy || !cacheOffered;
   document.getElementById('cleanup-confirm').disabled = cleanupBusy || !cleanupPreview ||
-    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length));
+    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length) || buildCache.checked);
 }
 
 function setCleanupBusy(busy, applying) {
@@ -4814,12 +4862,19 @@ function setCleanupBusy(busy, applying) {
 
 function renderCleanup(result) {
   var lines = [result.dry_run ? '[DRY RUN] Orphaned resources:' : '[CLEANUP] Removed resources:'];
+  var checkoutSizes = result.orphan_extra_checkout_sizes || {};
   cleanupGroups.forEach(function(group) {
     var names = result[group[0]] || [];
     if (!names.length) return;
     lines.push('  ' + group[1] + ' (' + names.length + '):');
-    names.forEach(function(name) { lines.push('    - ' + name); });
+    names.forEach(function(name) {
+      var size = checkoutSizes[name];
+      lines.push('    - ' + name + (size !== undefined ? ' — ' + fmtBytes(size) : ''));
+    });
   });
+  if (typeof result.extra_checkouts_freed_bytes === 'number' && result.extra_checkouts_freed_bytes > 0) {
+    lines.push('  Extra-addons checkouts freed ' + fmtBytes(result.extra_checkouts_freed_bytes) + '.');
+  }
   var count = cleanupCount(result);
   lines.push(count ? '\n' + count + ' resource(s) ' + (result.dry_run ? 'would be removed.' : 'removed.') :
     (result.dry_run ? 'No orphaned resources found.' : 'No orphaned resources removed.'));
@@ -4831,11 +4886,23 @@ function renderCleanup(result) {
     });
     if (!result.images.length) lines.push('  No unused images found.');
     else lines.push('Select "Remove unused Docker images" to include these images.');
+    var cache = result.build_cache || {};
+    if (cache.error) lines.push('\nDocker build cache: ' + cache.error);
+    else if (!cache.size_bytes) lines.push('\nDocker build cache: none found.');
+    else {
+      lines.push('\nDocker build cache: ' + fmtBytes(cache.size_bytes) + ' total, ' +
+        fmtBytes(cache.reclaimable_bytes) + ' reclaimable.');
+      if (cache.reclaimable_bytes > 0) lines.push('Select "Remove Docker build cache" to include it.');
+    }
   } else {
     lines.push('\nDocker images removed (' + result.images.removed.length + '):');
     result.images.removed.forEach(function(id) { lines.push('  ' + id); });
     result.images.skipped.forEach(function(item) { lines.push('Skipped ' + item.id + ': ' + item.reason); });
     result.images.errors.forEach(function(item) { lines.push('Error ' + item.id + ': ' + item.reason); });
+    if (result.build_cache) {
+      lines.push(result.build_cache.error ? '\nError Docker build cache: ' + result.build_cache.error :
+        '\nDocker build cache removed: ' + fmtBytes(result.build_cache.reclaimed_bytes) + ' reclaimed.');
+    }
   }
   (result.errors || []).forEach(function(error) { lines.push('Error: ' + error); });
   document.getElementById('cleanup-output').textContent = lines.join('\n');
@@ -4857,8 +4924,9 @@ async function scanCleanup() {
   if (cleanupBusy) return;
   cleanupPreview = null;
   document.getElementById('cleanup-images').checked = false;
+  document.getElementById('cleanup-build-cache').checked = false;
   document.getElementById('cleanup-cancel').textContent = 'Cancel';
-  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources and unused Docker images…';
+  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources, unused Docker images and the build cache…';
   setCleanupBusy(true, false);
   try {
     var response = await fetch('/api/cleanup', {
@@ -4878,6 +4946,7 @@ async function scanCleanup() {
 async function confirmCleanup() {
   if (cleanupBusy || !cleanupPreview || document.getElementById('cleanup-confirm').disabled) return;
   var imageIds = document.getElementById('cleanup-images').checked ? cleanupPreview.images.map(function(image) { return image.id; }) : [];
+  var buildCache = document.getElementById('cleanup-build-cache').checked;
   // Send the reviewed names: the server removes only these, and only if still orphaned.
   var orphans = {};
   cleanupGroups.forEach(function(group) { orphans[group[0]] = cleanupPreview[group[0]] || []; });
@@ -4885,7 +4954,7 @@ async function confirmCleanup() {
   try {
     var response = await fetch('/api/cleanup', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds })
+      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds, build_cache: buildCache })
     });
     var data = await readResult(response);
     if (!data.ok) throw new Error(data.error || 'Cleanup failed.');
@@ -4910,6 +4979,7 @@ async function loadStats() {
     containerStatsMap = {};
     (data.containers || []).forEach(c => { containerStatsMap[c.name] = c; });
     envStorageMap = (data.storage && data.storage.envs) || {};
+    prodStorageMap = (data.storage && data.storage.productions) || {};
 
     const sys = data.system;
     document.getElementById('sys-cpu').innerHTML =
@@ -5314,18 +5384,38 @@ async function doRecreate(branch) {
 }
 
 async function doDelete(branch) {
+  var env = cachedEnvs.find(function(e) { return e.branch === branch; });
+  var gitBranch = (env && env.git_branch) || branch;
+  // Live-mounted environments own no git state, so no branch option there.
+  // Checked by default only when Oduflow created the branch for this
+  // environment (the oduflow.git_branch_created label).
+  var checkbox = (env && env.local_path) ? null : {
+    label: 'Also delete git branch "' + gitBranch + '" on origin',
+    checked: !!(env && env.git_branch_created)
+  };
   if (!(await confirmDialog({
     title: 'Delete environment',
     message: 'Remove the container, database, and workspace of "' + branch + '"?',
     confirmLabel: 'Delete environment',
-    danger: true
+    danger: true,
+    checkbox: checkbox
   }))) return;
   setBusy(branch, 'Deleting');
   try {
-    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/delete', { method: 'POST' });
+    const opts = { method: 'POST' };
+    if (checkbox && checkbox.checked) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ delete_branch: true });
+    }
+    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/delete', opts);
     const data = await readResult(r);
     if (data.ok) {
-      showToast(branch + ': deleted');
+      var warnings = (data.result && data.result.warnings) || [];
+      if (warnings.length) {
+        showToast(branch + ': deleted. ' + warnings.join(' '), true);
+      } else {
+        showToast(branch + ': deleted');
+      }
     } else {
       showToast(data.error || 'Delete failed', true);
     }
@@ -10928,9 +11018,15 @@ function renderProductions() {
         lastHtml +
         snapHtml +
       '</div>' +
+      // DB/disk usage: cached, recomputed only via the per-card refresh
+      // button (filled in by applyStats, same as environment cards).
+      '<div class="containers">' +
+        '<span class="container-stats env-storage" data-prod-storage-for="' + esc(p.name) + '"></span>' +
+      '</div>' +
       (open ? '<div class="prod-section" id="prod-section-' + esc(p.name) + '">Loading…</div>' : '') +
     '</div>';
   }).join('');
+  applyStats();
   Object.keys(_prodOpen).forEach(function(name) {
     if (_prodOpen[name]) _loadProdSection(name, _prodOpen[name]);
   });

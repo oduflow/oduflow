@@ -2,7 +2,7 @@
 
 ![Agent Instructions](img/agent_instructions.png)
 
-Oduflow exposes **108 tools**. They are reachable from any MCP client (Cursor,
+Oduflow exposes **109 tools**. They are reachable from any MCP client (Cursor,
 Cline, Amp, Claude Code, …), locally with `oduflow call`, against a remote
 Oduflow server with `oduflow client`, and — for a subset — over the
 [REST API](web-api.md).
@@ -83,7 +83,8 @@ end to end.
     [`run_odoo_shell`](#run_odoo_shell)&nbsp;·
     [`http_request_to_odoo`](#http_request_to_odoo)&nbsp;·
     [`reset_admin_password`](#reset_admin_password)&nbsp;·
-    [`connect_as_user`](#connect_as_user)
+    [`connect_as_user`](#connect_as_user)&nbsp;·
+    [`connect_link`](#connect_link)
 
 -   __[Translations](#translations)__
 
@@ -320,6 +321,19 @@ Lock: environment.
 
 `env_name`
 :   *str · required* — The environment to tear down.
+
+`delete_branch`
+:   *bool · default `false`* — Also delete the environment's git branch on
+    origin (`git push origin --delete`), once the container and database are
+    gone. Skipped with a warning — the environment is still torn down — when
+    the branch is used by another environment, is not merged, received new
+    commits while it was being checked, is origin's default branch, or the
+    credential cannot push. *Merged* means the branch
+    tip is contained in origin's default branch or in the base branch named
+    when the environment was created; a squash- or rebase-merged branch is
+    not recognised as merged and has to be deleted by hand. Not applicable to
+    live-mounted environments, nor to an environment whose container is
+    already gone (the branch it tracked can no longer be confirmed).
 
 **Use it when**
 
@@ -1361,7 +1375,108 @@ Lock: environment.
 !!! warning "The session id is a live credential"
     It is shown in the tool's output (and therefore in the transcript) — treat
     it like a password. The tool grants no new privilege: whoever can call it
-    can already [`run_odoo_shell`](#run_odoo_shell).
+    can already [`run_odoo_shell`](#run_odoo_shell). The server log shows the
+    call but not the session id.
+
+To sign a **person** in rather than an automated browser, use
+[`connect_link`](#connect_link): another application cannot set a cookie for
+the environment's host from its own origin.
+
+### `connect_link`
+
+Create a one-time browser sign-in link for an environment. Redirect a person's
+browser to the returned URL — or hand it to them to click — and they land in
+Odoo already signed in as the chosen user, with no password and no cookie
+handling on the caller's side. This is the building block for an "Open as
+admin" button in an application that drives Oduflow over MCP.
+
+The result is an object (MCP structured content; the same object as JSON in the
+text content):
+
+| Field | Meaning |
+|---|---|
+| `url` | The redirect target: `https://<environment-host>/oduflow-connect?token=…` |
+| `login`, `uid` | The user the link signs in as, resolved when the link is created |
+| `env_name` | The environment |
+| `expires_in` | Lifetime of the link in seconds (300) |
+| `note` | Empty unless something needs saying — the environment was stopped and has been started |
+
+```json
+{
+  "url": "https://feature-x.dev.example.com/oduflow-connect?token=…",
+  "env_name": "feature-x",
+  "login": "admin",
+  "uid": 2,
+  "expires_in": 300,
+  "note": ""
+}
+```
+
+Lock: environment.
+{ .odu-tool-meta }
+
+**Parameters**
+
+`env_name`
+:   *str · required* — The environment.
+
+`user`
+:   *str · default empty* — The user to sign in as: a login (e.g. `"jane@acme.com"`) or a numeric id. Empty means the database's administrator, found through its `base.user_admin` record, so it keeps working when the administrator's login has been changed from `admin` to an email address. Passing `"admin"` looks up that literal login.
+
+**What the link does**
+
+- It works **once**, only on **that environment's host**, and for **five
+  minutes**.
+- **Nothing is minted until it is used.** The link carries only who to sign in
+  as; the Odoo session is created when a browser redeems it. A link nobody
+  opens leaves no session behind.
+- **Fetching it does not use it up.** Opening the URL shows a short page that
+  continues to Odoo by itself; the sign-in happens in the request that page
+  makes. A chat link preview or a mail link scanner that only fetches the URL
+  changes nothing, and the link still works for the person afterwards. A
+  browser driven by automation (`navigator.webdriver`) is shown the same page
+  but has to press **Continue** itself. The protection ends there: a scanner
+  that opens links in a full browser, runs the page's script and does not
+  report itself as automated continues exactly like a person, and uses the
+  link up.
+- **A busy or stopped environment does not cost the link.** If another
+  operation holds the environment when the link is opened, the page says so
+  and retries every few seconds until the link expires. A stopped environment
+  is started, and the browser is sent on once Odoo answers. The link is spent
+  only by a successful sign-in; if the environment or the user has been deleted
+  in the meantime, the page says the link can no longer be used. Any other
+  failure keeps the link and offers a retry; the page does not say what went
+  wrong — its reader may be anyone holding the link — and the reason is in the
+  server log.
+- An unknown `user` is rejected by the tool call, not later in the person's
+  browser. A stopped environment is started by the call as well, so the link
+  opens without a wait — after the user check, so a mistyped user does not
+  start an environment.
+
+**Requirements**
+
+- **Traefik routing.** In port mode an environment has no host of its own to
+  serve the landing; the tool fails with an explanation.
+- **The HTTP transport.** The link is redeemed by the web UI of the server
+  process that issued it, so the tool fails under the stdio transport and for a
+  one-off `oduflow call`. Links also do not survive a server restart.
+
+In both cases use [`connect_as_user`](#connect_as_user) and set the cookie
+yourself.
+
+**Use it when**
+
+- An application wants an "Open" or "Open as admin" button for an environment
+  it manages over MCP.
+- An agent should give a person a way into the environment it just prepared,
+  as a specific user, without sharing a password.
+
+!!! warning "The link is a bearer credential until it is used"
+    Anyone who opens it within five minutes is signed in as that user, so pass
+    it only to the person it is for. Oduflow keeps it out of its own log: the
+    tool-call log line and the HTTP access log both show the URL with the
+    token masked. Like `connect_as_user`, the tool grants no new privilege:
+    whoever can call it can already [`run_odoo_shell`](#run_odoo_shell).
 
 ## Translations
 
@@ -2284,7 +2399,27 @@ configuration keeps the reference.
 
 ## Container Image Builds
 
-Requires a `[team.X.image_registry]` section in `oduflow.toml`.
+Build a container image from a git revision, run it as an auxiliary service,
+and optionally publish it to a registry. Oduflow keeps the Docker socket and
+the registry credentials; the agent only names what to build.
+
+A build has one of two sources:
+
+- **a repository URL** (`repo_url` + `ref`) — any git repository, with no
+  environment involved. This is how to build a service whose repository holds
+  no Odoo code at all. Available on the team endpoint (`/mcp`) only;
+- **an environment** (`env_name`) — that environment's managed checkout. On the
+  scoped `/mcp/<env>` endpoint this is the only source, and it is implied.
+
+Building needs no configuration. **Publishing** needs a registry namespace:
+`repository_prefix` in the team's `[team.X.image_registry]` section of
+`oduflow.toml`, which also holds the optional build limits. A build runs its
+Dockerfile on the host's Docker daemon; an operator who does not want that for
+a team sets `builds_enabled = false` in the same section, and
+[`start_image_build`](#start_image_build) then refuses with a prerequisite
+error on both endpoints.
+
+See [Container Image Builds](image-builds.md) for the end-to-end workflow, the limits and retention, and the trust model.
 
 A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 `oduflow-build/team-<id>:<build-id>` (reported by
@@ -2293,26 +2428,57 @@ A succeeded build is kept in the host's Docker daemon under a **staging tag**,
 [`update_service`](#update_service): it is resolved from the local daemon, not
 pulled from a registry, so a build can be run and checked as an auxiliary
 service *before* [`publish_image_build`](#publish_image_build) pushes it
-anywhere. These service operations accept only the team's own staging images.
-Automatic build retention preserves tags referenced by running or stopped
-containers. Unused staging tags remain temporary and can be pruned; use a
-published tag to restore a service after pruning or move it to a new host.
+anywhere — or without ever publishing it. These service operations accept only
+the team's own staging images. Automatic build retention preserves tags
+referenced by running or stopped containers. Unused staging tags remain
+temporary and can be pruned; use a published tag to restore a service after
+pruning or move it to a new host.
+
+Build records (status, log, publication history) are kept until an operator
+runs cleanup — `oduflow cleanup --force` or the dashboard's **Cleanup**. It
+removes the records of failed, cancelled and interrupted builds — a build
+whose Oduflow process died counts as interrupted — and of succeeded builds
+whose staging image is gone, after which
+[`get_image_build`](#get_image_build) reports them as not found. Running
+builds, and succeeded builds whose staging image still exists, are kept. The
+dashboard's cleanup can also prune the Docker **build cache**, as its own
+opt-in; the cache is shared by every team on the server, so the next build of
+any image then runs without it. The legacy builder keeps its cache as
+intermediate images instead. Unused-image cleanup removes those only
+gradually: it never prunes an image's parents, so roughly one layer level goes
+per cleanup pass.
+
+Dockerfiles run under **BuildKit** when the `docker` CLI and its `buildx`
+plugin are installed next to Oduflow (the official Oduflow image ships both).
+Without the plugin Oduflow falls back to the Docker Engine's legacy builder,
+which fails on Dockerfiles that use `$BUILDPLATFORM`, `RUN --mount` or
+`COPY --link`; [`get_image_build`](#get_image_build) reports which builder ran.
+
+A Stack can declare the same build on a service — see
+[Building a service image](stacks.md#building-a-service-image).
 
 ### `start_image_build`
 
-Build a container image from the environment checkout's **current HEAD commit**
-— sealed with `git archive` under the environment lock, so the source cannot
-shift mid-build. The build runs asynchronously server-side and this call
-returns a `build_id` immediately. Hard timeouts, log-size caps and per-team
-concurrency limits apply.
+Build a container image from one git commit. The source is pinned before
+anything runs: a `ref` is resolved to a commit when the call is made, and an
+environment's checkout is sealed at its **current HEAD** under the environment
+lock, so the source cannot shift mid-build. The build runs asynchronously
+server-side and this call returns a `build_id` immediately. Hard timeouts,
+log-size caps and per-team concurrency limits apply.
 
-Lock: environment.
+Lock: environment (environment builds only).
 { .odu-tool-meta }
 
 **Parameters**
 
 `env_name`
-:   *str · required* — The environment whose checkout to build from.
+:   *str · default empty* — The environment whose checkout to build from. Pass this **or** `repo_url`, not both.
+
+`repo_url`
+:   *str · default empty* — Repository to build instead — HTTPS or SSH URL. Private repositories use the team's git credentials ([`setup_repo_auth`](#setup_repo_auth)) or its SSH deploy key ([`get_ssh_public_key`](#get_ssh_public_key)). Not available on the scoped endpoint.
+
+`ref`
+:   *str · default empty* — With `repo_url`: branch, tag or full commit SHA. Empty builds the repository's default branch.
 
 `dockerfile`
 :   *str · default `"Dockerfile"`* — Dockerfile path relative to the context.
@@ -2328,25 +2494,32 @@ Lock: environment.
 
 **Use it when**
 
-- Producing a deployable image from the exact code you just tested.
+- Building an auxiliary service from its own repository, e.g. `repo_url="https://github.com/acme/gateway"`, `dockerfile="docker/Dockerfile"`.
+- Producing a deployable image from the exact code you just tested in an environment.
 - Building a release candidate from a tagged commit.
 
 !!! warning "Build arguments are not secret"
     Their values reach the Dockerfile and the image history. Never pass
-    credentials. Push your commits and [`pull_and_apply`](#pull_and_apply)
-    first — the build uses the checkout's HEAD at call time.
+    credentials. For an environment build, push your commits and
+    [`pull_and_apply`](#pull_and_apply) first — the build uses the checkout's
+    HEAD at call time.
+
+!!! note "What the context contains"
+    The context is `git archive` of the pinned commit: tracked files only, no
+    `.git` directory, no submodule contents and no Git LFS objects.
 
 ### `get_image_build`
 
-Status, source commit, publication history and a build log tail for one build.
+Status, source commit, builder, publication history and a build log tail for
+one build.
 
 **Parameters**
 
-`env_name`
-:   *str · required* — The environment the build belongs to.
-
 `build_id`
 :   *str · required* — The build to inspect.
+
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
 
 `tail_lines`
 :   *int · default `100`* — Trailing build log lines to include.
@@ -2359,7 +2532,8 @@ Status, source commit, publication history and a build log tail for one build.
 ### `publish_image_build`
 
 Push a **succeeded** build's exact image — never a rebuild — to one or more
-tags under the team's configured registry namespace.
+tags under the team's configured registry namespace. Requires
+`repository_prefix` in `[team.X.image_registry]`.
 
 Any syntactically valid tag is accepted, including `latest` and semver.
 Overwriting an existing tag is intentional and last-writer-wins. Tags are
@@ -2367,9 +2541,6 @@ pushed one by one, so partial success is possible and each tag reports its own
 outcome.
 
 **Parameters**
-
-`env_name`
-:   *str · required* — The environment the build belongs to.
 
 `build_id`
 :   *str · required* — A build in status `succeeded`.
@@ -2380,6 +2551,9 @@ outcome.
 `tags`
 :   *str · required* — Comma-separated tags to publish, e.g. `"1.4.0,latest"`.
 
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
+
 **Use it when**
 
 - Promoting a verified build to `latest` and a version tag in one call.
@@ -2388,15 +2562,17 @@ outcome.
 ### `cancel_image_build`
 
 Terminate a running build and its Docker connection — even when the current
-Dockerfile step produces no output — and move the job to `cancelled`.
+Dockerfile step produces no output — and move the job to `cancelled`. A build
+that `oduflow stack apply` started runs inside that command and is cancelled by
+interrupting it, not through this tool.
 
 **Parameters**
 
-`env_name`
-:   *str · required* — The environment the build belongs to.
-
 `build_id`
 :   *str · required* — The build to cancel.
+
+`env_name`
+:   *str · default empty* — The environment the build was started from. Leave empty for a build started from a `repo_url`.
 
 **Use it when**
 
@@ -3050,7 +3226,9 @@ them with a dev environment's data (promotion into an *existing* production).
 
 The restore is swap-based, so a failed restore leaves the previous state in
 place. The **code checkout is not touched** — a warning is returned if it does
-not match the source's commit.
+not match the source's commit. A snapshot restore needs about twice the dump
+size free in the team's `tmp` directory plus room for a second copy of the
+filestore; see [How a snapshot restore runs](production.md#how-a-snapshot-restore-runs).
 
 Lock: production + backup store. Destructive for current data.
 { .odu-tool-meta }
@@ -3102,7 +3280,9 @@ Lock: production.
 ### `prune_production_backups`
 
 Apply the retention policy (`[backup] keep`) to the team's snapshots and
-filestore chunk store immediately. This also runs weekly on schedule.
+filestore chunk store immediately. This also runs weekly on schedule (Sunday
+04:30, server-local); see [Schedule and retention](production.md#schedule-and-retention)
+for how `keep` pairs are interpreted.
 
 Pruning uses safe two-step fossil collection: chunks are only permanently
 deleted on a *later* prune, after every production has produced a newer

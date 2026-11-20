@@ -4,6 +4,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from oduflow.docker_ops import image_cleanup
 from oduflow.errors import BusyError, ExternalCommandError
 from oduflow.locking import LockManager, image_cleanup_lock_key
 from oduflow.settings import Settings, TeamSettings
@@ -11,7 +12,12 @@ from oduflow.web_ui import _AUTH_COOKIE, _make_ui_token, mount_web_ui
 
 IMAGE_ID = "sha256:" + "a" * 64
 IMAGE_LOCK = image_cleanup_lock_key()
-REVIEWED = {"orphan_databases": ["oduflow_2_old"], "orphan_roles": []}
+REVIEWED = {
+    "orphan_databases": ["oduflow_2_old"],
+    "orphan_roles": [],
+    "orphan_build_jobs": ["bld-0123456789ab"],
+}
+CACHE_USAGE = {"size_bytes": 500, "reclaimable_bytes": 400}
 
 
 @pytest.fixture
@@ -32,11 +38,21 @@ def setup(tmp_path):
         patch("oduflow.docker_ops.system_ops.cleanup_orphans") as cleanup,
         patch("oduflow.docker_ops.image_cleanup.list_unused_images") as scan,
         patch("oduflow.docker_ops.image_cleanup.remove_unused_images") as remove,
+        patch("oduflow.docker_ops.image_cleanup.build_cache_usage") as usage,
+        patch("oduflow.docker_ops.image_cleanup.prune_build_cache") as prune,
     ):
         cleanup.return_value = {"dry_run": True, "orphan_databases": []}
         scan.return_value = [{"id": IMAGE_ID, "tags": ["odoo:old"], "size_bytes": 100}]
         remove.return_value = {"removed": [IMAGE_ID], "skipped": [], "errors": []}
+        usage.return_value = dict(CACHE_USAGE)
+        prune.return_value = {"reclaimed_bytes": 400}
         yield client, settings, locks, cleanup, scan, remove
+
+
+@pytest.fixture
+def cache(setup):
+    """The build cache mocks patched in by ``setup``: (usage, prune)."""
+    return image_cleanup.build_cache_usage, image_cleanup.prune_build_cache
 
 
 def test_default_is_dry_run_for_authenticated_team(setup):
@@ -97,6 +113,17 @@ def test_any_team_can_confirm_image_cleanup_and_worker_holds_locks(setup):
         pass
 
 
+def test_extra_checkouts_group_is_accepted(setup):
+    client, settings, _, cleanup, _, remove = setup
+    orphans = {"orphan_extra_checkouts": ["enterprise/" + "a" * 40]}
+    response = client.post("/api/cleanup", json={"force": True, "orphans": orphans})
+    assert response.status_code == 200
+    cleanup.assert_called_once_with(
+        settings, settings.teams["2"], dry_run=False, only=orphans
+    )
+    remove.assert_not_called()
+
+
 def test_confirm_without_reviewed_orphans_removes_none(setup):
     client, _, _, cleanup, _, remove = setup
     response = client.post("/api/cleanup", json={"force": True})
@@ -141,15 +168,139 @@ def test_busy_image_cleanup_removes_nothing(setup):
         {"force": True, "orphans": {"orphan_volumes": ["data"]}},
         {"force": True, "orphans": {"orphan_databases": "oduflow_2_old"}},
         {"force": True, "orphans": {"orphan_databases": [1]}},
+        {"force": True, "orphans": {"orphan_build_jobs": "bld-0123456789ab"}},
+        {"build_cache": "true"},
+        {"force": True, "image_ids": [IMAGE_ID], "build_cache": 1},
+        {"force": True, "image_ids": [IMAGE_ID], "build_cache": None},
+        # A preview never prunes: the build cache needs force.
+        {"force": False, "image_ids": [IMAGE_ID], "build_cache": True},
+        {"build_cache": True},
     ],
 )
-def test_invalid_input_cannot_delete_resources(setup, body):
+def test_invalid_input_cannot_delete_resources(setup, cache, body):
     client, _, _, cleanup, scan, remove = setup
+    usage, prune = cache
     response = client.post("/api/cleanup", json=body)
     assert response.status_code == 400
     cleanup.assert_not_called()
     scan.assert_not_called()
     remove.assert_not_called()
+    usage.assert_not_called()
+    prune.assert_not_called()
+
+
+def test_dry_run_reports_build_cache_usage_without_pruning(setup, cache):
+    client, _, _, _, _, _ = setup
+    usage, prune = cache
+    response = client.post("/api/cleanup", json={"force": False})
+    assert response.status_code == 200
+    assert response.json()["result"]["build_cache"] == CACHE_USAGE
+    usage.assert_called_once_with()
+    prune.assert_not_called()
+
+
+def test_build_cache_is_pruned_after_images_under_the_image_lock(setup, cache):
+    client, _, locks, cleanup, _, remove = setup
+    usage, prune = cache
+    cleanup.return_value = {"dry_run": False}
+    order = []
+    remove.side_effect = lambda ids: (
+        order.append("images") or {"removed": ids, "skipped": [], "errors": []}
+    )
+
+    def prune_cache():
+        order.append("build_cache")
+        # Server-wide like image removal; the team lock is long released.
+        with locks.env_lock("new-env", team_id="2"):
+            pass
+        with pytest.raises(BusyError):
+            locks.acquire_env(IMAGE_LOCK)
+        return {"reclaimed_bytes": 400}
+
+    prune.side_effect = prune_cache
+    response = client.post(
+        "/api/cleanup",
+        json={"force": True, "image_ids": [IMAGE_ID], "build_cache": True},
+    )
+    assert response.status_code == 200
+    assert order == ["images", "build_cache"]
+    assert response.json()["result"]["build_cache"] == {"reclaimed_bytes": 400}
+    prune.assert_called_once_with()
+    usage.assert_not_called()
+    with locks.env_lock(IMAGE_LOCK):
+        pass
+
+
+def test_build_cache_alone_is_pruned_under_the_image_lock(setup, cache):
+    client, settings, locks, cleanup, scan, remove = setup
+    usage, prune = cache
+    cleanup.return_value = {"dry_run": False}
+
+    def prune_cache():
+        with pytest.raises(BusyError):
+            locks.acquire_env(IMAGE_LOCK)
+        return {"reclaimed_bytes": 400}
+
+    prune.side_effect = prune_cache
+    response = client.post("/api/cleanup", json={"force": True, "build_cache": True})
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["build_cache"] == {"reclaimed_bytes": 400}
+    assert result["images"] == {"removed": [], "skipped": [], "errors": []}
+    cleanup.assert_called_once_with(
+        settings, settings.teams["2"], dry_run=False, only={}
+    )
+    prune.assert_called_once_with()
+    remove.assert_not_called()
+    scan.assert_not_called()
+    usage.assert_not_called()
+    with locks.env_lock(IMAGE_LOCK):
+        pass
+
+
+@pytest.mark.parametrize("extra", [{}, {"build_cache": False}])
+def test_build_cache_is_kept_unless_requested(setup, cache, extra):
+    client, _, _, cleanup, _, remove = setup
+    _, prune = cache
+    cleanup.return_value = {"dry_run": False}
+    response = client.post(
+        "/api/cleanup", json={"force": True, "image_ids": [IMAGE_ID], **extra}
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["build_cache"] is None
+    remove.assert_called_once_with([IMAGE_ID])
+    prune.assert_not_called()
+
+
+def test_build_cache_failure_is_reported_with_the_other_results(setup, cache):
+    client, _, _, cleanup, _, _ = setup
+    _, prune = cache
+    cleanup.return_value = {"dry_run": False, "orphan_databases": ["oduflow_2_old"]}
+    prune.return_value = {"reclaimed_bytes": 0, "error": "Docker could not remove it."}
+    response = client.post(
+        "/api/cleanup",
+        json={"force": True, "image_ids": [IMAGE_ID], "build_cache": True},
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["orphan_databases"] == ["oduflow_2_old"]
+    assert result["images"]["removed"] == [IMAGE_ID]
+    assert result["build_cache"]["error"] == "Docker could not remove it."
+
+
+@pytest.mark.parametrize("image_ids", [[IMAGE_ID], []])
+def test_busy_image_cleanup_keeps_the_build_cache(setup, cache, image_ids):
+    client, _, locks, cleanup, _, remove = setup
+    _, prune = cache
+    with locks.env_lock(IMAGE_LOCK, operation="cleanup"):
+        response = client.post(
+            "/api/cleanup",
+            json={"force": True, "image_ids": image_ids, "build_cache": True},
+        )
+    assert response.status_code == 409
+    cleanup.assert_not_called()
+    remove.assert_not_called()
+    prune.assert_not_called()
 
 
 def test_team_busy_does_not_release_another_operations_lock(setup):

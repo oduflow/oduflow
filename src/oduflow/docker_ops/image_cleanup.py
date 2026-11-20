@@ -5,6 +5,9 @@ kept when any container (any team, running or stopped, managed or not) uses
 it, when it has child images, when it is an image build's staging candidate,
 or when an Oduflow operation requested it recently (see
 :func:`note_image_requested`).
+
+The daemon's build cache is shared the same way; :func:`build_cache_usage` and
+:func:`prune_build_cache` back the cleanup's optional build cache removal.
 """
 
 from __future__ import annotations
@@ -159,3 +162,49 @@ def remove_unused_images(image_ids: list[str]) -> dict[str, Any]:
                 }
             )
     return {"removed": removed, "skipped": skipped, "errors": errors}
+
+
+def build_cache_usage() -> dict[str, Any]:
+    """Total and reclaimable size of the daemon's build cache.
+
+    Like images, the cache belongs to the daemon and so to every team. Both
+    sizes are zero when the daemon reports no cache — an API without BuildKit,
+    or the legacy builder, whose cache is intermediate images instead (those
+    go with unused images, a layer level per pass: removal never prunes
+    parents). A failed query is reported in ``error``, never raised: the cache
+    is an optional extra of the cleanup preview.
+    """
+    try:
+        records = get_client().api.df().get("BuildCache")
+    except Exception:  # noqa: BLE001 — must not fail the cleanup preview
+        logger.warning("Could not read Docker build cache usage", exc_info=True)
+        return {
+            "size_bytes": 0,
+            "reclaimable_bytes": 0,
+            "error": "Docker did not report build cache usage. Check server logs.",
+        }
+    # Records shared with the image store are counted with the images.
+    own = [
+        record
+        for record in (records if isinstance(records, list) else [])
+        if isinstance(record, dict) and not record.get("Shared")
+    ]
+    size = sum(int(record.get("Size") or 0) for record in own)
+    in_use = sum(int(record.get("Size") or 0) for record in own if record.get("InUse"))
+    return {"size_bytes": size, "reclaimable_bytes": size - in_use}
+
+
+def prune_build_cache() -> dict[str, Any]:
+    """Remove every build cache record no build is using.
+
+    BuildKit itself skips records in use, so a running build keeps its cache.
+    """
+    try:
+        result = get_client().api.prune_builds(all=True)
+    except Exception:  # noqa: BLE001 — reported alongside the other removals
+        logger.warning("Failed to prune the Docker build cache", exc_info=True)
+        return {
+            "reclaimed_bytes": 0,
+            "error": "Docker could not remove the build cache. Check server logs.",
+        }
+    return {"reclaimed_bytes": int((result or {}).get("SpaceReclaimed") or 0)}
