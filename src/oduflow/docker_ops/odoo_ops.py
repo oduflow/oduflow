@@ -942,20 +942,24 @@ def run_db_query(
         "Running DB query",
         extra={"env_name": env_name, "format": output_format},
     )
-    exit_code, output = target.container.exec_run(
-        cmd, user=target.user, environment=target.environment
+    exit_code, (stdout, stderr) = target.container.exec_run(
+        cmd, user=target.user, environment=target.environment, demux=True
     )
-    output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
 
     # psql itself exits with 0-3; 126/127 is the runtime failing to start it.
-    if exit_code in (126, 127):
-        raise psql_client_missing(env_name, output_str)
     if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, output_str)
+        detail = (stderr or stdout or b"").decode("utf-8", errors="replace")
+        if exit_code in (126, 127):
+            raise psql_client_missing(env_name, detail)
+        raise ExternalCommandError("psql", exit_code, detail)
 
+    # Client warnings on stderr must not appear as rows in successful CSV.
+    output = stdout or b""
+    if output_format == "human" and stderr:
+        output += stderr
     return {
         "exit_code": exit_code,
-        "output": output_str,
+        "output": output.decode("utf-8"),
     }
 
 
