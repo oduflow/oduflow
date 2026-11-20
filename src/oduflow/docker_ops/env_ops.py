@@ -30,6 +30,7 @@ from oduflow import (
     secret_store,
     settings,
 )
+from oduflow import settings as settings_module
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import (
     chown_recursive,
@@ -2641,6 +2642,8 @@ def _create_environment_impl(
         if local_mount
         else get_repo_path(env_name, team.workspaces_dir)
     )
+    if local_mount and settings_module.TRANSPORT == "http":
+        raise PrerequisiteNotMetError("Live-mount requires the local CLI or stdio MCP.")
     if local_mount and not settings.allow_local_path:
         raise PrerequisiteNotMetError(
             "local_path (live-mount) is disabled. Set allow_local_path = true "
@@ -4141,7 +4144,11 @@ def delete_environment(
 
 
 def recreate_environment(
-    settings: Settings, team: TeamSettings, env_name: str
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    allow_host_paths: bool = True,
 ) -> dict[str, Any]:
     """Tear the environment down and provision it again from its recorded
     configuration (repo, image, template, extra addons, git user, env vars,
@@ -4176,6 +4183,10 @@ def recreate_environment(
     git_user = labels.get("oduflow.git_user", "")
     env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
     local_path = labels.get("oduflow.local_path", "")
+    if local_path and (not allow_host_paths or settings_module.TRANSPORT == "http"):
+        raise PrerequisiteNotMetError(
+            "Recreating a live-mounted environment requires the local CLI or stdio MCP."
+        )
     # The environment name and the git branch it tracks can differ (several
     # environments off one branch), so recreate from the recorded branch label
     # rather than from the environment name.
@@ -6309,6 +6320,7 @@ def update_environment(
     label_overrides: dict[str, str] | None = None,
     rename_to: str | None = None,
     sync_agent_checkout: bool = True,
+    allow_host_paths: bool = True,
 ) -> dict[str, Any]:
     """Re-create an environment's container, preserving DB, repo and filestore.
 
@@ -6371,6 +6383,13 @@ def update_environment(
     except docker.errors.NotFound:
         raise NotFoundError(
             f"Environment '{env_name}' does not exist. Use create_environment first."
+        )
+
+    if container.labels.get("oduflow.local_path") and (
+        not allow_host_paths or settings_module.TRANSPORT == "http"
+    ):
+        raise PrerequisiteNotMetError(
+            "Updating a live-mounted environment requires the local CLI or stdio MCP."
         )
 
     if rename_to == env_name:

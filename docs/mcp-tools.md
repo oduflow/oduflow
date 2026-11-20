@@ -290,7 +290,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.
 
 `local_path`
-:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow skips the clone and bind-mounts the directory live, so file edits are visible instantly with no git round-trip. `repo_url` is not required. Gated by `allow_local_path`.
+:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow bind-mounts it read/write instead of cloning. Available only through the local CLI or stdio MCP, with `allow_local_path` enabled. HTTP MCP and the dashboard require a Git source instead, including when a template records a local path.
 
 **Use it when**
 
@@ -1588,7 +1588,7 @@ Lock: team + template. Destructive and irreversible.
 ### `import_template`
 
 Import or refresh a template from an Odoo database manager, an S3 prefix,
-a local directory, or a local dump file. See [Templates](templates.md)
+a local directory, or a local dump file. Local sources require the local CLI or stdio MCP. See [Templates](templates.md)
 for the raw dump plus `filestore/` layout and migration examples.
 
 Lock: template; overwrite and refresh also take the team lock to protect live
@@ -1672,7 +1672,7 @@ Lock: template throughout; the team lock only for the remount-and-swap, so stagi
 :   *str · required* — Template profile to attach the filestore to.
 
 `source`
-:   *str · required* — A local directory, a local `.zip` / `.tar` / `.tar.gz` archive, an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`.
+:   *str · required* — A local directory or archive (local CLI or stdio MCP only), an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`. Use stdio MCP only with trusted local clients: file access uses the Oduflow process's host permissions, not the team's token.
 
 `reset_env_changes`
 :   *bool · default `False`* — Discard environments' filestore deltas (destructive).

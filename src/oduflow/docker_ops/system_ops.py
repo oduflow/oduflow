@@ -26,6 +26,7 @@ from typing import Any
 import docker
 from docker import DockerClient
 from oduflow import pg_hba, service_database_credentials
+from oduflow import settings as settings_module
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import (
     chown_recursive,
@@ -368,7 +369,7 @@ def _run_rsync_source(source: str, dest: str) -> None:
     dest_arg = dest.rstrip("/") + "/"
     logger.info("Rsync filestore source: %s -> %s", source_arg, dest_arg)
     subprocess.run(
-        ["rsync", "-a", "--delete", source_arg, dest_arg],
+        ["rsync", "-a", "--delete", "--", source_arg, dest_arg],
         check=True,
         capture_output=True,
     )
@@ -380,6 +381,21 @@ def _stage_filestore_source(
     prepared_dir: str,
     strip_prefix: str = "auto",
 ) -> tuple[int, str, str]:
+    if settings_module.TRANSPORT == "http":
+        # Classify before touching the filesystem. On HTTP the rsync source
+        # must be explicitly remote, even if a matching local file exists.
+        if not source.startswith("rsync://") and not re.fullmatch(
+            r"(?:[\w.-]+@)?[a-zA-Z0-9][\w.-]*:.+", source
+        ):
+            raise PrerequisiteNotMetError(
+                "Local filestore paths require the local CLI or stdio MCP."
+            )
+        _run_rsync_source(source, raw_dir)
+        files, prefix = _copy_normalized_filestore_tree(
+            raw_dir, prepared_dir, strip_prefix
+        )
+        return files, prefix, "rsync"
+
     if os.path.isfile(source):
         if not _is_archive_source(source):
             raise PrerequisiteNotMetError(
@@ -6282,6 +6298,10 @@ def import_template(
             "The s3_* parameters are only valid for s3:// sources."
         )
     if not is_http:
+        if settings_module.TRANSPORT == "http":
+            raise PrerequisiteNotMetError(
+                "Local template paths require the local CLI or stdio MCP."
+            )
         return template_import.import_from_local_path(
             settings,
             team,

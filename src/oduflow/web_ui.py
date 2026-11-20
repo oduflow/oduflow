@@ -2148,6 +2148,7 @@ def _build_routes(
                 env_override=env_override,
                 image_override=odoo_image or None,
                 rename_to=new_name or None,
+                allow_host_paths=False,
                 hostname_override=(body.get("hostname") or "").strip() or None
                 if body
                 else None,
@@ -2213,7 +2214,9 @@ def _build_routes(
         try:
             settings = get_settings()
             activity.touch(team, branch)
-            result = env_ops.recreate_environment(settings, team, branch)
+            result = env_ops.recreate_environment(
+                settings, team, branch, allow_host_paths=False
+            )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2432,7 +2435,6 @@ def _build_routes(
                 extra_dict = extra_addons_raw or None
             elif isinstance(extra_addons_raw, str) and extra_addons_raw.strip():
                 extra_dict = _parse_extra_addons(extra_addons_raw.strip()) or None
-            local_path_from_meta = ""
             template_env_vars: dict[str, str] = {}
             if resolved_template:
                 metadata_path = team.get_template_metadata_path(resolved_template)
@@ -2455,24 +2457,19 @@ def _build_routes(
                         metadata, resolved_template
                     )
                     if not repo_url and metadata.get("local_path"):
-                        if settings.allow_local_path:
-                            local_path_from_meta = metadata["local_path"]
-                        else:
-                            return JSONResponse(
-                                {
-                                    "ok": False,
-                                    "error": (
-                                        f"Template '{resolved_template}' was saved "
-                                        "from a live-mounted environment and has no "
-                                        "repo_url. Set allow_local_path = true in "
-                                        "oduflow.toml [server], or provide "
-                                        "repo_url explicitly."
-                                    ),
-                                },
-                                status_code=400,
-                            )
+                        return JSONResponse(
+                            {
+                                "ok": False,
+                                "error": (
+                                    f"Template '{resolved_template}' was saved from a "
+                                    "live-mounted environment. Provide a Git repo_url "
+                                    "or use the local CLI or stdio MCP."
+                                ),
+                            },
+                            status_code=400,
+                        )
 
-            if not repo_url and not local_path_from_meta:
+            if not repo_url:
                 return JSONResponse(
                     {
                         "ok": False,
@@ -2508,7 +2505,6 @@ def _build_routes(
                 # Template env vars are the baseline; the request overrides
                 # only the keys it names (same merge as the MCP tool).
                 env_vars={**template_env_vars, **env_vars} or None,
-                local_path=local_path_from_meta,
                 hostname=hostname,
                 base_branch=base_branch,
             )
