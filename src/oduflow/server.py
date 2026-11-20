@@ -2193,16 +2193,30 @@ def rename_template(
 @mcp.tool()
 @handle_errors
 @with_env_lock
-def delete_environment(env_name: str, ctx: Context | None = None) -> str:
+def delete_environment(
+    env_name: str, delete_branch: bool = False, ctx: Context | None = None
+) -> str:
     """
     Stop and remove all resources associated with an Odoo environment.
 
     Args:
         env_name: The name of the environment to tear down.
+        delete_branch: Also delete the environment's git branch on origin
+            (git push origin --delete). Off by default. The deletion is
+            skipped with a warning — the environment is still torn down —
+            when the branch is used by another environment, is not merged,
+            received new commits during the check, is origin's default
+            branch, or the push is denied. Merged means
+            the branch tip is contained in origin's default branch or in the
+            base branch named when the environment was created; a squash-
+            or rebase-merged branch is not recognised as merged. Not
+            applicable to live-mounted environments.
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
-    warnings = env_ops.delete_environment(settings, team, env_name)
+    warnings = env_ops.delete_environment(
+        settings, team, env_name, delete_branch=delete_branch
+    )
     result = f"Environment '{env_name}' has been torn down."
     if warnings:
         result += "\n\n⚠️ Warnings:\n" + "\n".join(f"- {w}" for w in warnings)

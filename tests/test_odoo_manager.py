@@ -426,6 +426,101 @@ class TestCreateEnvironment:
             }
         mock_alloc.assert_called_once()
 
+    @staticmethod
+    def _created_labels(mock_docker_client, branch_created, **create_kwargs):
+        """Run create_environment with the clone stubbed; return the serving
+        container's labels."""
+        create_kwargs.setdefault("base_branch", "main")
+        mock_odoo = MagicMock()
+        mock_odoo.exec_run.return_value = (0, b"OK")
+        mock_odoo.wait.return_value = {"StatusCode": 0}
+        mock_docker_client.containers.run.return_value = mock_odoo
+        mock_docker_client.containers.create.return_value.wait.return_value = {
+            "StatusCode": 0
+        }
+        mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
+
+        with ExitStack() as stack:
+            for p in (
+                patch(
+                    "oduflow.extra_addons.generate_odoo_conf",
+                    return_value="/tmp/flow-test/workspaces/f/odoo.conf",
+                ),
+                patch("oduflow.docker_ops.env_ops._copy_file_to_container"),
+                patch("oduflow.docker_ops.env_ops._create_pg_role"),
+                patch(
+                    "oduflow.docker_ops.env_ops.create_credentials",
+                    return_value={"pg_user": "u", "pg_password": "pw"},
+                ),
+                patch("oduflow.docker_ops.env_ops._ensure_system_ready"),
+                patch(
+                    "oduflow.docker_ops.env_ops.get_odoo_uid_gid",
+                    return_value="100:101",
+                ),
+                patch("oduflow.docker_ops.env_ops._exec_sql"),
+                patch("oduflow.docker_ops.env_ops._db_exists", return_value=True),
+                patch("oduflow.docker_ops.env_ops._mount_filestore"),
+                patch("oduflow.docker_ops.env_ops._get_used_ports", return_value=set()),
+                patch("oduflow.docker_ops.env_ops.allocate_port", return_value=50000),
+                patch("oduflow.docker_ops.env_ops.subprocess.run"),
+                patch("oduflow.docker_ops.env_ops.os.chmod"),
+                patch("oduflow.docker_ops.env_ops.os.makedirs"),
+                patch("oduflow.docker_ops.env_ops.os.path.exists", return_value=False),
+                patch(
+                    "oduflow.docker_ops.env_ops._clone_or_start_branch",
+                    return_value=branch_created,
+                ),
+            ):
+                stack.enter_context(p)
+            env_ops.create_environment(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "feature/payments",
+                "https://github.com/org/repo.git",
+                "odoo:15.0",
+                **create_kwargs,
+            )
+        return mock_docker_client.containers.run.call_args.kwargs["labels"]
+
+    def test_a_branch_created_from_base_is_labelled(self, mock_docker_client):
+        labels = self._created_labels(mock_docker_client, branch_created=True)
+        assert labels["oduflow.git_branch_created"] == "true"
+        # delete_branch accepts "merged into the base" as merged.
+        assert labels["oduflow.git_base_branch"] == "main"
+
+    def test_a_cloned_existing_branch_is_not_labelled(self, mock_docker_client):
+        labels = self._created_labels(mock_docker_client, branch_created=False)
+        assert "oduflow.git_branch_created" not in labels
+        # The base named at creation is still recorded as a merge target.
+        assert labels["oduflow.git_base_branch"] == "main"
+
+    def test_no_base_branch_records_no_base_label(self, mock_docker_client):
+        labels = self._created_labels(
+            mock_docker_client, branch_created=False, base_branch=""
+        )
+        assert "oduflow.git_base_branch" not in labels
+        assert "oduflow.git_branch_created" not in labels
+
+    def test_recreate_provenance_is_carried_onto_the_new_container(
+        self, mock_docker_client
+    ):
+        # On a recreate the branch already exists (branch_created is False)
+        # and no base is named, so both labels come from the old container.
+        labels = self._created_labels(
+            mock_docker_client,
+            branch_created=False,
+            base_branch="",
+            branch_provenance={
+                "oduflow.git_branch_created": "true",
+                "oduflow.git_base_branch": "17.0",
+                # Anything else is not provenance and must not ride along.
+                "oduflow.template": "smuggled",
+            },
+        )
+        assert labels["oduflow.git_branch_created"] == "true"
+        assert labels["oduflow.git_base_branch"] == "17.0"
+        assert labels["oduflow.template"] == "none"
+
     @patch("oduflow.docker_ops.env_ops.release_port")
     @patch("oduflow.docker_ops.env_ops._cleanup_old_environment")
     @patch(
@@ -2118,6 +2213,53 @@ class TestUpdateEnvironment:
         assert result["image"] == "odoo:17.0"
         assert result["image_updated"] is True
         assert result["env_vars"] == {"FOO": "new"}
+
+    @patch(
+        "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")
+    )
+    @patch("oduflow.docker_ops.env_ops._install_apt_packages", return_value="")
+    @patch("oduflow.docker_ops.env_ops._reapply_odoo_conf", return_value=True)
+    @patch("oduflow.docker_ops.env_ops.os.path.isfile", return_value=False)
+    @patch("oduflow.docker_ops.env_ops.os.path.isdir", return_value=False)
+    @patch("oduflow.docker_ops.env_ops._create_pg_role")
+    @patch(
+        "oduflow.docker_ops.env_ops.load_credentials",
+        return_value={"pg_user": "u_1_main", "pg_password": "pw"},
+    )
+    def test_remove_labels_drops_labels_on_the_recreate(
+        self,
+        mock_creds,
+        mock_role,
+        mock_isdir,
+        mock_isfile,
+        mock_reapply_conf,
+        mock_apt,
+        mock_pip,
+        mock_docker_client,
+    ):
+        # switch_branch relies on this to clear the branch provenance labels:
+        # labels are frozen at container creation, so the recreate is the only
+        # point where one can be dropped.
+        container = self._make_container()
+        container.labels["oduflow.git_branch_created"] = "true"
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.containers.run.return_value = MagicMock()
+
+        env_ops.update_environment(
+            TEST_SETTINGS,
+            TEST_TEAM,
+            "main",
+            pull_image=False,
+            # An empty override value is an ordinary value, not a hidden
+            # "delete this label" request: removal is explicit.
+            label_overrides={"oduflow.git_branch": "feature/new", "x.empty": ""},
+            remove_labels=("oduflow.git_branch_created", "oduflow.not_there"),
+        )
+
+        labels = mock_docker_client.containers.run.call_args.kwargs["labels"]
+        assert labels["oduflow.git_branch"] == "feature/new"
+        assert labels["x.empty"] == ""
+        assert "oduflow.git_branch_created" not in labels
 
     @patch(
         "oduflow.docker_ops.env_ops._install_pip_requirements", return_value=(False, "")

@@ -5226,18 +5226,38 @@ async function doRecreate(branch) {
 }
 
 async function doDelete(branch) {
+  var env = cachedEnvs.find(function(e) { return e.branch === branch; });
+  var gitBranch = (env && env.git_branch) || branch;
+  // Live-mounted environments own no git state, so no branch option there.
+  // Checked by default only when Oduflow created the branch for this
+  // environment (the oduflow.git_branch_created label).
+  var checkbox = (env && env.local_path) ? null : {
+    label: 'Also delete git branch "' + gitBranch + '" on origin',
+    checked: !!(env && env.git_branch_created)
+  };
   if (!(await confirmDialog({
     title: 'Delete environment',
     message: 'Remove the container, database, and workspace of "' + branch + '"?',
     confirmLabel: 'Delete environment',
-    danger: true
+    danger: true,
+    checkbox: checkbox
   }))) return;
   setBusy(branch, 'Deleting');
   try {
-    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/delete', { method: 'POST' });
+    const opts = { method: 'POST' };
+    if (checkbox && checkbox.checked) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ delete_branch: true });
+    }
+    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/delete', opts);
     const data = await readResult(r);
     if (data.ok) {
-      showToast(branch + ': deleted');
+      var warnings = (data.result && data.result.warnings) || [];
+      if (warnings.length) {
+        showToast(branch + ': deleted. ' + warnings.join(' '), true);
+      } else {
+        showToast(branch + ': deleted');
+      }
     } else {
       showToast(data.error || 'Delete failed', true);
     }
