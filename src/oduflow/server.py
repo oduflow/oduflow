@@ -8839,6 +8839,9 @@ def _run_cli() -> None:
         "client",
         help="Call tools on a remote Oduflow MCP server",
         add_help=False,
+        # Forward even leading options to the client parser. NUL cannot
+        # occur in an OS argument, so this subparser has no option prefix.
+        prefix_chars="\x00",
     )
     p_client.add_argument(
         "client_args",
