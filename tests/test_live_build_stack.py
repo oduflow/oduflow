@@ -8,8 +8,13 @@ so they can execute on nested filesystems without changing the daemon driver.
 """
 
 import json
+import os
+import pwd
+import re
 import socket
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -276,7 +281,6 @@ def test_unsuccessful_build_leaves_no_staging_image(
         # cancel tool resolves its real team, job and running builder from here.
         monkeypatch.setattr(server, "_settings", settings)
         # Own the worker thread so fixture teardown cannot race a live build.
-        event = store.cancel_event(job.build_id)
         worker = threading.Thread(
             target=build_ops.run_build,
             args=(team, team.image_registry, job, {}, remote),
@@ -295,7 +299,7 @@ def test_unsuccessful_build_leaves_no_staging_image(
             worker.join(timeout=20)
             assert not worker.is_alive(), "BuildKit did not stop after cancellation"
         finally:
-            event.set()
+            store.cancel_path(team, job.build_id).touch()
             worker.join(timeout=30)
     else:
         build_ops.run_build(team, team.image_registry, job, {}, remote)
@@ -314,6 +318,102 @@ def test_unsuccessful_build_leaves_no_staging_image(
         get_client().images.get(
             f"{build_ops.staging_repository(team.team_id)}:{job.build_id}"
         )
+
+
+@pytest.fixture
+def cli_storage():
+    # pytest's root-owned temp tree is not traversable by the other UID.
+    with tempfile.TemporaryDirectory() as directory:
+        yield Path(directory)
+
+
+def test_cli_build_survives_caller_and_cancels_from_another_process(
+    build_team, source, native_builder, cli_storage, monkeypatch
+):
+    url, _, payload = source
+    config = cli_storage / "oduflow.toml"
+    config.write_text(
+        f'[storage]\ndata_dir = "{cli_storage}"\n[routing]\nmode = "port"\n'
+        '[team.1]\nhostname = "localhost"\n[team.1.image_registry]\n'
+        "max_concurrent_builds = 1\nbuild_timeout_seconds = 150\n"
+    )
+    monkeypatch.setenv("ODUFLOW_TOML", str(config))
+    exe = Path(sys.executable).with_name("oduflow")
+    service = {}
+    if os.geteuid() == 0:
+        account = pwd.getpwnam("nobody")
+        team_dir = cli_storage / "team_1"
+        team_dir.mkdir(mode=0o700)
+        for path in (cli_storage, config, team_dir):
+            os.chown(path, account.pw_uid, account.pw_gid)
+        service = dict(user=account.pw_uid, group=account.pw_gid, extra_groups=[])
+
+    def call(tool, *, as_service=False, **kwargs):
+        return subprocess.run(
+            [str(exe), "--no-telemetry", "call", tool, json.dumps(kwargs)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            umask=0o077,
+            **(service if as_service else {}),
+        )
+
+    def ok(tool, **kwargs):
+        result = call(tool, **kwargs)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    client = get_client()
+    for dockerfile, expected in (("Dockerfile", "succeeded"), ("slow", "cancelled")):
+        started = ok("start_image_build", repo_url=url, dockerfile=dockerfile)
+        build_id = re.search(r"^build_id: (bld-[a-f0-9]+)$", started, re.M)[1]
+        tag = f"{build_ops.staging_repository('1')}:{build_id}"
+        try:
+            deadline = time.monotonic() + 140
+            cancelled = False
+            while True:
+                status = ok("get_image_build", build_id=build_id, as_service=True)
+                state = re.search(rf"^Build {build_id}: (\w+)$", status, re.M)[1]
+                if state in image_builds.TERMINAL_STATUSES:
+                    break
+                if dockerfile == "slow" and payload in status and not cancelled:
+                    refused = call("start_image_build", repo_url=url, as_service=True)
+                    assert (
+                        refused.returncode
+                        and "configured maximum is 1" in refused.stderr
+                    )
+                    assert "Cancellation requested" in ok(
+                        "cancel_image_build", build_id=build_id, as_service=True
+                    )
+                    cancelled = True
+                assert time.monotonic() < deadline, status
+                time.sleep(0.2)
+            assert state == expected, status
+            if expected == "succeeded":
+                assert (
+                    client.containers.run(tag, ["cat", "/payload"], remove=True)
+                    == (payload + "\n").encode()
+                )
+            else:
+                assert cancelled
+                with pytest.raises(docker.errors.ImageNotFound):
+                    client.images.get(tag)
+        finally:
+            with suppress(docker.errors.ImageNotFound):
+                client.images.remove(tag)
+
+    # The service UID gets the freed slot, without Docker socket access. Use
+    # an absent commit so its real worker fails at fetch, before any build.
+    started = ok("start_image_build", repo_url=url, ref="0" * 40, as_service=True)
+    build_id = re.search(r"^build_id: (bld-[a-f0-9]+)$", started, re.M)[1]
+    deadline = time.monotonic() + 30
+    while True:
+        status = ok("get_image_build", build_id=build_id, as_service=True)
+        if f"Build {build_id}: failed" in status:
+            assert "fetch" in status.lower(), status
+            break
+        assert time.monotonic() < deadline, status
+        time.sleep(0.2)
 
 
 def test_stack_reuses_build_and_reconciles_lifecycle(build_team, source, tmp_path):

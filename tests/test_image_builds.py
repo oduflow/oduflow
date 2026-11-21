@@ -9,6 +9,7 @@ import os
 import subprocess
 import tarfile
 import textwrap
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -83,7 +84,6 @@ def test_job_roundtrip_and_active_authority(tmp_path):
         team, "feature-x", "feature-x", "Dockerfile", ".", owner_id=_OWNER
     )
     assert job.status == image_builds.STATUS_QUEUED
-    assert store.cancel_event(job.build_id) is not None
     # While active, load returns the live object (not a disk copy).
     assert store.load(team, "feature-x", _OWNER, job.build_id) is job
     # Ownership: the same ID under another env reports plain not-found.
@@ -148,7 +148,6 @@ def test_finish_persists_terminal_state_and_drops_context(tmp_path):
     os.makedirs(ctx, exist_ok=True)
     store.finish(team, job, image_builds.STATUS_SUCCEEDED)
     assert not os.path.exists(ctx)
-    assert store.cancel_event(job.build_id) is None
     loaded = store.load(team, "env", _OWNER, job.build_id)
     assert loaded.status == image_builds.STATUS_SUCCEEDED
     assert loaded.finished_at
@@ -190,7 +189,6 @@ def test_job_running_in_another_process_is_left_alone(tmp_path):
 
     assert loaded.status == image_builds.STATUS_BUILDING
     assert os.path.isdir(context)
-    assert server.cancel_event(job.build_id) is None
     on_disk = json.loads(open(server.job_json_path(team, job.build_id)).read())
     assert on_disk["status"] == image_builds.STATUS_BUILDING
 
@@ -814,9 +812,7 @@ def test_silent_build_can_be_cancelled(tmp_path):
     local_store = BuildJobStore()
     team = _team(tmp_path)
     job = local_store.create(team, "env", "main", "Dockerfile", ".", owner_id=_OWNER)
-    event = local_store.cancel_event(job.build_id)
-    assert event is not None
-    event.set()
+    local_store.cancel_path(team, job.build_id).touch()
     os.makedirs(local_store.context_dir(team, job.build_id), exist_ok=True)
     process = _NeverEndingProcess()
     fake_context = MagicMock()
@@ -1493,7 +1489,9 @@ def test_buildkit_build_is_terminated_with_its_process_group(tmp_path, fake_dock
             os.kill(child, 0)
         except ProcessLookupError:
             break
-        build.join(timeout=0.05)
+        # The builder already exited; joining it does not wait for init to
+        # reap its child. Give the process group time to disappear.
+        time.sleep(0.05)
     else:
         pytest.fail("the build's child process survived termination")
 
@@ -1506,7 +1504,7 @@ def test_buildkit_runs_cancellable_from_the_job_loop(tmp_path, fake_docker):
     team = _team(tmp_path / "data")
     job = local_store.create(team, "env", "main", "Dockerfile", ".", owner_id=_OWNER)
     os.makedirs(local_store.context_dir(team, job.build_id), exist_ok=True)
-    local_store.cancel_event(job.build_id).set()
+    local_store.cancel_path(team, job.build_id).touch()
 
     with (
         patch.object(build_ops, "store", local_store),

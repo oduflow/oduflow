@@ -129,10 +129,11 @@ rejected in a manifest, so they never reach `job.json` or the build log.
   with builds makes that call twice and waits for its builds, but not while
   holding the team lock; if the lock turns out busy afterwards, the retry
   reuses the builds.
-- A build started by `oduflow stack apply` runs in the CLI process, so only
-  that process can cancel it; it is not resumed if the CLI is interrupted.
-  `max_concurrent_builds` is counted per process, so such a build does not
-  take one of the server's slots.
+- `oduflow stack apply` owns its builds until it finishes; an interrupted
+  apply does not resume them. A standalone `call start_image_build` instead
+  gives the job to a detached worker before returning its ID. All three
+  owners (Stack, standalone worker and MCP server) share the team's build
+  limit and observe cancellation requests in the job directory.
 - Build arguments are passed to the builder as command-line arguments. They
   are documented as non-secret and end up in the image history regardless.
 - Still out of scope: multi-platform images, build secrets, submodules and LFS

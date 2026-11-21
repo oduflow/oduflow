@@ -592,7 +592,7 @@ rather than at the first build.
 | `[team.X.image_registry].build_timeout_seconds` | `1800` | Hard wall-clock deadline per build, including fetching a repository source; the build is terminated and the job fails. Must be `> 0` |
 | `[team.X.image_registry].max_context_mb` | `512` | Size cap for the sealed build context exported from the commit, checked before the build starts. A fixed ceiling of 200 000 files also applies. Must be `> 0` |
 | `[team.X.image_registry].max_log_mb` | `16` | Cap for the persisted build log per build; beyond it the log is truncated with a marker and the build continues. Must be `> 0` |
-| `[team.X.image_registry].max_concurrent_builds` | `2` | Active builds allowed for the team, counted per process — a build started by `oduflow stack apply` does not take one of the server's slots. Further builds are refused as busy. Must be `> 0` |
+| `[team.X.image_registry].max_concurrent_builds` | `2` | Active builds allowed for the team across MCP, standalone CLI and Stack processes sharing its data directory. Further builds are refused as busy. Must be `> 0` |
 | `[team.X.image_registry].keep_images` | `10` | Local staging images (`oduflow-build/team-<id>:<build-id>`) kept per team; older ones are untagged after each successful build, and tags referenced by a running or stopped container are always preserved. `0` disables pruning. Must be `>= 0` |
 
 ### Configuration file overrides

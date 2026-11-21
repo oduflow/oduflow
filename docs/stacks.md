@@ -361,7 +361,8 @@ the plan then reports the service as a conflict.
 
 A build started by `oduflow stack apply` belongs to that command:
 [`get_image_build`](mcp-tools.md#get_image_build) shows its progress, and
-interrupting the command is how to cancel it.
+you can interrupt the command or request cancellation with
+[`cancel_image_build`](mcp-tools.md#cancel_image_build).
 
 The image stays in the host's Docker daemon as a staging tag
 (`oduflow-build/team-<id>:<build-id>`), which the running service keeps alive.

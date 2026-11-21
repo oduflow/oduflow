@@ -3065,12 +3065,17 @@ def _image_build_call(job: image_builds.BuildJob, tool: str, extra: str = "") ->
 
 
 def _image_build_started(
-    registry_cfg: ImageRegistrySettings, job: image_builds.BuildJob, source: str
+    registry_cfg: ImageRegistrySettings, job: image_builds.BuildJob
 ) -> str:
+    source = (
+        f"{job.repo_url} ref '{job.branch}'"
+        if job.repo_url
+        else f"branch '{job.branch}'"
+    )
     lines = [
         "Image build started.",
         f"build_id: {job.build_id}",
-        f"Source: {source} (dockerfile {job.dockerfile}, context {job.context})",
+        f"Source: {source} @ {job.commit[:12]} (dockerfile {job.dockerfile}, context {job.context})",
         f"Timeout: {registry_cfg.build_timeout_seconds}s",
         "",
         f"Poll with {_image_build_call(job, 'get_image_build')}. Once succeeded, "
@@ -3090,7 +3095,7 @@ def _image_build_started(
 
 
 @with_env_lock
-def _start_environment_image_build(
+def _admit_environment_image_build(
     *,
     env_name: str,
     dockerfile: str,
@@ -3098,7 +3103,7 @@ def _start_environment_image_build(
     target: str,
     build_args: dict[str, str],
     ctx: Context | None,
-) -> str:
+) -> image_builds.BuildJob:
     from oduflow.docker_ops import build_ops
 
     settings = _get_settings()
@@ -3131,10 +3136,7 @@ def _start_environment_image_build(
             error=redact_url_credentials(str(exc)),
         )
         raise
-    build_ops.run_build_async(team, registry_cfg, job, build_args)
-    return _image_build_started(
-        registry_cfg, job, f"branch '{branch}' @ {job.commit[:12]}"
-    )
+    return job
 
 
 @mcp.tool()
@@ -3183,6 +3185,27 @@ def start_image_build(
     """
     from oduflow.docker_ops import build_ops
 
+    team, cfg, job, args, remote = _admit_image_build(
+        env_name, repo_url, ref, dockerfile, context, target, build_args, ctx
+    )
+    build_ops.run_build_async(team, cfg, job, args, remote_url=remote)
+    return _image_build_started(cfg, job)
+
+
+def _admit_image_build(
+    env_name: str = "",
+    repo_url: str = "",
+    ref: str = "",
+    dockerfile: str = "Dockerfile",
+    context: str = ".",
+    target: str = "",
+    build_args: str = "",
+    ctx: Context | None = None,
+) -> tuple[
+    TeamSettings, ImageRegistrySettings, image_builds.BuildJob, dict[str, str], str
+]:
+    from oduflow.docker_ops import build_ops
+
     env_name = env_name.strip()
     repo_url = repo_url.strip()
     if bool(env_name) == bool(repo_url):
@@ -3195,13 +3218,15 @@ def start_image_build(
     if dockerfile_path == ".":
         raise ToolError("dockerfile must be a file path, not '.'")
     args = parse_env_vars(build_args) if build_args.strip() else {}
+    team = _resolve_team(ctx)
+    registry_cfg = build_ops.build_settings(team)
     if env_name:
         if ref.strip():
             raise ToolError(
                 "ref applies to repo_url builds only; an environment build "
                 "uses the HEAD commit of its checkout."
             )
-        return _start_environment_image_build(
+        job = _admit_environment_image_build(
             env_name=env_name,
             dockerfile=dockerfile_path,
             context=context_path,
@@ -3209,11 +3234,10 @@ def start_image_build(
             build_args=args,
             ctx=ctx,
         )
+        return team, registry_cfg, job, args, ""
 
     git_ops.validate_repo_url(repo_url)
     git_ref = image_builds.validate_git_ref(ref)
-    team = _resolve_team(ctx)
-    registry_cfg = build_ops.build_settings(team)
     job, remote_url = build_ops.admit_git_build(
         team,
         registry_cfg,
@@ -3224,10 +3248,7 @@ def start_image_build(
         target.strip(),
         args,
     )
-    build_ops.run_build_async(team, registry_cfg, job, args, remote_url=remote_url)
-    return _image_build_started(
-        registry_cfg, job, f"{job.repo_url} ref '{job.branch}' @ {job.commit[:12]}"
-    )
+    return team, registry_cfg, job, args, remote_url
 
 
 @mcp.tool()
@@ -3387,16 +3408,7 @@ def cancel_image_build(
     job = image_builds.store.load(team, env_name, owner_id, build_id)
     if job.status in image_builds.TERMINAL_STATUSES:
         return f"Build {job.build_id} is already '{job.status}'; nothing to cancel."
-    event = image_builds.store.cancel_event(job.build_id)
-    if event is None:
-        # Finished a moment ago, or owned by another process: only an
-        # `oduflow stack apply` run can stop the builds it started.
-        return (
-            f"Build {job.build_id} is not running in this server process. If "
-            "an `oduflow stack apply` command started it, interrupt that "
-            "command to cancel it."
-        )
-    event.set()
+    image_builds.store.cancel_path(team, job.build_id).touch(mode=0o600)
     return (
         f"Cancellation requested for build {job.build_id}. Check "
         f"{_image_build_call(job, 'get_image_build')} for the final status."
@@ -8279,7 +8291,12 @@ def _run_call(argv: list[str]) -> None:
     try:
         import asyncio
 
-        result = tool_fn(**kwargs)
+        if tool_name == "start_image_build":
+            from oduflow.cli_build import start
+
+            result = start(kwargs, no_telemetry=_no_telemetry)
+        else:
+            result = tool_fn(**kwargs)
         if inspect.isawaitable(result):
             result = asyncio.run(cast(Any, result))
         print(result)

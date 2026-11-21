@@ -451,6 +451,13 @@ oduflow call create_service '{"name":"vpn","image":"linuxserver/wireguard","port
 oduflow call get_environment_logs dev 500
 ```
 
+`oduflow call start_image_build` starts a local worker and prints its `build_id`
+once the worker has accepted the job. The build continues after the CLI exits;
+no HTTP server is required. Use `oduflow call get_image_build <build_id>` to
+check its status or `oduflow call cancel_image_build <build_id>` to request
+cancellation. For an environment build, pass the environment name after the ID
+in both commands. Poll until `cancelled` to confirm cancellation took effect.
+
 ## Remote Tool Invocation
 
 `oduflow client` calls the same registered tools on a running Oduflow HTTP

@@ -21,6 +21,7 @@ Job directories are deleted only by cleanup (``stale_job_ids`` /
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -29,10 +30,13 @@ import posixpath
 import re
 import secrets
 import shutil
+import tempfile
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from oduflow.errors import BusyError, NotFoundError
@@ -226,13 +230,31 @@ class BuildJob:
         return BuildJob(**{k: v for k, v in data.items() if k in known})
 
 
+def _inherit_owner(fd: int, parent: str | int) -> None:
+    if os.geteuid() == 0:
+        owner = os.stat(parent)
+        if owner.st_uid != 0 and os.fstat(fd).st_uid != owner.st_uid:
+            os.fchown(fd, owner.st_uid, owner.st_gid)
+
+
+@contextmanager
+def _build_directory(path: str, *, exist_ok: bool) -> Iterator[int]:
+    """Keep the team data owner's access when a root caller creates storage."""
+    os.makedirs(path, mode=0o700, exist_ok=exist_ok)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _inherit_owner(fd, os.path.dirname(path))
+        yield fd
+    finally:
+        os.close(fd)
+
+
 class BuildJobStore:
     """In-memory registry of active jobs + on-disk job.json history per team."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._active: dict[str, BuildJob] = {}
-        self._cancel_events: dict[str, threading.Event] = {}
         # One flock-ed descriptor per job this process runs. The kernel drops
         # the lock with the process, so it cannot outlive its owner.
         self._owner_locks: dict[str, int] = {}
@@ -266,20 +288,14 @@ class BuildJobStore:
 
     def _claim(self, team: TeamSettings, build_id: str) -> None:
         """Hold the job's owner lock until ``finish`` (or process exit)."""
-        import fcntl
-
-        try:
-            fd = os.open(
-                self._owner_lock_path(team, build_id), os.O_CREAT | os.O_RDWR, 0o600
-            )
-        except OSError:
-            return
+        fd = os.open(
+            self._owner_lock_path(team, build_id), os.O_CREAT | os.O_RDWR, 0o600
+        )
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            # A filesystem without flock: the job runs unclaimed, as before.
             os.close(fd)
-            return
+            raise
         with self._lock:
             self._owner_locks[build_id] = fd
 
@@ -291,18 +307,14 @@ class BuildJobStore:
 
     def _owner_alive(self, team: TeamSettings, build_id: str) -> bool:
         """Whether a process still holds the job's owner lock."""
-        import fcntl
-
         try:
-            fd = os.open(self._owner_lock_path(team, build_id), os.O_RDWR)
-        except OSError:
+            fd = os.open(self._owner_lock_path(team, build_id), os.O_RDONLY)
+        except FileNotFoundError:
             return False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
-        except OSError:
-            return False
         finally:
             os.close(fd)
         return False
@@ -331,10 +343,25 @@ class BuildJobStore:
         commit: str = "",
         build_key: str = "",
     ) -> BuildJob:
-        with self._lock:
-            active_count = sum(
-                job.team_id == team.team_id for job in self._active.values()
-            )
+        directory = self.jobs_dir(team)
+        # Serialize count + claim across CLI, Stack and MCP owners. A dead
+        # worker releases its slot with its existing per-job owner lock.
+        with self._lock, _build_directory(directory, exist_ok=True) as admission:
+            fcntl.flock(admission, fcntl.LOCK_EX)
+            active_count = 0
+            for name in os.listdir(admission):
+                if not _BUILD_ID_RE.fullmatch(name):
+                    continue
+                try:
+                    active_count += self._owner_alive(team, name)
+                except PermissionError:
+                    # An older root build can leave a private owner.lock.
+                    # Its terminal record no longer needs a slot. Otherwise
+                    # fail closed instead of overbooking a potentially live job.
+                    legacy = self._read(team, name)
+                    active_count += (
+                        legacy is None or legacy.status not in TERMINAL_STATUSES
+                    )
             if active_count >= max_concurrent_builds:
                 raise BusyError(
                     f"Team '{team.team_id}' already has {active_count} active image "
@@ -361,26 +388,39 @@ class BuildJobStore:
                 commit=commit,
                 build_key=build_key,
             )
-            self._active[job.build_id] = job
-            self._cancel_events[job.build_id] = threading.Event()
-        try:
-            os.makedirs(self.job_dir(team, job.build_id), exist_ok=False)
+            with _build_directory(
+                self.job_dir(team, job.build_id), exist_ok=False
+            ) as d:
+                # Only hand over freshly created files. Never chown a path
+                # supplied by another process, or relax the caller's umask.
+                for name in ("owner.lock", "build.log"):
+                    fd = os.open(
+                        name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600, dir_fd=d
+                    )
+                    try:
+                        _inherit_owner(fd, d)
+                    finally:
+                        os.close(fd)
             self._claim(team, job.build_id)
-            self.save(team, job)
-        except Exception:
-            with self._lock:
-                self._active.pop(job.build_id, None)
-                self._cancel_events.pop(job.build_id, None)
-            self._release(job.build_id)
-            raise
+            try:
+                self.save(team, job)
+            except Exception:
+                self._release(job.build_id)
+                raise
+            self._active[job.build_id] = job
         return job
 
     def save(self, team: TeamSettings, job: BuildJob) -> None:
         path = self.job_json_path(team, job.build_id)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(job.to_dict(), f, indent=2)
-        os.replace(tmp, path)
+        directory = os.path.dirname(path)
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as f:
+            try:
+                json.dump(job.to_dict(), f, indent=2)
+                f.flush()
+                _inherit_owner(f.fileno(), directory)
+                os.replace(f.name, path)
+            finally:
+                Path(f.name).unlink(missing_ok=True)
 
     def finish(
         self, team: TeamSettings, job: BuildJob, status: str, error: str = ""
@@ -391,7 +431,6 @@ class BuildJobStore:
             job.error = error
             job.finished_at = now_iso()
             self._active.pop(job.build_id, None)
-            self._cancel_events.pop(job.build_id, None)
         try:
             self.save(team, job)
             self._drop_workdirs(team, job.build_id)
@@ -490,9 +529,8 @@ class BuildJobStore:
         jobs.sort(key=lambda job: job.finished_at or job.created_at, reverse=True)
         return jobs
 
-    def cancel_event(self, build_id: str) -> threading.Event | None:
-        with self._lock:
-            return self._cancel_events.get(build_id)
+    def cancel_path(self, team: TeamSettings, build_id: str) -> Path:
+        return Path(self.job_dir(team, build_id), "cancel.requested")
 
     def append_publication(
         self, team: TeamSettings, job: BuildJob, publication: dict[str, Any]

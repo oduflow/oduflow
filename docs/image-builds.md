@@ -236,7 +236,7 @@ section gets these defaults:
 
 | Bound | Default | What happens at the limit |
 |---|---|---|
-| `max_concurrent_builds` | `2` | A further build is refused as busy. Counted **per process**, so a build started by `oduflow stack apply` does not take one of the server's slots |
+| `max_concurrent_builds` | `2` | A further build is refused as busy. MCP, standalone CLI and Stack builds share the team's slots |
 | `build_timeout_seconds` | `1800` | Hard wall-clock deadline, fetching the source included; the build is terminated and the job fails |
 | `max_context_mb` | `512` | The sealed context is refused before the build starts (a fixed 200 000-file ceiling also applies) |
 | `max_log_mb` | `16` | The persisted log is truncated with a marker; the build continues |
@@ -264,17 +264,15 @@ build cheap. Prefer lowering `keep_images`.
 
 ## Ownership and restarts
 
-Builds are never resumed. A build runs in whichever process admitted it — the
-server, or an `oduflow stack apply` beside it — and that process holds a file
-lock in the job directory for as long as the job runs; the kernel releases it
-if the process dies. That is how Oduflow tells a build still running elsewhere
-from an abandoned one: a job whose owner lock is free is declared
-`interrupted`, and a job whose lock is held is never touched.
+Builds are never resumed. The server, a detached `oduflow call` worker, or
+`oduflow stack apply` holds the job's file lock until the build finishes. If
+the owner exits early, the kernel releases the lock and Oduflow reports the
+unfinished job as `interrupted` the next time it is inspected.
 
 Succeeded builds stay publishable while their staging image exists. Retrying is
-simply a new build — the layer cache usually makes it cheap. A build started by
-`oduflow stack apply` is cancelled by interrupting that command, not with
-`cancel_image_build`.
+simply a new build — the layer cache usually makes it cheap. Use
+`cancel_image_build` with the build ID even if another process owns the build,
+including a running `oduflow stack apply`.
 
 ## Out of scope
 

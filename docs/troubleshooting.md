@@ -679,8 +679,8 @@ A job stuck in `building` with no log progress is usually a Dockerfile step
 waiting on the network — an `apt-get` or `pip install` against an unreachable
 mirror. It is bounded by `build_timeout_seconds` and can be ended immediately
 with `cancel_image_build`; the builder's whole process group is terminated even
-when the step prints nothing. A build that `oduflow stack apply` started runs
-inside that command instead, so interrupting the command is how to cancel it.
+when the step prints nothing. For a build started by `oduflow stack apply`,
+interrupting the apply command is another way to stop it.
 
 Builds run on the **host Docker daemon**, so they compete with everything else
 for disk. A failure with `no space left on device` is a host problem, not a
