@@ -435,6 +435,7 @@ def test_cluster_pitr_replays_only_through_target(
         pg.stop()
         pg.remove(v=True)
         client.volumes.get(settings.prod_db_volume).remove()
+        settings = replace(settings, shared_network=settings.shared_network + "-fresh")
     restored = backup_ops.restore_cluster_pitr(
         settings, LockManager(), target_time=target, confirm="RESTORE-CLUSTER"
     )

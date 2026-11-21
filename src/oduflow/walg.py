@@ -719,7 +719,6 @@ def backup_list(
                 settings.postgres_image,
                 entrypoint=["sleep", "infinity"],
                 user="postgres",
-                network=settings.shared_network,
                 volumes={
                     bin_host_dir(settings): {"bind": BIN_MOUNT, "mode": "ro"},
                     conf_host_dir(settings): {"bind": CONF_MOUNT, "mode": "ro"},
@@ -1029,6 +1028,11 @@ def pitr_restore_cluster(
 
     # 3. Recreate the container; PostgreSQL replays WAL and promotes.
     system_labels = {settings.managed_label: "true", settings.system_label: "true"}
+    # The standalone restore CLI does not run init_system on a fresh host.
+    try:
+        client.networks.get(settings.shared_network)
+    except docker.errors.NotFound:
+        client.networks.create(settings.shared_network, labels=system_labels)
     _ensure_prod_pg_container(client, settings, system_labels)
     _wait_pg_ready(
         client,
