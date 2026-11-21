@@ -2,6 +2,7 @@ import configparser
 import datetime
 import json
 import os
+import sqlite3
 import tempfile
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
@@ -269,6 +270,55 @@ class TestCreateProduction:
         init = mocks["_init_empty_database"]
         init.assert_called_once()
         assert init.call_args.args[-1] == "/tmp/odoo.conf"
+
+    @pytest.mark.parametrize(
+        "initial,expected",
+        [
+            ("http://localhost:8069", "http://erp.example.com"),
+            ("https://custom.example.com/erp", "https://custom.example.com/erp"),
+        ],
+    )
+    def test_fresh_production_base_url(self, settings, team, initial, expected):
+        team = replace(team, public_scheme_setting="http")
+        client = _mock_client()
+        params = sqlite3.connect(":memory:")
+
+        def init(*args):
+            params.execute("CREATE TABLE ir_config_parameter (key TEXT, value TEXT)")
+            params.execute(
+                "INSERT INTO ir_config_parameter VALUES ('web.base.url', ?)", (initial,)
+            )
+            return "[INIT] ok"
+
+        def sql(client, settings, statement, db="postgres", **kwargs):
+            if db != "postgres":
+                assert (db, kwargs) == (
+                    production_ops.prod_db_name(team, "erp"),
+                    {
+                        "container_name": settings.prod_db_container,
+                        "user": "u_1_prod-erp",
+                    },
+                )
+                params.execute(statement)
+
+        try:
+            with _PatchAll(_patch_create_stack(client)) as mocks:
+                mocks["_init_empty_database"].side_effect = init
+                mocks["_exec_sql"].side_effect = sql
+                production_ops.create_production(
+                    settings,
+                    team,
+                    "erp",
+                    "https://github.com/o/r.git",
+                    "main",
+                    "erp.example.com",
+                    "odoo:19.0",
+                )
+            assert params.execute(
+                "SELECT value FROM ir_config_parameter"
+            ).fetchone() == (expected,)
+        finally:
+            params.close()
 
     def test_requires_traefik_mode(self, settings, team):
         port_settings = Settings(
