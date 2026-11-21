@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -585,6 +586,7 @@ def run_command_in_environment(
     argv[0] directly, which silently passes ``|``/``>``/``&&`` to the program as
     literal arguments. Pass ``shell=False`` for exact argv semantics (no
     globbing, no expansion, metacharacters stay literal).
+    The command runs under a 60-minute timeout inside the container.
     """
     client = get_client()
     odoo_container_name = get_resource_name(
@@ -607,8 +609,11 @@ def run_command_in_environment(
             "shell": shell,
         },
     )
+    argv = ["sh", "-c", command] if shell else shlex.split(command)
+    # Bound the exec itself, not just the time Docker spends waiting for it.
+    # The default timeout process group also covers ordinary pipeline children.
     exit_code, output = container.exec_run(
-        ["sh", "-c", command] if shell else command, user=user
+        ["timeout", "--verbose", "--kill-after=5s", "60m", *argv], user=user
     )
     output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
 
