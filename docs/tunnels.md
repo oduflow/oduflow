@@ -209,17 +209,38 @@ Oduflow itself running in Docker. Protect this state like `oduflow.toml`.
 
 ```bash
 oduflow call publish_environment '{"env_name":"feature-login"}'
-oduflow call get_environment_public_url '{"env_name":"feature-login"}'
+oduflow call get_environment_info '{"env_name":"feature-login"}'
 oduflow call unpublish_environment '{"env_name":"feature-login"}'
 ```
 
-`publish_environment` accepts an optional `hostname`. Responses contain
-`provider`, `enabled`, `status`, `url`, `hostname`, and `error`; status may be
-`starting` before a URL is available. `enabled` records the desired publication,
+`publish_environment` accepts an optional `hostname`. Publish and unpublish
+responses contain `provider`, `enabled`, `status`, `url`, `hostname`, and `error`;
+status may be `starting` before a URL is available. `enabled` records the desired publication,
 while `status` describes its current state. Keep the Oduflow server running
 for automatic completion/retries and lifecycle restoration; `oduflow call`
 alone performs only one attempt. Scoped environment MCP and Share UI sessions
 cannot manage these publications.
+
+Use `get_environment_info` with full team access to check the saved publication
+state alongside the ordinary environment details:
+
+```text
+URL: http://localhost:50001/web?debug=1
+Public Odoo: published
+Publication enabled: yes
+Public URL: https://example.trycloudflare.com
+Tunnel provider: cloudflare_quick
+UI shared: no
+```
+
+`Public URL` appears only when the state is `published` and matches the current
+provider settings. Otherwise the response reports `starting`, `stopped`,
+`disabled`, or `error`; any saved error is shown as `Tunnel error`. If the
+publication registry cannot be read, it reports `unknown` while still returning
+the ordinary environment details. This is saved state, not a live reachability
+check. `UI shared` reports whether a dashboard share key exists, without
+disclosing the key or link. These publication and sharing fields are omitted
+from scoped environment MCP responses.
 
 REST uses `GET`, `POST`, and `DELETE` on
 `/api/environments/{env_name}/public-odoo`. POST takes `{}` or

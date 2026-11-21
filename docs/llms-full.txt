@@ -3240,17 +3240,38 @@ Oduflow itself running in Docker. Protect this state like `oduflow.toml`.
 
 ```bash
 oduflow call publish_environment '{"env_name":"feature-login"}'
-oduflow call get_environment_public_url '{"env_name":"feature-login"}'
+oduflow call get_environment_info '{"env_name":"feature-login"}'
 oduflow call unpublish_environment '{"env_name":"feature-login"}'
 ```
 
-`publish_environment` accepts an optional `hostname`. Responses contain
-`provider`, `enabled`, `status`, `url`, `hostname`, and `error`; status may be
-`starting` before a URL is available. `enabled` records the desired publication,
+`publish_environment` accepts an optional `hostname`. Publish and unpublish
+responses contain `provider`, `enabled`, `status`, `url`, `hostname`, and `error`;
+status may be `starting` before a URL is available. `enabled` records the desired publication,
 while `status` describes its current state. Keep the Oduflow server running
 for automatic completion/retries and lifecycle restoration; `oduflow call`
 alone performs only one attempt. Scoped environment MCP and Share UI sessions
 cannot manage these publications.
+
+Use `get_environment_info` with full team access to check the saved publication
+state alongside the ordinary environment details:
+
+```text
+URL: http://localhost:50001/web?debug=1
+Public Odoo: published
+Publication enabled: yes
+Public URL: https://example.trycloudflare.com
+Tunnel provider: cloudflare_quick
+UI shared: no
+```
+
+`Public URL` appears only when the state is `published` and matches the current
+provider settings. Otherwise the response reports `starting`, `stopped`,
+`disabled`, or `error`; any saved error is shown as `Tunnel error`. If the
+publication registry cannot be read, it reports `unknown` while still returning
+the ordinary environment details. This is saved state, not a live reachability
+check. `UI shared` reports whether a dashboard share key exists, without
+disclosing the key or link. These publication and sharing fields are omitted
+from scoped environment MCP responses.
 
 REST uses `GET`, `POST`, and `DELETE` on
 `/api/environments/{env_name}/public-odoo`. POST takes `{}` or
@@ -5782,7 +5803,7 @@ semantics.
 
 ![Agent Instructions](img/agent_instructions.png)
 
-Oduflow exposes **111 tools**. They are reachable from any MCP client (Cursor,
+Oduflow exposes **110 tools**. They are reachable from any MCP client (Cursor,
 Cline, Amp, Claude Code, …), locally with `oduflow call`, against a remote
 Oduflow server with `oduflow client`, and — for a subset — over the
 [REST API](web-api.md).
@@ -5812,10 +5833,11 @@ end to end.
 ## Tool index
 
 For external client review of a local environment, see
-[`publish_environment`, `get_environment_public_url`, and `unpublish_environment`](tunnels.md#mcp-and-cli).
-These tools require full team access. Publishing and unpublishing take the
-environment lock; reading the saved URL does not. They publish Odoo with its
-existing accounts and permissions, independently of Share UI.
+[`publish_environment` and `unpublish_environment`](tunnels.md#mcp-and-cli).
+These actions require full team access and take the environment lock. They
+publish Odoo with its existing accounts and permissions, independently of Share
+UI. Read the publication status and public URL through
+[`get_environment_info`](#get_environment_info), which does not take a lock.
 
 <div class="grid cards odu-tool-index" markdown>
 
@@ -6159,6 +6181,26 @@ URL, repository, image, template, extra addons, workspace path, container
 status, and CPU/RAM stats. Fails with "does not exist" when the environment
 has neither an Odoo container nor a workspace.
 
+With full team access, the response also includes:
+
+- `Public Odoo`: saved publication state (`disabled`, `starting`, `published`,
+  `stopped`, or `error`; `unknown` if the publication registry cannot be read).
+- `Publication enabled`: `yes` or `no`, indicating the desired publication.
+  This can remain `yes` while the environment is stopped or the provider is
+  disabled. Omitted when the registry cannot be read.
+- `Tunnel provider`: the currently selected provider.
+- `Public URL`: included only when published with the current provider settings.
+  The ordinary `URL` remains the environment's usual address.
+- `Public hostname` and `Tunnel error`, when present.
+- `UI shared`: `yes` if the environment has a Share UI key, otherwise `no`.
+  The key and share link are never returned. This flag does not mean the local
+  dashboard is reachable from the internet.
+
+These additional fields are omitted on scoped environment MCP access. A
+publication registry error does not prevent the ordinary environment details
+from being returned. Publication status describes saved state, not a live
+reachability check.
+
 **Parameters**
 
 `env_name`
@@ -6169,6 +6211,7 @@ has neither an Odoo container nor a workspace.
 - You need the URL or database name to hand to someone or to another tool.
 - Diagnosing "is it actually running, and what is it running?" before digging into logs.
 - Checking which template and extra addons an environment was built from.
+- Checking whether publication has completed and retrieving the public Odoo URL.
 
 ### `start_environment`
 

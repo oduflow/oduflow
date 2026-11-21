@@ -36,6 +36,7 @@ from oduflow import (
     artifact_tokens,
     branding,
     bundled_upgrade,
+    env_share,
     git_ops,
     image_builds,
     migrations,
@@ -43,6 +44,7 @@ from oduflow import (
     production_registry,
     quotas,
     reaper,
+    scoped_access,
     secret_store,
 )
 from oduflow import settings as settings_module
@@ -2499,6 +2501,10 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
 
     Returns database name, URL, repository, image, template, extra addons,
     workspace path, container status, and CPU/RAM stats.
+    With full team access, also returns the saved public Odoo publication
+    status, provider, URL (only when published), errors, and whether Share UI
+    is enabled. Share keys are never returned. Use this tool to check a
+    starting publication; publication status is not a live reachability check.
 
     Fails with a not-found error if the environment does not exist.
 
@@ -2536,6 +2542,34 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
     lines.append(f"Database: {info['db_name']}")
     if info.get("url"):
         lines.append(f"URL: {info['url']}")
+    # Publication metadata remains operator-only, as in the dashboard API.
+    if (
+        not scoped_access.scoped_env_from_request()
+        and not scoped_access.env_from_access_token()
+    ):
+        from oduflow.tunnels.manager import status as publication_status
+
+        try:
+            publication = publication_status(settings, team, env_name)
+        except FlowError as exc:
+            # Optional publication metadata must not hide the environment's
+            # ordinary diagnostics when its registry cannot be read.
+            lines.extend(["Public Odoo: unknown", f"Tunnel error: {exc}"])
+        else:
+            lines.append(f"Public Odoo: {publication['status']}")
+            lines.append(
+                f"Publication enabled: {'yes' if publication['enabled'] else 'no'}"
+            )
+            if publication["url"]:
+                lines.append(f"Public URL: {publication['url']}")
+            if publication["hostname"]:
+                lines.append(f"Public hostname: {publication['hostname']}")
+            if publication["error"]:
+                lines.append(f"Tunnel error: {publication['error']}")
+        lines.append(f"Tunnel provider: {settings.tunnel.provider}")
+        lines.append(
+            f"UI shared: {'yes' if env_name in env_share.shared_environments(team) else 'no'}"
+        )
     if info.get("hostname"):
         lines.append(f"Hostname: {info['hostname']}")
     if info.get("repo_url") and not info.get("local_path"):
@@ -2628,7 +2662,7 @@ def publish_environment(
     This publishes Odoo, with its existing login and permissions. It does not
     grant dashboard access. hostname is optional; Quick Tunnel assigns its own.
     The first publication may restart Odoo to enable proxy mode. Use
-    get_environment_public_url to poll a starting publication. Automatic retry
+    get_environment_info to check a starting publication. Automatic retry
     and restoration run while the Oduflow server is running.
     """
     from oduflow.tunnels.manager import publish
@@ -2650,16 +2684,6 @@ def unpublish_environment(env_name: str, ctx: Context | None = None) -> str:
     return json.dumps(
         unpublish(_get_settings(), _resolve_team(ctx), env_name), indent=2
     )
-
-
-@mcp.tool()
-@handle_errors
-def get_environment_public_url(env_name: str, ctx: Context | None = None) -> str:
-    """Return the public Odoo URL, provider, publication status and any error."""
-    from oduflow.tunnels.manager import status
-
-    _reject_prod_env(env_name)
-    return json.dumps(status(_get_settings(), _resolve_team(ctx), env_name), indent=2)
 
 
 @mcp.tool()

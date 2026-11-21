@@ -9,9 +9,11 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 import docker
-from oduflow import po_tools
+from oduflow import env_share, po_tools, scoped_access
 from oduflow.po_tools import PoEntry, PoSummary
-from oduflow.settings import Settings, TeamSettings
+from oduflow.settings import Settings, TeamSettings, TunnelSettings
+from oduflow.tunnels import manager as tunnel_manager
+from oduflow.tunnels import store as tunnel_store
 
 TEST_TEAM = TeamSettings(
     team_id="1",
@@ -954,6 +956,33 @@ class TestAgentInstructionsTool:
 
 
 class TestInfoTool:
+    @pytest.fixture(autouse=True)
+    def access_settings(self, tmp_path, monkeypatch):
+        from oduflow import server
+
+        team = replace(TEST_TEAM, data_dir=str(tmp_path / "team"))
+        settings = replace(
+            TEST_SETTINGS,
+            base_data_dir=str(tmp_path),
+            teams={team.team_id: team},
+            tunnel=TunnelSettings(provider="cloudflare_quick"),
+        )
+        monkeypatch.setattr(server, "_settings", settings)
+        monkeypatch.setattr(server, "_resolve_team", lambda ctx: team)
+        return settings, team
+
+    @pytest.fixture
+    def basic_info(self):
+        with patch("oduflow.docker_ops.env_ops.get_environment_info") as mock_info:
+            mock_info.return_value = {
+                "db_name": "oduflow_1_main",
+                "all_running": True,
+                "url": "http://localhost:50000/web?debug=1",
+                "odoo": {"status": "running", "running": True},
+                "db": {"status": "running", "running": True},
+            }
+            yield mock_info
+
     @patch("oduflow.docker_ops.env_ops.get_environment_info")
     def test_info(self, mock_info):
         mock_info.return_value = {
@@ -1006,6 +1035,146 @@ class TestInfoTool:
         assert "Code delivery: live-mount" in result
         assert "Live-mount: /Users/dev/addons" in result
         assert "Repo:" not in result
+
+    @pytest.mark.parametrize(
+        "state", ["disabled", "starting", "published", "stopped", "error"]
+    )
+    def test_info_publication_states(self, access_settings, basic_info, state):
+        settings, team = access_settings
+        share_key = env_share.create_or_get(team, "main")
+        with tunnel_store.Registry(settings) as registry:
+            registry.publications[tunnel_store.key(team.team_id, "main")] = {
+                "config": tunnel_manager._config(settings),
+                "desired": state != "disabled",
+                "status": state,
+                "url": "https://demo.example.com",
+                "hostname": "demo.example.com",
+                "error": "Provider unavailable" if state == "error" else "",
+            }
+
+        result = _call_tool("get_environment_info", env_name="main")
+
+        basic_info.assert_called_once_with(settings, team, "main")
+        assert "URL: http://localhost:50000/web?debug=1" in result
+        assert f"Public Odoo: {state}" in result
+        assert (
+            f"Publication enabled: {'no' if state == 'disabled' else 'yes'}" in result
+        )
+        assert "Tunnel provider: cloudflare_quick" in result
+        assert "Public hostname: demo.example.com" in result
+        assert ("Public URL: https://demo.example.com" in result) == (
+            state == "published"
+        )
+        assert ("Tunnel error: Provider unavailable" in result) == (state == "error")
+        assert "UI shared: yes" in result
+        assert share_key not in result
+
+        env_share.revoke(team, "main")
+        assert "UI shared: no" in _call_tool("get_environment_info", env_name="main")
+
+    def test_info_access_is_isolated_by_team_and_environment(
+        self, access_settings, basic_info
+    ):
+        settings, team = access_settings
+        other_team = replace(team, team_id="2", data_dir=team.data_dir + "-other")
+        env_share.create_or_get(other_team, "main")
+        env_share.create_or_get(team, "other-env")
+        with tunnel_store.Registry(settings) as registry:
+            for team_id, env_name in [("2", "main"), ("1", "other-env")]:
+                registry.publications[tunnel_store.key(team_id, env_name)] = {
+                    "config": tunnel_manager._config(settings),
+                    "desired": True,
+                    "status": "published",
+                    "url": "https://other.example.com",
+                }
+
+        result = _call_tool("get_environment_info", env_name="main")
+
+        assert "Public Odoo: disabled" in result
+        assert "Publication enabled: no" in result
+        assert "UI shared: no" in result
+        assert "Public URL:" not in result
+        assert "other.example.com" not in result
+
+    def test_info_hides_old_url_after_provider_change(
+        self, access_settings, basic_info, monkeypatch
+    ):
+        from oduflow import server
+
+        settings, team = access_settings
+        with tunnel_store.Registry(settings) as registry:
+            registry.publications[tunnel_store.key(team.team_id, "main")] = {
+                "config": tunnel_manager._config(settings),
+                "desired": True,
+                "status": "published",
+                "url": "https://old.example.com",
+            }
+        monkeypatch.setattr(
+            server,
+            "_settings",
+            replace(
+                settings,
+                tunnel=TunnelSettings(
+                    provider="ngrok", ngrok_authtoken="private-token"
+                ),
+            ),
+        )
+
+        result = _call_tool("get_environment_info", env_name="main")
+
+        assert "Public Odoo: starting" in result
+        assert "Tunnel provider: ngrok" in result
+        assert "Public URL:" not in result
+        assert "old.example.com" not in result
+        assert "private-token" not in result
+
+    def test_info_survives_unreadable_publication_registry(
+        self, access_settings, basic_info
+    ):
+        settings, team = access_settings
+        path = tunnel_store.root(settings) / "registry.json"
+        path.parent.mkdir()
+        path.write_text("broken")
+        env_share.create_or_get(team, "main")
+
+        result = _call_tool("get_environment_info", env_name="main")
+
+        assert "Database: oduflow_1_main" in result
+        assert "Public Odoo: unknown" in result
+        assert "Tunnel error: Cannot read the public Odoo link registry." in result
+        assert "Public URL:" not in result
+        assert "UI shared: yes" in result
+
+    @pytest.mark.parametrize(
+        "url_env,token_env", [("main", None), ("main", "main"), (None, "main")]
+    )
+    def test_scoped_info_does_not_read_operator_access_metadata(
+        self, basic_info, monkeypatch, url_env, token_env
+    ):
+        monkeypatch.setattr(scoped_access, "scoped_env_from_request", lambda: url_env)
+        monkeypatch.setattr(scoped_access, "env_from_access_token", lambda: token_env)
+        with (
+            patch.object(tunnel_manager, "status") as publication_status,
+            patch.object(env_share, "shared_environments") as shared,
+        ):
+            result = _call_tool("get_environment_info", env_name="main")
+
+        publication_status.assert_not_called()
+        shared.assert_not_called()
+        assert "Database: oduflow_1_main" in result
+        assert "Public Odoo:" not in result
+        assert "Tunnel provider:" not in result
+        assert "Public URL:" not in result
+        assert "UI shared:" not in result
+
+    def test_publication_tool_catalog(self):
+        from tool_helpers import list_tools
+
+        tools = list_tools()
+        assert "get_environment_info" in tools
+        assert "publish_environment" in tools
+        assert "unpublish_environment" in tools
+        assert "get_environment_public_url" not in tools
 
 
 class TestErrorHandling:
