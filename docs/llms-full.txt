@@ -1255,7 +1255,7 @@ rather than at the first build.
 | `[team.X.image_registry].build_timeout_seconds` | `1800` | Hard wall-clock deadline per build, including fetching a repository source; the build is terminated and the job fails. Must be `> 0` |
 | `[team.X.image_registry].max_context_mb` | `512` | Size cap for the sealed build context exported from the commit, checked before the build starts. A fixed ceiling of 200 000 files also applies. Must be `> 0` |
 | `[team.X.image_registry].max_log_mb` | `16` | Cap for the persisted build log per build; beyond it the log is truncated with a marker and the build continues. Must be `> 0` |
-| `[team.X.image_registry].max_concurrent_builds` | `2` | Active builds allowed for the team, counted per process — a build started by `oduflow stack apply` does not take one of the server's slots. Further builds are refused as busy. Must be `> 0` |
+| `[team.X.image_registry].max_concurrent_builds` | `2` | Active builds allowed for the team across MCP, standalone CLI and Stack processes sharing its data directory. Further builds are refused as busy. Must be `> 0` |
 | `[team.X.image_registry].keep_images` | `10` | Local staging images (`oduflow-build/team-<id>:<build-id>`) kept per team; older ones are untagged after each successful build, and tags referenced by a running or stopped container are always preserved. `0` disables pruning. Must be `>= 0` |
 
 ### Configuration file overrides
@@ -5714,7 +5714,7 @@ section gets these defaults:
 
 | Bound | Default | What happens at the limit |
 |---|---|---|
-| `max_concurrent_builds` | `2` | A further build is refused as busy. Counted **per process**, so a build started by `oduflow stack apply` does not take one of the server's slots |
+| `max_concurrent_builds` | `2` | A further build is refused as busy. MCP, standalone CLI and Stack builds share the team's slots |
 | `build_timeout_seconds` | `1800` | Hard wall-clock deadline, fetching the source included; the build is terminated and the job fails |
 | `max_context_mb` | `512` | The sealed context is refused before the build starts (a fixed 200 000-file ceiling also applies) |
 | `max_log_mb` | `16` | The persisted log is truncated with a marker; the build continues |
@@ -6418,7 +6418,8 @@ the plan then reports the service as a conflict.
 
 A build started by `oduflow stack apply` belongs to that command:
 [`get_image_build`](mcp-tools.md#get_image_build) shows its progress, and
-interrupting the command is how to cancel it.
+you can interrupt the command or request cancellation with
+[`cancel_image_build`](mcp-tools.md#cancel_image_build).
 
 The image stays in the host's Docker daemon as a staging tag
 (`oduflow-build/team-<id>:<build-id>`), which the running service keeps alive.
@@ -10939,6 +10940,13 @@ oduflow call create_service '{"name":"vpn","image":"linuxserver/wireguard","port
 oduflow call get_environment_logs dev 500
 ```
 
+`oduflow call start_image_build` starts a local worker and prints its `build_id`
+once the worker has accepted the job. The build continues after the CLI exits;
+no HTTP server is required. Use `oduflow call get_image_build <build_id>` to
+check its status or `oduflow call cancel_image_build <build_id>` to request
+cancellation. For an environment build, pass the environment name after the ID
+in both commands. Poll until `cancelled` to confirm cancellation took effect.
+
 ## Remote Tool Invocation
 
 `oduflow client` calls the same registered tools on a running Oduflow HTTP
@@ -13629,8 +13637,8 @@ A job stuck in `building` with no log progress is usually a Dockerfile step
 waiting on the network — an `apt-get` or `pip install` against an unreachable
 mirror. It is bounded by `build_timeout_seconds` and can be ended immediately
 with `cancel_image_build`; the builder's whole process group is terminated even
-when the step prints nothing. A build that `oduflow stack apply` started runs
-inside that command instead, so interrupting the command is how to cancel it.
+when the step prints nothing. For a build started by `oduflow stack apply`,
+interrupting the apply command is another way to stop it.
 
 Builds run on the **host Docker daemon**, so they compete with everything else
 for disk. A failure with `no space left on device` is a host problem, not a
