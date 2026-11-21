@@ -180,13 +180,23 @@ def chown_recursive(
 
     Tries host-side ``os.chown`` first (works on Linux as root).
     On ``PermissionError`` (e.g. macOS) falls back to running
-    ``chown -R`` inside a throwaway container with *path* bind-mounted.
+    ``chown -hR`` inside a throwaway container with *path* bind-mounted.
+
+    The trees given away here are filestores and session directories, which
+    their tenant writes to. A symbolic link in one is given away as a link and
+    never followed: following it would hand whatever host file it names to the
+    Odoo account. Each entry is addressed through its directory's descriptor,
+    so swapping a directory for a link while the walk runs gains nothing.
     """
+    top = os.path.realpath(path)
+    if not os.path.isdir(top):
+        # As before: a tree that is not there has nothing to give away.
+        return
     try:
-        for root, dirs, files in os.walk(path):
-            os.chown(root, uid, gid)
+        os.chown(top, uid, gid)
+        for _root, dirs, files, dir_fd in os.fwalk(top):
             for name in dirs + files:
-                os.chown(os.path.join(root, name), uid, gid)
+                os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
     except PermissionError:
         logger.info(
             "Host chown failed (PermissionError), falling back to in-container chown for %s",
@@ -194,7 +204,7 @@ def chown_recursive(
         )
         client.containers.run(
             image,
-            f"chown -R {uid}:{gid} /mnt/target",
+            f"chown -hR {uid}:{gid} /mnt/target",
             entrypoint="",
             user="root",
             remove=True,

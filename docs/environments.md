@@ -511,13 +511,14 @@ from deletion, since only stopped environments are ever deleted.
 automatically and prepend a short note to the response
 (`Note: environment was stopped; started it ...`): `pull_and_apply`, module
 installs/upgrades, `run_odoo_tests`, `run_odoo_shell`, `run_odoo_command`,
-the ORM tools (`odoo_search_read`, `odoo_create`, `odoo_write`, `odoo_unlink`,
-`odoo_call`, `odoo_schema`), file tools (`read/write/search_in_odoo`),
-`http_request_to_odoo` and `reset_admin_password`. Read-only and diagnostic
-tools never wake an
-environment: `run_db_query` and `list_installed_modules` go to the shared
-PostgreSQL, and `get_environment_logs` reads logs of stopped containers —
-useful when diagnosing why something died.
+`run_db_query` (its `psql` runs in the environment's Odoo container, see
+[Direct SQL](#direct-sql)), the ORM tools (`odoo_search_read`, `odoo_create`,
+`odoo_write`, `odoo_unlink`, `odoo_call`, `odoo_schema`), file tools
+(`read/write/search_in_odoo`), `http_request_to_odoo` and
+`reset_admin_password`. Read-only and diagnostic tools never wake an
+environment: `list_installed_modules` asks the shared PostgreSQL directly,
+and `get_environment_logs` reads logs of stopped containers — useful when
+diagnosing why something died.
 
 The dashboard shows each environment's last activity (`Active: 2h ago`) and,
 for stopped ones, when and how it stopped (`Stopped: 1d ago (auto)`). Every
@@ -711,8 +712,148 @@ Odoo process has restarted.
 Use `run_odoo_shell` when you need a fresh registry, `sudo()`, private methods,
 or a multi-step transaction. Successful shell writes are committed by default;
 pass `auto_commit=false` for a dry run whose transaction is left uncommitted.
-Use `run_db_query` for direct SQL; it supports CSV (default) or JSON output and
-returns at most 100 rows by default (`max_rows` changes the cap).
+Use `run_db_query` for direct SQL; it returns CSV (default) or a human-readable
+table, at most 100 rows by default (`max_rows` changes the cap).
+
+### Direct SQL
+
+`run_db_query` and the dashboard's **SQL console** both run `psql` **inside the
+environment's own Odoo container**, as the image's unprivileged `odoo` user.
+`psql` connects to the shared PostgreSQL over the Docker network — the way Odoo
+itself does — as the environment's own database role, whose password is handed
+to that one process in `PGPASSWORD` (never on its command line).
+
+It does not run inside the shared PostgreSQL container, and that is deliberate.
+`psql` is a client program: `\!` opens a shell where `psql` runs, and `\c`
+reconnects from there. Next to PostgreSQL that would be a root shell beside
+every team's data files and a local socket that accepts any role name without a
+password. From the Odoo container the same commands stay inside your own
+environment: `\!` is the shell `run_odoo_command` already gives you, and `\c`
+to another role or database is asked for a password like any network
+connection.
+
+What follows from running there:
+
+- **The environment has to be running.** `run_db_query` starts a stopped one
+  first (and says so); the SQL console is offered for a running environment
+  only.
+- **The Odoo image has to ship `psql`.** The official Odoo images do. For a
+  custom image that does not, both surfaces fail with an error that says so —
+  add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
+  is no fallback to the PostgreSQL container.
+- **The environment needs its own database role.** One created before
+  per-environment credentials existed is refused until `update_environment`
+  has given it one; the cluster's own credential is never used for it — see
+  [Database isolation](#database-isolation).
+- **Productions are not reachable** through either surface.
+
+### Database isolation
+
+Every environment has its own PostgreSQL role, which owns the environment's
+database, and **no other role of the cluster may connect to that database**.
+PostgreSQL by default lets every role connect to every database; Oduflow
+revokes that when it creates a database — an environment's, a template's, a
+production's or a service database — and, on each server start, on databases
+an older version created. The owner keeps its access; a production whose
+database is still owned by the superuser (one restored by an older version)
+has its role granted access first, so nothing running is cut off. Databases
+outside the `oduflow_` namespace are yours and are left as they are.
+
+If you connected to an environment's database with a role of your own (a
+reporting or monitoring role, for example), grant it access explicitly:
+`GRANT CONNECT ON DATABASE "oduflow_<team>_<env>" TO "<role>";`. A copy made
+from a template starts without it again.
+
+Oduflow reads an environment's database the same way your code does: as the
+environment's own role, never as the cluster superuser. That holds for the
+checks around `install_odoo_modules` and `upgrade_odoo_modules`, the installed
+modules list, the dashboard's **Connect As** user list, translation exports
+and `reset_admin_password`, and for the `pg_dump` behind `save_as_template`
+and a production seeded from the environment. The tables, functions and
+operators in a database are its tenant's to define, and a query resolves them
+with the rights of whoever runs it.
+
+The few statements the superuser still runs inside an environment's database
+(handing a new copy's tables and functions to the environment's role) are
+catalog-only, and before them Oduflow disables any enabled **event trigger**
+in that database: one runs its function with the rights of whoever issues
+DDL. In practice only a template loaded by an older version contains one — see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
+**Environments without their own role.** An environment created before
+per-environment credentials existed has no role on record, and Oduflow does
+not fall back to the superuser for it. On such an environment:
+
+- `install_odoo_modules`, `upgrade_odoo_modules` with module names and
+  `pull_and_apply` with modules to install or upgrade are refused before Odoo
+  runs (`upgrade_odoo_modules all` reads nothing first and still works);
+- `list_installed_modules`, the dashboard's module picker and the **Connect
+  As** user list report the error instead of a list;
+- `run_db_query`, the SQL console, `run_odoo_shell`, `run_odoo_tests`,
+  `connect_as_user` and `reset_admin_password` are refused as before;
+- `save_as_template`, `create_production(from_environment=…)` and
+  `restore_production(from_environment=…)` are refused before anything is
+  dumped: an environment's database is dumped by its own role too (see
+  [How a database is dumped](templates.md#how-a-database-is-dumped)).
+
+The error is `Environment '<name>' has no scoped database credentials`.
+Run `update_environment` on it (no arguments needed): the environment gets a
+role and keeps its database and filestore. While the container is stopped for
+the recreate, Oduflow creates the role, makes it the owner of the database and
+of everything in it, closes the database to other roles and records the
+credentials; the new container connects as that role. The result is the state
+a newly created environment starts in, and the response says that a role was
+provisioned. Everything that recreates the container does the same — the
+dashboard's **Update**, `switch_branch`, and a `pull_and_apply` that changes
+extra-addon checkouts. `recreate_environment` works too, but rebuilds the
+database from its template.
+
+If the role cannot be provisioned (the database is missing, PostgreSQL is
+down), the update fails with the cause, the old container is left in place and
+started again if it was running, and nothing is recreated.
+
+**The superuser's password in old containers.** Such an environment's
+container was created with the cluster superuser's login in its `USER` and
+`PASSWORD` variables, and whoever has a shell in the container can read them.
+Oduflow no longer creates any Odoo container that way, but a container's
+variables are fixed when it is created, so an existing one keeps them until it
+is recreated — starting or restarting it changes nothing. On every start the
+server log names the containers concerned:
+
+```
+2 container(s) run with the PostgreSQL superuser's credentials, which anyone
+with a shell in them can read: oduflow-1-legacy-odoo, oduflow-1-old-odoo. …
+```
+
+They are reported rather than repaired on start, because the repair recreates
+the container, which interrupts whoever works in the environment and can fail
+for reasons you need to see (an image that can no longer be pulled, a failing
+dependency install). To clear the list:
+
+1. Run `update_environment` for each environment named (and
+   `reconfigure_production` for a production — see
+   [Reconfiguring a production](production.md#reconfiguring-a-production)):
+
+    ```bash
+    oduflow call update_environment '{"env_name": "legacy"}'
+    ```
+
+2. Then change the superuser's password, since it has been readable in those
+   containers: set a new one in PostgreSQL — in the development cluster and,
+   with production hosting enabled, in the production cluster — and put the
+   same value in `[database].password`:
+
+    ```bash
+    docker exec -it oduflow-db psql -U odoo -d postgres -c '\password odoo'
+    docker exec -it oduflow-prod-db psql -U odoo -d postgres -c '\password odoo'
+    ```
+
+   (`odoo` is `[database].user`.) Restart Oduflow after editing the file.
+   Oduflow itself reaches PostgreSQL through the containers' local socket
+   and does not need the password to keep working; environments, productions
+   and services connect with their own roles and are not affected. A
+   container that still holds the old password stops connecting, which is
+   the point — update it.
 
 ## Interactive Terminal
 
@@ -728,6 +869,19 @@ The WebSocket endpoint is `ws://<host>:<port>/api/environments/{branch}/terminal
 
 !!! note
     The terminal requires the environment container to be running. If the container is stopped, the terminal will display an error message.
+
+The **SQL console** next to it is an interactive `psql` on the environment's
+database (`ws://<host>:<port>/api/environments/{branch}/sql`). It runs in the
+same Odoo container and has the same requirement — see [Direct SQL](#direct-sql).
+
+Closing the terminal window ends its process: Docker itself leaves a TTY
+`docker exec` running after the client disconnects, so the dashboard hangs up
+the `odoo shell` (and the SQL console's `psql`) and kills one that does not
+exit. Uncommitted work in the shell is rolled back, and no idle process or
+database connection is left behind. Minimizing the window keeps the session;
+reloading the page or losing the connection ends it like closing does. A
+query that is still executing when a SQL console is closed runs to completion
+on the server before its connection goes away.
 
 ## Environment Protection
 

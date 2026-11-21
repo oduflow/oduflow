@@ -851,8 +851,9 @@ Both clusters are upgraded together. Prepare the server first:
 
 On startup, before changing anything, Oduflow checks that no environment
 remains, that the clusters hold only databases it can restore, that the new
-image provides every extension those databases use, and that there is room for
-the dumps. It then stops services and production Odoo containers, and dumps
+image provides every extension those databases use and marks the ones in
+production and service databases as trusted, and that there is room for the
+dumps. It then stops services and production Odoo containers, and dumps
 service databases and production databases (including productions deleted
 with their data kept) together with all PostgreSQL roles and their passwords.
 With `[backup]` configured, it then deletes the old WAL-G archive. Only then
@@ -863,6 +864,46 @@ verified), and a new base backup is taken shortly afterwards. Template
 databases are restored from their dumps on disk last, and the dumps are
 deleted. Productions and services are down while their databases are dumped
 and restored.
+
+Each production and service database is dumped out of the old cluster and
+restored into the new one by its own PostgreSQL role, the one recorded in its
+credentials file, never by the superuser: restoring a database runs what its
+content defines, and the old cluster may run a PostgreSQL release in which
+dumping one could too. The superuser dumps only the roles, and recreates only
+the database itself (locale, tablespace, `ALTER DATABASE` settings, privileges
+on the database), making that role its owner. Everything inside ends up owned
+by that role, and privileges are restored as recorded. Three consequences are
+checked before anything is changed:
+
+- an extension that only a superuser may create (for example `postgis` or
+  `pg_stat_statements`) must be marked `trusted = true` in the new image's
+  control file, or be dropped first;
+- a database whose credentials file is missing has no role to dump and
+  restore it. For a production, `reconfigure_production` with no settings
+  changed provisions the role again and writes the file;
+- a database that contains a subscription or a user mapping is refused:
+  `pg_dump` leaves those out of a dump it does not take as a superuser;
+- a database that contains an event trigger is refused: its dump includes the
+  trigger, and only a superuser could create it again in the new cluster. Drop
+  it (`DROP EVENT TRIGGER <name>;`) unless you need it — one that came with a
+  template loaded by an older version is described under
+  [What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
+The role also has to be able to read everything in its database. If it cannot
+— a table that still belongs to another role, a table with
+`FORCE ROW LEVEL SECURITY` — the dump fails with PostgreSQL's reason, the
+upgrade stops, the services and productions it had stopped are started again,
+and nothing has been removed.
+
+If you trust everything a database contains, you can let the superuser dump
+and restore it as before by starting Oduflow with
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
+environment. The same variable is the way out when a restore stops on content
+that only a superuser can recreate (a publication `FOR ALL TABLES`, a function
+in an untrusted language): the error names the database and its kept dump; set
+the variable and restart to resume. On PostgreSQL 17 and newer the superuser
+restores such a database with event triggers switched off for the session, so
+one that the archive creates does not fire during the rest of the restore.
 
 A failure before an old cluster is removed, including a refused S3 delete,
 leaves everything as it was, and setting the image back cancels the upgrade; if
@@ -1050,7 +1091,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[server].bind` | `0.0.0.0` | HTTP server listener address. The legacy key `[server].host` remains accepted with a deprecation warning; if both are present they must have the same value |
 | `[server].host` | *(legacy)* | Deprecated alias for `[server].bind` |
 | `[server].port` | `8000` | HTTP server port |
-| `[server].allow_local_path` | `true` | Allow trusted local-development live-mounts that bind a host checkout read/write. Set `false` on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required |
+| `[server].allow_local_path` | `true` | Allow local CLI and stdio MCP to bind a host checkout read/write. HTTP MCP and the dashboard cannot create or rebuild live-mounted environments, regardless of this setting |
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
 | `[server].trace` | `false` | Enable detailed trace logging for git analysis and environment operations |
 | `[server].disable_telemetry` | `false` | Disable anonymous usage telemetry (see [Telemetry](#telemetry)) |
@@ -1818,6 +1859,11 @@ This will:
 4. Extract the filestore to `{data_dir}/team_{ID}/templates/{name}/filestore/`
 5. Load the dump into the template database automatically
 
+The temporary Odoo container connects as a one-off PostgreSQL role that owns
+only the build database, not as the cluster superuser: the build runs whatever
+the image contains. The same role dumps the result. The role and the build
+database are removed afterwards.
+
 ### Install additional modules during generation
 
 ```bash
@@ -1861,6 +1907,8 @@ This operation:
 6. Remounts those overlays against the new baseline, **preserving each environment's filestore changes** by default
 7. Restarts the affected containers
 
+The dump is taken by the **environment's own PostgreSQL role**, not by the cluster superuser (see [How a database is dumped](#how-a-database-is-dumped)). An environment created before each environment had a role of its own is refused with `has no scoped database credentials`; run `update_environment` on it first — it keeps its database and filestore.
+
 The **source environment** is always reset to the new baseline (its data just became the template). **Other environments keep their filestore changes** (the overlay `upper` layer) — this is non-destructive by default. Their existing files shadow the new template (env-local edits win); files they deleted stay deleted; new template files show through.
 
 To instead discard other environments' changes and reset them to the clean new baseline:
@@ -1875,6 +1923,9 @@ oduflow template-from-env my-branch --template-name default --reset-env-changes
 !!! info "Copy-mode templates"
     Environments created from a small (copy-mode, `use_overlay=false`) template have an independent filestore copy, not an overlay. They are not affected by template filestore updates and are left untouched.
 
+!!! info "Symbolic links and special files in a filestore"
+    An Odoo filestore holds regular files and directories. If an environment's filestore contains anything else, Oduflow never follows it: a symbolic link is carried into the template — and from there into environments and productions created from it — as a link, not as a copy of what it points to on the Oduflow host, and ownership is changed on the link itself. Device nodes, FIFOs and sockets are left out of the template.
+
 ## Create a Template from Production
 
 A [production](production.md) can be published as a dev template — the reverse of seeding a production from a template. The production database is dumped out of the production cluster and restored into the dev cluster as the template database, and the production filestore becomes the template's baseline:
@@ -1883,7 +1934,7 @@ A [production](production.md) can be published as a dev template — the reverse
 oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09"}'
 ```
 
-The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`).
+The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`). It is taken by the production's own PostgreSQL role, not by the production cluster's superuser — see [How a production's data is dumped](production.md#how-a-productions-data-is-dumped).
 
 The template records the production's `repo_url`, `odoo_image`, `git_user` and extra addons, plus [provenance](#template-metadata) — the production's branch, the commit its checkout is on, and the snapshot time — so environments created from it report code/database drift like any other template.
 
@@ -2267,6 +2318,189 @@ no cron daemon is started inside the Oduflow server/container. **Do not run a
 separate worker container**: overlay mounts must be created in the same mount
 namespace as the server. The native installation uses the configured Python
 executable directly.
+
+## How a dump is loaded
+
+A dump is input from outside: it comes from a URL, a bucket or a path someone
+named, or from an environment's database, which holds whatever its users put
+there. Oduflow therefore never runs a dump as the PostgreSQL superuser, and
+never inside the shared PostgreSQL container. This applies to every way a
+template database is built — `init-template`, `import-template` in all its
+forms, saving a branch or a production as a template, a scheduled sync, and
+the template rebuild after a PostgreSQL upgrade.
+
+For each load Oduflow:
+
+1. creates a one-off **loader role** — not a superuser, unable to create
+   databases or roles — and an empty template database owned by it;
+2. starts a short-lived **restore client** container from the cluster's own
+   PostgreSQL image on the team network. It runs `psql` (plain SQL) or
+   `pg_restore --no-owner` (custom format) as the loader role, connecting over
+   the network with a password like an Odoo container does, and sees the dump
+   file read-only;
+3. hands everything the load created to the team's **template owner** role
+   (`oduflow_tplown_<team>`, not a superuser and without a password) and drops
+   the loader role.
+
+Environments created from the template get their own role as owner of the
+copy, exactly as before.
+
+What this means for a dump:
+
+- **Extensions.** `CREATE EXTENSION` works for the extensions PostgreSQL marks
+  as *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `btree_gist`,
+  `fuzzystrmatch`, `pgcrypto`, `uuid-ossp`, `citext`, `hstore` and the rest of
+  that list — which covers what Odoo itself uses. An extension that needs a
+  superuser (for example `postgis`, `pg_stat_statements`, `dblink` or
+  `postgres_fdw`) or an untrusted language (`plpython3u`) cannot be created by
+  a dump any more. If you need one, use a `[database].image` in which the
+  extension's control file sets `trusted = true`; that is the PostgreSQL-native
+  way to let a database owner install it.
+- **Anything else reserved for superusers** — `ALTER ROLE ... SUPERUSER`,
+  `COPY ... FROM PROGRAM`, `ALTER SYSTEM`, event triggers, subscriptions — is
+  refused by PostgreSQL. `psql` meta-commands in a dump (`\!`, `\c`) take
+  effect only inside the restore client, which holds nothing but the dump and
+  the loader role's connection.
+- **Custom-format dumps fail on the first such statement**, because
+  `pg_restore` reports any error as a failed restore; the error message names
+  the statement. An archive from an old server (PostgreSQL 10 or earlier)
+  usually contains `COMMENT ON EXTENSION plpgsql`, which now fails the same way
+  (`must be owner of extension plpgsql`): convert it with
+  `pg_restore --no-owner -f dump.sql dump.pgdump` and import the SQL instead.
+- **Plain SQL and SQL.gz fail on statement errors**, except for known
+  compatibility errors: refused ownership changes, a comment on the existing
+  `plpgsql` extension, and `transaction_timeout` on older PostgreSQL versions.
+  Skipped ownership changes are reported as a single summary line.
+
+A template database loaded by an older Oduflow keeps its previous owner until
+it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
+an environment over it).
+
+### What an older load may have left behind
+
+Older versions loaded dumps as the PostgreSQL superuser, so a dump could
+create what only a superuser can. Such objects stay in the template database
+until it is rebuilt, and `CREATE DATABASE ... TEMPLATE` copies most of them
+into every environment made from it. A template loaded by a current version
+cannot contain them: the loader role is refused each one.
+
+**Event triggers** are the ones that matter to Oduflow itself. An event trigger
+runs its function with the rights of whoever issues the statement that fires
+it — any DDL statement in that database and, since PostgreSQL 17, any login to
+it — and in an environment the function belongs to the environment's role,
+which can rewrite it. Oduflow's superuser still runs a few statements inside
+such databases (handing a copy's objects to its role, giving an old
+environment or production a role of its own). So:
+
+- **Before the superuser runs DDL inside a database, Oduflow disables the
+  event triggers that are enabled there** and writes
+  `Disabled N event trigger(s) in database ...` to the server log, with each
+  trigger's name, event and function. They are disabled, not dropped, and stay
+  disabled: only a superuser can alter an event trigger. This happens in the
+  database those statements run in (the environment, the staged database of
+  a scheduled sync, a production being given its role) and on every
+  PostgreSQL release; an existing template is left as it is. A database
+  without event triggers pays one catalog query for it.
+- **On PostgreSQL 17 and newer, every superuser session that enters a database
+  other than `postgres` also connects with `event_triggers=off`**, so that an
+  `ON login` trigger cannot run before Oduflow's first statement. This covers
+  the `pg_dump` of a template the superuser still owns. PostgreSQL 15 and 16
+  have neither that setting nor login triggers.
+
+If you rely on an event trigger in an environment, an operator can turn it
+back on as the superuser (`ALTER EVENT TRIGGER <name> ENABLE;`); Oduflow
+disables it again the next time its superuser has DDL to run in that database.
+A rebuilt template does not bring it back: `CREATE EVENT TRIGGER` in a dump is
+refused like everything else reserved for superusers.
+
+**On each start Oduflow reports**, per cluster, which managed databases hold
+such objects. It reads catalog tables only and changes nothing; the statements
+in the last column are yours to run, as the superuser, in the database named
+(`docker exec <postgres container> psql -U <superuser> -d <database>`):
+
+| In the server log | What it is | What to do |
+|---|---|---|
+| `event triggers` (enabled) | Fires for every DDL statement or login, as whoever issues it. | Rebuild the template; or `DROP EVENT TRIGGER <name>;` in that database. |
+| `functions in an untrusted language` | A C, `internal` or `plpython3u`-style function outside any extension: no role's limits apply to what it does, whoever calls it. | Check what it does. Drop it, or revoke `EXECUTE` from the environment's role. |
+| `SECURITY DEFINER functions owned by a superuser`, `views owned by a superuser` | Run, or read their tables, with the superuser's rights for whoever may use them. Left in an environment by a version that did not hand functions and views to its role. | `ALTER FUNCTION ... OWNER TO "<role>";` / `ALTER VIEW ... OWNER TO "<role>";` with the role from `get_environment_info`, or recreate the environment. |
+| `foreign servers`, `user mappings`, `subscriptions` | Decide where, and as whom, a foreign table or a subscription connects. | Drop them unless you set them up yourself. |
+| `casts between built-in types`, `libraries preloaded by ALTER DATABASE ... SET` | Change how every session in that database behaves, Oduflow's included. | Drop the cast; `ALTER DATABASE ... RESET <setting>;`. |
+
+These are logged as warnings, one line per database. Extensions the image
+does not mark trusted, operators, rules and publications that are the
+superuser's, and event triggers that are already disabled hand nothing to
+anybody; they are listed in one informational line because a rebuild of the
+template will refuse them. Templates that still belong to the superuser and
+hold none of the above are named in one informational line as well.
+
+The remedy for a template is always the same: rebuild it
+(`import-template ... --overwrite` or `--refresh`, or save an environment over
+it), fixing the dump first if the load now refuses something in it. Existing
+environments keep what they were copied with until they are recreated
+(`recreate_environment`); one that still carries an event trigger, disabled or
+not, cannot be saved as a template until the trigger is dropped.
+
+### Archives from a newer `pg_dump`
+
+A custom-format archive written by a newer `pg_dump` than the cluster's
+PostgreSQL cannot be read by the cluster's own `pg_restore`
+(`unsupported version ... in file header`). Oduflow then converts it to plain
+SQL with `pg_restore -f` from a short-lived `postgres:17` **conversion helper**
+container and loads that SQL through the same loader role and restore client.
+
+The helper reads a file from outside, so it is confined on its own terms: it
+has no network (it connects to nothing), is never root, holds no capabilities
+and no password, has a read-only root filesystem, and sees exactly two things
+of the host — the archive, read-only, and a scratch directory created for this
+conversion under `team_<ID>/.dump_convert/`. It does not see the template
+directory. Oduflow moves the SQL out of that scratch directory and checks that
+it is one regular, non-empty file before anything reads it; the scratch
+directory is removed afterwards.
+
+- When a template is reloaded from its own archive (`import-template --refresh`,
+  a database-only pull from a running Odoo, a push import from Odoo.sh), the
+  SQL replaces the archive as the template's `dump.sql`, so the conversion is
+  not repeated. An archive you import from S3 or a local path is stored as it
+  is; nothing is written next to it.
+- The SQL is several times the size of the archive and counts against the
+  team's disk while the load runs. The helper is stopped if it runs longer than
+  six hours or the disk holding the team's data falls below 1 GiB free, and the
+  import fails with that reason.
+- A private archive owned by root (mode `0600`) is copied into the scratch
+  directory for the helper instead of being read as root, which needs the
+  archive's size once more for the duration of the conversion.
+
+## How a database is dumped
+
+Dumping is the same question from the other side: `pg_dump` reads a database
+whose tables, views and functions its users defined. On a current PostgreSQL
+release reading runs none of it, but releases before 15.8 and 16.4 had a flaw
+that let a database's user run SQL as whoever dumped it (CVE-2024-7348), and a
+PostgreSQL container keeps the release it was created with. So Oduflow runs
+`pg_dump` as the role the database belongs to, which gains nothing by it:
+
+| What is dumped | By |
+|---|---|
+| An environment (`template-from-env` / `save_as_template`, `create_production(from_environment=…)`, `restore_production(from_environment=…)`) | the environment's own role |
+| A production (snapshots, `save_production_as_template`) | the production's own role |
+| A template (`create_production(template_name=…)`) | the team's template owner |
+| The build database of `init-template` | the one-off build role |
+| A production or service database during a [PostgreSQL upgrade](installation.md#upgrading-postgresql) | the role in its credentials file |
+
+The dump format, where it is written and how it is restored are unchanged.
+
+Two dumps are still the superuser's. A template database that an older Oduflow
+loaded belongs to the superuser, so nobody else can read all of it; no user's
+role can connect to a template database, which is what the flaw needs. It is
+dumped as before until the template is imported or published again. And a
+PostgreSQL upgrade lets the superuser dump the databases you name in
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE`. In both cases the server is told not to
+expand views and foreign tables during the dump; a server too old to know that
+setting is named in a warning in the server log instead.
+
+A dump its role cannot finish fails with PostgreSQL's reason, usually
+`permission denied for table …`; see
+[Troubleshooting](troubleshooting.md#a-dump-fails-with-permission-denied).
 
 ## Listing and Dropping Templates
 
@@ -2853,13 +3087,14 @@ from deletion, since only stopped environments are ever deleted.
 automatically and prepend a short note to the response
 (`Note: environment was stopped; started it ...`): `pull_and_apply`, module
 installs/upgrades, `run_odoo_tests`, `run_odoo_shell`, `run_odoo_command`,
-the ORM tools (`odoo_search_read`, `odoo_create`, `odoo_write`, `odoo_unlink`,
-`odoo_call`, `odoo_schema`), file tools (`read/write/search_in_odoo`),
-`http_request_to_odoo` and `reset_admin_password`. Read-only and diagnostic
-tools never wake an
-environment: `run_db_query` and `list_installed_modules` go to the shared
-PostgreSQL, and `get_environment_logs` reads logs of stopped containers —
-useful when diagnosing why something died.
+`run_db_query` (its `psql` runs in the environment's Odoo container, see
+[Direct SQL](#direct-sql)), the ORM tools (`odoo_search_read`, `odoo_create`,
+`odoo_write`, `odoo_unlink`, `odoo_call`, `odoo_schema`), file tools
+(`read/write/search_in_odoo`), `http_request_to_odoo` and
+`reset_admin_password`. Read-only and diagnostic tools never wake an
+environment: `list_installed_modules` asks the shared PostgreSQL directly,
+and `get_environment_logs` reads logs of stopped containers — useful when
+diagnosing why something died.
 
 The dashboard shows each environment's last activity (`Active: 2h ago`) and,
 for stopped ones, when and how it stopped (`Stopped: 1d ago (auto)`). Every
@@ -3053,8 +3288,148 @@ Odoo process has restarted.
 Use `run_odoo_shell` when you need a fresh registry, `sudo()`, private methods,
 or a multi-step transaction. Successful shell writes are committed by default;
 pass `auto_commit=false` for a dry run whose transaction is left uncommitted.
-Use `run_db_query` for direct SQL; it supports CSV (default) or JSON output and
-returns at most 100 rows by default (`max_rows` changes the cap).
+Use `run_db_query` for direct SQL; it returns CSV (default) or a human-readable
+table, at most 100 rows by default (`max_rows` changes the cap).
+
+### Direct SQL
+
+`run_db_query` and the dashboard's **SQL console** both run `psql` **inside the
+environment's own Odoo container**, as the image's unprivileged `odoo` user.
+`psql` connects to the shared PostgreSQL over the Docker network — the way Odoo
+itself does — as the environment's own database role, whose password is handed
+to that one process in `PGPASSWORD` (never on its command line).
+
+It does not run inside the shared PostgreSQL container, and that is deliberate.
+`psql` is a client program: `\!` opens a shell where `psql` runs, and `\c`
+reconnects from there. Next to PostgreSQL that would be a root shell beside
+every team's data files and a local socket that accepts any role name without a
+password. From the Odoo container the same commands stay inside your own
+environment: `\!` is the shell `run_odoo_command` already gives you, and `\c`
+to another role or database is asked for a password like any network
+connection.
+
+What follows from running there:
+
+- **The environment has to be running.** `run_db_query` starts a stopped one
+  first (and says so); the SQL console is offered for a running environment
+  only.
+- **The Odoo image has to ship `psql`.** The official Odoo images do. For a
+  custom image that does not, both surfaces fail with an error that says so —
+  add `postgresql-client` to the image or to `.oduflow/apt_packages.txt`. There
+  is no fallback to the PostgreSQL container.
+- **The environment needs its own database role.** One created before
+  per-environment credentials existed is refused until `update_environment`
+  has given it one; the cluster's own credential is never used for it — see
+  [Database isolation](#database-isolation).
+- **Productions are not reachable** through either surface.
+
+### Database isolation
+
+Every environment has its own PostgreSQL role, which owns the environment's
+database, and **no other role of the cluster may connect to that database**.
+PostgreSQL by default lets every role connect to every database; Oduflow
+revokes that when it creates a database — an environment's, a template's, a
+production's or a service database — and, on each server start, on databases
+an older version created. The owner keeps its access; a production whose
+database is still owned by the superuser (one restored by an older version)
+has its role granted access first, so nothing running is cut off. Databases
+outside the `oduflow_` namespace are yours and are left as they are.
+
+If you connected to an environment's database with a role of your own (a
+reporting or monitoring role, for example), grant it access explicitly:
+`GRANT CONNECT ON DATABASE "oduflow_<team>_<env>" TO "<role>";`. A copy made
+from a template starts without it again.
+
+Oduflow reads an environment's database the same way your code does: as the
+environment's own role, never as the cluster superuser. That holds for the
+checks around `install_odoo_modules` and `upgrade_odoo_modules`, the installed
+modules list, the dashboard's **Connect As** user list, translation exports
+and `reset_admin_password`, and for the `pg_dump` behind `save_as_template`
+and a production seeded from the environment. The tables, functions and
+operators in a database are its tenant's to define, and a query resolves them
+with the rights of whoever runs it.
+
+The few statements the superuser still runs inside an environment's database
+(handing a new copy's tables and functions to the environment's role) are
+catalog-only, and before them Oduflow disables any enabled **event trigger**
+in that database: one runs its function with the rights of whoever issues
+DDL. In practice only a template loaded by an older version contains one — see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
+**Environments without their own role.** An environment created before
+per-environment credentials existed has no role on record, and Oduflow does
+not fall back to the superuser for it. On such an environment:
+
+- `install_odoo_modules`, `upgrade_odoo_modules` with module names and
+  `pull_and_apply` with modules to install or upgrade are refused before Odoo
+  runs (`upgrade_odoo_modules all` reads nothing first and still works);
+- `list_installed_modules`, the dashboard's module picker and the **Connect
+  As** user list report the error instead of a list;
+- `run_db_query`, the SQL console, `run_odoo_shell`, `run_odoo_tests`,
+  `connect_as_user` and `reset_admin_password` are refused as before;
+- `save_as_template`, `create_production(from_environment=…)` and
+  `restore_production(from_environment=…)` are refused before anything is
+  dumped: an environment's database is dumped by its own role too (see
+  [How a database is dumped](templates.md#how-a-database-is-dumped)).
+
+The error is `Environment '<name>' has no scoped database credentials`.
+Run `update_environment` on it (no arguments needed): the environment gets a
+role and keeps its database and filestore. While the container is stopped for
+the recreate, Oduflow creates the role, makes it the owner of the database and
+of everything in it, closes the database to other roles and records the
+credentials; the new container connects as that role. The result is the state
+a newly created environment starts in, and the response says that a role was
+provisioned. Everything that recreates the container does the same — the
+dashboard's **Update**, `switch_branch`, and a `pull_and_apply` that changes
+extra-addon checkouts. `recreate_environment` works too, but rebuilds the
+database from its template.
+
+If the role cannot be provisioned (the database is missing, PostgreSQL is
+down), the update fails with the cause, the old container is left in place and
+started again if it was running, and nothing is recreated.
+
+**The superuser's password in old containers.** Such an environment's
+container was created with the cluster superuser's login in its `USER` and
+`PASSWORD` variables, and whoever has a shell in the container can read them.
+Oduflow no longer creates any Odoo container that way, but a container's
+variables are fixed when it is created, so an existing one keeps them until it
+is recreated — starting or restarting it changes nothing. On every start the
+server log names the containers concerned:
+
+```
+2 container(s) run with the PostgreSQL superuser's credentials, which anyone
+with a shell in them can read: oduflow-1-legacy-odoo, oduflow-1-old-odoo. …
+```
+
+They are reported rather than repaired on start, because the repair recreates
+the container, which interrupts whoever works in the environment and can fail
+for reasons you need to see (an image that can no longer be pulled, a failing
+dependency install). To clear the list:
+
+1. Run `update_environment` for each environment named (and
+   `reconfigure_production` for a production — see
+   [Reconfiguring a production](production.md#reconfiguring-a-production)):
+
+    ```bash
+    oduflow call update_environment '{"env_name": "legacy"}'
+    ```
+
+2. Then change the superuser's password, since it has been readable in those
+   containers: set a new one in PostgreSQL — in the development cluster and,
+   with production hosting enabled, in the production cluster — and put the
+   same value in `[database].password`:
+
+    ```bash
+    docker exec -it oduflow-db psql -U odoo -d postgres -c '\password odoo'
+    docker exec -it oduflow-prod-db psql -U odoo -d postgres -c '\password odoo'
+    ```
+
+   (`odoo` is `[database].user`.) Restart Oduflow after editing the file.
+   Oduflow itself reaches PostgreSQL through the containers' local socket
+   and does not need the password to keep working; environments, productions
+   and services connect with their own roles and are not affected. A
+   container that still holds the old password stops connecting, which is
+   the point — update it.
 
 ## Interactive Terminal
 
@@ -3070,6 +3445,19 @@ The WebSocket endpoint is `ws://<host>:<port>/api/environments/{branch}/terminal
 
 !!! note
     The terminal requires the environment container to be running. If the container is stopped, the terminal will display an error message.
+
+The **SQL console** next to it is an interactive `psql` on the environment's
+database (`ws://<host>:<port>/api/environments/{branch}/sql`). It runs in the
+same Odoo container and has the same requirement — see [Direct SQL](#direct-sql).
+
+Closing the terminal window ends its process: Docker itself leaves a TTY
+`docker exec` running after the client disconnects, so the dashboard hangs up
+the `odoo shell` (and the SQL console's `psql`) and kills one that does not
+exit. Uncommitted work in the shell is rolled back, and no idle process or
+database connection is left behind. Minimizing the window keeps the session;
+reloading the page or losing the connection ends it like closing does. A
+query that is still executing when a SQL console is closed runs to completion
+on the server before its connection goes away.
 
 ## Environment Protection
 
@@ -3478,6 +3866,83 @@ To promote into a production that **already exists**, use
 `restore_production(from_environment=…)` instead — see
 [Backups](#backups) for the restore mechanics.
 
+### How data is loaded into a production
+
+A production's database is filled from a template, from a dev environment, or
+from one of its own snapshots. All three are database content that the
+database's users defined, and restoring it runs what it defines: a function
+used in a `CHECK` constraint, for example, is called for every row the restore
+copies. Oduflow therefore never restores this content as the PostgreSQL
+superuser, in either cluster. For `create_production(template_name=…)`,
+`create_production(from_environment=…)` and both forms of `restore_production`
+it:
+
+1. creates the target database for the **production's own PostgreSQL role**
+   (the role its Odoo connects with), which owns it from the start;
+2. starts a short-lived **restore client** container from the production
+   cluster's PostgreSQL image on the team network. It runs
+   `pg_restore --no-owner` as that role, connecting over the network with the
+   role's password like the production's Odoo does, and sees the dump
+   read-only. Nothing is restored inside the PostgreSQL container;
+3. leaves the result with that role: every restored object, and the database
+   itself, belongs to the production's role.
+
+What this means for the data:
+
+- **Extensions.** The role creates the extensions PostgreSQL marks as
+  *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `pgcrypto`, `uuid-ossp` and
+  the rest of that list, which covers what Odoo itself uses. A database that
+  contains an extension only a superuser may create (for example `postgis`,
+  `pg_stat_statements`, `dblink`, `postgres_fdw`) can no longer be seeded,
+  promoted or restored from a snapshot: the restore fails with
+  `permission denied to create extension` and the production keeps its previous
+  data. Use a `[database].image` in which that extension's control file sets
+  `trusted = true`; a database owner may then create it. Snapshots taken
+  earlier become restorable the same way.
+- **Anything else reserved for superusers** — event triggers, publications
+  `FOR ALL TABLES`, subscriptions, functions in an untrusted language — fails
+  the restore the same way.
+- **A production without its credentials file**
+  (`env_credentials.json` in its workspace) is not restored at all, instead of
+  being restored as the superuser. Run `reconfigure_production` on it first,
+  with no settings changed — see
+  [Reconfiguring a production](#reconfiguring-a-production).
+
+The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
+and is not affected.
+
+### How a production's data is dumped
+
+The other direction follows the same rule. A snapshot
+(`snapshot_production`, the daily schedule, the one before a deploy) and
+`save_production_as_template` run `pg_dump` as the **production's own
+PostgreSQL role**, not as the superuser of the production cluster; the
+database a production is seeded or promoted from is dumped by the
+environment's role, or by the role that owns the team's templates. `pg_dump`
+only reads, and on a current PostgreSQL release reading runs nothing a
+database defines — but releases before 15.8 and 16.4 had a flaw that let it
+(CVE-2024-7348), and a PostgreSQL container keeps the release it was created
+with. A dump taken by the database's own role cannot do more than that role
+already can.
+
+Nothing changes in what a snapshot contains or how it is stored. What can
+change is that a dump is refused:
+
+- **Something the role may not read.** Everything in a production's database
+  belongs to its role, unless an older version recreated the container with
+  the superuser's login and Odoo has created tables since. The snapshot then
+  fails with `permission denied for table …`; `reconfigure_production` with no
+  settings changed hands everything back to the role (see
+  [Reconfiguring a production](#reconfiguring-a-production)). A table with
+  `FORCE ROW LEVEL SECURITY` has to let its owner read every row.
+- **No role at all.** A production whose role no longer exists in the cluster
+  is not dumped by the superuser in its place; the error names
+  `reconfigure_production`. A missing `env_credentials.json` alone does not
+  stop a snapshot: the role's name is all a dump needs.
+
+A deploy continues when its pre-update snapshot fails, as before, and logs the
+reason; a failed scheduled snapshot is reported by `production_backup_status`.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
@@ -3520,6 +3985,27 @@ replacing a secret's value in the dashboard, call
 container when one differs and lists the affected variables by name. A
 reference to a deleted secret is not treated as a change; the next recreate
 reports it. `recreate=true` recreates the container even when nothing differs.
+
+**A production without its database role on record.** A production connects
+to PostgreSQL as its own role, recorded in `env_credentials.json` in its
+workspace. If that file is lost, restores are refused and earlier versions
+recreated the container with the cluster superuser's login. Now
+`reconfigure_production(name="erp")` treats it as drift and repairs it during
+the same container swap: with Odoo stopped, the role is made the owner of the
+database and of everything in it, the database is closed to other roles, and
+the credentials are written back. If the old container still connects as the
+role, its password is kept; otherwise the role gets a new one. The response's
+notes say that a role was provisioned. Event triggers that are enabled in the
+database are disabled first, because the hand-over is DDL run by the
+superuser and an event trigger would run its function with those rights (see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind));
+the server log names them. If the role cannot be provisioned — PostgreSQL is not
+reachable, or WAL protection is holding the cluster — nothing is recreated:
+the old container is left in place and started again if it was running. No
+production container is ever created with the superuser's login; if the server
+log names a production among the containers that still hold it, reconfigure it
+and then change the superuser's password as described under
+[Database isolation](environments.md#database-isolation).
 
 Two things reconfigure deliberately does **not** do:
 
@@ -3751,7 +4237,11 @@ Restore is swap-based: the dump is restored into a scratch database and
 swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
-`rollback_production` to the matching commit.
+`rollback_production` to the matching commit. The dump is taken and restored
+by the production's own PostgreSQL role, not by the superuser — see
+[How a production's data is dumped](#how-a-productions-data-is-dumped) and
+[How data is loaded into a production](#how-data-is-loaded-into-a-production)
+for what that excludes.
 
 **Restoring from a dev environment.** The same tool also promotes a dev
 environment's data into an *existing* production — the counterpart of
@@ -4372,7 +4862,12 @@ WebSocket ↔ `docker exec` bridge:
 
 - **Agent CLI** — the agent's own terminal UI (TUI) rendered in the browser,
   exec'd with a PTY at the environment's git checkout. Full access to the
-  agent's native command-line experience.
+  agent's native command-line experience. Closing the window ends that agent
+  process (it gets a hangup, and is killed if it does not exit), so a task
+  still in progress is interrupted; minimize the window to keep it running.
+  The session is tied to its browser connection, like a shell to an SSH
+  connection: reloading the page or losing the connection ends the agent the
+  same way, rather than leaving an unreachable agent at work in the checkout.
 - **Agent Chat** — a structured, framework-free browser chat that speaks the
   **Agent Client Protocol (ACP)** to the agent's adapter. Each environment has
   a durable, bounded **conversation history**: use **History** to resume one of
@@ -4878,6 +5373,23 @@ oduflow call delete_service '{"name":"redis","save_preset":false}'
 # Execute a command inside a service container
 oduflow call run_service_command redis "redis-cli ping"
 ```
+
+### Shell Access
+
+In the dashboard, **Shell** on a service card opens an interactive terminal
+inside the running container — the equivalent of
+`docker exec -it <container> sh`. The shell runs as the image's default user,
+and the window can be minimized to the dock without ending the session.
+Closing the window ends the shell and its foreground job, so an abandoned
+terminal does not leave them running in the container; so does reloading the
+page or losing the connection. Jobs the shell put in
+the background (`worker &`, `nohup ...`) are not stopped, the same as after
+leaving a `docker exec` session; stop them yourself before closing. The
+button is disabled while the service is not running, and an image that ships no
+`sh` (scratch/distroless) reports the exec error instead of a prompt; use
+`run_service_command` with `shell=false` there. Protection does not block the
+shell. A shared single-environment link cannot reach it, like every other
+team-wide surface.
 
 ### Changing a Service
 
@@ -6052,7 +6564,7 @@ are registered only when `[production].enabled = true`.
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
 | `POST` | `/api/environments/{branch}/sync` | Pull and automatically apply code changes |
-| `GET` | `/api/environments/{branch}/modules` | List installed modules (name and version) — the source for the dashboard's Upgrade modules picker |
+| `GET` | `/api/environments/{branch}/modules` | List installed modules (name and version) — the source for the dashboard's Upgrade modules picker. Read as the environment's own database role; an environment without one gets an error ([Database isolation](environments.md#database-isolation)) |
 | `POST` | `/api/environments/{branch}/modules` | Install or upgrade modules. Body: `action` (`install` or `upgrade`), `modules` (comma-separated string). A successful action returns `modules_installed` or `modules_upgraded` plus `container_restarted`; if the follow-up restart fails, the module action remains successful with `container_restarted: false` plus a warning. Every result includes `modules_attempted`; a non-zero Odoo exit code omits the success field and includes the command output |
 | `POST` | `/api/environments/{branch}/switch-branch` | Move the environment onto another git branch, keeping DB, filestore and URL, then apply the difference. Body: `branch`, optional `new_name` to rename the environment at the same time. The response's `env_name` is the name to address it by afterwards |
 | `POST` | `/api/environments/{branch}/update` | Recreate the container while preserving DB and filestore. Optional body: `env_vars` (full replacement of the user-supplied container variables — either an object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas; an empty object/string clears them, an absent key keeps them). The dashboard sends an object, so a value may contain commas, `odoo_image`, `new_name` (rename the environment; a pooled or explicit hostname is kept, its scoped MCP endpoint moves to `/mcp/<new name>`; productions and stack members are refused) |
@@ -6069,7 +6581,7 @@ are registered only when `[production].enabled = true`.
 | `POST` | `/api/environments/{branch}/share` | Start sharing the environment, or return the existing link |
 | `POST` | `/api/environments/{branch}/share/rotate` | Issue a new link; the previous one and every session opened with it stop working |
 | `POST` | `/api/environments/{branch}/share/revoke` | Stop sharing the environment |
-| `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As |
+| `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As. Read as the environment's own database role; an environment without one gets an error instead of a list, and the dashboard shows it |
 | `POST` | `/api/environments/{branch}/connect-as` | Mint an Odoo session for body `user` and return URL/cookie details |
 | `GET` | `/api/environments/{branch}/connect-open?user=` | Mint a session and redirect toward the environment login handoff |
 | `POST` | `/api/environments/{branch}/save-as-template` | Save the environment under body `template_name`; the UI never overwrites an existing template |
@@ -6131,7 +6643,7 @@ would let work in the environment.
 | Protocol | Endpoint | Description |
 |---|---|---|
 | `WebSocket` | `/api/environments/{branch}/terminal` | Interactive `odoo shell` terminal |
-| `WebSocket` | `/api/environments/{branch}/sql` | Interactive `psql` terminal using the environment-scoped DB role |
+| `WebSocket` | `/api/environments/{branch}/sql` | Interactive `psql` terminal using the environment-scoped DB role. `psql` runs in the environment's Odoo container (which must be running and ship `psql`), never in the shared PostgreSQL container — see [Direct SQL](environments.md#direct-sql) |
 | `WebSocket` | `/api/environments/{branch}/agent` | Hosted Agent CLI PTY |
 | `WebSocket` | `/api/environments/{branch}/agent-acp` | Hosted Agent Chat ACP relay |
 
@@ -6185,6 +6697,7 @@ Odoo.sh ingest endpoints accept the import token only in
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
+| `WebSocket` | `/api/services/{name}/shell` | Interactive `sh` terminal inside the service container, as the image's default user (the dashboard's **Shell** button). Same JSON `input`/`resize` frames as the environment terminals |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
 | `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |
@@ -6610,7 +7123,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.
 
 `local_path`
-:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow skips the clone and bind-mounts the directory live, so file edits are visible instantly with no git round-trip. `repo_url` is not required. Gated by `allow_local_path`.
+:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow bind-mounts it read/write instead of cloning. Available only through the local CLI or stdio MCP, with `allow_local_path` enabled. HTTP MCP and the dashboard require a Git source instead, including when a template records a local path.
 
 **Use it when**
 
@@ -6788,6 +7301,13 @@ setup logs together with the resulting environment identity. A completed rename
 is retained, including the agent checkout and its MCP configuration; use the
 reported new name and endpoint even when dependency setup failed.
 
+An environment without a database role of its own (created before
+per-environment database roles existed) is given one during the update: the
+role becomes the owner of the database and its content, and the new container
+connects as it. The setup log says so. If the role cannot be provisioned, the
+update fails and the old container stays. See
+[Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -6813,6 +7333,7 @@ Lock: environment.
 - Bumping the Odoo image (e.g. `odoo:18.0` → `odoo:19.0`) while keeping the data.
 - Changing container environment variables or wiring in a new secret.
 - The container is damaged and you want a fresh one on the same data.
+- A tool refused the environment with `has no scoped database credentials`.
 - The environment's name no longer describes what it holds. (If it should also move onto another branch, use [`switch_branch`](#switch_branch) — it renames along the way.)
 
 ```bash
@@ -6973,6 +7494,12 @@ oduflow call pull_and_apply '{"env_name": "main", "upgrade": "sale_custom"}'
 
 Install Odoo modules (`odoo -i`) in an environment.
 
+After a successful run the module states are read back from the database, as
+the environment's own database role. An environment without one (created
+before per-environment database roles existed) is refused before Odoo runs,
+until [`update_environment`](#update_environment) has given it one — see
+[Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -6995,7 +7522,10 @@ Upgrade already-installed Odoo modules (`odoo -u`).
 
 Unknown or uninstalled modules are rejected with a suggestion to use
 [`install_odoo_modules`](#install_odoo_modules) or
-`pull_and_apply(install=...)` instead.
+`pull_and_apply(install=...)` instead. That check reads the database as the
+environment's own database role, so naming modules on an environment without
+one is refused; `"all"` needs no check and still runs. See
+[Database isolation](environments.md#database-isolation).
 
 Lock: environment.
 { .odu-tool-meta }
@@ -7058,6 +7588,10 @@ oduflow call run_odoo_tests '{
 
 List Odoo modules and their states as a table of name, state and installed
 version. By default only installed modules are shown.
+
+The list is read as the environment's own database role, directly from the
+shared PostgreSQL, so it works on a stopped environment; one without its own
+role is refused (see [Database isolation](environments.md#database-isolation)).
 
 **Parameters**
 
@@ -7384,10 +7918,19 @@ model-level (`@api.model`) methods.
 
 ### `run_db_query`
 
-Execute SQL directly against the environment's PostgreSQL database.
+Execute SQL directly against the environment's PostgreSQL database, as the
+environment's own database role.
 
 Lock: environment.
 { .odu-tool-meta }
+
+The query is run by `psql` inside the environment's Odoo container (as the
+unprivileged `odoo` user, over the Docker network), not inside the shared
+PostgreSQL container — see
+[Direct SQL](environments.md#direct-sql). A stopped environment is started
+first and the response says so. The Odoo image must ship `psql`
+(`postgresql-client`; the official images do), and the environment must have
+its own database role.
 
 **Parameters**
 
@@ -7609,8 +8152,14 @@ container's mapped port.
 ### `reset_admin_password`
 
 Reset the `admin` user's password in the environment's Odoo database. The
-password is hashed with passlib (pbkdf2_sha512) inside the container and
-written to the `res_users` record where `login = 'admin'`.
+Oduflow server hashes the password itself (`pbkdf2_sha512`, 600,000 rounds —
+the format and work factor Odoo 15–20 store) and writes it to the `res_users`
+record where `login = 'admin'`, as the environment's own database role.
+
+Nothing is executed in the Odoo container and the cluster's own credential is
+not used. An environment created before per-environment database roles existed
+is therefore refused with an error; [`update_environment`](#update_environment)
+provisions a role and keeps the database.
 
 Lock: environment.
 { .odu-tool-meta }
@@ -7852,6 +8401,10 @@ new baseline. On re-baseline their filestore changes (the overlay upper layer)
 are **preserved** by default; `reset_env_changes=True` discards them. The source
 environment itself is always reset — its data just became the new template.
 
+The database is dumped by the environment's own PostgreSQL role, not by the
+cluster superuser. An environment without one is refused; run
+[`update_environment`](#update_environment) on it first.
+
 Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=True`.
 { .odu-tool-meta }
 
@@ -7883,7 +8436,8 @@ Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=T
 
 Save a **production's** database and filestore as a dev template. The
 production keeps serving throughout — the dump is a consistent snapshot and
-nothing is stopped or modified on the production side.
+nothing is stopped or modified on the production side. It is taken by the
+production's own PostgreSQL role, not by the cluster superuser.
 
 Overwrite and reset semantics are identical to
 [`save_as_template`](#save_as_template).
@@ -7981,7 +8535,7 @@ Lock: team + template. Destructive and irreversible.
 ### `import_template`
 
 Import or refresh a template from an Odoo database manager, an S3 prefix,
-a local directory, or a local dump file. See [Templates](templates.md)
+a local directory, or a local dump file. Local sources require the local CLI or stdio MCP. See [Templates](templates.md)
 for the raw dump plus `filestore/` layout and migration examples.
 
 Lock: template; overwrite and refresh also take the team lock to protect live
@@ -8065,7 +8619,7 @@ Lock: template throughout; the team lock only for the remount-and-swap, so stagi
 :   *str · required* — Template profile to attach the filestore to.
 
 `source`
-:   *str · required* — A local directory, a local `.zip` / `.tar` / `.tar.gz` archive, an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`.
+:   *str · required* — A local directory or archive (local CLI or stdio MCP only), an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`. Use stdio MCP only with trusted local clients: file access uses the Oduflow process's host permissions, not the team's token.
 
 `reset_env_changes`
 :   *bool · default `False`* — Discard environments' filestore deltas (destructive).
@@ -9195,8 +9749,9 @@ domains, the Odoo image, the deployed branch or repository URL, the git
 credential user, the extra addon repos, the user environment variables, and
 the server mode. A call that changes nothing still recreates a container whose
 state drifted from the record (missing container or checkout, outdated
-Traefik routing, or a team secret whose value changed since the container was
-created).
+Traefik routing, a team secret whose value changed since the container was
+created, or a production without a database role of its own on record — see
+[Reconfiguring a production](production.md#reconfiguring-a-production)).
 
 Lock: production.
 { .odu-tool-meta }
@@ -9452,7 +10007,11 @@ Both require a `[backup]` section in `oduflow.toml`.
 ### `snapshot_production`
 
 Take a snapshot of a production to S3: a database dump, a deduplicated
-filestore revision, and a manifest recording the deployed commit sha.
+filestore revision, and a manifest recording the deployed commit sha. The
+dump is taken by the production's own PostgreSQL role, not by the cluster
+superuser; if that role may not read something
+(`permission denied for table …`), run
+[`reconfigure_production`](#reconfigure_production) and retry.
 
 Lock: production + backup store.
 { .odu-tool-meta }
@@ -10871,9 +11430,11 @@ database size.
 
 A second base-level directory, `{data_dir}/pg_exchange/`, is mounted the same
 way (as `/exchange`). Database dumps are staged in `pg_exchange/team_{id}/`
-so `pg_dump` writes them once, straight to their final filesystem, and a
-restore reads them in place instead of having a full-size copy pushed into
-the PostgreSQL container's writable layer. Give it the **same XFS project ID**
+so `pg_dump` writes them once, straight to their final filesystem, instead of
+a full-size copy passing through the PostgreSQL container's writable layer.
+(Restores do not use the mount: a dump is read from the host by a separate
+restore client, see [How a dump is loaded](templates.md#how-a-dump-is-loaded).)
+Give it the **same XFS project ID**
 as the rest of the team: besides keeping the accounting right, XFS refuses to
 rename a file into a project-inheriting directory with a different ID, which
 would break moving a finished dump into the team's templates directory.
@@ -10916,6 +11477,11 @@ from the exact team/database pair, so two teams can never end up sharing a
 database or a role.
 - Environment containers: `oduflow-{team_id}-{env}-{type}` (e.g. `oduflow-1-feature-login-odoo`)
 - Service containers: `oduflow-{team_id}-svc-{name}` (e.g. `oduflow-1-svc-redis`)
+
+Each database has one role that may connect to it — its environment's,
+template's, production's or service's own. Roles of other environments and
+teams share the PostgreSQL server but are refused at connection time; see
+[Database isolation](environments.md#database-isolation).
 
 Containers are additionally labeled with `oduflow.team={team_id}`; listing and
 filtering are label-based, and container names are team-scoped so two teams
@@ -12692,6 +13258,152 @@ This is intentional. A template's filestore is the overlay **lower layer** for
 every environment built from it; deleting the template would pull the base out
 from under those live overlays and break them. Delete the listed environments
 first (or keep the template). The same guard applies to renaming a template.
+
+---
+
+## A template import fails with `permission denied to create extension`
+
+```
+pg_restore: error: could not execute query: ERROR:  permission denied to create extension "postgis"
+HINT:  Must be superuser to create this extension.
+```
+
+Template dumps are loaded by a restricted PostgreSQL role, never by the
+cluster superuser, so a dump can only create the extensions PostgreSQL marks
+as trusted (`pg_trgm`, `unaccent` and the like). The same applies to
+`must be owner of extension` and `must be superuser` errors during an import,
+and to `permission denied to create event trigger`.
+See [How a dump is loaded](templates.md#how-a-dump-is-loaded) for what is
+allowed and how to make a further extension available.
+
+---
+
+## Creating or restoring a production fails with `permission denied to create extension`
+
+`create_production` with `template_name` or `from_environment`, and
+`restore_production`, load the data as the production's own PostgreSQL role,
+never as the cluster superuser. A database that contains an extension
+PostgreSQL does not mark as trusted (`postgis`, `pg_stat_statements`,
+`dblink`, …), or anything else only a superuser may create, fails to load; a
+restore leaves the production's previous data in place. Use a
+`[database].image` whose control file for that extension sets
+`trusted = true`. See
+[How data is loaded into a production](production.md#how-data-is-loaded-into-a-production).
+
+The same rule holds for a PostgreSQL upgrade, which checks it before changing
+anything — see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
+## A dump fails with `permission denied`
+
+```
+Command 'pg_dump' failed (exit 1): pg_dump: error: query failed: ERROR:  permission denied for table x
+```
+
+`save_as_template`, `save_production_as_template`, production snapshots and
+the dump that seeds or promotes a production run `pg_dump` as the database's
+own PostgreSQL role, never as the cluster superuser, so that role has to be
+able to read everything in the database. It owns everything Odoo created
+through it. What it does not own was created while an older version ran the
+container with the superuser's login: recreate the container
+(`update_environment`, or `reconfigure_production` with no settings changed
+for a production), which hands every table, sequence, view and function back
+to the role, then retry. A table with `FORCE ROW LEVEL SECURITY` has to let
+its owner read every row (`query would be affected by row-level security
+policy`). See
+[How a database is dumped](templates.md#how-a-database-is-dumped).
+
+During a PostgreSQL upgrade the same failure stops the upgrade before anything
+is removed; see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
+## `Dumping database ... as the PostgreSQL superuser on PostgreSQL ...` in the server log
+
+The superuser still dumps a template database that an older version loaded
+(when a production is created from it), and the databases named in
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE` during a PostgreSQL upgrade. The
+warning says the cluster runs a release without the fix for CVE-2024-7348
+(before 15.8 or 16.4), where an open session in a database being dumped could
+run SQL as whoever dumps it. No user's role can connect to a template
+database, and the databases named for an upgrade are ones you declared
+trusted, so the dump went ahead. To clear it, move the cluster to a current
+minor release of its PostgreSQL image, and import or publish the template
+again so that it stops being the superuser's.
+
+---
+
+## `Disabled N event trigger(s) in database ...` in the server log
+
+The database was copied from a template that an older version loaded as the
+PostgreSQL superuser, and that dump created an event trigger. An event trigger
+runs its function with the rights of whoever issues a DDL statement, Oduflow's
+superuser included, so Oduflow disabled it before running its own DDL there
+(handing the copy to its role, or giving an old environment or production a
+role). Nothing else in the database was changed, and the trigger is still
+there, disabled. Rebuild the template to stop new environments from getting a
+copy. See
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind),
+also for the `Database ... holds what only a PostgreSQL superuser can create
+or still owns` warning written on each start.
+
+---
+
+## `Environment '...' has no scoped database credentials`
+
+The environment was created before each environment had its own PostgreSQL
+role, so its workspace has no `env_credentials.json`. Oduflow reads, writes
+and dumps an environment's database only as that role and does not substitute
+the cluster superuser, so module installs and upgrades, the module and
+**Connect As** lists, direct SQL, the Odoo shell, tests,
+`reset_admin_password` and `save_as_template` are refused for it. Run `update_environment` on it: the
+container is recreated with a role of its own, and the database and filestore
+are kept. See [Database isolation](environments.md#database-isolation).
+
+For a production the error reads `Production '<name>' has no scoped database
+credentials` (its `env_credentials.json` is gone); `reconfigure_production`
+with no settings changed gives it its role back.
+
+---
+
+## `... run with the PostgreSQL superuser's credentials` in the server log
+
+Environments created before per-environment roles existed were given the
+cluster superuser's login, and their containers still hold it. Update each
+container named in the warning (`update_environment`, or
+`reconfigure_production` for a production), then change the superuser's
+password. The steps are in
+[Database isolation](environments.md#database-isolation).
+
+---
+
+## `... has no PostgreSQL role of its own, and one could not be provisioned`
+
+`update_environment` (or `reconfigure_production`) found no database role on
+record and could not create one; the text after the colon is PostgreSQL's
+reason. Nothing was recreated: the old container is still there, and running
+again if it was running. Fix the cause — most often the database server is not
+running, or the environment's database no longer exists — and repeat the call.
+An environment whose database is gone can only be rebuilt with
+`recreate_environment`.
+
+---
+
+## A role of your own can no longer connect to an environment's database
+
+```
+FATAL:  permission denied for database "oduflow_1_main"
+DETAIL:  User does not have CONNECT privilege.
+```
+
+Oduflow revokes PostgreSQL's default "every role may connect" from the
+databases it manages, at creation and on each server start, so that one
+tenant's role cannot open another tenant's database. A database's own role is
+not affected. Grant a role you added yourself what it needs —
+`GRANT CONNECT ON DATABASE "oduflow_1_main" TO "reporting";` — and repeat it
+after the environment is recreated, since a new database starts closed again.
+See [Database isolation](environments.md#database-isolation).
 
 ---
 

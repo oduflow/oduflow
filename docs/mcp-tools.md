@@ -291,7 +291,7 @@ are in use. Move it with [`switch_branch`](#switch_branch), pass a different
 :   *str · default empty* — Build this environment from a production's real data (database + filestore + repo/image/extra addons). Mutually exclusive with `template_name` and `local_path`. The copy goes through one managed `prod-<name>` template, published on first use and reused afterwards.
 
 `local_path`
-:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow skips the clone and bind-mounts the directory live, so file edits are visible instantly with no git round-trip. `repo_url` is not required. Gated by `allow_local_path`.
+:   *str · default empty* — **Local fast path.** Absolute path to a checkout on this host: Oduflow bind-mounts it read/write instead of cloning. Available only through the local CLI or stdio MCP, with `allow_local_path` enabled. HTTP MCP and the dashboard require a Git source instead, including when a template records a local path.
 
 **Use it when**
 
@@ -469,6 +469,13 @@ setup logs together with the resulting environment identity. A completed rename
 is retained, including the agent checkout and its MCP configuration; use the
 reported new name and endpoint even when dependency setup failed.
 
+An environment without a database role of its own (created before
+per-environment database roles existed) is given one during the update: the
+role becomes the owner of the database and its content, and the new container
+connects as it. The setup log says so. If the role cannot be provisioned, the
+update fails and the old container stays. See
+[Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -494,6 +501,7 @@ Lock: environment.
 - Bumping the Odoo image (e.g. `odoo:18.0` → `odoo:19.0`) while keeping the data.
 - Changing container environment variables or wiring in a new secret.
 - The container is damaged and you want a fresh one on the same data.
+- A tool refused the environment with `has no scoped database credentials`.
 - The environment's name no longer describes what it holds. (If it should also move onto another branch, use [`switch_branch`](#switch_branch) — it renames along the way.)
 
 ```bash
@@ -654,6 +662,12 @@ oduflow call pull_and_apply '{"env_name": "main", "upgrade": "sale_custom"}'
 
 Install Odoo modules (`odoo -i`) in an environment.
 
+After a successful run the module states are read back from the database, as
+the environment's own database role. An environment without one (created
+before per-environment database roles existed) is refused before Odoo runs,
+until [`update_environment`](#update_environment) has given it one — see
+[Database isolation](environments.md#database-isolation).
+
 Lock: environment.
 { .odu-tool-meta }
 
@@ -676,7 +690,10 @@ Upgrade already-installed Odoo modules (`odoo -u`).
 
 Unknown or uninstalled modules are rejected with a suggestion to use
 [`install_odoo_modules`](#install_odoo_modules) or
-`pull_and_apply(install=...)` instead.
+`pull_and_apply(install=...)` instead. That check reads the database as the
+environment's own database role, so naming modules on an environment without
+one is refused; `"all"` needs no check and still runs. See
+[Database isolation](environments.md#database-isolation).
 
 Lock: environment.
 { .odu-tool-meta }
@@ -739,6 +756,10 @@ oduflow call run_odoo_tests '{
 
 List Odoo modules and their states as a table of name, state and installed
 version. By default only installed modules are shown.
+
+The list is read as the environment's own database role, directly from the
+shared PostgreSQL, so it works on a stopped environment; one without its own
+role is refused (see [Database isolation](environments.md#database-isolation)).
 
 **Parameters**
 
@@ -1065,10 +1086,19 @@ model-level (`@api.model`) methods.
 
 ### `run_db_query`
 
-Execute SQL directly against the environment's PostgreSQL database.
+Execute SQL directly against the environment's PostgreSQL database, as the
+environment's own database role.
 
 Lock: environment.
 { .odu-tool-meta }
+
+The query is run by `psql` inside the environment's Odoo container (as the
+unprivileged `odoo` user, over the Docker network), not inside the shared
+PostgreSQL container — see
+[Direct SQL](environments.md#direct-sql). A stopped environment is started
+first and the response says so. The Odoo image must ship `psql`
+(`postgresql-client`; the official images do), and the environment must have
+its own database role.
 
 **Parameters**
 
@@ -1290,8 +1320,14 @@ container's mapped port.
 ### `reset_admin_password`
 
 Reset the `admin` user's password in the environment's Odoo database. The
-password is hashed with passlib (pbkdf2_sha512) inside the container and
-written to the `res_users` record where `login = 'admin'`.
+Oduflow server hashes the password itself (`pbkdf2_sha512`, 600,000 rounds —
+the format and work factor Odoo 15–20 store) and writes it to the `res_users`
+record where `login = 'admin'`, as the environment's own database role.
+
+Nothing is executed in the Odoo container and the cluster's own credential is
+not used. An environment created before per-environment database roles existed
+is therefore refused with an error; [`update_environment`](#update_environment)
+provisions a role and keeps the database.
 
 Lock: environment.
 { .odu-tool-meta }
@@ -1533,6 +1569,10 @@ new baseline. On re-baseline their filestore changes (the overlay upper layer)
 are **preserved** by default; `reset_env_changes=True` discards them. The source
 environment itself is always reset — its data just became the new template.
 
+The database is dumped by the environment's own PostgreSQL role, not by the
+cluster superuser. An environment without one is refused; run
+[`update_environment`](#update_environment) on it first.
+
 Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=True`.
 { .odu-tool-meta }
 
@@ -1564,7 +1604,8 @@ Lock: team + template. Destructive when `overwrite=True` or `reset_env_changes=T
 
 Save a **production's** database and filestore as a dev template. The
 production keeps serving throughout — the dump is a consistent snapshot and
-nothing is stopped or modified on the production side.
+nothing is stopped or modified on the production side. It is taken by the
+production's own PostgreSQL role, not by the cluster superuser.
 
 Overwrite and reset semantics are identical to
 [`save_as_template`](#save_as_template).
@@ -1662,7 +1703,7 @@ Lock: team + template. Destructive and irreversible.
 ### `import_template`
 
 Import or refresh a template from an Odoo database manager, an S3 prefix,
-a local directory, or a local dump file. See [Templates](templates.md)
+a local directory, or a local dump file. Local sources require the local CLI or stdio MCP. See [Templates](templates.md)
 for the raw dump plus `filestore/` layout and migration examples.
 
 Lock: template; overwrite and refresh also take the team lock to protect live
@@ -1746,7 +1787,7 @@ Lock: template throughout; the team lock only for the remount-and-swap, so stagi
 :   *str · required* — Template profile to attach the filestore to.
 
 `source`
-:   *str · required* — A local directory, a local `.zip` / `.tar` / `.tar.gz` archive, an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`.
+:   *str · required* — A local directory or archive (local CLI or stdio MCP only), an `rsync://` URL, or an SSH-style rsync source such as `user@host:/path`. Use stdio MCP only with trusted local clients: file access uses the Oduflow process's host permissions, not the team's token.
 
 `reset_env_changes`
 :   *bool · default `False`* — Discard environments' filestore deltas (destructive).
@@ -2876,8 +2917,9 @@ domains, the Odoo image, the deployed branch or repository URL, the git
 credential user, the extra addon repos, the user environment variables, and
 the server mode. A call that changes nothing still recreates a container whose
 state drifted from the record (missing container or checkout, outdated
-Traefik routing, or a team secret whose value changed since the container was
-created).
+Traefik routing, a team secret whose value changed since the container was
+created, or a production without a database role of its own on record — see
+[Reconfiguring a production](production.md#reconfiguring-a-production)).
 
 Lock: production.
 { .odu-tool-meta }
@@ -3133,7 +3175,11 @@ Both require a `[backup]` section in `oduflow.toml`.
 ### `snapshot_production`
 
 Take a snapshot of a production to S3: a database dump, a deduplicated
-filestore revision, and a manifest recording the deployed commit sha.
+filestore revision, and a manifest recording the deployed commit sha. The
+dump is taken by the production's own PostgreSQL role, not by the cluster
+superuser; if that role may not read something
+(`permission denied for table …`), run
+[`reconfigure_production`](#reconfigure_production) and retry.
 
 Lock: production + backup store.
 { .odu-tool-meta }

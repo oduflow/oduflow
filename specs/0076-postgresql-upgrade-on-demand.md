@@ -82,3 +82,19 @@ migration `0009-postgresql16` remains in the registry as a no-op.
   manual trigger by changing the image; carry over service and production
   databases; environments deleted beforehand; refuse unknown databases;
   delete dumps after success; restore templates from their on-disk dumps.
+- 2026-11-19: carried databases are restored by their own role instead of the
+  superuser. The superuser replays only the database-level entries
+  (`pg_restore --create` filtered to a schema that cannot exist) and sets the
+  owner from the credential records; the role restores the content with
+  `--no-owner`. The plan additionally refuses a carried database without a
+  scoped role and an extension the new image does not mark trusted;
+  `ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE` is the operator's explicit exception.
+  Rationale in [[0013-per-environment-db-credentials-and-sanitization]].
+- 2026-11-19: carried databases are dumped by their own role too; the old
+  cluster is the one most likely to run a release with CVE-2024-7348. A dump
+  the role cannot take fails while every old cluster is intact. The plan
+  refuses a database with a subscription or a user mapping, which a role's
+  `pg_dump` would leave out without failing, and the operator's exception now
+  covers the dump as well as the restore. The helper container is given the
+  password of the role its command connects as (none for `pg_restore
+  --list`) and keeps one capability.

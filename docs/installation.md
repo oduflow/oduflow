@@ -188,8 +188,9 @@ Both clusters are upgraded together. Prepare the server first:
 
 On startup, before changing anything, Oduflow checks that no environment
 remains, that the clusters hold only databases it can restore, that the new
-image provides every extension those databases use, and that there is room for
-the dumps. It then stops services and production Odoo containers, and dumps
+image provides every extension those databases use and marks the ones in
+production and service databases as trusted, and that there is room for the
+dumps. It then stops services and production Odoo containers, and dumps
 service databases and production databases (including productions deleted
 with their data kept) together with all PostgreSQL roles and their passwords.
 With `[backup]` configured, it then deletes the old WAL-G archive. Only then
@@ -200,6 +201,46 @@ verified), and a new base backup is taken shortly afterwards. Template
 databases are restored from their dumps on disk last, and the dumps are
 deleted. Productions and services are down while their databases are dumped
 and restored.
+
+Each production and service database is dumped out of the old cluster and
+restored into the new one by its own PostgreSQL role, the one recorded in its
+credentials file, never by the superuser: restoring a database runs what its
+content defines, and the old cluster may run a PostgreSQL release in which
+dumping one could too. The superuser dumps only the roles, and recreates only
+the database itself (locale, tablespace, `ALTER DATABASE` settings, privileges
+on the database), making that role its owner. Everything inside ends up owned
+by that role, and privileges are restored as recorded. Three consequences are
+checked before anything is changed:
+
+- an extension that only a superuser may create (for example `postgis` or
+  `pg_stat_statements`) must be marked `trusted = true` in the new image's
+  control file, or be dropped first;
+- a database whose credentials file is missing has no role to dump and
+  restore it. For a production, `reconfigure_production` with no settings
+  changed provisions the role again and writes the file;
+- a database that contains a subscription or a user mapping is refused:
+  `pg_dump` leaves those out of a dump it does not take as a superuser;
+- a database that contains an event trigger is refused: its dump includes the
+  trigger, and only a superuser could create it again in the new cluster. Drop
+  it (`DROP EVENT TRIGGER <name>;`) unless you need it — one that came with a
+  template loaded by an older version is described under
+  [What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
+The role also has to be able to read everything in its database. If it cannot
+— a table that still belongs to another role, a table with
+`FORCE ROW LEVEL SECURITY` — the dump fails with PostgreSQL's reason, the
+upgrade stops, the services and productions it had stopped are started again,
+and nothing has been removed.
+
+If you trust everything a database contains, you can let the superuser dump
+and restore it as before by starting Oduflow with
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
+environment. The same variable is the way out when a restore stops on content
+that only a superuser can recreate (a publication `FOR ALL TABLES`, a function
+in an untrusted language): the error names the database and its kept dump; set
+the variable and restart to resume. On PostgreSQL 17 and newer the superuser
+restores such a database with event triggers switched off for the session, so
+one that the archive creates does not fire during the rest of the restore.
 
 A failure before an old cluster is removed, including a refused S3 delete,
 leaves everything as it was, and setting the image back cancels the upgrade; if
@@ -387,7 +428,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[server].bind` | `0.0.0.0` | HTTP server listener address. The legacy key `[server].host` remains accepted with a deprecation warning; if both are present they must have the same value |
 | `[server].host` | *(legacy)* | Deprecated alias for `[server].bind` |
 | `[server].port` | `8000` | HTTP server port |
-| `[server].allow_local_path` | `true` | Allow trusted local-development live-mounts that bind a host checkout read/write. Set `false` on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required |
+| `[server].allow_local_path` | `true` | Allow local CLI and stdio MCP to bind a host checkout read/write. HTTP MCP and the dashboard cannot create or rebuild live-mounted environments, regardless of this setting |
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
 | `[server].trace` | `false` | Enable detailed trace logging for git analysis and environment operations |
 | `[server].disable_telemetry` | `false` | Disable anonymous usage telemetry (see [Telemetry](#telemetry)) |

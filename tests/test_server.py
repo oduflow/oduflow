@@ -65,9 +65,10 @@ class TestMCPBootstrapInstructions:
 
 
 class TestCLIInitDestroy:
-    def test_cli_transport_short_flag_starts_http(self, tmp_path):
+    def test_cli_transport_short_flag_starts_http(self, tmp_path, monkeypatch):
         from oduflow import server
 
+        monkeypatch.setattr(server.settings_module, "TRANSPORT", "stdio")
         settings = replace(TEST_SETTINGS, base_data_dir=str(tmp_path))
         with (
             patch.object(sys, "argv", ["oduflow", "--no-telemetry", "-t", "http"]),
@@ -1855,6 +1856,86 @@ class TestResetAdminPasswordTool:
         mock_reset.side_effect = NotFoundError("Environment 'xyz' does not exist.")
         with pytest.raises(ToolError, match="does not exist"):
             _get_tool_fn("reset_admin_password")(env_name="xyz")
+
+
+class TestRunDbQueryTool:
+    """psql runs in the environment's Odoo container (never in the shared
+    PostgreSQL one), which makes run_db_query a container-level tool."""
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.run_db_query")
+    def test_output_is_unchanged_for_a_running_environment(
+        self, mock_query, mock_ensure
+    ):
+        mock_query.return_value = {"exit_code": 0, "output": "id,name\n1,Acme\n"}
+
+        result = _get_tool_fn("run_db_query")(env_name="main", query="SELECT 1")
+
+        assert result == "\n\nOutput:\nid,name\n1,Acme\n"
+        mock_query.assert_called_once_with(
+            TEST_SETTINGS, TEST_TEAM, "main", "SELECT 1", "csv"
+        )
+        mock_ensure.assert_called_once_with(TEST_SETTINGS, "main", TEST_TEAM)
+
+    @patch("oduflow.server.activity.mark_started")
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=True)
+    @patch("oduflow.docker_ops.odoo_ops.run_db_query")
+    def test_stopped_environment_is_started_and_noted(
+        self, mock_query, mock_ensure, mock_started
+    ):
+        mock_query.return_value = {"exit_code": 0, "output": "id\n1\n"}
+
+        result = _get_tool_fn("run_db_query")(
+            env_name="main", query="SELECT 1", output_format="human"
+        )
+
+        assert result == (
+            "Note: environment was stopped; started it for this call."
+            "\n\nOutput:\nid\n1\n"
+        )
+        assert mock_query.call_args.args[-1] == "human"
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running", return_value=False)
+    @patch("oduflow.docker_ops.odoo_ops.run_db_query")
+    def test_rows_are_still_truncated(self, mock_query, mock_ensure):
+        rows = "\n".join(["id", *(str(i) for i in range(5))])
+        mock_query.return_value = {"exit_code": 0, "output": rows}
+
+        result = _get_tool_fn("run_db_query")(
+            env_name="main", query="SELECT id FROM t", max_rows=2
+        )
+
+        assert result.endswith("id\n0\n1\n... (3 more rows, add LIMIT to your query)")
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.run_db_query")
+    def test_production_is_rejected_before_the_wake(self, mock_query, mock_ensure):
+        with pytest.raises(ToolError, match="production environment"):
+            _get_tool_fn("run_db_query")(env_name="prod-erp", query="SELECT 1")
+
+        mock_ensure.assert_not_called()
+        mock_query.assert_not_called()
+
+    @patch("oduflow.docker_ops.env_ops.ensure_running")
+    @patch("oduflow.docker_ops.odoo_ops.run_db_query")
+    @patch("oduflow.docker_ops.odoo_ops.run_internal_db_query")
+    def test_module_listing_stays_a_read_that_never_wakes(
+        self, mock_internal, mock_query, mock_ensure
+    ):
+        """Its query is built by the server, so it keeps running next to
+        PostgreSQL and works on a stopped environment."""
+        mock_internal.return_value = {"exit_code": 0, "output": "name,state\n"}
+
+        result = _get_tool_fn("list_installed_modules")(
+            env_name="main", name_filter="sale"
+        )
+
+        assert result == "name,state\n"
+        query = mock_internal.call_args.args[-1]
+        assert query.startswith("SELECT name, state, latest_version FROM ")
+        assert "name ILIKE '%sale%'" in query
+        mock_query.assert_not_called()
+        mock_ensure.assert_not_called()
 
 
 class TestConnectAsUserTool:

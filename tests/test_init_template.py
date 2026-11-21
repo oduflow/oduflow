@@ -31,7 +31,9 @@ def _run_init(tmp_path, builder, sql):
         stack.enter_context(patch.object(so, "ensure_team_network", return_value="n"))
         stack.enter_context(patch.object(so, "_db_exists", return_value=False))
         stack.enter_context(
-            patch.object(so, "_exec_sql", side_effect=lambda c, s, q: sql.append(q))
+            patch.object(
+                so, "_exec_sql", side_effect=lambda c, s, q, *a, **kw: sql.append(q)
+            )
         )
         so.init_template(settings, team, "base", "odoo:19.0", force=True)
 

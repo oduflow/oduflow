@@ -27,11 +27,13 @@ import docker
 from oduflow import production_registry
 from oduflow.docker_ops import production_ops, system_ops
 from oduflow.errors import ConflictError, ExternalCommandError, NotFoundError
-from oduflow.naming import get_template_db_name
+from oduflow.naming import get_template_db_name, prod_env_name
 from oduflow.settings import Settings, TeamSettings
 
 PROD = "erp"
 TPL = "prod-erp"
+# The production's scoped PostgreSQL role, which is what dumps it.
+PROD_ROLE = "u_1_prod-erp"
 
 
 # =============================================================================
@@ -132,6 +134,9 @@ def _publish_patches(stack, client, existing_dbs, *, reload_side_effect=None):
     )
     mocks["_wait_pg_ready"] = stack.enter_context(
         patch.object(system_ops, "_wait_pg_ready")
+    )
+    mocks["scoped_dump_role"] = stack.enter_context(
+        patch.object(system_ops, "scoped_dump_role", return_value=PROD_ROLE)
     )
     mocks["_stream_exec_to_file"] = stack.enter_context(
         patch.object(
@@ -339,8 +344,16 @@ class TestPublishProductionAsTemplate:
         stream.assert_called_once()
         assert stream.call_args.args[1] is prod_container
         cmd = stream.call_args.args[2]
-        assert cmd[:4] == ["pg_dump", "-U", settings.db_user, "-Fc"]
-        assert cmd[-1] == prod_db
+        # Dumped by the production's own role, looked up in the production
+        # cluster — never by that cluster's superuser.
+        assert cmd == ["pg_dump", "-U", PROD_ROLE, "-Fc", prod_db]
+        mocks["scoped_dump_role"].assert_called_once_with(
+            client,
+            settings,
+            team,
+            prod_env_name(PROD),
+            container_name=settings.prod_db_container,
+        )
         assert not any(
             call.args and call.args[0][0] == "pg_dump"
             for call in prod_container.exec_run.call_args_list
@@ -370,6 +383,29 @@ class TestPublishProductionAsTemplate:
         mocks["reload_template"].assert_not_called()
         # Nothing half-published is left behind — not even the directory, which
         # readers would otherwise take for a template.
+        assert not os.path.exists(team.get_template_dir(TPL))
+
+    def test_a_production_without_a_role_is_refused_before_anything_is_touched(
+        self, settings, team
+    ):
+        from contextlib import ExitStack
+
+        from oduflow.env_credentials import MissingCredentialsError
+
+        _record(team)
+        prod_db = production_ops.prod_db_name(team, PROD)
+        client = MagicMock()
+        client.containers.get.return_value = _prod_container()
+
+        with ExitStack() as stack:
+            mocks = _publish_patches(stack, client, {prod_db})
+            mocks["scoped_dump_role"].side_effect = MissingCredentialsError("no role")
+            with pytest.raises(MissingCredentialsError):
+                system_ops.publish_production_as_template(settings, team, PROD, TPL)
+
+        # No superuser dump in the role's place, and no trace of a template.
+        mocks["_stream_exec_to_file"].assert_not_called()
+        mocks["reload_template"].assert_not_called()
         assert not os.path.exists(team.get_template_dir(TPL))
 
     def test_failed_restore_leaves_no_template_directory(self, settings, team):

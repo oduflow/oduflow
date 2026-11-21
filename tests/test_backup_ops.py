@@ -208,9 +208,9 @@ def _restore_patches(manifest, *, container=None):
             patch.object(backup_ops, "get_client", return_value=client),
             patch.object(production_ops, "_get_container", return_value=container),
             patch.object(backup_ops.s3_client, "make_client", return_value=s3),
-            patch.object(backup_ops, "_copy_file_to_container"),
+            patch.object(backup_ops, "restore_archive_as_role"),
             patch.object(
-                backup_ops,
+                production_ops,
                 "load_credentials",
                 return_value={"pg_user": "prod_user", "pg_password": "pw"},
             ),
@@ -332,7 +332,7 @@ def _env_restore_patches(*, container=None, source_env=None, copy_result=None):
             patch.object(production_ops, "wait_production_healthy", return_value=True),
             patch.object(production_ops, "append_deploy"),
             patch.object(
-                backup_ops,
+                production_ops,
                 "load_credentials",
                 return_value={"pg_user": "prod_user", "pg_password": "pw"},
             ),
@@ -357,7 +357,15 @@ def test_env_restore_swaps_staged_pair_without_backup_config(tmp_path):
         )
 
     statements = [call.args[2] for call in sql.call_args_list]
-    assert f'CREATE DATABASE "{db_name}__restore";' in statements
+    # The staged database belongs to the production's role from the start.
+    assert [
+        call.args[0][-1]
+        for call in _client.containers.get.return_value.exec_run.call_args_list
+    ] == [
+        f'CREATE DATABASE "{db_name}__restore" OWNER "prod_user";',
+        f'REVOKE ALL ON DATABASE "{db_name}__restore" FROM PUBLIC;',
+        'ALTER SCHEMA public OWNER TO "prod_user";',
+    ]
     assert f'ALTER DATABASE "{db_name}" RENAME TO "{db_name}__old";' in statements
     assert f'ALTER DATABASE "{db_name}__restore" RENAME TO "{db_name}";' in statements
     prod_container.stop.assert_called_once_with()

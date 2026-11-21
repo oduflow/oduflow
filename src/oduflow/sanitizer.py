@@ -77,7 +77,6 @@ def _run_scripts_from_dir(
             env_name,
             team.workspaces_dir,
             settings.db_user,
-            settings.db_password,
             allow_fallback=False,
         )
     except MissingCredentialsError:

@@ -887,7 +887,7 @@ def _promote_and_reload(
         )
         restore_seconds = result.get("restore_seconds", 0)
         manifest = system_ops._read_template_manifest_from_db(
-            client, settings, str(result["template_db"])
+            client, settings, team, str(result["template_db"])
         )
         major = str(manifest.get("major_version") or "")
         metadata["odoo_version"] = manifest.get("version", "")
@@ -1565,7 +1565,7 @@ def refresh_from_own_files(
 
     result = system_ops.reload_template(settings, team, template_name=template_name)
     manifest = system_ops._read_template_manifest_from_db(
-        client, settings, str(result["template_db"])
+        client, settings, team, str(result["template_db"])
     )
     major = str(manifest.get("major_version") or "")
     metadata["odoo_version"] = manifest.get("version", "")

@@ -421,6 +421,16 @@ def create_service(
     is_new_service = False
     try:
         existing = client.containers.get(container_name)
+        if not _is_team_service_container(settings, team, existing):
+            # The container name is taken, but not by this team's service (see
+            # find_service_container). Docker would refuse the name anyway;
+            # pointing at restart/update/delete_service here would be wrong,
+            # as none of them will touch a container this team does not own.
+            raise ConflictError(
+                f"Service name '{name}' is not available: its container name "
+                "is already used by another Oduflow resource. Choose a "
+                "different service name."
+            )
         if existing.status == "running":
             raise ConflictError(f"Service '{name}' already exists and is running.")
         # Docker would refuse the name with a 409 that quotes the container
@@ -618,9 +628,7 @@ def create_service(
             # The SDK creates the container before starting it, so a failed
             # start leaves a `created` container holding the name. Drop it,
             # otherwise the retry this error recommends hits a name conflict.
-            _remove_stale_service_container(
-                client, container_name, settings.managed_label
-            )
+            _remove_stale_service_container(client, settings, team, name)
             _raise_service_start_error(
                 name, port, exc, retry_with="create_service again"
             )
@@ -659,30 +667,72 @@ def create_service(
 
 
 def _remove_stale_service_container(
-    client: Any, container_name: str, managed_label: str
+    client: Any, settings: Settings, team: TeamSettings, name: str
 ) -> None:
     """Best-effort removal of a service container that never started.
 
-    Only an Oduflow-managed ``created`` container is touched: that is what the
-    SDK leaves behind when ``start`` fails. A stopped (``exited``) container or
-    one without our label is someone's service and is left alone, so a name
-    clash surfaces instead of deleting it.
+    Only this team's own, Oduflow-managed ``created`` service container is
+    touched: that is what the SDK leaves behind when ``start`` fails, and it
+    already carries every label, as Docker sets them at create time. A stopped
+    (``exited``) container is someone's service and is left alone, so a name
+    clash surfaces instead of deleting it. So is a container of another team
+    or of an environment that merely shares the name (see
+    :func:`find_service_container`): a failed ``run`` may be exactly that name
+    conflict, with the other container caught between its create and start.
     """
     try:
-        stale = client.containers.get(container_name)
+        stale = find_service_container(client, settings, team, name)
         if stale.status != "created":
             return
-        if (stale.labels or {}).get(managed_label) != "true":
+        if stale.labels.get(settings.managed_label) != "true":
             return
         stale.remove(force=True)
-    except docker.errors.NotFound:
+    except (NotFoundError, docker.errors.NotFound):
         pass
     except docker.errors.DockerException:
         logger.warning(
             "Could not remove failed service container %s",
-            container_name,
+            get_service_container_name(name, settings.prefix, team.team_id),
             exc_info=True,
         )
+
+
+def _is_team_service_container(
+    settings: Settings, team: TeamSettings, container: Any
+) -> bool:
+    """Whether *container* is a service of *team*, judged by its labels."""
+    labels = container.labels or {}
+    return bool(
+        labels.get("oduflow.service")
+        and labels.get(settings.team_label) == team.team_id
+    )
+
+
+def find_service_container(
+    client: Any, settings: Settings, team: TeamSettings, name: str
+) -> Any:
+    """Return *team*'s service container *name*, or raise ``NotFoundError``.
+
+    A name alone does not prove ownership, so the labels are checked too:
+
+    - ``oduflow.service``: an environment named ``svc`` owns
+      ``<prefix><team>-svc-odoo`` as well, and that container is no service;
+    - the team label: team ids and service names may both contain ``-svc-``,
+      so team ``a``'s name ``b-svc-x`` resolves to the very container of team
+      ``a-svc-b``'s service ``x``.
+
+    Every operation that acts on an existing service resolves it through this
+    function; a container that fails the check is reported exactly like a
+    missing one, so the caller learns nothing about another team's services.
+    """
+    container_name = get_service_container_name(name, settings.prefix, team.team_id)
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        raise NotFoundError(f"Service '{name}' not found")
+    if not _is_team_service_container(settings, team, container):
+        raise NotFoundError(f"Service '{name}' not found")
+    return container
 
 
 def _protection_path(team: TeamSettings) -> str:
@@ -727,14 +777,7 @@ def set_service_protected(
     if protected:
         # Only existing services can be protected; unprotect always works so
         # a stale entry can be cleared even after the container is gone.
-        client = get_client()
-        container_name = get_service_container_name(name, settings.prefix, team.team_id)
-        try:
-            container = client.containers.get(container_name)
-        except docker.errors.NotFound:
-            raise NotFoundError(f"Service '{name}' not found")
-        if not container.labels.get("oduflow.service"):
-            raise NotFoundError(f"Service '{name}' not found")
+        find_service_container(get_client(), settings, team, name)
     with keyed_mutex(service_registry_key(team.team_id)):
         names = _load_protected_services(team)
         if protected:
@@ -757,13 +800,8 @@ def set_service_protected(
 def restart_service(
     settings: Settings, team: TeamSettings, name: str
 ) -> dict[str, str]:
-    client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
+    container = find_service_container(get_client(), settings, team, name)
 
     port: int | None = None
     try:
@@ -855,13 +893,8 @@ def delete_service(
     preset to keep, and a failed preset delete leaves one behind.
     """
     assert_service_not_protected(team, name, "deleting")
-    client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
+    container = find_service_container(get_client(), settings, team, name)
 
     container.stop(**stop_kwargs(container))
     container.remove(v=True)
@@ -1131,16 +1164,7 @@ def get_service_info(
     runtime status) with preset presence flag. Raises :class:`NotFoundError`
     if the service container is missing.
     """
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
-
-    if not container.labels.get("oduflow.service"):
-        raise NotFoundError(f"Service '{name}' not found")
+    container = find_service_container(get_client(), settings, team, name)
 
     info = _describe_service_container(settings, team, container)
 
@@ -1300,16 +1324,7 @@ def get_service_config(
     would preserve, and env values configured as team secrets come back as
     their ``secret:<name>`` reference, never as the resolved value.
     """
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
-
-    if not container.labels.get("oduflow.service"):
-        raise NotFoundError(f"Service '{name}' not found")
+    container = find_service_container(get_client(), settings, team, name)
 
     config = _effective_service_config(settings, team, name, container)
     config["name"] = name
@@ -1348,11 +1363,10 @@ def update_service(
     assert_service_not_protected(team, name, "updating")
     client = get_client()
     container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
+    # Ownership is settled here, before the stop/remove below: the container
+    # this update replaces is this team's service, and create_service stamps
+    # the replacement with the team and service labels again.
+    container = find_service_container(client, settings, team, name)
 
     # Capture current image name
     old_image = _container_image_reference(container)
@@ -1582,13 +1596,7 @@ def update_service(
 def get_service_logs(
     settings: Settings, team: TeamSettings, name: str, lines: int = 100
 ) -> str:
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
+    container = find_service_container(get_client(), settings, team, name)
 
     output = container.logs(tail=lines, timestamps=True)
     text: str = output.decode("utf-8")
@@ -1611,13 +1619,7 @@ def run_command_in_service(
     ship a POSIX ``sh``; on one that genuinely has none (scratch/distroless),
     use ``shell=False``.
     """
-    client = get_client()
-    container_name = get_service_container_name(name, settings.prefix, team.team_id)
-
-    try:
-        container = client.containers.get(container_name)
-    except docker.errors.NotFound:
-        raise NotFoundError(f"Service '{name}' not found")
+    container = find_service_container(get_client(), settings, team, name)
 
     logger.info(
         "Executing command in service",

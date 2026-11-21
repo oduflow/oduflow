@@ -136,6 +136,20 @@ def test_copy_refresh_preserves_container_and_promotes_sanitized_data(prepared):
     assert p.sanitize.call_count == 1
 
 
+def test_staged_database_is_closed_to_public_before_anything_reads_it(prepared):
+    # A copy of a template starts with PostgreSQL's default privileges, and
+    # this one becomes the environment's database by a rename, which keeps
+    # whatever privileges it has by then.
+    p = prepared
+    refresh(p)
+    statements = [call.args[2] for call in p.sql.call_args_list]
+    created = next(i for i, sql in enumerate(statements) if "CREATE DATABASE" in sql)
+    staged = statements[created].split('"')[1]
+    assert staged.startswith("oduflow_sync_")
+    assert statements[created + 1] == f'REVOKE ALL ON DATABASE "{staged}" FROM PUBLIC;'
+    assert 'OWNER "u_1_dev"' in statements[created]
+
+
 def test_stopped_environment_stays_stopped(prepared):
     p = prepared
     p.container.status = "exited"

@@ -59,13 +59,21 @@ from oduflow.docker_ops.system_ops import (
     _db_exists,
     _drop_pg_role,
     _exec_sql,
+    _own_public_schema,
     _resolve_conf,
     _resolve_instance_conf,
     drop_signaling_sequences,
     ensure_prod_infra,
     ensure_team_network,
+    explain_dump_failure,
+    provision_scoped_role,
     reassign_db_ownership,
     require_postgres_for_odoo,
+    restore_archive_as_role,
+    restrict_database_access,
+    scoped_dump_role,
+    superuser_dump_environment,
+    template_dump_role,
 )
 from oduflow.domains import (
     NameIndex,
@@ -74,7 +82,12 @@ from oduflow.domains import (
     default_production_domain,
     validate_production_domain,
 )
-from oduflow.env_credentials import create_credentials, load_credentials
+from oduflow.env_credentials import (
+    create_credentials,
+    generate_pg_username,
+    load_credentials,
+    new_credentials,
+)
 from oduflow.errors import (
     ConflictError,
     ExternalCommandError,
@@ -88,6 +101,7 @@ from oduflow.extra_addons import (
     LISTEN_INTERFACE_CONF,
     validate_extra_repo_name,
 )
+from oduflow.fsutil import copy_tenant_tree
 from oduflow.naming import (
     PROD_ENV_PREFIX,
     PRODUCTION_TEMPLATE_PREFIX,
@@ -1002,12 +1016,73 @@ def _normalize_extra_domains(
     return result
 
 
+def production_db_credentials(
+    settings: Settings, team: TeamSettings, name: str
+) -> dict[str, str]:
+    """The scoped PostgreSQL role a production's data is restored as.
+
+    Database content is never restored by the cluster superuser (see
+    system_ops.restore_archive_as_role), so a production whose credentials
+    file is gone is refused instead of falling back to it. Recreating its
+    container is what gives it a role again (see _credentials_for_recreate).
+    """
+    creds = load_credentials(
+        prod_env_name(name),
+        team.workspaces_dir,
+        settings.db_user,
+    )
+    if creds["pg_user"] == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Production '{name}' has no scoped database credentials "
+            f"(env_credentials.json is missing from {_workspace(team, name)}). "
+            "Its data is restored by the production's own PostgreSQL role, "
+            "never by the cluster superuser. Run reconfigure_production (no "
+            "settings need to change) to give the production its role back, "
+            "or restore the credentials file, then retry."
+        )
+    return creds
+
+
+def _credentials_for_recreate(
+    settings: Settings, team: TeamSettings, name: str, container: Any
+) -> tuple[dict[str, str], bool]:
+    """The role a recreated container connects as, and whether to provision it.
+
+    A production is created with a role of its own, on record in its
+    workspace. Without the record a recreated container would have had to
+    connect as the cluster superuser, whose password does not go into an Odoo
+    container; the role is provisioned again instead
+    (system_ops.provision_scoped_role), which this reports as the second
+    value. So it does for a container an older version recreated as the
+    superuser: what Odoo created since belongs to the superuser.
+
+    While the record is gone, the container usually still runs as the role.
+    Its name and password are then kept: a new password would lock that
+    container out the moment it is set, and it is the container a failed
+    provisioning falls back to. Only the derived role name is accepted from
+    it. Otherwise the role gets a new password.
+    """
+    env_name = prod_env_name(name)
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
+    held = container_env(container) if container is not None else {}
+    if creds["pg_user"] != settings.db_user:
+        return creds, held.get("USER") == settings.db_user
+    role = generate_pg_username(env_name, team.team_id)
+    if held.get("USER") == role and held.get("PASSWORD"):
+        return {"pg_user": role, "pg_password": held["PASSWORD"]}, True
+    return new_credentials(env_name, team.team_id), True
+
+
 def _copy_db_into_prod_cluster(
     client: DockerClient,
     settings: Settings,
+    team: TeamSettings,
     source_db: str,
     target_db: str,
     label: str,
+    creds: dict[str, str],
+    *,
+    source_role: str,
 ) -> None:
     """Copy a dev-cluster database into the production cluster.
 
@@ -1015,42 +1090,60 @@ def _copy_db_into_prod_cluster(
     source from the dev instance and restores it into the production one
     (pg_dump -Fc | pg_restore --no-owner). The production image's pg_restore
     is same-or-newer than the dev dump's format, so defaults are compatible.
+
+    The source is a tenant's database, and restoring it runs what it defines
+    (a function in a CHECK constraint is called for every copied row). So the
+    restore is done by the production's own scoped role — ``creds``, which
+    must already own *target_db* — from a throwaway client container, never by
+    the production cluster's superuser.
+
+    The dump is taken by *source_role*, the source database's own role: the
+    environment's, or the template owner. Only a template an older version
+    loaded as the superuser is still dumped by the superuser (see
+    system_ops.template_dump_role), with the server told not to expand what
+    is not a plain relation.
     """
     dev = client.containers.get(settings.shared_db_container)
-    prod = client.containers.get(settings.prod_db_container)
     dump_in_container = f"/tmp/{target_db}.seed.pgdump"
 
+    environment = (
+        superuser_dump_environment(client, settings, source_db)
+        if source_role == settings.db_user
+        else {}
+    )
     exit_code, output = dev.exec_run(
-        ["pg_dump", "-U", settings.db_user, "-Fc", "-f", dump_in_container, source_db]
+        ["pg_dump", "-U", source_role, "-Fc", "-f", dump_in_container, source_db],
+        environment=environment,
     )
     if exit_code != 0:
         text = output.decode("utf-8", errors="replace") if output else ""
-        raise ExternalCommandError(f"pg_dump ({label})", exit_code, text[-2000:])
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        host_dump = os.path.join(tmpdir, "seed.pgdump")
-        _copy_file_from_container(dev, dump_in_container, host_dump)
+        # A failed dump can leave part of itself in the container's layer.
         dev.exec_run(["rm", "-f", dump_in_container])
-        _copy_file_to_container(prod, host_dump, "/tmp")
+        raise ExternalCommandError(
+            f"pg_dump ({label})", exit_code, explain_dump_failure(text, tail=2000)
+        )
+
+    # Under the data directory: the restore client mounts the dump, and the
+    # Docker daemon resolves that path, not this process.
+    tmp_root = os.path.join(team.data_dir, "tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
+        host_dump = os.path.join(tmpdir, "seed.pgdump")
         try:
-            exit_code, output = prod.exec_run(
-                [
-                    "pg_restore",
-                    "-U",
-                    settings.db_user,
-                    "--no-owner",
-                    "-d",
-                    target_db,
-                    f"/tmp/{os.path.basename(host_dump)}",
-                ]
-            )
-            if exit_code != 0:
-                text = output.decode("utf-8", errors="replace") if output else ""
-                raise ExternalCommandError(
-                    f"pg_restore ({label})", exit_code, text[-2000:]
-                )
+            _copy_file_from_container(dev, dump_in_container, host_dump)
         finally:
-            prod.exec_run(["rm", "-f", f"/tmp/{os.path.basename(host_dump)}"])
+            dev.exec_run(["rm", "-f", dump_in_container])
+        restore_archive_as_role(
+            client,
+            settings,
+            team,
+            host_dump,
+            database=target_db,
+            role=creds["pg_user"],
+            password=creds["pg_password"],
+            container_name=settings.prod_db_container,
+            label=f"pg_restore ({label})",
+        )
 
 
 def _seed_db_from_template(
@@ -1059,6 +1152,7 @@ def _seed_db_from_template(
     team: TeamSettings,
     template_name: str,
     target_db: str,
+    creds: dict[str, str],
 ) -> None:
     """Copy a (dev-cluster) template database into the production cluster."""
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -1067,7 +1161,16 @@ def _seed_db_from_template(
             f"Template database '{tpl_db}' not found. Import or create the "
             f"template '{template_name}' first."
         )
-    _copy_db_into_prod_cluster(client, settings, tpl_db, target_db, "template seed")
+    _copy_db_into_prod_cluster(
+        client,
+        settings,
+        team,
+        tpl_db,
+        target_db,
+        "template seed",
+        creds,
+        source_role=template_dump_role(client, settings, team, tpl_db),
+    )
 
 
 def _seed_db_from_environment(
@@ -1076,6 +1179,7 @@ def _seed_db_from_environment(
     team: TeamSettings,
     source_env: str,
     target_db: str,
+    creds: dict[str, str],
 ) -> None:
     """Copy a dev environment's database into the production cluster."""
     src_db = get_db_name(source_env, team.team_id)
@@ -1083,7 +1187,16 @@ def _seed_db_from_environment(
         raise NotFoundError(
             f"Environment database '{src_db}' not found for environment '{source_env}'."
         )
-    _copy_db_into_prod_cluster(client, settings, src_db, target_db, "environment seed")
+    _copy_db_into_prod_cluster(
+        client,
+        settings,
+        team,
+        src_db,
+        target_db,
+        "environment seed",
+        creds,
+        source_role=scoped_dump_role(client, settings, team, source_env),
+    )
 
 
 def _production_env_vars(raw: object) -> dict[str, str]:
@@ -1201,13 +1314,16 @@ def _copy_env_data_into_production(
     source: str,
     name: str,
     env_db: str,
+    creds: dict[str, str],
     filestore_dest: str | None = None,
 ) -> list[str]:
     """Copy the source environment's database and filestore into a
     production, with the environment's Odoo stopped over both copies for a
     consistent pair. The environment itself is left as it was (not reset).
-    ``filestore_dest`` overrides the filestore target — a restore stages
-    into a scratch sibling directory instead of the live filestore.
+    ``creds`` is the production's scoped role, which owns ``env_db`` and
+    restores the copy into it. ``filestore_dest`` overrides the filestore
+    target — a restore stages into a scratch sibling directory instead of the
+    live filestore.
     Returns user-facing notes (e.g. when the env could not be restarted)."""
     container = source_env["container"]
     # The cached SDK object may be minutes old (fetched before infra checks
@@ -1221,7 +1337,7 @@ def _copy_env_data_into_production(
         container.stop(timeout=60)
     notes: list[str] = []
     try:
-        _seed_db_from_environment(client, settings, team, source, env_db)
+        _seed_db_from_environment(client, settings, team, source, env_db, creds)
         src_filestore = get_filestore_paths(source, team.workspaces_dir)["merged"]
         if not os.path.isdir(src_filestore):
             # A dead overlay mount (or missing dir) would silently promote a
@@ -1232,7 +1348,7 @@ def _copy_env_data_into_production(
             )
         filestore_path = filestore_dest or prod_filestore_dir(team, name)
         os.makedirs(filestore_path, mode=0o777, exist_ok=True)
-        shutil.copytree(src_filestore, filestore_path, dirs_exist_ok=True)
+        copy_tenant_tree(src_filestore, filestore_path, dirs_exist_ok=True)
     finally:
         if was_running:
             try:
@@ -1378,6 +1494,13 @@ def _container_spec(
     env_name = prod_env_name(name)
     env_db = prod_db_name(team, name)
     repo_path = get_repo_path(env_name, team.workspaces_dir)
+    if env_creds["pg_user"] == settings.db_user:
+        # Every caller hands over the production's own role; this is the last
+        # point before a container would exist with the superuser's login.
+        raise PrerequisiteNotMetError(
+            f"Production '{name}' has no PostgreSQL role of its own; its "
+            "container is not created with the cluster superuser's credentials."
+        )
     odoo_env = {
         "HOST": settings.prod_db_container,
         "USER": env_creds["pg_user"],
@@ -1722,8 +1845,33 @@ def create_production(
             f'CREATE DATABASE "{env_db}";',
             container_name=settings.prod_db_container,
         )
+        restrict_database_access(
+            client, settings, env_db, container_name=settings.prod_db_container
+        )
+        # The role comes before the data: a seed is the content of a tenant's
+        # database, and it is restored by the production's own role, never by
+        # the cluster superuser (see _copy_db_into_prod_cluster).
+        env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
+        _create_pg_role(
+            client,
+            settings,
+            env_creds["pg_user"],
+            env_creds["pg_password"],
+            env_db,
+            container_name=settings.prod_db_container,
+        )
+        if template_name is not None or source_env is not None:
+            _own_public_schema(
+                client,
+                settings,
+                env_db,
+                env_creds["pg_user"],
+                container_name=settings.prod_db_container,
+            )
         if template_name is not None:
-            _seed_db_from_template(client, settings, team, template_name, env_db)
+            _seed_db_from_template(
+                client, settings, team, template_name, env_db, env_creds
+            )
         if source_env is not None:
             assert from_environment is not None
             # The source env is only touched here; scope its lock (when the
@@ -1738,18 +1886,10 @@ def create_production(
                         from_environment,
                         name,
                         env_db,
+                        env_creds,
                     )
                 )
 
-        env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
-        _create_pg_role(
-            client,
-            settings,
-            env_creds["pg_user"],
-            env_creds["pg_password"],
-            env_db,
-            container_name=settings.prod_db_container,
-        )
         if template_name is not None or source_env is not None:
             reassign_db_ownership(
                 client,
@@ -1773,7 +1913,7 @@ def create_production(
         if template_name is not None:
             tpl_filestore = team.get_template_filestore_path(template_name)
             if os.path.isdir(tpl_filestore):
-                shutil.copytree(tpl_filestore, filestore_path, dirs_exist_ok=True)
+                copy_tenant_tree(tpl_filestore, filestore_path, dirs_exist_ok=True)
         uid_str, gid_str = get_odoo_uid_gid(client, odoo_image).split(":")
         chown_recursive(filestore_path, int(uid_str), int(gid_str), client, odoo_image)
 
@@ -2102,6 +2242,10 @@ def reconfigure_production(
     whose Traefik routing no longer matches the record (e.g. one created
     before the bus route existed), or a checkout/container still on a
     branch the record has moved away from, instead of reporting a no-op.
+    The same goes for a production without a PostgreSQL role of its own on
+    record (or whose container connects as the cluster superuser): the role
+    is provisioned while the container is stopped, and a failure there puts
+    the old container back and raises (see _credentials_for_recreate).
     Changing
     ``server_mode`` re-tunes odoo.conf and re-points Traefik at the other
     Odoo port. Changing ``odoo_image`` does NOT migrate the
@@ -2246,6 +2390,13 @@ def reconfigure_production(
             or (bool(checked_out) and checked_out != target_branch)
         )
     )
+    # The role the container connects as. A production without one on record
+    # (its credentials file is gone), or one an older version recreated as
+    # the cluster superuser for that reason, is drift like the rest: this
+    # call gives it its role back while the container is replaced.
+    env_creds, provision_role = _credentials_for_recreate(
+        settings, team, name, container
+    )
     drift = (
         force_recreate
         or container is None
@@ -2253,6 +2404,7 @@ def reconfigure_production(
         or routing_drift(settings, team, name, record, container.labels or {})
         or bool(secret_drift)
         or branch_drift
+        or provision_role
     )
     if settings.backup is not None and (updates or drift):
         ensure_prod_infra(client, settings, force=True)
@@ -2381,9 +2533,6 @@ def reconfigure_production(
         )
 
     # Built after the addon refresh above: both mount the managed checkout.
-    env_creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
     generated_conf = _build_prod_odoo_conf(
         settings,
         team,
@@ -2397,11 +2546,48 @@ def reconfigure_production(
     )
 
     container = _get_container(client, settings, team, name)
+    was_running = container is not None and container.status == "running"
+    if provision_role:
+        # Checked again right before the downtime starts: the role is written
+        # to the production cluster.
+        assert_writable(settings)
     if container is not None:
         try:
             container.stop(timeout=30)
         except Exception as exc:
             logger.warning("Stopping old container failed (removing anyway): %s", exc)
+    if provision_role:
+        # With Odoo stopped and its container still there: the ownership
+        # transfer wants no session in the database, and a failure can still
+        # put the production back the way it was.
+        try:
+            env_creds = provision_scoped_role(
+                client,
+                settings,
+                team,
+                env_name,
+                creds=env_creds,
+                container_name=settings.prod_db_container,
+            )
+        except Exception as exc:
+            if container is not None and was_running:
+                try:
+                    assert_writable(settings)
+                    container.start()
+                except Exception as restart_exc:
+                    logger.warning(
+                        "Could not restart production container after a "
+                        "failed role provisioning: %s",
+                        restart_exc,
+                    )
+            raise PrerequisiteNotMetError(
+                f"Production '{name}' has no PostgreSQL role of its own on "
+                f"record, and one could not be provisioned: {exc} The "
+                "container was left as it was, and is not recreated with the "
+                "cluster superuser's credentials. Fix the cause and run "
+                "reconfigure_production again."
+            ) from exc
+    if container is not None:
         container.remove(force=True)
 
     if staged_clone_path is not None:
@@ -2456,6 +2642,12 @@ def reconfigure_production(
         )
 
     notes: list[str] = []
+    if provision_role:
+        notes.append(
+            "The production had no PostgreSQL role of its own in use or on "
+            f"record. It now connects as '{env_creds['pg_user']}', which owns "
+            "its database, and the credentials are recorded in its workspace."
+        )
     if rotated_secrets:
         notes.append(
             "Recreated to apply rotated secret values: "
@@ -2464,7 +2656,7 @@ def reconfigure_production(
         )
     if force_recreate and not updates:
         notes.append("The container was recreated on request.")
-    elif not updates and not rotated_secrets:
+    elif not updates and not rotated_secrets and not provision_role:
         notes.append(
             "No settings changed, but drifted state was repaired (the "
             "container, its Traefik routing, the repo checkout and/or its "
@@ -2515,6 +2707,7 @@ def reconfigure_production(
         "healthy": healthy,
         "setup_logs": setup_logs,
         "notes": notes,
+        "db_role_provisioned": provision_role,
         "elapsed_seconds": round(time.time() - start_time, 1),
     }
 
@@ -2618,9 +2811,7 @@ def _destroy_leftovers(
     if require_db_drop and not db_dropped:
         return False, warnings
     try:
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
+        creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
         _drop_pg_role(
             client,
             settings,

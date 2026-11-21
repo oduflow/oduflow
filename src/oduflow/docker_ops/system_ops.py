@@ -9,6 +9,7 @@ import logging
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -25,8 +26,14 @@ from typing import Any
 import docker
 from docker import DockerClient
 from oduflow import image_builds, pg_hba, service_database_credentials
+from oduflow import settings as settings_module
 from oduflow.docker_ops import build_ops, image_cleanup
-from oduflow.docker_ops.client import chown_recursive, get_client, get_odoo_uid_gid
+from oduflow.docker_ops.client import (
+    chown_recursive,
+    container_env,
+    get_client,
+    get_odoo_uid_gid,
+)
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.errors import (
     ConflictError,
@@ -34,7 +41,11 @@ from oduflow.errors import (
     NotFoundError,
     PrerequisiteNotMetError,
 )
-from oduflow.fsutil import atomic_write_private_json, atomic_write_private_text
+from oduflow.fsutil import (
+    atomic_write_private_json,
+    atomic_write_private_text,
+    copy_tenant_tree,
+)
 from oduflow.module_versions import odoo_series
 from oduflow.naming import (
     PROD_ENV_PREFIX,
@@ -43,6 +54,7 @@ from oduflow.naming import (
     get_tablespace_name,
     get_team_network_name,
     get_template_db_name,
+    get_template_owner_role,
     normalize_env_vars,
     validate_template_name,
 )
@@ -357,7 +369,7 @@ def _run_rsync_source(source: str, dest: str) -> None:
     dest_arg = dest.rstrip("/") + "/"
     logger.info("Rsync filestore source: %s -> %s", source_arg, dest_arg)
     subprocess.run(
-        ["rsync", "-a", "--delete", source_arg, dest_arg],
+        ["rsync", "-a", "--delete", "--", source_arg, dest_arg],
         check=True,
         capture_output=True,
     )
@@ -369,6 +381,21 @@ def _stage_filestore_source(
     prepared_dir: str,
     strip_prefix: str = "auto",
 ) -> tuple[int, str, str]:
+    if settings_module.TRANSPORT == "http":
+        # Classify before touching the filesystem. On HTTP the rsync source
+        # must be explicitly remote, even if a matching local file exists.
+        if not source.startswith("rsync://") and not re.fullmatch(
+            r"(?:[\w.-]+@)?[a-zA-Z0-9][\w.-]*:.+", source
+        ):
+            raise PrerequisiteNotMetError(
+                "Local filestore paths require the local CLI or stdio MCP."
+            )
+        _run_rsync_source(source, raw_dir)
+        files, prefix = _copy_normalized_filestore_tree(
+            raw_dir, prepared_dir, strip_prefix
+        )
+        return files, prefix, "rsync"
+
     if os.path.isfile(source):
         if not _is_archive_source(source):
             raise PrerequisiteNotMetError(
@@ -396,24 +423,32 @@ def _stage_filestore_source(
 
 
 def _read_template_manifest_from_db(
-    client: DockerClient, settings: Settings, template_db: str
+    client: DockerClient, settings: Settings, team: TeamSettings, template_db: str
 ) -> dict[str, object]:
-    """Build Odoo backup-like manifest metadata from a restored database."""
+    """Build Odoo backup-like manifest metadata from a restored database.
+
+    The queries run as the team's template owner, not the superuser: the
+    database holds whatever its dump defined, and ``ir_module_module`` may just
+    as well be a view over a function of the dump's own.
+    """
+    owner = get_template_owner_role(team.team_id)
     version = _exec_sql(
         client,
         settings,
         "SELECT COALESCE(latest_version, '') FROM ir_module_module "
         "WHERE name='base' AND state='installed' LIMIT 1;",
         db=template_db,
+        user=owner,
     ).strip()
     major_version = odoo_series(version)
-    pg_version = _exec_sql(client, settings, "SHOW server_version;", db=template_db)
+    pg_version = _exec_sql(client, settings, "SHOW server_version;")
     modules_raw = _exec_sql(
         client,
         settings,
         "SELECT COALESCE(json_object_agg(name, latest_version), '{}'::json)::text "
         "FROM ir_module_module WHERE state='installed';",
         db=template_db,
+        user=owner,
     )
     try:
         modules = json.loads(modules_raw) if modules_raw else {}
@@ -858,16 +893,294 @@ def _exec_sql(
     # ``user`` runs the statement as a specific PostgreSQL role instead of the
     # shared-cluster superuser (settings.db_user). Repo-controlled sanitize SQL
     # must run as the environment's scoped, non-superuser role so it cannot
-    # ``COPY ... TO PROGRAM`` (RCE) or reach another team's database — same local
-    # -socket, scoped-role transport that run_db_query already relies on.
+    # ``COPY ... TO PROGRAM`` (RCE) or reach another team's database. The role
+    # confines SQL only: psql runs here inside the PostgreSQL container, so the
+    # caller must keep psql meta-commands out of ``sql`` (the sanitizer rejects
+    # them; caller-written SQL goes through odoo_ops.run_db_query instead).
+    #
+    # Without ``user`` (or with the superuser named as it) the statement runs
+    # as the superuser, and then nothing in it may resolve to an object a
+    # tenant controls: an unqualified operator or function is looked up along
+    # ``search_path``, where the owner of a database can plant a closer match
+    # (``public.!~~(name, name)`` beats the built-in ``LIKE`` for a ``name``
+    # column) and set the path itself with ``ALTER DATABASE ... SET``. So
+    # every superuser session pins the path before the statement; see
+    # _superuser_psql.
+    #
+    # A session that enters a database other than the maintenance one also
+    # switches event triggers off where the server can (PostgreSQL 17+): one
+    # ``ON login`` runs its function while the session is being set up, before
+    # any statement of ours. See superuser_session_environment, and
+    # disable_event_triggers for the statements that are DDL.
     container = client.containers.get(container_name or settings.shared_db_container)
-    exit_code, output = container.exec_run(
-        ["psql", "-U", user or settings.db_user, "-d", db, "-tAc", sql]
+    as_superuser = not user or user == settings.db_user
+    cmd = (
+        _superuser_psql(settings, db, sql)
+        if as_superuser
+        else ["psql", "-U", str(user), "-d", db, "-tAc", sql]
+    )
+    environment = (
+        superuser_session_environment(settings, container)
+        if as_superuser and db != MAINTENANCE_DATABASE
+        else {}
+    )
+    # Passed only when there is something to pass: the option is a superuser's
+    # to set, so a scoped role's session must never carry it.
+    exit_code, output = (
+        container.exec_run(cmd, environment=environment)
+        if environment
+        else container.exec_run(cmd)
     )
     result = output.decode("utf-8") if isinstance(output, bytes) else str(output)
     if exit_code != 0:
         raise ExternalCommandError("psql", exit_code, result)
     return result.strip()
+
+
+# Session setting for every statement the superuser runs. pg_temp is named so
+# that it comes last: left out, it would be searched before pg_catalog.
+SUPERUSER_SEARCH_PATH_SQL = "SET search_path = pg_catalog, pg_temp"
+
+
+def _superuser_psql(settings: Settings, db: str, sql: str) -> list[str]:
+    """``psql`` argv running *sql* as the superuser with a pinned search_path.
+
+    The pin is a statement of its own, issued once the session exists:
+    ``ALTER DATABASE/ROLE ... SET search_path`` takes effect while
+    connecting, and a ``SET`` sent afterwards is what replaces it whatever
+    the database or the role says. Each ``-c`` is a separate transaction in
+    one session, which keeps statements such as CREATE DATABASE outside a
+    transaction block.
+    ``ON_ERROR_STOP`` makes a failed pin fail the call instead of letting the
+    statement run without it, and ``-q`` keeps the pin's ``SET`` tag out of
+    the result.
+    """
+    return [
+        "psql",
+        "-q",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        settings.db_user,
+        "-d",
+        db,
+        "-c",
+        SUPERUSER_SEARCH_PATH_SQL,
+        "-tAc",
+        sql,
+    ]
+
+
+# The database every cluster is born with. Oduflow connects to it for what
+# concerns the cluster (roles, CREATE / DROP DATABASE); no tenant owns it.
+MAINTENANCE_DATABASE = "postgres"
+
+# An event trigger runs its function with the rights of whoever issues the
+# statement that fires it — every DDL statement of that database, and since
+# PostgreSQL 17 every login to it (``ON login``). Only a superuser can create
+# one, but a dump loaded as the superuser by an older version could, and
+# ``CREATE DATABASE ... TEMPLATE`` copies it into every clone, where the
+# function it calls ends up owned by the clone's tenant. It is called by OID,
+# so the pinned search_path does not come into it.
+#
+# PostgreSQL 17 has a switch for the session, which only a superuser may set.
+# Sent with the connection, it is in force before a login trigger would fire,
+# and it outranks whatever ALTER DATABASE / ALTER ROLE ... SET says. Older
+# servers do not know the setting and would refuse the connection over it;
+# they have no login triggers either, and DDL is covered by
+# disable_event_triggers on every release.
+EVENT_TRIGGERS_OFF_OPTIONS = "-c event_triggers=off"
+_EVENT_TRIGGER_SWITCH_VERSION = 170000
+
+# server_version_num per PostgreSQL container id. A container never changes
+# its image, so neither does the answer; an upgraded cluster is a new one.
+_SERVER_VERSIONS: dict[str, int] = {}
+
+
+def _server_version_num(settings: Settings, container: Any) -> int:
+    """``server_version_num`` of the cluster in *container*, asked for once.
+
+    Asked in the maintenance database, which is why sessions there go
+    without the event trigger switch: this one could not know yet.
+    """
+    key = getattr(container, "id", None)
+    if isinstance(key, str) and key in _SERVER_VERSIONS:
+        return _SERVER_VERSIONS[key]
+    exit_code, output = container.exec_run(
+        _superuser_psql(settings, MAINTENANCE_DATABASE, "SHOW server_version_num;")
+    )
+    result = output.decode("utf-8") if isinstance(output, bytes) else str(output)
+    if exit_code != 0:
+        raise ExternalCommandError("psql", exit_code, result)
+    try:
+        version = int(result.strip())
+    except ValueError:
+        raise ExternalCommandError(
+            "psql", exit_code, f"Unexpected server_version_num: {result.strip()!r}"
+        ) from None
+    if isinstance(key, str) and key:
+        _SERVER_VERSIONS[key] = version
+    return version
+
+
+def event_trigger_switch_supported(version_num: int) -> bool:
+    """Whether a server (``server_version_num``) knows ``event_triggers``."""
+    return version_num >= _EVENT_TRIGGER_SWITCH_VERSION
+
+
+def superuser_session_environment(settings: Settings, container: Any) -> dict[str, str]:
+    """Environment of a superuser client entering a tenant's database.
+
+    For ``psql``, ``pg_dump`` and ``pg_restore`` alike: ``PGOPTIONS`` that
+    keeps event triggers from firing in the session, on a server that has
+    the setting, and nothing on one that does not.
+    """
+    if event_trigger_switch_supported(_server_version_num(settings, container)):
+        return {"PGOPTIONS": EVENT_TRIGGERS_OFF_OPTIONS}
+    return {}
+
+
+def _json_answer(output: str, kind: type) -> Any:
+    """The JSON value of type *kind* a query printed, else None.
+
+    psql's stderr arrives in the same stream as the row (a collation version
+    warning on connect, for one), so the row is looked for, not assumed.
+    """
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith(("[", "{")):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, kind):
+            return value
+    return None
+
+
+# Catalog only, every name spelled out: this is the superuser reading a
+# database whose content is a tenant's. Names go through text on their way
+# into JSON, which looks up a cast for no built-in type.
+_ENABLED_EVENT_TRIGGERS_SQL = (
+    "SELECT COALESCE(pg_catalog.json_agg(pg_catalog.json_build_object("
+    "'name', t.evtname::pg_catalog.text, "
+    "'event', t.evtevent::pg_catalog.text, "
+    "'function', t.evtfoid::pg_catalog.regprocedure::pg_catalog.text)), "
+    "'[]'::pg_catalog.json) FROM pg_catalog.pg_event_trigger t "
+    "WHERE t.evtenabled OPERATOR(pg_catalog.<>) 'D';"
+)
+# The names are quoted by the server (%I): they are whatever a dump said.
+_DISABLE_EVENT_TRIGGERS_SQL = (
+    "DO $$ DECLARE r RECORD; BEGIN "
+    "SET LOCAL search_path = pg_catalog; "
+    "FOR r IN SELECT t.evtname FROM pg_event_trigger t WHERE t.evtenabled <> 'D' "
+    "LOOP EXECUTE format('ALTER EVENT TRIGGER %I DISABLE', r.evtname); "
+    "END LOOP; END $$;"
+)
+
+
+def enabled_event_triggers(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> list[dict[str, str]]:
+    """Event triggers of *database* that would fire: name, event, function.
+
+    A read of one catalog table, which fires nothing itself. An answer that
+    cannot be read is an error, not "none": the callers are about to run DDL
+    as the superuser on the strength of it.
+    """
+    output = _exec_sql(
+        client,
+        settings,
+        _ENABLED_EVENT_TRIGGERS_SQL,
+        database,
+        container_name=container_name,
+    )
+    found = _json_answer(output, list)
+    if found is None:
+        raise ExternalCommandError(
+            "psql",
+            0,
+            f"Could not read the event triggers of database '{database}': "
+            f"{output[-500:] or 'no answer'}",
+        )
+    return [
+        {key: str(entry.get(key, "")) for key in ("name", "event", "function")}
+        for entry in found
+        if isinstance(entry, dict)
+    ]
+
+
+def disable_event_triggers(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> list[str]:
+    """Disable the event triggers of *database* that would fire; return them.
+
+    Call it before the superuser runs DDL inside a database that holds, or
+    was copied from, a tenant's content: ``ALTER ... OWNER``, ``REASSIGN
+    OWNED``, ``DROP OWNED`` and ``DROP SEQUENCE`` all fire
+    ``ddl_command_start``, and the function behind an event trigger is the
+    tenant's to rewrite once the clone's objects are handed to its role. One
+    catalog query when there is nothing to do, which is every database loaded
+    since dumps stopped being the superuser's.
+
+    Disabled, not dropped and not refused. Dropping would destroy something
+    the operator may want to look at. Refusing would stop every environment
+    made from such a template, and the remedy it would name — loading the
+    template again — fails on the very same statement, since the role that
+    loads dumps now cannot create an event trigger. Disabled is also what a
+    rebuilt template amounts to, and it lasts: altering an event trigger takes
+    a superuser, so no tenant can turn one back on. Commands on event
+    triggers fire no event trigger themselves, on any release.
+    """
+    found = enabled_event_triggers(
+        client, settings, database, container_name=container_name
+    )
+    if not found:
+        return []
+    _exec_sql(
+        client,
+        settings,
+        _DISABLE_EVENT_TRIGGERS_SQL,
+        database,
+        container_name=container_name,
+    )
+    left = enabled_event_triggers(
+        client, settings, database, container_name=container_name
+    )
+    if left:
+        raise PrerequisiteNotMetError(
+            f"Database '{database}' still has enabled event triggers "
+            f"({', '.join(_plain(entry['name']) for entry in left)}), which would run "
+            "with the PostgreSQL superuser's rights. Drop them as the "
+            "superuser (DROP EVENT TRIGGER ...) and retry."
+        )
+    logger.warning(
+        "Disabled %d event trigger(s) in database %s of %s before running DDL "
+        "there as the PostgreSQL superuser: %s. An event trigger runs its "
+        "function with the rights of whoever issues the statement, and only a "
+        "superuser can create one, so these came with a dump that an older "
+        "version loaded as the superuser. They stay disabled; rebuild the "
+        "template they came from to be rid of them (see 'What an older load "
+        "may have left behind' in the templates guide).",
+        len(found),
+        database,
+        container_name or settings.shared_db_container,
+        "; ".join(
+            f"{_plain(entry['name'])} (on {_plain(entry['event'])}, "
+            f"runs {_plain(entry['function'])})"
+            for entry in found
+        ),
+    )
+    return [entry["name"] for entry in found]
 
 
 def get_team_db_usage_bytes(
@@ -1399,13 +1712,24 @@ def reassign_db_ownership(
     """Reassign every object in *db_name* not owned by *new_user* to it.
 
     A restored/cloned database's objects are owned by whatever role created
-    them — normally the superuser, but plain-SQL imports can leave objects
-    owned by a source env's role. DDL during module upgrades requires
-    ownership, so transfer it per-object instead of granting superuser-role
-    membership (which would be a cross-tenant RCE, #40). Linked
+    them — a team's template owner for a clone, the superuser for a database
+    an older version restored, or a source env's role in an old template. (A
+    production's data is restored by the production's own role nowadays, which
+    leaves this nothing to do there.) DDL during module
+    upgrades requires ownership, so transfer it per-object instead of granting
+    superuser-role membership (which would be a cross-tenant RCE, #40). Linked
     (SERIAL/identity) sequences are skipped: they follow their table's owner
     automatically. System roles (pg_*) are left untouched.
+
+    This runs as the superuser inside a database holding tenant-defined
+    objects, so the block pins ``search_path`` first: with ``public`` on the
+    path, an operator such as ``public.!~~(name, name)`` from a template dump
+    is a better match for ``rolname NOT LIKE '...'`` than the built-in one and
+    would run with superuser rights. Every statement here is DDL, so the
+    database's event triggers are disabled first (see disable_event_triggers):
+    they fire for the superuser like for anyone else.
     """
+    disable_event_triggers(client, settings, db_name, container_name=container_name)
     _exec_sql(
         client,
         settings,
@@ -1420,6 +1744,7 @@ def reassign_db_ownership(
         DO $$
         DECLARE r RECORD;
         BEGIN
+          SET LOCAL search_path = pg_catalog;
           FOR r IN SELECT n.nspname FROM pg_namespace n JOIN pg_roles o ON n.nspowner = o.oid
                    WHERE o.rolname <> '{new_user}' AND o.rolname NOT LIKE 'pg\_%'
                      AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
@@ -1466,20 +1791,664 @@ def drop_signaling_sequences(
 
     Odoo re-creates them on first startup (CREATE SEQUENCE without IF NOT
     EXISTS), so leftovers cause DuplicateTable errors.
+
+    Like reassign_db_ownership, this is the superuser inside tenant content:
+    ``search_path`` is pinned, the sequences are named with their schema, and
+    event triggers are disabled before the DROP that would fire them.
     """
+    disable_event_triggers(client, settings, db_name, container_name=container_name)
     _exec_sql(
         client,
         settings,
         "DO $$ DECLARE r RECORD; BEGIN "
-        "FOR r IN SELECT c.relname FROM pg_class c "
-        "WHERE c.relkind = 'S' "
+        "SET LOCAL search_path = pg_catalog; "
+        "FOR r IN SELECT n.nspname, c.relname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relkind = 'S' AND n.nspname = 'public' "
         "AND (c.relname LIKE 'base_registry_signaling%' "
         "OR c.relname LIKE 'base_cache_signaling%') "
-        "LOOP EXECUTE 'DROP SEQUENCE IF EXISTS ' || quote_ident(r.relname); "
+        "LOOP EXECUTE format('DROP SEQUENCE IF EXISTS %I.%I', r.nspname, r.relname); "
         "END LOOP; END $$;",
         db=db_name,
         container_name=container_name,
     )
+
+
+def restrict_database_access(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> None:
+    """Take away what PostgreSQL gives every role on a new *database*.
+
+    A new database lets PUBLIC connect and create temporary tables, and a
+    copy of a template starts with those defaults again whatever the template
+    had. Every role of a cluster reaches it over the team networks, so
+    another tenant could read this database's catalog (table and column
+    names, function bodies), call what it leaves executable by PUBLIC, fill
+    its tablespace with temporary tables, or hold a session on a template
+    and block every clone of it. The owner's own rights are not PUBLIC's and
+    stay; they follow the database when its owner changes.
+
+    Call it right after CREATE DATABASE, while the superuser still owns the
+    database or its future owner has not connected yet.
+    """
+    _exec_sql(
+        client,
+        settings,
+        f'REVOKE ALL ON DATABASE "{_quote_ident(database)}" FROM PUBLIC;',
+        container_name=container_name,
+    )
+
+
+def _quote_ident(name: str) -> str:
+    """*name* for use between double quotes in SQL."""
+    return name.replace('"', '""')
+
+
+def provision_scoped_role(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    creds: dict[str, str] | None = None,
+    container_name: str | None = None,
+) -> dict[str, str]:
+    """Give the existing database of *env_name* a role of its own; return it.
+
+    For an environment created before per-environment roles existed, and for
+    a production whose credentials file is gone: both would otherwise have to
+    connect as the cluster superuser, whose password must not enter a
+    container a tenant has a shell in. The result is what create_environment
+    leaves a new environment in — the role owns the database and everything
+    in it, nobody else may connect, the credentials are on record — reached
+    without rebuilding the database.
+
+    Call it with the database's Odoo container stopped: the ownership
+    transfer locks every relation it moves, and until now the content was the
+    superuser's, which nothing takes away from a session already open. The
+    superuser runs utility statements and the pinned catalog blocks only
+    (see reassign_db_ownership); nothing here resolves a name of the tenant's.
+
+    The credentials file is written last, so a failure leaves no record of a
+    role that may not own its database, and a retry starts over: every
+    statement is idempotent. ``creds`` reuses a role name and password (the
+    ones a production's container already runs with) instead of generating
+    new ones; ``container_name`` selects the cluster.
+    """
+    from oduflow.env_credentials import new_credentials, save_credentials
+
+    database = get_db_name(env_name, team.team_id)
+    if not _db_exists(client, settings, database, container_name=container_name):
+        raise PrerequisiteNotMetError(
+            f"Database '{database}' does not exist, so there is nothing to "
+            "give a PostgreSQL role of its own."
+        )
+    creds = dict(creds) if creds else new_credentials(env_name, team.team_id)
+    role = creds["pg_user"]
+    if role == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Refusing to record the cluster superuser as the role of '{database}'."
+        )
+    restrict_database_access(client, settings, database, container_name=container_name)
+    _create_pg_role(
+        client,
+        settings,
+        role,
+        creds["pg_password"],
+        database,
+        container_name=container_name,
+    )
+    reassign_db_ownership(
+        client, settings, database, role, container_name=container_name
+    )
+    save_credentials(env_name, team.workspaces_dir, creds)
+    logger.info(
+        "Provisioned PG role '%s' for existing database '%s'",
+        role,
+        database,
+        extra={"env_name": env_name},
+    )
+    return creds
+
+
+def superuser_credential_holders(client: DockerClient, settings: Settings) -> list[str]:
+    """Environment and production containers created with the superuser's login.
+
+    An environment created before per-environment roles existed connects as
+    the cluster superuser, and so does a production recreated by an older
+    version after its credentials file was lost. A container's environment
+    is fixed when it is created, so each keeps the password until it is
+    recreated — which is when provision_scoped_role gives it a role of its
+    own. The PostgreSQL containers themselves are not listed: they are not a
+    tenant's.
+    """
+    holders: list[str] = []
+    for container in client.containers.list(
+        all=True, filters={"label": f"{settings.managed_label}=true"}
+    ):
+        labels = container.labels or {}
+        if labels.get(settings.system_label) == "true" or not (
+            labels.get(settings.branch_label) or labels.get("oduflow.prod") == "true"
+        ):
+            continue
+        env = container_env(container)
+        if (
+            env.get("USER") == settings.db_user
+            and env.get("PASSWORD") == settings.db_password
+        ):
+            holders.append(str(container.name))
+    return sorted(holders)
+
+
+def _warn_superuser_credential_holders(
+    client: DockerClient, settings: Settings
+) -> None:
+    """Name the containers a tenant can read the superuser's password in.
+
+    Reported, not repaired, on start: the repair recreates a container and
+    rewrites the ownership of its database, which interrupts whoever works in
+    it and can fail for reasons an operator has to see (an image that is no
+    longer pullable, a failing dependency install). It happens with the next
+    update_environment / reconfigure_production of each one instead.
+    """
+    try:
+        holders = superuser_credential_holders(client, settings)
+    except Exception:
+        logger.warning(
+            "Could not check containers for the PostgreSQL superuser's credentials",
+            exc_info=True,
+        )
+        return
+    if holders:
+        logger.warning(
+            "%d container(s) run with the PostgreSQL superuser's credentials, "
+            "which anyone with a shell in them can read: %s. Recreate each "
+            "(update_environment, or reconfigure_production for a production) "
+            "to give it a role of its own, then change the superuser's "
+            "password (ALTER ROLE in each cluster, then [database].password).",
+            len(holders),
+            ", ".join(holders),
+        )
+
+
+# Managed databases PUBLIC still has a privilege on. grantee 0 is PUBLIC; a
+# database nobody ran GRANT or REVOKE on has no ACL and its defaults apply.
+_PUBLIC_DATABASE_ACCESS_SQL = (
+    "SELECT d.datname FROM pg_catalog.pg_database d WHERE EXISTS ("
+    "SELECT 1 FROM pg_catalog.aclexplode(COALESCE(d.datacl, "
+    "pg_catalog.acldefault('d', d.datdba))) a "
+    "WHERE a.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid);"
+)
+# Everything Oduflow creates in a cluster: environments and productions
+# (oduflow_<team>_), templates, service databases, staged and build copies.
+_MANAGED_DATABASE_PREFIX = "oduflow_"
+
+
+def restrict_managed_databases(
+    client: DockerClient,
+    settings: Settings,
+    *,
+    container_name: str | None = None,
+) -> list[str]:
+    """Close managed databases that PUBLIC may still connect to; return them.
+
+    Databases created before :func:`restrict_database_access` existed keep
+    PostgreSQL's defaults, and a cluster restored to a point in time gets its
+    old privileges back, so this runs on every start rather than once. It
+    finds nothing to do afterwards: one catalog query per cluster.
+
+    The owner keeps its access. A database whose role on record is *not* its
+    owner — a production an older version restored stays owned by the
+    superuser — reached it through PUBLIC, so that role is granted the same
+    two privileges first, in the same transaction as the revoke. Databases
+    outside the ``oduflow_`` namespace are an operator's own and are left
+    alone. Failures are logged per database and do not stop the others.
+    """
+    from oduflow.env_credentials import recorded_roles
+
+    rows = _exec_sql(
+        client, settings, _PUBLIC_DATABASE_ACCESS_SQL, container_name=container_name
+    )
+    databases = [
+        name for name in rows.splitlines() if name.startswith(_MANAGED_DATABASE_PREFIX)
+    ]
+    if not databases:
+        return []
+    on_record = {
+        get_db_name(entry, team.team_id): role
+        for team in settings.teams.values()
+        for entry, role in recorded_roles(team.workspaces_dir).items()
+    }
+    existing = set(
+        _exec_sql(
+            client,
+            settings,
+            "SELECT rolname FROM pg_catalog.pg_roles;",
+            container_name=container_name,
+        ).splitlines()
+    )
+    cluster = container_name or settings.shared_db_container
+    restricted: list[str] = []
+    for database in sorted(databases):
+        role = on_record.get(database)
+        keep = (
+            f'GRANT CONNECT, TEMPORARY ON DATABASE "{_quote_ident(database)}" '
+            f'TO "{_quote_ident(role)}"; '
+            if role and role != settings.db_user and role in existing
+            else ""
+        )
+        try:
+            _exec_sql(
+                client,
+                settings,
+                f'{keep}REVOKE ALL ON DATABASE "{_quote_ident(database)}" FROM PUBLIC;',
+                container_name=container_name,
+            )
+        except ExternalCommandError as exc:
+            logger.warning(
+                "Could not revoke PUBLIC access to database %s in %s: %s",
+                database,
+                cluster,
+                exc,
+            )
+            continue
+        restricted.append(database)
+    if restricted:
+        logger.info(
+            "Revoked PUBLIC access to %d database(s) in %s: %s",
+            len(restricted),
+            cluster,
+            ", ".join(restricted),
+        )
+    return restricted
+
+
+# What a dump could create only because an older version loaded it as the
+# superuser, and what is still the superuser's in a database that has a role
+# of its own. Template dumps are loaded by a role that can create none of it
+# nowadays (see reload_template), but a database loaded before that keeps it,
+# and CREATE DATABASE ... TEMPLATE copies most of it into every clone.
+#
+# One row of JSON per database, catalog tables only. The session's
+# search_path is pinned to pg_catalog before this runs, which is what the
+# unqualified names rely on. 16384 is the first OID a user's object can have.
+# Members of an extension are the image's code, not a dump's, and are left
+# out; the extension itself is listed when the image does not mark it trusted.
+_NOT_EXTENSION_MEMBER = (
+    "NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '{catalog}'::regclass "
+    "AND d.objid = {oid} AND d.deptype = 'e')"
+)
+
+
+def _json_list(query: str) -> str:
+    """Subquery aggregating up to 20 values ``v`` of *query* into a JSON array."""
+    return (
+        "(SELECT COALESCE(json_agg(x.v), '[]'::json) "
+        f"FROM ({query} ORDER BY 1 LIMIT 20) x)"
+    )
+
+
+_SUPERUSER_ONLY_OBJECTS_SQL = (
+    "SELECT json_build_object("
+    "'database', current_database()::text, "
+    # Fired by DDL or a login, as whoever issues it.
+    "'event_triggers', (SELECT COALESCE(json_agg(json_build_object("
+    "'name', t.evtname::text, 'event', t.evtevent::text, "
+    "'enabled', t.evtenabled <> 'D', "
+    "'function', t.evtfoid::regprocedure::text, "
+    "'function_owner', pg_get_userbyid(p.proowner)::text)), '[]'::json) "
+    "FROM pg_event_trigger t JOIN pg_proc p ON p.oid = t.evtfoid), "
+    # C, internal and untrusted procedural languages: no role's limits apply
+    # to what they do, whoever calls them.
+    "'untrusted_functions', "
+    + _json_list(
+        "SELECT p.oid::regprocedure::text || ' in ' || l.lanname::text AS v "
+        "FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang "
+        "WHERE p.oid >= 16384 AND NOT l.lanpltrusted AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_proc", oid="p.oid")
+    )
+    # Run with the superuser's rights for whoever may call them.
+    + ", 'definer_functions', "
+    + _json_list(
+        "SELECT p.oid::regprocedure::text AS v "
+        "FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner "
+        "WHERE p.oid >= 16384 AND p.prosecdef AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_proc", oid="p.oid")
+    )
+    # Read their tables with the superuser's rights.
+    + ", 'superuser_views', "
+    + _json_list(
+        "SELECT c.oid::regclass::text AS v "
+        "FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner "
+        "WHERE c.oid >= 16384 AND c.relkind IN ('v', 'm') AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_class", oid="c.oid")
+    )
+    + ", 'untrusted_extensions', "
+    + _json_list(
+        "SELECT e.extname::text AS v FROM pg_extension e "
+        "WHERE e.extname <> 'plpgsql' AND NOT EXISTS ("
+        "SELECT 1 FROM pg_available_extension_versions a "
+        "WHERE a.name = e.extname AND a.version = e.extversion AND a.trusted)"
+    )
+    # A cast between two built-in types takes the owner of one of them.
+    + ", 'casts', "
+    + _json_list(
+        "SELECT format_type(c.castsource, NULL) || ' to ' || "
+        "format_type(c.casttarget, NULL) AS v FROM pg_cast c "
+        "WHERE c.oid >= 16384 AND c.castsource < 16384 AND c.casttarget < 16384"
+    )
+    + ", 'superuser_operators', "
+    + _json_list(
+        "SELECT o.oid::regoperator::text AS v "
+        "FROM pg_operator o JOIN pg_roles r ON r.oid = o.oprowner "
+        "WHERE o.oid >= 16384 AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_operator", oid="o.oid")
+        + " UNION ALL SELECT 'operator class ' || c.opcname::text "
+        "FROM pg_opclass c JOIN pg_roles r ON r.oid = c.opcowner "
+        "WHERE c.oid >= 16384 AND r.rolsuper AND "
+        + _NOT_EXTENSION_MEMBER.format(catalog="pg_opclass", oid="c.oid")
+    )
+    # Libraries loaded into every session of this database, ours included.
+    + ", 'preload_settings', "
+    + _json_list(
+        "SELECT DISTINCT split_part(cfg, '=', 1) AS v "
+        "FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase "
+        "CROSS JOIN LATERAL unnest(s.setconfig) AS cfg "
+        "WHERE d.datname = current_database() AND split_part(cfg, '=', 1) "
+        "IN ('session_preload_libraries', 'local_preload_libraries')"
+    )
+    + ", 'publications', "
+    + _json_list(
+        "SELECT p.pubname::text AS v "
+        "FROM pg_publication p JOIN pg_roles r ON r.oid = p.pubowner "
+        "WHERE p.puballtables OR r.rolsuper"
+    )
+    + ", 'subscriptions', "
+    + _json_list(
+        "SELECT s.subname::text AS v "
+        "FROM pg_subscription s JOIN pg_database d ON d.oid = s.subdbid "
+        "WHERE d.datname = current_database()"
+    )
+    # A server and a mapping decide where, and as whom, a foreign table
+    # connects for whoever may read it.
+    + ", 'foreign_servers', "
+    + _json_list("SELECT s.srvname::text AS v FROM pg_foreign_server s")
+    + ", 'user_mappings', (SELECT count(*) FROM pg_user_mapping)"
+    # A rule's actions are checked against the rights of its table's owner.
+    + ", 'rules', "
+    + _json_list(
+        "SELECT w.ev_class::regclass::text || ': ' || w.rulename::text AS v "
+        "FROM pg_rewrite w JOIN pg_class c ON c.oid = w.ev_class "
+        "JOIN pg_roles r ON r.oid = c.relowner "
+        "WHERE w.rulename <> '_RETURN' AND c.oid >= 16384 AND r.rolsuper"
+    )
+    + ")::text;"
+)
+# Managed databases that accept connections, whether each is a template, and
+# whether its owner is a superuser (a template an older version loaded).
+_SCAN_DATABASES_SQL = (
+    "SELECT d.datname, d.datistemplate, r.rolsuper FROM pg_catalog.pg_database d "
+    "JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) d.datdba "
+    "WHERE d.datallowconn;"
+)
+# Names Oduflow gives its databases; anything else is not passed to a shell.
+_SCANNED_DATABASE_RE = re.compile(rf"^{_MANAGED_DATABASE_PREFIX}[A-Za-z0-9_.-]+$")
+_SCAN_FAILED_MARKER = "oduflow-scan-failed"
+# For the whole cluster, and for one database: a session waits while its
+# database is being copied (CREATE DATABASE ... TEMPLATE locks the source
+# against new connections), and one large clone must not hold up the rest.
+_SCAN_TIMEOUT_SECONDS = 120
+_SCAN_DATABASE_TIMEOUT_SECONDS = 10
+# One psql per database, all of them in a single exec: a start should not
+# cost a round trip through Docker for every environment. The query and the
+# names reach the shell as environment and arguments, never as its text.
+# A session of a few milliseconds does not get in a clone's way either:
+# CREATE DATABASE waits five seconds for its template to be left alone.
+_SCAN_SCRIPT = (
+    'for db in "$@"; do '
+    f"timeout {_SCAN_DATABASE_TIMEOUT_SECONDS} "
+    'psql -X -q -tA -v ON_ERROR_STOP=1 -U "$ODUFLOW_SCAN_ROLE" -d "$db" '
+    '-c "$ODUFLOW_SCAN_PIN" -c "$ODUFLOW_SCAN_SQL" 2>&1 '
+    f'|| echo "{_SCAN_FAILED_MARKER} $db"; done'
+)
+
+# kind -> how a report names it. Those in _RISK_KINDS can hand a tenant, or
+# code a tenant controls, rights it should not have, and are warned about;
+# the rest only cannot be recreated by a rebuild and are mentioned.
+_OBJECT_KINDS = {
+    "event_triggers": "event triggers",
+    "untrusted_functions": "functions in an untrusted language",
+    "definer_functions": "SECURITY DEFINER functions owned by a superuser",
+    "superuser_views": "views owned by a superuser",
+    "casts": "casts between built-in types",
+    "preload_settings": "libraries preloaded by ALTER DATABASE ... SET",
+    "subscriptions": "subscriptions",
+    "foreign_servers": "foreign servers",
+    "user_mappings": "user mappings",
+    "untrusted_extensions": "extensions the image does not mark trusted",
+    "superuser_operators": "operators owned by a superuser",
+    "publications": "publications of a superuser",
+    "rules": "rules on tables owned by a superuser",
+}
+_RISK_KINDS = frozenset(
+    {
+        "event_triggers",
+        "untrusted_functions",
+        "definer_functions",
+        "superuser_views",
+        "casts",
+        "preload_settings",
+        "subscriptions",
+        "foreign_servers",
+        "user_mappings",
+    }
+)
+# In a template the superuser still owns, everything is the superuser's;
+# these say nothing more than that.
+_OWNERSHIP_KINDS = frozenset(
+    {"definer_functions", "superuser_views", "superuser_operators", "rules"}
+)
+
+
+def _plain(value: object, limit: int = 120) -> str:
+    """*value* for a log line: it is a name out of a tenant's catalog."""
+    text = "".join(ch if ch.isprintable() else "?" for ch in str(value))
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def superuser_only_objects(
+    client: DockerClient,
+    settings: Settings,
+    *,
+    container_name: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """What only a superuser could have left in each managed database.
+
+    Per database of the ``oduflow_`` namespace that accepts connections:
+    ``template`` and ``superuser_owned`` (a template an older version loaded
+    is both), ``checked``, and ``objects`` — the kinds of _OBJECT_KINDS found
+    there, each a list of names (a count for user mappings; name, event,
+    function and state for event triggers).
+
+    Read-only. The superuser reads catalog tables in every database, with
+    its search_path pinned and, on PostgreSQL 17+, event triggers off for the
+    session, so that looking runs nothing of what it is looking for.
+    """
+    cluster = container_name or settings.shared_db_container
+    rows = _exec_sql(
+        client, settings, _SCAN_DATABASES_SQL, container_name=container_name
+    )
+    databases: dict[str, dict[str, Any]] = {}
+    for line in rows.splitlines():
+        parts = line.rsplit("|", 2)
+        if len(parts) == 3 and _SCANNED_DATABASE_RE.match(parts[0]):
+            databases[parts[0]] = {
+                "template": parts[1] == "t",
+                "superuser_owned": parts[2] == "t",
+                "checked": False,
+                "objects": {},
+            }
+    if not databases:
+        return {}
+    container = client.containers.get(cluster)
+    exit_code, output = container.exec_run(
+        [
+            "timeout",
+            str(_SCAN_TIMEOUT_SECONDS),
+            "sh",
+            "-c",
+            _SCAN_SCRIPT,
+            "sh",
+            *sorted(databases),
+        ],
+        environment={
+            **superuser_session_environment(settings, container),
+            "ODUFLOW_SCAN_ROLE": settings.db_user,
+            "ODUFLOW_SCAN_PIN": SUPERUSER_SEARCH_PATH_SQL,
+            "ODUFLOW_SCAN_SQL": _SUPERUSER_ONLY_OBJECTS_SQL,
+        },
+    )
+    text = _container_output(output)
+    for line in text.splitlines():
+        found = _json_answer(line, dict)
+        entry = databases.get(str(found.get("database"))) if found else None
+        if entry is None:
+            continue
+        entry["checked"] = True
+        entry["objects"] = {
+            kind: found[kind] for kind in _OBJECT_KINDS if found.get(kind)
+        }
+    if exit_code != 0 and not any(entry["checked"] for entry in databases.values()):
+        raise ExternalCommandError("psql", exit_code, text[-2000:])
+    return databases
+
+
+def _describe_objects(objects: dict[str, Any]) -> str:
+    """The findings of one database, for a log line."""
+    parts = []
+    for kind, label in _OBJECT_KINDS.items():
+        found = objects.get(kind)
+        if not found:
+            continue
+        if kind == "event_triggers":
+            names = [
+                f"{_plain(t.get('name'))} (on {_plain(t.get('event'))}, runs "
+                f"{_plain(t.get('function'))} of {_plain(t.get('function_owner'))}, "
+                f"{'enabled' if t.get('enabled') else 'disabled'})"
+                for t in found
+                if isinstance(t, dict)
+            ]
+        elif isinstance(found, list):
+            names = [_plain(name) for name in found]
+        else:
+            names = [_plain(found)]
+        shown = ", ".join(names[:5])
+        if len(names) > 5:
+            shown += f" and {len(names) - 5} more"
+        parts.append(f"{label}: {shown}")
+    return "; ".join(parts)
+
+
+def _is_risk(kind: str, found: Any) -> bool:
+    """Whether a finding is warned about rather than mentioned."""
+    if kind == "event_triggers":
+        # A disabled one fires for nobody, and only a superuser enables it.
+        return any(isinstance(t, dict) and t.get("enabled") for t in found)
+    return kind in _RISK_KINDS
+
+
+def _report_superuser_only_objects(
+    client: DockerClient, settings: Settings, container_name: str
+) -> None:
+    """Name the managed databases of one cluster that hold such objects.
+
+    Reported on start, never repaired: what to do with a function in an
+    untrusted language or a view of the superuser's is the operator's call,
+    and nothing here is needed for Oduflow's own safety — its superuser
+    sessions do not fire event triggers (see disable_event_triggers) and
+    resolve no name of a tenant's. Never fails the start.
+    """
+    try:
+        _log_superuser_only_objects(
+            superuser_only_objects(client, settings, container_name=container_name),
+            container_name,
+        )
+    except Exception:
+        logger.warning(
+            "Could not check the databases of %s for objects only a "
+            "PostgreSQL superuser can create",
+            container_name,
+            exc_info=True,
+        )
+
+
+def _log_superuser_only_objects(
+    databases: dict[str, dict[str, Any]], container_name: str
+) -> None:
+    """One warning per database with a finding that matters, the rest in brief."""
+    legacy_templates: list[str] = []
+    mentioned: list[str] = []
+    for name in sorted(databases):
+        entry = databases[name]
+        legacy = entry["template"] and entry["superuser_owned"]
+        objects = {
+            kind: found
+            for kind, found in entry["objects"].items()
+            if not (legacy and kind in _OWNERSHIP_KINDS)
+        }
+        if any(_is_risk(kind, found) for kind, found in objects.items()):
+            logger.warning(
+                "Database %s in %s holds what only a PostgreSQL superuser can "
+                "create or still owns: %s.%s See 'What an older load may have "
+                "left behind' in the templates guide.",
+                name,
+                container_name,
+                _describe_objects(objects),
+                " It is a template an older version loaded as the superuser, "
+                "and every environment created from it gets a copy: rebuild "
+                "the template."
+                if legacy
+                else "",
+            )
+            continue
+        if objects:
+            mentioned.append(f"{name} ({_describe_objects(objects)})")
+        if legacy:
+            legacy_templates.append(name)
+    if mentioned:
+        logger.info(
+            "%d database(s) in %s hold what a rebuild cannot recreate, because "
+            "only a PostgreSQL superuser can create it: %s",
+            len(mentioned),
+            container_name,
+            "; ".join(mentioned[:10])
+            + (f" and {len(mentioned) - 10} more" if len(mentioned) > 10 else ""),
+        )
+    if legacy_templates:
+        logger.info(
+            "%d template database(s) in %s were loaded by an older version and "
+            "still belong to the PostgreSQL superuser: %s. They work as before; "
+            "rebuild each when convenient (import it again with --overwrite or "
+            "--refresh, or publish an environment over it).",
+            len(legacy_templates),
+            container_name,
+            ", ".join(legacy_templates),
+        )
+    unchecked = sorted(
+        name for name, entry in databases.items() if not entry["checked"]
+    )
+    if unchecked:
+        logger.info(
+            "%d database(s) in %s could not be checked for objects only a "
+            "PostgreSQL superuser can create: %s",
+            len(unchecked),
+            container_name,
+            ", ".join(unchecked[:10]),
+        )
 
 
 def _db_exists(
@@ -1603,62 +2572,304 @@ def _copy_file_to_container(
         raise producer_error[0]
 
 
-def _convert_custom_dump_to_sql_with_helper(
+# An archive the cluster's own pg_restore cannot read — one written by a newer
+# pg_dump — is first rewritten as plain SQL by a newer client. That client
+# parses a file its tenant supplied, so a flaw in the parser is the tenant's to
+# use. It is therefore held tighter than the restore client: it connects to
+# nothing, so it gets no network; it is never root and has no capabilities; it
+# sees the archive read-only and, to write to, one scratch directory made for
+# this conversion and nothing else of the host. What it leaves there is not
+# trusted either: Oduflow takes the one file it expects out of the helper's
+# reach and checks it before anything reads it.
+_CONVERT_INPUT = "/convert/in"
+_CONVERT_OUTPUT_DIR = "/convert/out"
+_CONVERT_SQL_NAME = "dump.sql"
+_CONVERT_SCRATCH_DIRNAME = ".dump_convert"
+_CONVERT_TIMEOUT_SECONDS = 6 * 3600
+_CONVERT_POLL_SECONDS = 1.0
+_CONVERT_HEARTBEAT_SECONDS = 60.0
+# A scratch directory changes when its conversion starts and when the SQL is
+# taken out of the helper's reach, so one untouched for this long was left by
+# a crash — or belongs to a load that already holds its SQL open.
+_CONVERT_STALE_SECONDS = 24 * 3600
+# pg_restore writing SQL is one process; the gzip pipeline adds two.
+_CONVERT_PIDS_LIMIT = 64
+
+
+def sweep_dump_conversions(settings: Settings) -> None:
+    """Remove, for every team, what interrupted dump conversions left behind."""
+    for team in settings.teams.values():
+        _sweep_conversion_scratch(os.path.join(team.data_dir, _CONVERT_SCRATCH_DIRNAME))
+
+
+def _sweep_conversion_scratch(root: str) -> None:
+    """Remove the scratch directories of conversions a crash interrupted.
+
+    Each can hold the whole database as SQL, counted against the team's disk.
+    A CLI command may be converting while a server starts, so only directories
+    older than any conversion can run are treated as abandoned.
+    """
+    cutoff = time.time() - _CONVERT_STALE_SECONDS
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (
+                not entry.is_dir(follow_symlinks=False)
+                or entry.stat(follow_symlinks=False).st_mtime > cutoff
+            ):
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        logger.info("Removed stale dump conversion directory %s", entry.path)
+
+
+def _conversion_helper_account(dump_path: str) -> tuple[int, int, bool]:
+    """The uid and gid the conversion helper runs as, and whether the archive
+    has to be copied for it.
+
+    Never root. The helper has no capabilities, so it reads the archive by
+    plain permissions: as ``nobody`` when anyone may read it, else as its
+    owner. Root's own private archive is the one case with no such account;
+    the helper then gets a copy it may read rather than root's uid.
+    """
+    euid = os.geteuid()
+    if euid != 0:
+        # Oduflow cannot give the scratch directory to another account, so the
+        # helper is this one: it reads what Oduflow reads and owns the scratch
+        # directory Oduflow just made.
+        return euid, os.getegid(), False
+    nobody_uid, nobody_gid = (int(part) for part in _RESTORE_CLIENT_NOBODY.split(":"))
+    st = os.stat(dump_path)
+    if st.st_mode & stat.S_IROTH:
+        return nobody_uid, nobody_gid, False
+    if st.st_uid != 0:
+        return st.st_uid, st.st_gid, False
+    return nobody_uid, nobody_gid, True
+
+
+def _await_conversion(helper: Any, out_dir: str) -> tuple[int, str]:
+    """Wait for the conversion helper; return its exit code and its output.
+
+    The helper is stopped when it runs past its deadline, and when the disk it
+    writes to is nearly full: an archive of a few megabytes can expand without
+    bound, and the helper must not be what fills the host.
+    """
+    produced = os.path.join(out_dir, _CONVERT_SQL_NAME)
+    started = last_beat = time.monotonic()
+    while True:
+        helper.reload()
+        if helper.status not in ("created", "running", "restarting"):
+            break
+        now = time.monotonic()
+        stopped = ""
+        if now - started > _CONVERT_TIMEOUT_SECONDS:
+            stopped = (
+                f"it did not finish within {_CONVERT_TIMEOUT_SECONDS // 3600} hours"
+            )
+        elif shutil.disk_usage(out_dir).free < _DISK_RECOVERY_FLOOR_BYTES:
+            stopped = (
+                "less than "
+                f"{_DISK_RECOVERY_FLOOR_BYTES // 1024**3} GiB of disk space is left"
+            )
+        if stopped:
+            with contextlib.suppress(Exception):
+                helper.kill()
+            raise ExternalCommandError(
+                "pg_restore", -1, f"The dump conversion was stopped: {stopped}."
+            )
+        if now - last_beat >= _CONVERT_HEARTBEAT_SECONDS:
+            written = 0.0
+            with contextlib.suppress(OSError):
+                written = os.lstat(produced).st_size / 1024**2
+            logger.info(
+                "Converting the dump to SQL for %.0fs, %.0f MiB written",
+                now - started,
+                written,
+            )
+            last_beat = now
+        time.sleep(_CONVERT_POLL_SECONDS)
+    exit_code = int(helper.wait().get("StatusCode", -1))
+    output = helper.logs(stdout=True, stderr=True, tail=200).decode(
+        "utf-8", errors="replace"
+    )
+    return exit_code, output
+
+
+def _take_converted_sql(scratch: str, out_dir: str) -> str:
+    """Move the helper's SQL out of its reach, check it, and return its path.
+
+    The directory the helper wrote to is as untrusted as the archive: where
+    the SQL should be there may be a link to a host file, a FIFO, or nothing.
+    The entry is renamed into the private parent first — a rename moves a link
+    as a link — and only then looked at, so what is checked is what is used.
+    """
+    produced = os.path.join(out_dir, _CONVERT_SQL_NAME)
+    taken = os.path.join(scratch, _CONVERT_SQL_NAME)
+    try:
+        os.rename(produced, taken)
+        st = os.lstat(taken)
+    except OSError as exc:
+        raise ExternalCommandError(
+            "pg_restore", -1, f"The dump conversion produced no SQL file: {exc}"
+        ) from exc
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise ExternalCommandError(
+            "pg_restore",
+            -1,
+            "The dump conversion left something other than a regular file "
+            "where its SQL was expected; it was not used.",
+        )
+    if st.st_size == 0:
+        raise ExternalCommandError(
+            "pg_restore", -1, "The dump conversion produced an empty SQL file."
+        )
+    # The helper's account owns it; from here on it is an ordinary dump.
+    if (st.st_uid, st.st_gid) != (os.geteuid(), os.getegid()):
+        os.chown(taken, os.geteuid(), os.getegid(), follow_symlinks=False)
+    os.chmod(taken, 0o644)
+    return taken
+
+
+def _convert_dump_in_helper(
     client: DockerClient,
     settings: Settings,
     dump_path: str,
+    scratch: str,
     *,
     is_gzipped: bool,
-) -> tuple[int, str, str]:
-    """Convert a custom dump to plain SQL with a newer pg_restore client."""
-    dump_dir = os.path.abspath(os.path.dirname(dump_path))
-    dump_name = os.path.basename(dump_path)
-    container_path = f"/backup/{dump_name}"
-    sql_path = os.path.join(dump_dir, "dump.sql")
-    container_sql_path = "/backup/dump.sql"
+) -> str:
+    """Convert the archive at *dump_path* to SQL in *scratch*; return its path."""
+    uid, gid, needs_copy = _conversion_helper_account(dump_path)
+    out_dir = os.path.join(scratch, "out")
+    os.mkdir(out_dir, 0o700)
+    source = os.path.abspath(dump_path)
+    if needs_copy:
+        # Readable by anyone, but only through the mount: the scratch
+        # directory around it is closed to every other account on the host.
+        source = os.path.join(scratch, "in")
+        shutil.copyfile(dump_path, source)
+        os.chmod(source, 0o644)
+    if (uid, gid) != (os.geteuid(), os.getegid()):
+        os.chown(out_dir, uid, gid)
+
+    target = f"{_CONVERT_OUTPUT_DIR}/{_CONVERT_SQL_NAME}"
     if is_gzipped:
         command = [
             "bash",
             "-c",
-            "set -o pipefail; "
-            f"gunzip -c {shlex.quote(container_path)} | "
-            "pg_restore --no-owner "
-            f"-f {shlex.quote(container_sql_path)}",
+            f"set -o pipefail; gunzip -c {_CONVERT_INPUT} | "
+            f"pg_restore --no-owner -f {target}",
         ]
     else:
-        command = [
-            "pg_restore",
-            "--no-owner",
-            "-f",
-            container_sql_path,
-            container_path,
-        ]
+        command = ["pg_restore", "--no-owner", "-f", target, _CONVERT_INPUT]
 
     image_cleanup.note_image_requested(_PG_RESTORE_HELPER_IMAGE)
     with contextlib.suppress(Exception):
         client.images.pull(_PG_RESTORE_HELPER_IMAGE)
 
-    helper_name = f"{settings.prefix}pg-restore-helper-{time.time_ns()}"
     helper = None
     try:
         helper = client.containers.run(
             _PG_RESTORE_HELPER_IMAGE,
-            name=helper_name,
+            command[1:],
+            # Not the image's entrypoint, which prepares a server.
+            entrypoint=command[0],
+            name=f"{settings.prefix}pg-restore-helper-{uuid.uuid4().hex[:12]}",
             detach=True,
-            volumes={dump_dir: {"bind": "/backup", "mode": "rw"}},
-            command=command,
+            user=f"{uid}:{gid}",
+            network_mode="none",
+            read_only=True,
+            tmpfs={"/tmp": "rw,noexec,nosuid,nodev,size=16m"},
+            # An arbitrary uid has no home directory to look up.
+            environment={"HOME": "/tmp"},
+            volumes={
+                source: {"bind": _CONVERT_INPUT, "mode": "ro"},
+                out_dir: {"bind": _CONVERT_OUTPUT_DIR, "mode": "rw"},
+            },
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            mem_limit=default_env_limits()["mem_limit"],
+            pids_limit=_CONVERT_PIDS_LIMIT,
+            # The output is read back below, whatever the daemon's default.
+            log_config={"type": "json-file"},
             labels={settings.managed_label: "true", settings.system_label: "true"},
         )
-        wait_result = helper.wait()
-        exit_code = int(wait_result.get("StatusCode", -1))
-        logs = helper.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
-        return exit_code, logs, sql_path
+        exit_code, output = _await_conversion(helper, out_dir)
     except docker.errors.APIError as exc:
-        return -1, str(exc), sql_path
+        raise ExternalCommandError(
+            "pg_restore",
+            -1,
+            f"The {_PG_RESTORE_HELPER_IMAGE} conversion helper could not run: {exc}",
+        ) from exc
     finally:
+        # Before its output is looked at: nothing may still be writing there.
         if helper is not None:
             with contextlib.suppress(Exception):
                 helper.remove(force=True)
+    if exit_code != 0:
+        raise ExternalCommandError("pg_restore", exit_code, output)
+    return _take_converted_sql(scratch, out_dir)
+
+
+@contextlib.contextmanager
+def _converted_sql_dump(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    dump_path: str,
+    *,
+    is_gzipped: bool,
+) -> Iterator[str]:
+    """Yield the path of plain SQL converted from the archive at *dump_path*.
+
+    The conversion runs in a throwaway ``postgres:17`` container (see the
+    notes above) and fails with ExternalCommandError. The SQL lives in a
+    scratch directory under the team's data directory — where the Docker
+    daemon can mount it from and the team's disk quota counts it — and is
+    removed on exit, so a caller that wants to keep it moves it away first.
+    """
+    root = os.path.join(team.data_dir, _CONVERT_SCRATCH_DIRNAME)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    _sweep_conversion_scratch(root)
+    scratch = os.path.join(root, uuid.uuid4().hex)
+    os.mkdir(scratch, 0o700)
+    try:
+        yield _convert_dump_in_helper(
+            client, settings, dump_path, scratch, is_gzipped=is_gzipped
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _keep_converted_dump(sql_path: str, archive_path: str) -> None:
+    """Make the converted SQL the template's dump, in place of its archive.
+
+    The cluster cannot read the archive, so keeping it would repeat the
+    conversion on every reload. Best effort: when the SQL cannot be moved the
+    archive stays the template's dump, which is still correct.
+    """
+    dest = os.path.join(os.path.dirname(os.path.abspath(archive_path)), "dump.sql")
+    try:
+        try:
+            os.replace(sql_path, dest)
+        except OSError:
+            # Both sit under the team data dir, so this is normally a rename;
+            # XFS refuses it across quota projects (see _staged_db_dump).
+            shutil.move(sql_path, dest)
+    except OSError as exc:
+        logger.warning(
+            "Could not keep the converted dump as %s (%s); the archive stays",
+            dest,
+            exc,
+        )
+        return
+    if os.path.abspath(archive_path) != dest:
+        with contextlib.suppress(OSError):
+            os.remove(archive_path)
 
 
 def _is_pg_restore_archive_version_error(output: str) -> bool:
@@ -1885,6 +3096,200 @@ def _pg_exchange_dirs(
     )
 
 
+# pg_dump reads a database whose content is its tenant's. It pins search_path
+# and qualifies every name itself, so reading does not run tenant code — as
+# long as what it reads is what it listed: until 12.20 / 13.16 / 14.13 / 15.8
+# / 16.4 (CVE-2024-7348) a session that swapped a sequence for a view in
+# between had the view's functions run by whoever dumped. Whatever the next
+# such flaw is, it is worth nothing against a dump taken by the database's own
+# role, so that is who dumps; see scoped_dump_role and template_dump_role.
+# pg_dump is not psql: it reads no input of the tenant's that could reconnect
+# or shell out, so it may run next to PostgreSQL, where the local socket takes
+# the role's name without a password and the dump is written in place.
+#
+# Where the superuser still has to dump, the server is told not to expand
+# what a tenant can put in a relation's place. A patched pg_dump sets this
+# itself; passing it with the connection does not depend on the client.
+_PG_DUMP_GUARD_MINORS = {12: 20, 13: 16, 14: 13, 15: 8, 16: 4}
+PG_DUMP_GUARD_OPTIONS = "-c restrict_nonsystem_relation_kind=view,foreign-table"
+# PostgreSQL's own refusals, as it words them. The operating system's
+# "Permission denied" (an output file that cannot be written) is not one.
+_OWNER_DUMP_MARKERS = (
+    "permission denied for ",
+    "must be owner of ",
+    "row-level security policy",
+)
+_OWNER_DUMP_HINT = (
+    "\n\nA database is dumped by its own PostgreSQL role, never by the cluster "
+    "superuser, so that role has to be able to read everything in it. "
+    "Objects that belong to another role (created while an older version ran "
+    "the container as the superuser) are handed over by update_environment, "
+    "or by reconfigure_production for a production. A table with FORCE ROW "
+    "LEVEL SECURITY has to let its owner read every row."
+)
+
+
+def pg_dump_guard_supported(version_num: int) -> bool:
+    """Whether a server (``server_version_num``) has the fix for CVE-2024-7348.
+
+    That is the release that knows ``restrict_nonsystem_relation_kind``;
+    PostgreSQL 17 had it from the start.
+    """
+    major, minor = divmod(version_num, 10000)
+    if major >= 17:
+        return True
+    fixed = _PG_DUMP_GUARD_MINORS.get(major)
+    return fixed is not None and minor >= fixed
+
+
+def superuser_dump_environment(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    *,
+    container_name: str | None = None,
+) -> dict[str, str]:
+    """Environment of a ``pg_dump`` that the superuser has to run.
+
+    Only two dumps are left to it. A template database an older version
+    loaded as the superuser: no tenant role can connect to one, so the second
+    session CVE-2024-7348 needs cannot exist there. And a database an
+    operator names for a PostgreSQL upgrade, on the operator's word that its
+    content is trusted. The setting returned here closes the flaw on the
+    server whatever the client's release. A server too old to know the
+    setting cannot be given it (the connection would fail), so that is
+    reported instead.
+
+    A dump runs no DDL, but it logs in, and since PostgreSQL 17 a database
+    can hold an event trigger ``ON login`` — which a template loaded as the
+    superuser may have brought along, and which runs its function as whoever
+    connects. Such a server is told to fire no event trigger in the session
+    (see superuser_session_environment); older ones have no login triggers.
+    """
+    version = int(
+        _exec_sql(
+            client, settings, "SHOW server_version_num;", container_name=container_name
+        )
+    )
+    options = []
+    if pg_dump_guard_supported(version):
+        options.append(PG_DUMP_GUARD_OPTIONS)
+    else:
+        logger.warning(
+            "Dumping database %s as the PostgreSQL superuser on PostgreSQL %d.%d "
+            "(%s), a release without the fix for CVE-2024-7348: an open session in "
+            "that database could run SQL as the superuser during the dump. Move "
+            "the cluster to a current minor release of its PostgreSQL image.",
+            database,
+            version // 10000,
+            version % 10000,
+            container_name or settings.shared_db_container,
+        )
+    if event_trigger_switch_supported(version):
+        options.append(EVENT_TRIGGERS_OFF_OPTIONS)
+    return {"PGOPTIONS": " ".join(options)} if options else {}
+
+
+def scoped_dump_role(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    container_name: str | None = None,
+) -> str:
+    """The role that dumps the database of an environment or a production.
+
+    It is the database's own scoped role, the one its Odoo connects as:
+    whatever a dump could be made to run, it runs with rights the tenant has
+    anyway. *env_name* is a production's ``prod_env_name``; ``container_name``
+    selects its cluster.
+
+    A dump runs next to PostgreSQL, where a role needs no password, so only
+    the name is taken from the credentials file, and a lost file does not
+    stop a backup: the name is then the derived one the role was created
+    with. The cluster has the last word on it. A role that does not exist
+    means the database never had one (an environment older than scoped
+    roles) and is refused with the remedy, as everywhere else; a superuser is
+    refused whatever the file says.
+    """
+    from oduflow.env_credentials import (
+        MissingCredentialsError,
+        generate_pg_username,
+        load_credentials,
+        missing_credentials_message,
+    )
+
+    role = load_credentials(env_name, team.workspaces_dir, settings.db_user).get(
+        "pg_user"
+    )
+    if not isinstance(role, str) or not role or role == settings.db_user:
+        role = generate_pg_username(env_name, team.team_id)
+    literal = role.replace("'", "''")
+    superuser = _exec_sql(
+        client,
+        settings,
+        f"SELECT rolsuper FROM pg_roles WHERE rolname = '{literal}';",
+        container_name=container_name,
+    )
+    if superuser == "f":
+        return role
+    if superuser == "t":
+        raise PrerequisiteNotMetError(
+            f"Refusing to dump the database of '{env_name}' as '{role}': that "
+            "role is a PostgreSQL superuser, and a database is dumped by a "
+            "scoped role of its own."
+        )
+    raise MissingCredentialsError(missing_credentials_message(env_name))
+
+
+def template_dump_role(
+    client: DockerClient, settings: Settings, team: TeamSettings, tpl_db: str
+) -> str:
+    """The role that dumps the template database *tpl_db*: its owner.
+
+    That is the team's template owner for everything loaded since templates
+    stopped being the superuser's (see ensure_template_owner_role). A
+    template an older version loaded still belongs to the superuser, and
+    nobody else can read all of it; it is dumped as before until it is
+    loaded again (see superuser_dump_environment for why that holds). A
+    database owned by anyone else is a load that did not finish.
+    """
+    owner = _exec_sql(
+        client,
+        settings,
+        "SELECT r.rolname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba "
+        f"WHERE d.datname = '{tpl_db}';",
+    )
+    if owner == get_template_owner_role(team.team_id):
+        return owner
+    if owner == settings.db_user:
+        logger.info(
+            "Template database %s was loaded by an older version and still "
+            "belongs to the PostgreSQL superuser; it is dumped as the "
+            "superuser until the template is imported or published again",
+            tpl_db,
+        )
+        return owner
+    raise PrerequisiteNotMetError(
+        f"Template database '{tpl_db}' belongs to '{owner or 'nobody'}', not "
+        "to the team's template owner: its load did not finish. Import or "
+        "publish the template again, then retry."
+    )
+
+
+def explain_dump_failure(output: str, *, tail: int = 0) -> str:
+    """A failed pg_dump's *output*, explained when a privilege is the cause.
+
+    ``tail`` keeps only that many trailing characters of the output; the cause
+    is looked for in all of it.
+    """
+    text = output[-tail:] if tail else output
+    if any(marker in output for marker in _OWNER_DUMP_MARKERS):
+        text += _OWNER_DUMP_HINT
+    return text
+
+
 @contextlib.contextmanager
 def _staged_db_dump(
     client: DockerClient,
@@ -1893,22 +3298,24 @@ def _staged_db_dump(
     db_name: str,
     dest_path: str,
     *,
+    role: str,
     container_name: str | None = None,
 ) -> Any:
-    """Dump *db_name* for *dest_path*, as cheaply as this installation allows.
+    """Dump *db_name* as *role* for *dest_path*, as cheaply as possible here.
 
-    Yields ``(host_path, container_path)``. ``container_path`` is None unless
-    the dump was staged in the pg_exchange mount, where PostgreSQL can restore
-    it in place instead of having it copied into its writable layer first.
-    Writing through the mount also leaves the archive's TOC offsets intact,
-    which a parallel ``pg_restore`` uses; a dump streamed from stdout cannot
-    carry them.
+    *role* is the database's own (see scoped_dump_role), never the superuser:
+    the callers dump an environment's or a production's database.
+
+    Yields the host path of the staged dump. With the pg_exchange mount,
+    ``pg_dump`` writes it there itself: one write to its final filesystem, and
+    an archive whose TOC offsets are intact, which a parallel ``pg_restore``
+    uses; a dump streamed from stdout cannot carry them.
 
     ``container_name`` selects the PostgreSQL instance to dump from: the shared
     dev cluster by default, or ``settings.prod_db_container``. Only the shared
     container has the exchange dir mounted, so a dump from any other cluster is
     streamed out through the exec API — still straight into the exchange dir
-    when there is one, so the dev-side restore can read it in place.
+    when there is one.
 
     On a clean exit the staged dump is moved to *dest_path*; on failure nothing
     is left behind, and *dest_path* is never half-written.
@@ -1917,7 +3324,11 @@ def _staged_db_dump(
     db_container = client.containers.get(source_name)
     dump_in_place = source_name == settings.shared_db_container
     exchange = _pg_exchange_dirs(client, settings, team)
-    dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fc"]
+    if role == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Refusing to dump database '{db_name}' as the PostgreSQL superuser."
+        )
+    dump_cmd = ["pg_dump", "-U", role, "-Fc"]
     container_path: str | None = None
 
     if exchange is None:
@@ -1930,21 +3341,29 @@ def _staged_db_dump(
         container_path = f"{container_dir}/{name}"
 
     try:
-        if container_path is None or not dump_in_place:
-            _stream_exec_to_file(
-                client, db_container, [*dump_cmd, db_name], host_path, tool="pg_dump"
-            )
-        else:
-            exit_code, output = db_container.exec_run(
-                [*dump_cmd, "-f", container_path, db_name]
-            )
-            if exit_code != 0:
-                msg = (
-                    output.decode("utf-8") if isinstance(output, bytes) else str(output)
+        try:
+            if container_path is None or not dump_in_place:
+                _stream_exec_to_file(
+                    client,
+                    db_container,
+                    [*dump_cmd, db_name],
+                    host_path,
+                    tool="pg_dump",
                 )
-                raise ExternalCommandError("pg_dump", exit_code, msg)
+            else:
+                exit_code, output = db_container.exec_run(
+                    [*dump_cmd, "-f", container_path, db_name]
+                )
+                if exit_code != 0:
+                    raise ExternalCommandError(
+                        "pg_dump", exit_code, _container_output(output)
+                    )
+        except ExternalCommandError as exc:
+            raise ExternalCommandError(
+                exc.cmd, exc.exit_code, explain_dump_failure(exc.output)
+            ) from exc
 
-        yield host_path, container_path
+        yield host_path
         try:
             os.replace(host_path, dest_path)
         except OSError as exc:
@@ -1961,83 +3380,438 @@ def _staged_db_dump(
             os.remove(host_path)
 
 
-@contextlib.contextmanager
-def _expose_file_to_pg(
+# Template dumps are tenant input: an import pulls one from a URL, bucket or
+# path its caller names, and a published environment's dump carries whatever
+# that tenant defined in its database. So a dump is executed by a throwaway
+# role that owns nothing but the database being loaded, and it is read by a
+# client in a throwaway container. Neither half may be skipped: SQL run by the
+# cluster superuser can ``COPY ... FROM PROGRAM``, and a client inside the
+# shared PostgreSQL container is not held to its role at all — psql's ``\!``
+# is a root shell there, and the local socket trusts ``\c - <superuser>``.
+_TEMPLATE_LOADER_PREFIX = "oduflow_load_"
+_TEMPLATE_LOADER_RE = re.compile(rf"^{_TEMPLATE_LOADER_PREFIX}[0-9a-f]{{16}}$")
+_RESTORE_CLIENT_DUMP = "/restore/dump"
+# An account every PostgreSQL image has. A world-readable dump is read as it,
+# so the client does not have to run as the dump's owner.
+_RESTORE_CLIENT_NOBODY = "65534:65534"
+# One per object in a plain-SQL dump that records owners, and expected: the
+# loader may not give objects away (PG 15 / PG 16+ wording).
+_OWNERSHIP_DENIED_RE = re.compile(
+    r"ERROR:\s+(must be member of role|must be able to SET ROLE)\b"
+)
+_TEMPLATE_SQL_ERROR_RE = re.compile(
+    r"^psql:(?:/restore/dump|<stdin>):\d+: ERROR:\s+(.*)$"
+)
+_TOLERATED_TEMPLATE_SQL_ERRORS = {
+    'unrecognized configuration parameter "transaction_timeout"',
+    "must be owner of extension plpgsql",
+}
+_RESTRICTED_LOAD_MARKERS = (
+    "permission denied to create extension",
+    "must be owner of extension",
+    "must be superuser",
+)
+_RESTRICTED_LOAD_HINT = (
+    "\n\nTemplate dumps are loaded by a restricted PostgreSQL role, never by "
+    "the cluster superuser, so a dump cannot use what only a superuser may: "
+    "an extension PostgreSQL does not mark as trusted (pg_trgm, unaccent and "
+    "the other trusted extensions load fine), an untrusted language, an event "
+    "trigger, or a comment on an extension it did not create. See 'How a dump "
+    "is loaded' in the templates guide."
+)
+_RESTRICTED_RESTORE_HINT = (
+    "\n\nDatabase content is restored by the database's own PostgreSQL role, "
+    "never by the cluster superuser, so it cannot contain what only a "
+    "superuser may create: an extension PostgreSQL does not mark as trusted "
+    "(pg_trgm, unaccent and the other trusted extensions restore fine), an "
+    "untrusted language, an event trigger. An operator who needs such an "
+    "extension marks it trusted in the PostgreSQL image "
+    "(`trusted = true` in its control file)."
+)
+
+
+def _restricted_load_failure(output: str, hint: str, *, tail: int = 0) -> str:
+    """*output* of a failed restricted load, explained when a privilege is why.
+
+    ``tail`` keeps only that many trailing characters of the output; the cause
+    is looked for in all of it.
+    """
+    text = output[-tail:] if tail else output
+    if any(marker in output.lower() for marker in _RESTRICTED_LOAD_MARKERS):
+        text += hint
+    return text
+
+
+def ensure_template_owner_role(
+    client: DockerClient, settings: Settings, team: TeamSettings
+) -> str:
+    """Ensure the role that owns the team's template databases; return its name.
+
+    What a dump defines must not end up owned by the superuser: a view is
+    checked against its owner's rights and a SECURITY DEFINER function runs
+    with them, so either would hand superuser rights to whoever may use it.
+    The owner is an ordinary role instead. It can log in, because Oduflow reads
+    template databases as it through the local socket, but nothing can
+    authenticate as it over the network: it has no password, and one would be
+    expired from the start — a role may set its own password, and a SECURITY
+    DEFINER function from a dump runs as this role.
+    """
+    role = get_template_owner_role(team.team_id)
+    _exec_sql(
+        client,
+        settings,
+        f'DO $$ BEGIN CREATE ROLE "{role}" WITH LOGIN NOSUPERUSER NOCREATEDB '
+        "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'epoch'; "
+        # Loads of two templates of one team may get here together.
+        "EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;",
+    )
+    return role
+
+
+def _create_template_loader(
+    client: DockerClient, settings: Settings
+) -> tuple[str, str]:
+    """Create the role one template load runs as; return its name and password."""
+    role = f"{_TEMPLATE_LOADER_PREFIX}{secrets.token_hex(8)}"
+    password = secrets.token_urlsafe(24)
+    _exec_sql(
+        client,
+        settings,
+        f'CREATE ROLE "{role}" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+        f"NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';",
+    )
+    return role, password
+
+
+def _create_load_db(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    owner: str,
+    *,
+    tablespace: str | None = None,
+    container_name: str | None = None,
+) -> None:
+    """Create the empty *database* for the non-superuser *owner* to restore into.
+
+    ``container_name`` selects the cluster, like everywhere else: the shared
+    development one by default, or the production cluster.
+    """
+    placement = f' TABLESPACE "{tablespace}"' if tablespace else ""
+    _exec_sql(
+        client,
+        settings,
+        f'CREATE DATABASE "{database}" OWNER "{owner}"{placement};',
+        container_name=container_name,
+    )
+    restrict_database_access(client, settings, database, container_name=container_name)
+    _own_public_schema(client, settings, database, owner, container_name=container_name)
+
+
+def _own_public_schema(
+    client: DockerClient,
+    settings: Settings,
+    database: str,
+    owner: str,
+    *,
+    container_name: str | None = None,
+) -> None:
+    """Give the ``public`` schema of a still empty *database* to *owner*.
+
+    A dump may grant on, comment on or re-own the public schema, which takes
+    its owner. Nothing from the dump is in the database yet, so the superuser
+    runs this utility statement over no tenant content. It is DDL all the
+    same, and the rule has no exceptions: event triggers are disabled first,
+    which here means whatever ``template1`` handed down.
+    """
+    disable_event_triggers(client, settings, database, container_name=container_name)
+    _exec_sql(
+        client,
+        settings,
+        f'ALTER SCHEMA public OWNER TO "{owner}";',
+        database,
+        container_name=container_name,
+    )
+
+
+def _stale_template_loader(
+    client: DockerClient, settings: Settings, tpl_db: str
+) -> str | None:
+    """The loader still owning *tpl_db*: its load did not outlive the server."""
+    owner = _exec_sql(
+        client,
+        settings,
+        "SELECT r.rolname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba "
+        f"WHERE d.datname = '{tpl_db}';",
+    )
+    return owner if _TEMPLATE_LOADER_RE.match(owner) else None
+
+
+def _retire_template_loader(
+    client: DockerClient,
+    settings: Settings,
+    loader: str,
+    *,
+    handover: tuple[str, str] | None = None,
+) -> None:
+    """Remove a loader role, or at least leave it unable to connect.
+
+    ``handover`` is ``(database, owner)``: everything the loader restored into
+    that database goes to its owner first.
+    """
+    # Its client container is gone, but a dump could have made that client copy
+    # the password out, or leave a session behind.
+    _exec_sql(client, settings, f'ALTER ROLE "{loader}" PASSWORD NULL;')
+    _exec_sql(
+        client,
+        settings,
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        f"WHERE usename = '{loader}' AND pid <> pg_backend_pid();",
+    )
+    if handover is not None and _db_exists(client, settings, handover[0]):
+        # Both are utility statements: they run no code from the database, so
+        # the superuser can issue them over tenant content. DROP OWNED only
+        # has privileges and default privileges left to remove. What they do
+        # fire is an event trigger. The loader cannot create one, but an
+        # extension the operator's image marks trusted can, since its script
+        # runs as the bootstrap superuser; so they are disabled first.
+        disable_event_triggers(client, settings, handover[0])
+        _exec_sql(
+            client,
+            settings,
+            f'REASSIGN OWNED BY "{loader}" TO "{handover[1]}"; '
+            f'DROP OWNED BY "{loader}";',
+            handover[0],
+        )
+    try:
+        _exec_sql(client, settings, f'DROP ROLE IF EXISTS "{loader}";')
+    except ExternalCommandError as exc:
+        # Only a dump that connected to another database and created something
+        # there gets here; the role then stays, with nothing left to it.
+        _exec_sql(client, settings, f'ALTER ROLE "{loader}" NOLOGIN;')
+        logger.warning(
+            "Template loader role %s could not be dropped and was disabled instead: %s",
+            loader,
+            exc,
+        )
+
+
+def _template_restore_command(
+    *,
+    text_dump: bool,
+    gzipped: bool,
+    database: str,
+    strict: bool,
+    jobs: int | None = None,
+) -> list[str]:
+    """The client command restoring the dump mounted in a restore client.
+
+    The connection comes from the client's environment. ``-w`` keeps either
+    tool from waiting on a password prompt nobody can answer. ``jobs`` fixes
+    the parallelism of an archive restore; by default it follows the host.
+    """
+    if text_dump:
+        # -X: no psqlrc. -q: errors and notices only — a command tag per
+        # statement would otherwise fill the container log.
+        tool = ["psql", "-X", "-q", "-w"]
+    else:
+        # --no-owner leaves every object with the role restoring it instead of
+        # the one the archive recorded. An environment's dump names its own
+        # role, which is dropped with the environment.
+        tool = ["pg_restore", "--no-owner", "-w", "-d", database]
+        if strict:
+            tool += ["--no-acl", "--exit-on-error"]
+    if gzipped:
+        if text_dump:
+            tool += ["-f", "-"]  # Keep file/line diagnostics for piped SQL.
+        return [
+            "bash",
+            "-c",
+            f"set -o pipefail; gunzip -c {_RESTORE_CLIENT_DUMP} | {shlex.join(tool)}",
+        ]
+    if text_dump:
+        return [*tool, "-f", _RESTORE_CLIENT_DUMP]
+    # Parallel restore only here: -j needs a seekable archive, which rules out
+    # the gzip pipeline above and plain SQL. Odoo restores are dominated by
+    # index and constraint builds, which is exactly what -j parallelises.
+    if jobs is None:
+        jobs = _pg_restore_jobs()
+    if jobs > 1:
+        tool += ["-j", str(jobs)]
+    return [*tool, _RESTORE_CLIENT_DUMP]
+
+
+def _restore_client_user(dump_path: str) -> str:
+    """The uid:gid a restore client reads *dump_path* as.
+
+    The client runs without capabilities, so not even root in it can read a
+    file it does not own: a private dump is read as its owner.
+    """
+    st = os.stat(dump_path)
+    if st.st_mode & stat.S_IROTH:
+        return _RESTORE_CLIENT_NOBODY
+    return f"{st.st_uid}:{st.st_gid}"
+
+
+def _container_image(container: Any, default: str) -> str:
+    """The image reference *container* was created from, else *default*."""
+    attrs = getattr(container, "attrs", None)
+    config = attrs.get("Config") if isinstance(attrs, dict) else None
+    image = config.get("Image") if isinstance(config, dict) else None
+    return image if isinstance(image, str) and image else default
+
+
+def _run_restore_client(
     client: DockerClient,
     settings: Settings,
     team: TeamSettings,
-    db_container: docker.models.containers.Container,
-    host_path: str,
-) -> Iterator[str]:
-    """Yield a path at which the shared PostgreSQL container can read *host_path*.
+    db_container: Any,
+    command: list[str],
+    *,
+    role: str,
+    password: str,
+    database: str,
+    dump_path: str,
+    host: str | None = None,
+    purpose: str = "template-restore",
+) -> tuple[int, str]:
+    """Run a restore *command* as *role* from a throwaway client container.
 
-    Prefers a hardlink in the team's pg_exchange dir: it exposes the existing
-    host file without writing another full-size copy. Older DB containers lack
-    that mount, hardlinks fail across filesystems, and a linked inode keeps its
-    host owner and mode, which a remapped container user may not be able to
-    read — each case falls back to streaming a copy into the container's /tmp.
-    Whatever was staged is removed on exit, however the restore ended.
+    The client is the cluster's own image, so its tools match the server. It
+    reaches PostgreSQL over the team network like the team's Odoo containers
+    do, which makes every connection password-authenticated: the dump can only
+    act as *role*, whose password is the only secret in the container. It sees
+    the dump read-only and nothing else of the host.
 
-    The DB container is shared across teams, whose locks do not contend, so
-    every input gets an opaque name: one restore can neither overwrite nor
-    clean up another's.
+    ``host`` is the cluster to restore into: *db_container*'s name on the team
+    network, the shared development cluster by default. Both clusters are
+    attached to every team network. ``purpose`` names the client container.
     """
-    name = f"oduflow-restore-{uuid.uuid4().hex}"
-    link_path: str | None = None
-    container_tmp_path: str | None = None
-    container_path: str | None = None
-    exchange = _pg_exchange_dirs(client, settings, team, container=db_container)
+    container = None
     try:
-        if exchange is not None:
-            host_dir, container_dir = exchange
-            candidate = os.path.join(host_dir, name)
-            try:
-                os.makedirs(host_dir, exist_ok=True)
-                os.link(host_path, candidate)
-            except OSError as exc:
-                logger.warning(
-                    "Could not expose %s through pg_exchange (%s); "
-                    "falling back to streamed Docker copy",
-                    host_path,
-                    exc,
-                )
-            else:
-                link_path = candidate
-                exit_code, _ = db_container.exec_run(
-                    ["test", "-r", f"{container_dir}/{name}"]
-                )
-                if exit_code == 0:
-                    container_path = f"{container_dir}/{name}"
-                else:
-                    logger.warning(
-                        "PostgreSQL cannot read %s through pg_exchange; "
-                        "falling back to streamed Docker copy",
-                        host_path,
-                    )
-                    with contextlib.suppress(OSError):
-                        os.remove(link_path)
-                    link_path = None
-
-        if container_path is None:
-            container_tmp_path = f"/tmp/{name}"
-            _copy_file_to_container(db_container, host_path, "/tmp", archive_name=name)
-            container_path = container_tmp_path
-
-        yield container_path
+        container = client.containers.run(
+            _container_image(db_container, settings.postgres_image),
+            command[1:],
+            entrypoint=command[0],
+            name=f"{settings.prefix}{purpose}-{uuid.uuid4().hex[:12]}",
+            detach=True,
+            network=ensure_team_network(client, settings, team),
+            user=_restore_client_user(dump_path),
+            environment={
+                "PGHOST": host or settings.shared_db_container,
+                "PGUSER": role,
+                "PGPASSWORD": password,
+                "PGDATABASE": database,
+                # An arbitrary uid has no home directory to look up.
+                "HOME": "/tmp",
+            },
+            volumes={
+                os.path.abspath(dump_path): {
+                    "bind": _RESTORE_CLIENT_DUMP,
+                    "mode": "ro",
+                }
+            },
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            labels={settings.managed_label: "true", settings.system_label: "true"},
+            **default_env_limits(),
+        )
+        exit_code = int(container.wait().get("StatusCode", -1))
+        output = container.logs(stdout=True, stderr=True).decode(
+            "utf-8", errors="replace"
+        )
+        return exit_code, output
     finally:
-        if link_path is not None:
-            with contextlib.suppress(OSError):
-                os.remove(link_path)
-        if container_tmp_path is not None:
-            # Each copy is a full-size file in the container's writable layer;
-            # leaving it behind grows oduflow-db without bound.
+        if container is not None:
             with contextlib.suppress(Exception):
-                db_container.exec_run(["rm", "-f", container_tmp_path])
+                container.remove(force=True)
 
 
-# Inputs staged by _expose_file_to_pg and _staged_db_dump, including incomplete
-# .part files from _stream_exec_to_file. Normal exits clean these up; a process
-# crash can leave either a complete dump or a partial stream behind.
+def restore_archive_as_role(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    dump_path: str,
+    *,
+    database: str,
+    role: str,
+    password: str,
+    container_name: str | None = None,
+    jobs: int = 1,
+    label: str = "pg_restore",
+) -> None:
+    """Restore a ``pg_dump -Fc`` archive into *database* as its owner *role*.
+
+    The restricted load of reload_template, for a database whose owner already
+    exists: a production's scoped role restoring that production's own data.
+    The content of a database is its tenant's — a function in a CHECK
+    constraint, an index expression or a column default runs during the
+    restore with the rights of whoever restores — so no superuser does it, in
+    either cluster. *role* must own *database* and be an ordinary role; the
+    superuser is refused rather than trusted to be one.
+
+    The archive is read by a throwaway client container (see
+    _run_restore_client), never inside the PostgreSQL container, and must lie
+    where the Docker daemon can mount it from: under the data directory.
+    ``--no-owner`` leaves everything with *role*, and trusted extensions
+    (pg_trgm, unaccent) are created and owned by it. pg_restore exits non-zero
+    after any failed statement, so content that needs a superuser fails the
+    restore instead of being half applied.
+    """
+    if role == settings.db_user:
+        raise PrerequisiteNotMetError(
+            f"Refusing to restore database content into '{database}' as the "
+            "PostgreSQL superuser: the database has no scoped role."
+        )
+    host = container_name or settings.shared_db_container
+    exit_code, output = _run_restore_client(
+        client,
+        settings,
+        team,
+        client.containers.get(host),
+        _template_restore_command(
+            text_dump=False,
+            gzipped=False,
+            database=database,
+            strict=False,
+            jobs=jobs,
+        ),
+        role=role,
+        password=password,
+        database=database,
+        dump_path=dump_path,
+        host=host,
+        purpose="db-restore",
+    )
+    if exit_code != 0:
+        raise ExternalCommandError(
+            label,
+            exit_code,
+            _restricted_load_failure(output, _RESTRICTED_RESTORE_HINT, tail=2000),
+        )
+
+
+def _summarize_restore_output(output: str) -> str:
+    """Fold the ownership statements a restricted load skips into one line."""
+    kept = []
+    skipped = 0
+    for line in output.splitlines():
+        if _OWNERSHIP_DENIED_RE.search(line):
+            skipped += 1
+        else:
+            kept.append(line)
+    if skipped:
+        kept.append(
+            f"{skipped} ownership statement(s) in the dump were not applied: "
+            "the template keeps one owner."
+        )
+    return "\n".join(kept)
+
+
+# Dumps staged by _staged_db_dump, including incomplete .part files from
+# _stream_exec_to_file, and the restore inputs older versions hardlinked in.
+# Normal exits clean these up; a process crash can leave either a complete
+# dump or a partial stream behind.
 _PG_EXCHANGE_STAGED_RE = re.compile(
     r"^(oduflow-restore-[0-9a-f]{32}|.+-[0-9a-f]{32}\.pgdump(?:\.part)?)$"
 )
@@ -2099,12 +3873,10 @@ def _ensure_pg_container(
 
     pg_tablespaces holds the databases themselves. pg_exchange is where dumps
     are staged: writing one there costs a single write to its final filesystem
-    instead of a full-size copy through the container's writable layer, and a
-    restore can read it in place. It carries no new exposure — a dump is a
-    subset of the cluster this container already serves. Restore inputs are
-    hardlinked in (see _expose_file_to_pg), so for the duration of a restore
-    the container sees the source file itself — e.g. a template's persisted
-    dump — not a copy; only the cluster superuser can write through the mount.
+    instead of a full-size copy through the container's writable layer. It
+    carries no new exposure — a dump is a subset of the cluster this container
+    already serves. Nothing is restored through the mount: a dump is tenant
+    input and is read by a separate client container (see reload_template).
     """
     tablespaces_dir = _pg_tablespaces_host_dir(settings)
     exchange_dir = _pg_exchange_host_dir(settings)
@@ -2487,11 +4259,26 @@ def ensure_team_tablespace(
                 else str(output)
             )
             raise ExternalCommandError(cmd[0], exit_code, out)
-    _exec_sql(
-        client,
-        settings,
-        f"CREATE TABLESPACE \"{ts_name}\" LOCATION '{target}';",
-    )
+    try:
+        _exec_sql(
+            client,
+            settings,
+            f"CREATE TABLESPACE \"{ts_name}\" LOCATION '{target}';",
+        )
+    except ExternalCommandError as exc:
+        # Another branch may have created it after our initial catalog check.
+        try:
+            location = _exec_sql(
+                client,
+                settings,
+                f"SELECT pg_tablespace_location(oid) FROM pg_tablespace "
+                f"WHERE spcname = '{ts_name}';",
+            )
+        except ExternalCommandError:
+            raise exc from None
+        if location != target:
+            raise
+        return ts_name
     logger.info("Created tablespace %s at %s", ts_name, target)
     return ts_name
 
@@ -2768,6 +4555,21 @@ def _ensure_iptables_accept(client: DockerClient, network_name: str) -> None:
             logger.warning("Could not add iptables rule for %s: %s", bridge_iface, exc)
 
 
+def _restrict_cluster_databases(
+    client: DockerClient, settings: Settings, container_name: str
+) -> None:
+    """restrict_managed_databases for one cluster, never failing the start."""
+    try:
+        restrict_managed_databases(client, settings, container_name=container_name)
+    except Exception:
+        logger.exception(
+            "Could not check database privileges in %s; managed databases "
+            "created by an older version may still accept connections from "
+            "every role of the cluster",
+            container_name,
+        )
+
+
 def init_system(
     settings: Settings,
 ) -> dict[str, str]:
@@ -2803,6 +4605,8 @@ def init_system(
         settings,
         container_name=settings.shared_db_container,
     )
+    _restrict_cluster_databases(client, settings, settings.shared_db_container)
+    _report_superuser_only_objects(client, settings, settings.shared_db_container)
 
     # Production hosting is a strict opt-in. Disabled installations stop all
     # managed production workloads without deleting them; enabled installations
@@ -2812,6 +4616,14 @@ def init_system(
         reconcile_prod_workloads(client, settings)
     except Exception:
         logger.exception("Production workload reconciliation failed")
+    # Not while the WAL guard holds the cluster: it must not be written to.
+    from oduflow import wal_monitor
+
+    if _prod_pg_running(client, settings) and not wal_monitor.state(settings).get(
+        "latched"
+    ):
+        _restrict_cluster_databases(client, settings, settings.prod_db_container)
+        _report_superuser_only_objects(client, settings, settings.prod_db_container)
 
     # A server that died mid-deploy leaves deploy_in_progress flags behind.
     # This belongs to startup and only to startup: ensure_prod_infra is also
@@ -2822,6 +4634,8 @@ def init_system(
 
     for team in settings.teams.values():
         production_registry.clear_stale_deploy_flags(team)
+
+    _warn_superuser_credential_holders(client, settings)
 
     # Per-team coding-agent containers. init_system runs on every server
     # start, so oduflow.toml is applied here: enabled teams get their container
@@ -2847,22 +4661,25 @@ def reload_template(
     team: TeamSettings,
     template_name: str,
     dump_path: str | None = None,
-    container_dump_path: str | None = None,
     *,
     persist_dump: bool = True,
     strict: bool = False,
 ) -> dict[str, Any]:
     """Rebuild the template database from its dump.
 
-    ``container_dump_path`` names a dump the PostgreSQL container can already
-    read (staged in the pg_exchange mount), skipping the copy into its writable
-    layer. The caller owns that file; only dumps copied in here are cleaned up.
-    ``persist_dump=False`` lets a caller install its staged file atomically after
-    this restore succeeds instead of making a second full-size copy here.
+    A dump is tenant input, so nothing in it runs as the cluster superuser.
+    The superuser only prepares the load: it creates a one-off loader role and
+    an empty database owned by it. The dump is then restored as that role by a
+    client in a throwaway container (see _run_restore_client), and afterwards
+    everything the loader owns goes to the team's template owner and the
+    loader is dropped. A dump that needs superuser rights fails on exactly
+    those statements.
+
+    ``persist_dump=False`` lets a caller install its staged file atomically
+    after this restore succeeds instead of making a second full-size copy here.
     ``strict=True`` makes archive restores stop at the first error and omit
-    ACLs, which may name roles missing from a new cluster. Plain SQL keeps the
-    tolerant psql behaviour: dumps from newer clients contain settings older
-    servers reject (e.g. ``SET transaction_timeout``), which are harmless.
+    ACLs, which may name roles missing from a new cluster. Plain SQL continues
+    past known compatibility errors, but any other SQL error fails the load.
     """
     client = get_client()
     tpl_db = get_template_db_name(template_name, team.team_id)
@@ -2877,6 +4694,7 @@ def reload_template(
     use_psql = _is_text_dump(resolved_dump)
 
     if _db_exists(client, settings, tpl_db):
+        stale_loader = _stale_template_loader(client, settings, tpl_db)
         _exec_sql(
             client,
             settings,
@@ -2884,229 +4702,176 @@ def reload_template(
         )
         _exec_sql(client, settings, f'DROP DATABASE "{tpl_db}" WITH (FORCE);')
         logger.info("Dropped template DB %s", tpl_db)
+        if stale_loader:
+            _retire_template_loader(client, settings, stale_loader)
 
     ts_name = ensure_team_tablespace(client, settings, team)
-    _exec_sql(client, settings, f'CREATE DATABASE "{tpl_db}" TABLESPACE "{ts_name}";')
-
+    owner = ensure_template_owner_role(client, settings, team)
     db_container = client.containers.get(settings.shared_db_container)
+    loader, loader_password = _create_template_loader(client, settings)
 
-    # Every input staged for PostgreSQL is released when this block exits,
-    # whether the restore succeeded, failed, or raised mid-flight.
-    with contextlib.ExitStack() as staging:
-        if container_dump_path is None:
-            container_dump_path = staging.enter_context(
-                _expose_file_to_pg(client, settings, team, db_container, resolved_dump)
-            )
+    def restore(dump: str, *, text_dump: bool, gzipped: bool) -> tuple[int, str]:
+        exit_code, output = _run_restore_client(
+            client,
+            settings,
+            team,
+            db_container,
+            _template_restore_command(
+                text_dump=text_dump, gzipped=gzipped, database=tpl_db, strict=strict
+            ),
+            role=loader,
+            password=loader_password,
+            database=tpl_db,
+            dump_path=dump,
+        )
+        # ON_ERROR_STOP would abort on harmless errors before loading the rest
+        # of an older (ownership) or newer (transaction_timeout) dump.
+        if text_dump and exit_code == 0:
+            for line in output.splitlines():
+                error = _TEMPLATE_SQL_ERROR_RE.match(line)
+                if (
+                    error
+                    and error[1] not in _TOLERATED_TEMPLATE_SQL_ERRORS
+                    and not _OWNERSHIP_DENIED_RE.search(line)
+                ):
+                    return 1, output
+        return exit_code, output
 
-        # pg_restore runs with --no-owner so restored objects are owned by the
-        # restoring superuser, not by whatever role the dump recorded. For
-        # env-derived templates that role is the source env's per-env role
-        # (u_<team>_<env>), which is dropped when the env is deleted — keeping it
-        # as owner makes deletion fail with "objects depend on it" and leaks an
-        # orphan role. create_environment re-assigns ownership to the new per-env
-        # role when provisioning from a template. (--no-owner is meaningful only
-        # at restore time for archive formats. The psql path for plain-SQL/
-        # external dumps is left untouched.)
-        restore_tool = "psql" if use_psql else "pg_restore"
-        archive_options = ["--no-acl", "--exit-on-error"] if strict else []
-        if is_gzipped:
-            if use_psql:
-                pipeline = f"gunzip -c {container_dump_path} | psql -U {settings.db_user} -d {tpl_db}"
-            else:
-                pipeline = (
-                    f"gunzip -c {container_dump_path} | "
-                    f"pg_restore --no-owner -U {settings.db_user} -d {tpl_db}"
-                )
-                if strict:
-                    pipeline += " " + " ".join(archive_options)
-            restore_cmd = ["bash", "-c", f"set -o pipefail; {pipeline}"]
-        else:
-            if use_psql:
-                restore_cmd = [
-                    "psql",
-                    "-U",
-                    settings.db_user,
-                    "-d",
-                    tpl_db,
-                    "-f",
-                    container_dump_path,
-                ]
-            else:
-                # Parallel restore only here: -j needs a seekable archive, which
-                # rules out the gzip pipeline above (pg_restore reads a pipe) and
-                # the plain-SQL psql path. Odoo restores are dominated by index
-                # and constraint builds, which is exactly what -j parallelises.
-                restore_cmd = [
-                    "pg_restore",
-                    "--no-owner",
-                    *archive_options,
-                    "-U",
-                    settings.db_user,
-                    "-d",
-                    tpl_db,
-                ]
-                jobs = _pg_restore_jobs()
-                if jobs > 1:
-                    restore_cmd += ["-j", str(jobs)]
-                restore_cmd.append(container_dump_path)
+    restore_tool = "psql" if use_psql else "pg_restore"
+    try:
+        _create_load_db(client, settings, tpl_db, loader, tablespace=ts_name)
 
         logger.info(
             "DB restore started, template_db=%s, dump=%s", tpl_db, resolved_dump
         )
         restore_start = time.monotonic()
-
-        exit_code, output = db_container.exec_run(restore_cmd)
-
+        exit_code, output_str = restore(
+            resolved_dump, text_dump=use_psql, gzipped=is_gzipped
+        )
         restore_elapsed = time.monotonic() - restore_start
-        output_str = (
-            output.decode("utf-8") if isinstance(output, bytes) else str(output)
-        )
 
-        if exit_code != 0:
-            if restore_tool == "pg_restore" and _is_pg_restore_archive_version_error(
-                output_str
-            ):
-                logger.warning(
-                    "pg_restore in %s cannot read dump archive; retrying with %s helper",
-                    settings.shared_db_container,
-                    _PG_RESTORE_HELPER_IMAGE,
-                )
-                _exec_sql(
-                    client,
-                    settings,
-                    f'DROP DATABASE IF EXISTS "{tpl_db}" WITH (FORCE);',
-                )
-                _exec_sql(
-                    client,
-                    settings,
-                    f'CREATE DATABASE "{tpl_db}" TABLESPACE "{ts_name}";',
-                )
-                helper_start = time.monotonic()
-                helper_exit, helper_output, helper_sql_path = (
-                    _convert_custom_dump_to_sql_with_helper(
-                        client, settings, resolved_dump, is_gzipped=is_gzipped
-                    )
-                )
-                restore_elapsed += time.monotonic() - helper_start
-                if helper_exit != 0:
-                    exit_code = helper_exit
-                    output_str = helper_output
-                else:
-                    # The converted SQL is often larger than the archive, so
-                    # it takes the same link-or-copy path as the dump itself.
-                    helper_container_path = staging.enter_context(
-                        _expose_file_to_pg(
-                            client, settings, team, db_container, helper_sql_path
-                        )
-                    )
-                    psql_cmd = [
-                        "psql",
-                        "-U",
-                        settings.db_user,
-                        "-d",
-                        tpl_db,
-                        "-f",
-                        helper_container_path,
-                    ]
-                    psql_start = time.monotonic()
-                    exit_code, output = db_container.exec_run(psql_cmd)
-                    restore_elapsed += time.monotonic() - psql_start
-                    output_str = (
-                        output.decode("utf-8")
-                        if isinstance(output, bytes)
-                        else str(output)
-                    )
-                    restore_tool = "psql"
-                    template_dir = os.path.abspath(team.get_template_dir(template_name))
-                    if (
-                        exit_code == 0
-                        and dump_path is None
-                        and os.path.abspath(resolved_dump).startswith(
-                            template_dir + os.sep
-                        )
-                        and os.path.abspath(helper_sql_path)
-                        != os.path.abspath(resolved_dump)
-                    ):
-                        with contextlib.suppress(OSError):
-                            os.remove(resolved_dump)
-
-            if exit_code != 0:
-                logger.error(
-                    "DB restore failed after %.1fs: %s", restore_elapsed, output_str
-                )
-                raise ExternalCommandError(restore_tool, exit_code, output_str)
-
-        if output_str.strip():
-            logger.info("DB restore output: %s", output_str)
-
-        logger.info("DB restore finished in %.1fs", restore_elapsed)
-
-        table_count = _exec_sql(
-            client,
-            settings,
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';",
-            tpl_db,
-        ).strip()
-
-        try:
-            num_tables = int(table_count)
-        except ValueError:
-            num_tables = 0
-
-        if num_tables == 0:
-            error_msg = (
-                f"Dump restore succeeded but no tables found in database {tpl_db}"
+        if (
+            exit_code != 0
+            and restore_tool == "pg_restore"
+            and _is_pg_restore_archive_version_error(output_str)
+        ):
+            logger.warning(
+                "pg_restore of %s cannot read dump archive; retrying with %s helper",
+                settings.shared_db_container,
+                _PG_RESTORE_HELPER_IMAGE,
             )
-            logger.error(error_msg)
-            raise ExternalCommandError("restore", 1, error_msg)
+            _exec_sql(
+                client,
+                settings,
+                f'DROP DATABASE IF EXISTS "{tpl_db}" WITH (FORCE);',
+            )
+            _create_load_db(client, settings, tpl_db, loader, tablespace=ts_name)
+            helper_start = time.monotonic()
+            # The helper only rewrites the archive as SQL; it connects to
+            # nothing. Loading that SQL is the same restricted restore.
+            with _converted_sql_dump(
+                client, settings, team, resolved_dump, is_gzipped=is_gzipped
+            ) as converted_sql:
+                exit_code, output_str = restore(
+                    converted_sql, text_dump=True, gzipped=False
+                )
+                restore_tool = "psql"
+                if exit_code == 0 and dump_path is None:
+                    _keep_converted_dump(converted_sql, resolved_dump)
+            restore_elapsed += time.monotonic() - helper_start
 
-        logger.info("Verified %d tables in restored database %s", num_tables, tpl_db)
+        output_str = _summarize_restore_output(output_str)
+        if exit_code != 0:
+            logger.error(
+                "DB restore failed after %.1fs: %s", restore_elapsed, output_str
+            )
+            raise ExternalCommandError(
+                restore_tool,
+                exit_code,
+                _restricted_load_failure(output_str, _RESTRICTED_LOAD_HINT),
+            )
+    except BaseException:
+        # The loader must not outlive a failed load either; whatever it left
+        # in the database is still handed over, so a retry starts clean.
+        try:
+            _retire_template_loader(client, settings, loader, handover=(tpl_db, owner))
+        except Exception:
+            logger.warning(
+                "Could not retire template loader role %s", loader, exc_info=True
+            )
+        raise
+    _retire_template_loader(client, settings, loader, handover=(tpl_db, owner))
 
-        if dump_path and persist_dump:
-            tpl_dir = team.get_template_dir(template_name)
-            os.makedirs(tpl_dir, exist_ok=True)
-            base = "dump.sql" if use_psql else "dump.pgdump"
-            if is_gzipped:
-                base += ".gz"
-            dest_path = os.path.join(tpl_dir, base)
-            for old_name in (
-                "dump.sql",
-                "dump.pgdump",
-                "dump.sql.gz",
-                "dump.pgdump.gz",
-            ):
-                old_path = os.path.join(tpl_dir, old_name)
-                if old_path == dest_path:
-                    continue
-                if os.path.isfile(old_path):
-                    os.remove(old_path)
-                    logger.info("Removed old dump %s", old_path)
-            if not os.path.exists(dest_path) or not os.path.samefile(
-                dump_path, dest_path
-            ):
-                shutil.copy2(dump_path, dest_path)
-            logger.info("Saved dump to workspace: %s", dest_path)
+    if output_str.strip():
+        logger.info("DB restore output: %s", output_str)
 
-        _exec_sql(
-            client,
-            settings,
-            f"UPDATE pg_database SET datistemplate=true WHERE datname='{tpl_db}';",
-        )
+    logger.info("DB restore finished in %.1fs", restore_elapsed)
 
-        _update_template_sizes(team, settings, template_name)
-        logger.info(
-            "Template DB reloaded, template_db=%s, restore_time=%.1fs, tables=%d",
-            tpl_db,
-            restore_elapsed,
-            num_tables,
-        )
-        return {
-            "status": "reloaded",
-            "template_db": tpl_db,
-            "restore_seconds": round(restore_elapsed, 1),
-            "tables": str(num_tables),
-            "message": output_str,
-        }
+    # Read as the template owner: a query over what a dump defined runs the
+    # dump's own operators and functions with the rights of whoever asks.
+    table_count = _exec_sql(
+        client,
+        settings,
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';",
+        tpl_db,
+        user=owner,
+    ).strip()
+
+    try:
+        num_tables = int(table_count)
+    except ValueError:
+        num_tables = 0
+
+    if num_tables == 0:
+        error_msg = f"Dump restore succeeded but no tables found in database {tpl_db}"
+        logger.error(error_msg)
+        raise ExternalCommandError("restore", 1, error_msg)
+
+    logger.info("Verified %d tables in restored database %s", num_tables, tpl_db)
+
+    if dump_path and persist_dump:
+        tpl_dir = team.get_template_dir(template_name)
+        os.makedirs(tpl_dir, exist_ok=True)
+        base = "dump.sql" if use_psql else "dump.pgdump"
+        if is_gzipped:
+            base += ".gz"
+        dest_path = os.path.join(tpl_dir, base)
+        for old_name in (
+            "dump.sql",
+            "dump.pgdump",
+            "dump.sql.gz",
+            "dump.pgdump.gz",
+        ):
+            old_path = os.path.join(tpl_dir, old_name)
+            if old_path == dest_path:
+                continue
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+                logger.info("Removed old dump %s", old_path)
+        if not os.path.exists(dest_path) or not os.path.samefile(dump_path, dest_path):
+            shutil.copy2(dump_path, dest_path)
+        logger.info("Saved dump to workspace: %s", dest_path)
+
+    _exec_sql(
+        client,
+        settings,
+        f"UPDATE pg_database SET datistemplate=true WHERE datname='{tpl_db}';",
+    )
+
+    _update_template_sizes(team, settings, template_name)
+    logger.info(
+        "Template DB reloaded, template_db=%s, restore_time=%.1fs, tables=%d",
+        tpl_db,
+        restore_elapsed,
+        num_tables,
+    )
+    return {
+        "status": "reloaded",
+        "template_db": tpl_db,
+        "restore_seconds": round(restore_elapsed, 1),
+        "tables": str(num_tables),
+        "message": output_str,
+    }
 
 
 def init_template(
@@ -3175,9 +4940,29 @@ def init_template(
     temp_container_name = "flow-template-builder"
 
     if _db_exists(client, settings, build_db):
+        stale_builder = _stale_template_loader(client, settings, build_db)
         _exec_sql(client, settings, f"DROP DATABASE {build_db} WITH (FORCE);")
+        if stale_builder:
+            _retire_template_loader(client, settings, stale_builder)
 
-    _exec_sql(client, settings, f"CREATE DATABASE {build_db};")
+    # The build runs whatever the image holds, as root in its container, and
+    # the image may be one a tenant built. It gets a one-off role that owns
+    # the build database and nothing else, like a template load, instead of
+    # the superuser's login. The public schema keeps its owner, as in an
+    # environment created without a template: the dump below then carries no
+    # privilege that names a role dropped at the end of the build.
+    builder, builder_password = _create_template_loader(client, settings)
+
+    def drop_build_db() -> None:
+        _exec_sql(client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);")
+        _retire_template_loader(client, settings, builder)
+
+    try:
+        _exec_sql(client, settings, f'CREATE DATABASE {build_db} OWNER "{builder}";')
+        restrict_database_access(client, settings, build_db)
+    except Exception:
+        drop_build_db()
+        raise
     logger.info("Created temporary database %s", build_db)
 
     try:
@@ -3208,8 +4993,8 @@ def init_template(
             **default_env_limits(),
             environment={
                 "HOST": settings.shared_db_container,
-                "USER": settings.db_user,
-                "PASSWORD": settings.db_password,
+                "USER": builder,
+                "PASSWORD": builder_password,
             },
             volumes=volumes,
             # Odoo 19 made --without-demo a boolean; "=all" (the pre-19 module
@@ -3245,7 +5030,9 @@ def init_template(
         os.makedirs(os.path.dirname(template_sql_path), exist_ok=True)
 
         db_container = client.containers.get(settings.shared_db_container)
-        dump_cmd = ["pg_dump", "-U", settings.db_user, "-Fp", build_db]
+        # Dump as the builder and omit owners so the restricted loader can
+        # restore the SQL after the one-off builder role has been dropped.
+        dump_cmd = ["pg_dump", "-U", builder, "-Fp", "--no-owner", build_db]
         _stream_exec_to_file(
             client, db_container, dump_cmd, template_sql_path, tool="pg_dump"
         )
@@ -3292,9 +5079,7 @@ def init_template(
             with contextlib.suppress(Exception):
                 temp_container.remove(v=True, force=True)
         with contextlib.suppress(Exception):
-            _exec_sql(
-                client, settings, f"DROP DATABASE IF EXISTS {build_db} WITH (FORCE);"
-            )
+            drop_build_db()
     logger.info("Temporary container removed and database dropped")
 
     logger.info("Template generation complete, loading into template DB")
@@ -3429,13 +5214,24 @@ def _snapshot_filestore(
         # Never silent: falling back here costs exactly the full-size copy this
         # function exists to avoid, so it must be visible in the logs.
         logger.warning("Filestore snapshot fell back to a full copy: %s", reason)
-        shutil.copytree(source, dest)
+        copy_tenant_tree(source, dest)
 
     if not shutil.which("rsync"):
         _full_copy("rsync not found on PATH")
         return None
 
-    cmd = ["rsync", "-a", "--delete", "--out-format=%n"]
+    # -a keeps a symbolic link as a link (the copies made from a template do
+    # too, see copy_tenant_tree). Device nodes, FIFOs and sockets are left out:
+    # an Odoo filestore has none, and as root rsync would recreate a device
+    # node a tenant made in its container on the host.
+    cmd = [
+        "rsync",
+        "-a",
+        "--no-devices",
+        "--no-specials",
+        "--delete",
+        "--out-format=%n",
+    ]
     for link_dest in link_dests:
         if os.path.isdir(link_dest):
             # Relative paths would be resolved against dest, not the cwd.
@@ -3521,7 +5317,8 @@ def _chown_filestore(
         for rel in rel_paths:
             target = os.path.join(root, rel)
             if _is_within_directory(root, target) and os.path.lexists(target):
-                os.chown(target, uid, gid)
+                # A link pointing back into the tree is given away as a link.
+                os.chown(target, uid, gid, follow_symlinks=False)
     except PermissionError:
         # macOS and other non-root hosts: fall back to the container-based chown.
         chown_recursive(root, uid, gid, client, image)
@@ -3638,7 +5435,7 @@ def _install_filestore_snapshot(
             exc,
             snapshot_dir,
         )
-        shutil.copytree(snapshot_dir, template_filestore_path)
+        copy_tenant_tree(snapshot_dir, template_filestore_path)
         shutil.rmtree(snapshot_dir)
     logger.info("Template filestore replaced from %s", source_label)
 
@@ -3729,6 +5526,9 @@ def publish_env_as_template(
         client, settings, team, template_name, tpl_db, overwrite=overwrite
     )
     _wait_pg_ready(client, settings)
+    # The environment's own role dumps it, never the superuser; an
+    # environment without one is refused before anything is touched.
+    dump_role = scoped_dump_role(client, settings, team, env_name)
 
     dump_path = os.path.join(team.get_template_dir(template_name), "dump.pgdump")
     with _publishing_template(team, template_name) as template_dir:
@@ -3737,18 +5537,16 @@ def publish_env_as_template(
         # leaves no half-published template behind. Ownership is stripped at
         # restore time (pg_restore --no-owner in reload_template), NOT here:
         # --no-owner is ignored by pg_dump for the -Fc archive format.
-        logger.info("Dumping branch database %s", env_db)
-        with _staged_db_dump(client, settings, team, env_db, dump_path) as (
-            staged_dump,
-            container_dump,
-        ):
+        logger.info("Dumping branch database %s as %s", env_db, dump_role)
+        with _staged_db_dump(
+            client, settings, team, env_db, dump_path, role=dump_role
+        ) as staged_dump:
             logger.info("Branch dump saved to %s", staged_dump)
             reload_template(
                 settings,
                 team,
                 template_name=template_name,
                 dump_path=staged_dump,
-                container_dump_path=container_dump,
                 persist_dump=False,
             )
         _remove_legacy_dumps(template_dir)
@@ -3970,6 +5768,15 @@ def publish_production_as_template(
     )
     _wait_pg_ready(client, settings)
     _wait_pg_ready(client, settings, container_name=settings.prod_db_container)
+    # The production's own role dumps it, never the production cluster's
+    # superuser.
+    dump_role = scoped_dump_role(
+        client,
+        settings,
+        team,
+        prod_env_name(prod_name),
+        container_name=settings.prod_db_container,
+    )
 
     dump_path = os.path.join(team.get_template_dir(template_name), "dump.pgdump")
     with _publishing_template(team, template_name) as template_dir:
@@ -3977,22 +5784,22 @@ def publish_production_as_template(
         # staging file (nothing lands in the production container's writable
         # layer) and restored into the dev cluster; only once that succeeded
         # does it become the template's dump.
-        logger.info("Dumping production database %s", prod_db)
+        logger.info("Dumping production database %s as %s", prod_db, dump_role)
         with _staged_db_dump(
             client,
             settings,
             team,
             prod_db,
             dump_path,
+            role=dump_role,
             container_name=settings.prod_db_container,
-        ) as (staged_dump, container_dump):
+        ) as staged_dump:
             logger.info("Production dump staged at %s", staged_dump)
             reload_template(
                 settings,
                 team,
                 template_name=template_name,
                 dump_path=staged_dump,
-                container_dump_path=container_dump,
                 persist_dump=False,
             )
         _remove_legacy_dumps(template_dir)
@@ -4492,6 +6299,10 @@ def import_template(
             "The s3_* parameters are only valid for s3:// sources."
         )
     if not is_http:
+        if settings_module.TRANSPORT == "http":
+            raise PrerequisiteNotMetError(
+                "Local template paths require the local CLI or stdio MCP."
+            )
         return template_import.import_from_local_path(
             settings,
             team,
@@ -4702,7 +6513,7 @@ def import_template(
     # both cases read version/modules from the restored database instead.
     if not manifest:
         manifest = _read_template_manifest_from_db(
-            client, settings, str(result["template_db"])
+            client, settings, team, str(result["template_db"])
         )
         major_version = manifest.get("major_version", "")
         odoo_image = f"odoo:{major_version}" if major_version else ""
@@ -5276,7 +7087,6 @@ def cleanup_orphans(
             branch,
             team.workspaces_dir,
             settings.db_user,
-            settings.db_password,
         )
         live_roles.add(credentials["pg_user"])
     orphan_roles = [

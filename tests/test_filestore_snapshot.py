@@ -267,6 +267,7 @@ def _publish(
         ),
         patch.object(system_ops, "check_db_quota"),
         patch.object(system_ops, "_wait_pg_ready"),
+        patch.object(system_ops, "scoped_dump_role", return_value="u_1_feature-x"),
         patch.object(system_ops, "_stream_exec_to_file", side_effect=_fake_pg_dump),
         patch.object(system_ops, "reload_template") as reload_db,
         patch.object(system_ops, "get_odoo_uid_gid", return_value="101:102"),

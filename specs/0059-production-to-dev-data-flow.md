@@ -111,3 +111,6 @@ already knows what to do with it.
   `save_production_as_template` tool, `create_environment(from_production=…)`
   and the `allow_copy_to_dev_mcp` record flag with its dashboard-only toggle
   (branch `create-template-environment-production`).
+- 2026-11-19 — the production database is dumped by the production's own
+  PostgreSQL role, not by the production cluster's superuser. See
+  [[0013-per-environment-db-credentials-and-sanitization]].

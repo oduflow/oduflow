@@ -354,7 +354,9 @@ def _installed_modules(
     if not requested:
         return set()
     quoted = ",".join("'" + name.replace("'", "''") + "'" for name in requested)
-    result = odoo_ops.run_db_query(
+    # Server-built (the names are quoted), so it may run next to PostgreSQL and
+    # a plan does not need the environment's Odoo container to be running.
+    result = odoo_ops.run_internal_db_query(
         settings,
         team,
         env_name,

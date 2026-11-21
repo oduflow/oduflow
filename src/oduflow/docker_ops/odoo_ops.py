@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import csv
+import hashlib
 import logging
 import os
 import re
 import secrets
+from dataclasses import dataclass, field
 from typing import Any
 
 import docker
@@ -168,7 +171,6 @@ def run_environment_tests(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     # Use -u (upgrade), not -i (install): the module is already installed in the
@@ -296,6 +298,16 @@ def _run_odoo_module_command(
             f"Environment '{env_name}' does not exist. Use create_environment first."
         )
 
+    if flag == "-i":
+        # The check after the install reads the database as the environment's
+        # own role. Without one on record, refuse before Odoo changes anything
+        # instead of reporting a finished installation as a failure.
+        load_credentials(
+            env_name,
+            team.workspaces_dir,
+            settings.db_user,
+            allow_fallback=False,
+        )
     if flag == "-u":
         if ALL_MODULES in modules:
             if len(modules) > 1:
@@ -338,14 +350,13 @@ def _get_module_states(
     # trusting every caller to have done it first.
     _validate_module_names(modules)
     names = ", ".join(f"'{module}'" for module in modules)
-    # This is a fixed, validated SELECT, so legacy environments may safely use
-    # the cluster credential that their Odoo container already runs with.
-    result = _execute_db_query(
+    # As the environment's own role, like every read of its database: the
+    # text is fixed, but ir_module_module is the tenant's to redefine.
+    result = run_internal_db_query(
         settings,
         team,
         env_name,
         f"SELECT name, state FROM ir_module_module WHERE name IN ({names})",
-        allow_fallback=True,
     )
     states: dict[str, str] = {}
     for row in result["output"].splitlines()[1:]:
@@ -607,71 +618,269 @@ def run_command_in_environment(
     }
 
 
+# Odoo's own work factor for ``res.users`` passwords: ``pbkdf2_sha512__rounds``
+# is 600_000 in ``odoo/addons/base/models/res_users.py`` on every supported
+# version (hard-coded on 15.0, ``MIN_ROUNDS`` from 16.0 on). passlib treats a
+# hash with any other round count as needing an update, so matching it keeps
+# Odoo from rewriting the hash on the first login.
+ODOO_PASSWORD_ROUNDS = 600_000
+# passlib's defaults for ``pbkdf2_sha512``: a 16-byte salt and the full
+# 64-byte SHA-512 digest.
+_ODOO_PASSWORD_SALT_BYTES = 16
+_ODOO_PASSWORD_DIGEST_BYTES = 64
+# The exact shape hash_odoo_password emits — 22 and 86 characters are 16 and
+# 64 bytes in unpadded base64. Nothing in this alphabet can end an SQL string
+# literal (no quote, no backslash, no whitespace).
+_ODOO_PASSWORD_HASH_RE = re.compile(
+    r"\$pbkdf2-sha512\$[1-9][0-9]{0,9}\$[A-Za-z0-9./]{22}\$[A-Za-z0-9./]{86}"
+)
+
+
+def _ab64(data: bytes) -> str:
+    """passlib's "adapted base64": ``.`` instead of ``+``, no ``=`` padding."""
+    return base64.b64encode(data, altchars=b"./").decode("ascii").rstrip("=")
+
+
+def hash_odoo_password(
+    password: str,
+    *,
+    rounds: int = ODOO_PASSWORD_ROUNDS,
+    salt: bytes | None = None,
+) -> str:
+    """Hash *password* the way Odoo stores it in ``res_users.password``.
+
+    The result is passlib's ``pbkdf2_sha512`` modular-crypt string,
+    ``$pbkdf2-sha512$<rounds>$<salt>$<checksum>``, which is the first scheme of
+    Odoo's ``CryptContext`` on 15–20. It is computed here, in the Oduflow
+    process: the environment's Odoo container belongs to the tenant, so
+    whatever a ``python3`` in there prints is tenant-written text, not a hash.
+
+    ``salt`` is for tests against known vectors; leave it out otherwise.
+    """
+    if salt is None:
+        salt = secrets.token_bytes(_ODOO_PASSWORD_SALT_BYTES)
+    checksum = hashlib.pbkdf2_hmac(
+        "sha512",
+        password.encode("utf-8"),
+        salt,
+        rounds,
+        dklen=_ODOO_PASSWORD_DIGEST_BYTES,
+    )
+    return f"$pbkdf2-sha512${rounds}${_ab64(salt)}${_ab64(checksum)}"
+
+
+def _admin_password_update_sql(hashed: str) -> str:
+    """The one statement ``reset_admin_password`` runs, for a well-formed hash.
+
+    The hash is produced by :func:`hash_odoo_password` and is checked again
+    here, where it meets SQL text, so the statement can only ever carry a
+    string of the hash alphabet whatever a future caller passes in.
+    """
+    if not _ODOO_PASSWORD_HASH_RE.fullmatch(hashed):
+        raise ValueError("Refusing to store a malformed password hash.")
+    return f"UPDATE res_users SET password = '{hashed}' WHERE login = 'admin'"
+
+
 def reset_admin_password(
     settings: Settings, team: TeamSettings, env_name: str, new_password: str = "test"
 ) -> dict[str, str]:
+    """Set the ``admin`` user's password in a dev environment's database.
+
+    Nothing here trusts the environment's Odoo container, and nothing runs as
+    the cluster superuser: the hash is computed in this process and the
+    ``UPDATE`` runs as the environment's scoped role (which owns the database,
+    as Odoo itself connects with it). An environment without a scoped role is
+    refused rather than served with the cluster's own credential.
+    """
+    validate_env_name(env_name)
+    if slugify_branch(env_name).startswith(PROD_ENV_PREFIX):
+        raise ValueError(
+            f"'{env_name}' is a production environment. The admin password can "
+            "be reset for dev environments only."
+        )
     client = get_client()
     odoo_container_name = get_resource_name(
         env_name, "odoo", settings.prefix, team.team_id
     )
-    env_db = get_db_name(env_name, team.team_id)
-
+    missing = NotFoundError(
+        f"Environment '{env_name}' does not exist. Use create_environment first."
+    )
+    # Looked up for existence only — nothing is executed in this container.
     try:
         container = client.containers.get(odoo_container_name)
     except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Environment '{env_name}' does not exist. Use create_environment first."
-        )
+        raise missing from None
+    # Defence in depth on top of team-scoped names (issue #39).
+    label = container.labels.get(settings.team_label)
+    if label is not None and label != team.team_id:
+        raise missing
 
-    # Hash the password using passlib inside the Odoo container
-    hash_cmd = [
-        "python3",
-        "-c",
-        "from passlib.context import CryptContext; "
-        f"print(CryptContext(['pbkdf2_sha512']).hash({new_password!r}))",
-    ]
-    exit_code, output = container.exec_run(hash_cmd)
-    hashed = (
-        output.decode("utf-8") if isinstance(output, bytes) else str(output)
-    ).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("python3 (passlib hash)", exit_code, hashed)
-
-    # Update the password in the database
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
-
-    sql = f"UPDATE res_users SET password = '{hashed}' WHERE login = 'admin'"
-    psql_cmd = ["psql", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    exit_code, output = db_container.exec_run(psql_cmd)
-    output_str = (
-        output.decode("utf-8") if isinstance(output, bytes) else str(output)
-    ).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, output_str)
+    sql = _admin_password_update_sql(hash_odoo_password(new_password))
+    result = run_internal_db_query(settings, team, env_name, sql)
 
     logger.info(
         "Admin password reset",
         extra={"env_name": env_name},
     )
-    return {"status": "ok", "login": "admin", "psql_output": output_str}
+    return {
+        "status": "ok",
+        "login": "admin",
+        "psql_output": str(result["output"]).strip(),
+    }
 
 
-def _execute_db_query(
+# PostgreSQL listens on its default port inside the Docker network; the Odoo
+# container reaches it the same way (HOST=<db container>, default port).
+_PG_PORT = "5432"
+# The unprivileged user of the Odoo image, as for run_odoo_shell.
+_PSQL_CLIENT_USER = "odoo"
+
+
+@dataclass(frozen=True)
+class ScopedPsql:
+    """Where and how to run ``psql`` for one environment's caller-supplied SQL.
+
+    ``psql`` is a client program: its ``\\!`` opens a shell in the container
+    it runs in, and its ``\\c`` reconnects from there. Inside the shared
+    PostgreSQL container that means a root shell next to every team's data
+    files, and a local socket whose trust auth admits any role name — the
+    cluster superuser included, whichever scoped role the session began
+    with. So caller-supplied SQL (the dashboard SQL console, ``run_db_query``)
+    never runs there. It runs in the environment's own Odoo container, as the
+    image's unprivileged user, and reaches PostgreSQL over the Docker network
+    like Odoo does: every connection is password-authenticated, the only
+    password supplied is the scoped role's, and ``\\!`` lands in a container
+    the caller already has a shell in (``run_odoo_command``, the console).
+
+    The password travels in ``environment`` (``PGPASSWORD``), never in
+    ``argv``; it is left out of the repr so it cannot reach a log line.
+    """
+
+    container: Any
+    argv: tuple[str, ...]
+    user: str
+    environment: dict[str, str] = field(repr=False)
+
+
+def scoped_psql(
+    client: Any, settings: Settings, team: TeamSettings, env_name: str
+) -> ScopedPsql:
+    """Resolve the :class:`ScopedPsql` for a dev environment.
+
+    There is deliberately no fallback to the shared PostgreSQL container: an
+    environment without scoped credentials, without a running Odoo container
+    or (see :func:`psql_client_missing`) without a ``psql`` client is refused
+    with the reason instead.
+    """
+    validate_env_name(env_name)
+    if slugify_branch(env_name).startswith(PROD_ENV_PREFIX):
+        # The host below is the dev cluster, and nothing here may exec inside
+        # a production's container.
+        raise ValueError(
+            f"'{env_name}' is a production environment. Direct SQL access is "
+            "available for dev environments only."
+        )
+    missing = NotFoundError(
+        f"Environment '{env_name}' does not exist. Use create_environment first."
+    )
+    try:
+        container = client.containers.get(
+            get_resource_name(env_name, "odoo", settings.prefix, team.team_id)
+        )
+    except docker.errors.NotFound:
+        raise missing from None
+    # Defence in depth on top of team-scoped names (issue #39).
+    label = container.labels.get(settings.team_label)
+    if label is not None and label != team.team_id:
+        raise missing
+    # allow_fallback=False: the fallback is the cluster superuser, whose
+    # password must never enter a tenant's container.
+    creds = load_credentials(
+        env_name,
+        team.workspaces_dir,
+        settings.db_user,
+        allow_fallback=False,
+    )
+    if container.status != "running":
+        raise PrerequisiteNotMetError(
+            f"Environment '{env_name}' is not running. SQL runs through psql in "
+            "the environment's own Odoo container, so start the environment "
+            "first."
+        )
+    return ScopedPsql(
+        container=container,
+        argv=(
+            "psql",
+            "-h",
+            settings.shared_db_container,
+            "-p",
+            _PG_PORT,
+            "-U",
+            creds["pg_user"],
+            "-d",
+            get_db_name(env_name, team.team_id),
+        ),
+        user=_PSQL_CLIENT_USER,
+        environment={"PGPASSWORD": creds["pg_password"]},
+    )
+
+
+def psql_client_missing(env_name: str, detail: str = "") -> PrerequisiteNotMetError:
+    """The error for an Odoo image that cannot run ``psql``."""
+    detail = detail.strip()
+    return PrerequisiteNotMetError(
+        f"Environment '{env_name}': the Odoo container cannot run psql"
+        + (f" ({detail})" if detail else "")
+        + ". SQL access runs the psql client from the environment's own Odoo "
+        "container, never inside the shared PostgreSQL container. The official "
+        "Odoo images ship it; for a custom image, install the postgresql-client "
+        "package (in the image, or through .oduflow/apt_packages.txt)."
+    )
+
+
+def require_psql_client(target: ScopedPsql, env_name: str) -> None:
+    """Fail with the reason when the Odoo image ships no ``psql``.
+
+    For the interactive console, whose PTY would otherwise just show the
+    shell's ``psql: not found`` and close.
+    """
+    exit_code, output = target.container.exec_run(
+        ["sh", "-c", "command -v psql"], user=target.user
+    )
+    if exit_code != 0:
+        raise psql_client_missing(env_name, _decode(output))
+
+
+def run_internal_db_query(
     settings: Settings,
     team: TeamSettings,
     env_name: str,
     query: str,
     output_format: str = "csv",
-    *,
-    allow_fallback: bool,
 ) -> dict[str, Any]:
-    """Execute SQL; legacy fallback is only safe for fixed internal queries."""
+    """Run server-built SQL as the environment's scoped role.
+
+    ``psql`` runs inside the PostgreSQL container, so this is for queries the
+    server composes from fixed text and validated or quoted values only —
+    never for SQL text a caller supplies: ``psql`` in that container is a
+    root shell and a trust-authenticated socket away from the whole cluster
+    (see :class:`ScopedPsql`; arbitrary SQL goes through :func:`run_db_query`).
+    What it offers in return is independence from the environment's Odoo
+    container, so these checks work on a stopped environment.
+
+    The role is always the environment's own, however fixed the text: its
+    tables, operators and ``search_path`` are the tenant's to define, and a
+    query resolves them with the rights of whoever runs it. A legacy
+    environment without a credentials file therefore gets
+    ``MissingCredentialsError``, not the superuser.
+
+    ``output_format`` is ``csv`` (with a header row), ``human`` (psql's
+    table) or ``tuples`` (unaligned rows only).
+    """
+    if query[:1] == "\\":
+        # ``psql -c`` treats a string that starts with a backslash as a
+        # meta-command, which would run inside the PostgreSQL container.
+        raise ValueError("psql meta-commands are not allowed in internal queries.")
     client = get_client()
     env_db = get_db_name(env_name, team.team_id)
 
@@ -687,13 +896,10 @@ def _execute_db_query(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
-        allow_fallback=allow_fallback,
+        allow_fallback=False,
     )
-    if output_format == "human":
-        cmd = ["psql", "-U", creds["pg_user"], "-d", env_db, "-c", query]
-    else:
-        cmd = ["psql", "-U", creds["pg_user"], "-d", env_db, "--csv", "-c", query]
+    layout = {"human": [], "tuples": ["-tA"]}.get(output_format, ["--csv"])
+    cmd = ["psql", "-U", creds["pg_user"], "-d", env_db, *layout, "-c", query]
 
     logger.info(
         "Running DB query",
@@ -718,24 +924,52 @@ def run_db_query(
     query: str,
     output_format: str = "csv",
 ) -> dict[str, Any]:
-    """Run arbitrary SQL using only the environment's scoped credentials."""
-    return _execute_db_query(
-        settings,
-        team,
-        env_name,
-        query,
-        output_format,
-        allow_fallback=False,
+    """Run arbitrary SQL as the environment's scoped role.
+
+    ``psql`` runs in the environment's own Odoo container, not in the shared
+    PostgreSQL one (see :class:`ScopedPsql`), so the environment must be
+    running.
+    """
+    target = scoped_psql(get_client(), settings, team, env_name)
+    # -X: the unprivileged user's ~/.psqlrc must not reshape the output.
+    # -w: never wait at a password prompt nobody can answer.
+    cmd = [*target.argv, "-X", "-w"]
+    if output_format != "human":
+        cmd.append("--csv")
+    cmd += ["-c", query]
+
+    logger.info(
+        "Running DB query",
+        extra={"env_name": env_name, "format": output_format},
     )
+    exit_code, (stdout, stderr) = target.container.exec_run(
+        cmd, user=target.user, environment=target.environment, demux=True
+    )
+
+    # psql itself exits with 0-3; 126/127 is the runtime failing to start it.
+    if exit_code != 0:
+        detail = (stderr or stdout or b"").decode("utf-8", errors="replace")
+        if exit_code in (126, 127):
+            raise psql_client_missing(env_name, detail)
+        raise ExternalCommandError("psql", exit_code, detail)
+
+    # Client warnings on stderr must not appear as rows in successful CSV.
+    output = stdout or b""
+    if output_format == "human" and stderr:
+        output += stderr
+    return {
+        "exit_code": exit_code,
+        "output": output.decode("utf-8"),
+    }
 
 
 def list_installed_module_records(
     settings: Settings, team: TeamSettings, env_name: str
 ) -> list[dict[str, str]]:
-    """Return installed module names and versions using a fixed safe query.
+    """Return installed module names and versions using a fixed query.
 
-    The query is server-controlled, so legacy environments may use the shared
-    database credential without exposing an arbitrary-query surface.
+    It runs as the environment's own role, so a legacy environment without a
+    credentials file is refused with ``MissingCredentialsError``.
     """
     validate_env_name(env_name)
     if slugify_branch(env_name).startswith(PROD_ENV_PREFIX):
@@ -743,13 +977,12 @@ def list_installed_module_records(
             f"'{env_name}' is a production environment. Use the production "
             "deployment workflow instead of dev module operations."
         )
-    result = _execute_db_query(
+    result = run_internal_db_query(
         settings,
         team,
         env_name,
         "SELECT name, latest_version FROM ir_module_module "
         "WHERE state = 'installed' ORDER BY name",
-        allow_fallback=True,
     )
     modules: list[dict[str, str]] = []
     for row in csv.DictReader(result.get("output", "").splitlines()):
@@ -917,7 +1150,6 @@ def run_odoo_shell(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
 
@@ -1079,7 +1311,6 @@ def connect_as_user(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
 
@@ -1166,34 +1397,6 @@ def connect_as_user(
         container.exec_run(["rm", "-f", script_path])
 
 
-def _psql_on_env_db(
-    settings: Settings, team: TeamSettings, env_name: str, sql: str
-) -> str:
-    """Run one query on an environment's database and return its bare output.
-
-    ``psql -tAX`` on the shared DB container as the cluster superuser: tuples
-    only, unaligned, no psqlrc. It needs only that container, so it answers
-    whether or not the environment's Odoo is running. For fixed internal
-    queries — *sql* is passed as written.
-    """
-    client = get_client()
-    env_db = get_db_name(env_name, team.team_id)
-    try:
-        db_container = client.containers.get(settings.shared_db_container)
-    except docker.errors.NotFound:
-        raise NotFoundError(
-            f"Database container '{settings.shared_db_container}' is not running. "
-            "System not initialized. Restart Oduflow."
-        )
-    exit_code, output = db_container.exec_run(
-        ["psql", "-tAX", "-U", settings.db_user, "-d", env_db, "-c", sql]
-    )
-    out = (output.decode("utf-8") if isinstance(output, bytes) else str(output)).strip()
-    if exit_code != 0:
-        raise ExternalCommandError("psql", exit_code, out)
-    return out
-
-
 def resolve_env_user(
     settings: Settings, team: TeamSettings, env_name: str, user: str
 ) -> dict[str, Any]:
@@ -1248,7 +1451,8 @@ def resolve_env_user(
             f"ORDER BY (u.login = {login}) DESC LIMIT 1"
         )
 
-    out = _psql_on_env_db(settings, team, env_name, sql)
+    result = run_internal_db_query(settings, team, env_name, sql, "tuples")
+    out = str(result["output"]).strip()
     try:
         row = json.loads(out) if out else None
     except json.JSONDecodeError:
@@ -1264,12 +1468,20 @@ def list_env_users(
     """Active login users of an environment (login, name, share, portal).
 
     Powers the dashboard's "Connect as" picker. Reads the environment database
-    directly via psql on the shared DB container (like ``reset_admin_password``),
-    so it works regardless of whether the Odoo HTTP server is up. ``share`` is
-    True for both portal and public users; ``portal`` is True only for real
-    portal users (members of ``base.group_portal``). The UI uses this to offer
-    separate internal (``share`` False) and portal (``portal`` True) pickers and
-    to exclude the public/anonymous user from both.
+    directly via psql on the shared DB container, so it works regardless of
+    whether the Odoo HTTP server is up. ``share`` is True for both portal and
+    public users; ``portal`` is True only for real portal users (members of
+    ``base.group_portal``). The UI uses this to offer separate internal
+    (``share`` False) and portal (``portal`` True) pickers and to exclude the
+    public/anonymous user from both.
+
+    The query names the tenant's own tables, so it runs as the environment's
+    scoped role and never as the superuser: ``res_users`` may be a view over
+    a function, and ``lower`` or ``<>`` an object the tenant put in
+    ``public``. A legacy environment without a credentials file raises
+    ``MissingCredentialsError``; ``connect_as_user`` refuses it as well. What
+    comes back is the tenant's data in a shape the tenant controls, so only
+    rows of the expected form are passed on.
     """
     import json
 
@@ -1290,12 +1502,27 @@ def list_env_users(
         "FROM res_users u JOIN res_partner p ON p.id = u.partner_id "
         "WHERE u.active AND u.login IS NOT NULL AND u.login <> '__system__'"
     )
-    out = _psql_on_env_db(settings, team, env_name, sql)
+    result = run_internal_db_query(settings, team, env_name, sql, "tuples")
     try:
-        rows: list[dict[str, Any]] = json.loads(out or "[]")
-        return rows
+        rows = json.loads(str(result["output"]).strip() or "[]")
     except json.JSONDecodeError:
         return []
+    if not isinstance(rows, list):
+        return []
+    users: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("login"), str):
+            continue
+        name = row.get("name")
+        users.append(
+            {
+                "login": row["login"],
+                "name": name if isinstance(name, str) else "",
+                "share": row.get("share") is True,
+                "portal": row.get("portal") is True,
+            }
+        )
+    return users
 
 
 def search_in_environment(
@@ -1479,7 +1706,7 @@ def _require_installed_module(
     """
     # `module` has already passed _validate_module_names ([A-Za-z0-9_]), so it
     # cannot break out of the literal.
-    result = run_db_query(
+    result = run_internal_db_query(
         settings,
         team,
         env_name,
@@ -1501,7 +1728,7 @@ def _require_installed_module(
 
 def _active_langs(settings: Settings, team: TeamSettings, env_name: str) -> list[str]:
     """Language codes activated in the environment's database."""
-    result = run_db_query(
+    result = run_internal_db_query(
         settings, team, env_name, "SELECT code FROM res_lang WHERE active"
     )
     return _csv_column(result["output"])
@@ -1549,7 +1776,6 @@ def _export_command(
             env_name,
             team.workspaces_dir,
             settings.db_user,
-            settings.db_password,
             allow_fallback=False,
         )
         conf = f"/tmp/oduflow-i18n-{token}.conf"

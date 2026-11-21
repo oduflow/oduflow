@@ -1985,6 +1985,20 @@
     </div>
   </div>
 </div>
+<div class="modal-overlay" id="svc-shell-modal" onclick="closeServiceShell(event)">
+  <div class="modal modal-terminal">
+    <div class="modal-header">
+      <h2 id="svc-shell-title">Shell</h2>
+      <div class="modal-header-actions">
+        <button class="modal-min" onclick="minimizePanel('svc-shell-modal')" aria-label="Minimize" title="Minimize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 18h12"/></svg></button>
+        <button class="modal-close" onclick="closeServiceShell()" aria-label="Close" title="Close and end the session">&times;</button>
+      </div>
+    </div>
+    <div class="modal-body" style="flex:1; padding:0; overflow:hidden;">
+      <div id="svc-shell-terminal" style="height:100%;"></div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="agent-modal" onclick="closeAgentConsole(event)">
   <div class="modal modal-terminal">
     <div class="modal-header">
@@ -3197,17 +3211,168 @@ function hideModal(id) {
   if (prev && document.contains(prev)) prev.focus();
 }
 
+// --- PTY terminals: one registry for every xterm + WebSocket window ---
+// Each entry is keyed by its overlay id and describes one singleton terminal.
+// MIN_ICONS, restorePanel, the resize handler, MODAL_CLOSERS and the Escape
+// check all derive from this registry, and openPtyTerminal / closePtyTerminal
+// drive every entry, so a new terminal is one entry plus its overlay markup.
+//   termId / titleId  ids of the xterm mount point and the header <h2>
+//   icon              dock chip icon shown while the window is minimized
+//   title(p)          header text for the session opened with params `p`
+//   banner(p)         text after "# <brand> " on the terminal's first line
+//   wsPath(p)         WebSocket path, including any query string
+var _PTY_ICON_SHELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8"/></svg>';
+var PTY_TERMINALS = {
+  // Shell inside the Odoo container of an environment.
+  'console-modal': {
+    termId: 'console-terminal',
+    titleId: 'console-title',
+    icon: _PTY_ICON_SHELL,
+    title: function(p) { return 'Console — ' + p.branch; },
+    banner: function(p) { return 'console — ' + p.branch; },
+    wsPath: function(p) { return '/api/environments/' + encodeURIComponent(p.branch) + '/terminal'; }
+  },
+  // psql session on the environment database.
+  'sql-modal': {
+    termId: 'sql-terminal',
+    titleId: 'sql-title',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
+    title: function(p) { return 'SQL — ' + p.branch; },
+    banner: function(p) { return 'sql — ' + p.branch; },
+    wsPath: function(p) { return '/api/environments/' + encodeURIComponent(p.branch) + '/sql'; }
+  },
+  // `sh` inside a service container — the dashboard's `docker exec -it <container> sh`.
+  'svc-shell-modal': {
+    termId: 'svc-shell-terminal',
+    titleId: 'svc-shell-title',
+    icon: _PTY_ICON_SHELL,
+    title: function(p) { return 'Shell — ' + p.name; },
+    banner: function(p) { return 'shell — ' + p.name; },
+    wsPath: function(p) { return '/api/services/' + encodeURIComponent(p.name) + '/shell'; }
+  },
+  // Coding-agent CLI for an environment; `p.type` picks the agent.
+  'agent-modal': {
+    termId: 'agent-terminal',
+    titleId: 'agent-title',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M12 3v4M8 13h.01M16 13h.01"/></svg>',
+    title: function(p) { return 'Agent · ' + p.label + ' — ' + p.branch; },
+    banner: function(p) { return 'agent (' + p.label + ') — ' + p.branch; },
+    wsPath: function(p) {
+      return '/api/environments/' + encodeURIComponent(p.branch) + '/agent?type=' + encodeURIComponent(p.type);
+    }
+  }
+};
+// Live session per terminal. `seq` is bumped by every open and close, so an
+// open that was superseded while the xterm assets loaded gives up.
+var _ptyState = {};
+Object.keys(PTY_TERMINALS).forEach(function(id) {
+  _ptyState[id] = { ws: null, term: null, fitAddon: null, seq: 0 };
+});
+
+function teardownPtyTerminal(modalId) {
+  var st = _ptyState[modalId];
+  st.seq++;
+  if (st.ws) {
+    // Its terminal is disposed right below: nothing is left to report to.
+    st.ws.onopen = st.ws.onmessage = st.ws.onclose = st.ws.onerror = null;
+    st.ws.close();
+    st.ws = null;
+  }
+  if (st.term) { st.term.dispose(); st.term = null; }
+  st.fitAddon = null;
+}
+
+async function openPtyTerminal(modalId, params) {
+  var spec = PTY_TERMINALS[modalId];
+  var st = _ptyState[modalId];
+  // Reopening replaces any live/minimized session for this singleton overlay.
+  teardownPtyTerminal(modalId);
+  _dropChip(modalId);
+  var seq = st.seq;
+  try {
+    await ensureXterm();
+  } catch (e) {
+    showToast('Failed to load terminal assets: ' + e.message, true);
+    return;
+  }
+  // A second click (or a close) while the terminal assets were loading
+  // supersedes this open; going on would orphan a connected shell.
+  if (seq !== st.seq) return;
+  document.getElementById(spec.titleId).textContent = spec.title(params);
+  showModal(modalId);
+
+  var container = document.getElementById(spec.termId);
+  container.innerHTML = '';
+
+  var term = new Terminal({
+    theme: _XTERM_THEME,
+    fontFamily: _XTERM_FONT,
+    fontSize: 14,
+    cursorBlink: true
+  });
+  var fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' ' + spec.banner(params) + '\x1b[0m\r\n');
+
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var ws = new WebSocket(proto + '//' + location.host + spec.wsPath(params));
+
+  ws.onopen = function() {
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onmessage = function(e) { term.write(e.data); };
+  ws.onclose = function() {
+    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
+  };
+  ws.onerror = function() {
+    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
+  };
+
+  term.onData(function(data) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', data: data }));
+    }
+  });
+  term.onResize(function(size) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+    }
+  });
+
+  st.ws = ws;
+  st.term = term;
+  st.fitAddon = fitAddon;
+  term.focus();
+}
+
+// Overlay onclick passes its event so only a click on the backdrop closes.
+function closePtyTerminal(modalId, event) {
+  if (event && event.target !== event.currentTarget) return;
+  teardownPtyTerminal(modalId);
+  _dropChip(modalId);
+  hideModal(modalId);
+}
+
+// Refit a live terminal to its container; false when no session is open.
+function fitPtyTerminal(modalId, focus) {
+  var st = _ptyState[modalId];
+  if (!st || !st.fitAddon || !st.term) return false;
+  st.fitAddon.fit();
+  if (focus) st.term.focus();
+  return true;
+}
+
 // --- Minimize/restore: dock log & console windows without tearing them down ---
 // Overlays are singletons, so at most one window of each type is minimized.
 // Minimizing only drops the .show class; the WebSocket, xterm buffer and log
 // state stay alive so restoring resumes the exact session.
 var _minimized = {};   // id -> { title, returnFocus }
 var MIN_ICONS = {
-  'console-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8"/></svg>',
-  'sql-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
-  'logs-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>',
-  'agent-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M12 3v4M8 13h.01M16 13h.01"/></svg>'
+  'logs-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>'
 };
+Object.keys(PTY_TERMINALS).forEach(function(id) { MIN_ICONS[id] = PTY_TERMINALS[id].icon; });
 
 function renderMinDock() {
   var dock = document.getElementById('min-dock');
@@ -3252,15 +3417,8 @@ function restorePanel(id) {
   if (returnFocus && document.contains(returnFocus)) {
     _modalReturnFocus[id] = returnFocus;
   }
-  if (id === 'console-modal' && _consoleState.fitAddon && _consoleState.term) {
-    _consoleState.fitAddon.fit();
-    _consoleState.term.focus();
-  } else if (id === 'sql-modal' && _sqlConsoleState.fitAddon && _sqlConsoleState.term) {
-    _sqlConsoleState.fitAddon.fit();
-    _sqlConsoleState.term.focus();
-  } else if (id === 'agent-modal' && _agentConsoleState.fitAddon && _agentConsoleState.term) {
-    _agentConsoleState.fitAddon.fit();
-    _agentConsoleState.term.focus();
+  if (PTY_TERMINALS[id]) {
+    fitPtyTerminal(id, true);
   } else if (id === 'logs-modal') {
     document.getElementById('logs-search').focus();
   }
@@ -7731,6 +7889,10 @@ function renderServices(services) {
             (svc.protected ? 'disabled title="Service is protected"' : '') + '>Update</button>' +
           '<button class="btn btn-restart" onclick="doRestartService(\'' + escAttr(svc.name) + '\')">Restart</button>' +
           '<button class="btn btn-logs" onclick="showServiceLogs(\'' + escAttr(svc.name) + '\')">Logs</button>' +
+          '<button class="btn btn-logs" onclick="openServiceShell(\'' + escAttr(svc.name) + '\')" ' +
+            (svc.status === 'running'
+              ? 'title="Shell inside the service container (sh)"'
+              : 'disabled title="Service is not running"') + '>Shell</button>' +
           '<button class="btn btn-protect" title="' + (svc.protected ? 'Allow Update, Restore and Delete again' : 'Disable Update, Restore and Delete') + '" ' +
             'onclick="doProtectService(\'' + escAttr(svc.name) + '\',' + (svc.protected ? 'true' : 'false') + ')">' +
             (svc.protected ? 'Unprotect' : 'Protect') + '</button>' +
@@ -10406,224 +10568,24 @@ function openChat(branch, type) {
 var _XTERM_THEME = { background: '#060a12', foreground: '#e6e8eb', cursor: '#2e79f5' };
 var _XTERM_FONT = getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim();
 
-var _consoleState = { ws: null, term: null, fitAddon: null };
+// The four terminals are thin entry points over the PTY_TERMINALS registry;
+// the overlay markup and the launcher buttons call them by name.
+function openConsole(branch) { return openPtyTerminal('console-modal', { branch: branch }); }
+function closeConsole(event) { closePtyTerminal('console-modal', event); }
 
-function teardownConsole() {
-  if (_consoleState.ws) { _consoleState.ws.close(); _consoleState.ws = null; }
-  if (_consoleState.term) { _consoleState.term.dispose(); _consoleState.term = null; }
-  _consoleState.fitAddon = null;
-}
+function openSqlConsole(branch) { return openPtyTerminal('sql-modal', { branch: branch }); }
+function closeSqlConsole(event) { closePtyTerminal('sql-modal', event); }
 
-async function openConsole(branch) {
-  // Reopening replaces any live/minimized session for this singleton overlay.
-  teardownConsole();
-  _dropChip('console-modal');
-  try {
-    await ensureXterm();
-  } catch (e) {
-    showToast('Failed to load terminal assets: ' + e.message, true);
-    return;
-  }
-  document.getElementById('console-title').textContent = 'Console \u2014 ' + branch;
-  showModal('console-modal');
+function openServiceShell(name) { return openPtyTerminal('svc-shell-modal', { name: name }); }
+function closeServiceShell(event) { closePtyTerminal('svc-shell-modal', event); }
 
-  var container = document.getElementById('console-terminal');
-  container.innerHTML = '';
-
-  var term = new Terminal({
-    theme: _XTERM_THEME,
-    fontFamily: _XTERM_FONT,
-    fontSize: 14,
-    cursorBlink: true
-  });
-  var fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' console \u2014 ' + branch + '\x1b[0m\r\n');
-
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/terminal');
-
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = function(e) { term.write(e.data); };
-  ws.onclose = function() {
-    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
-  };
-  ws.onerror = function() {
-    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
-  };
-
-  term.onData(function(data) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
-    }
-  });
-  term.onResize(function(size) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    }
-  });
-
-  _consoleState = { ws: ws, term: term, fitAddon: fitAddon };
-  term.focus();
-}
-
-function closeConsole(event) {
-  if (event && event.target !== event.currentTarget) return;
-  teardownConsole();
-  _dropChip('console-modal');
-  hideModal('console-modal');
-}
-
-var _sqlConsoleState = { ws: null, term: null, fitAddon: null };
-
-function teardownSqlConsole() {
-  if (_sqlConsoleState.ws) { _sqlConsoleState.ws.close(); _sqlConsoleState.ws = null; }
-  if (_sqlConsoleState.term) { _sqlConsoleState.term.dispose(); _sqlConsoleState.term = null; }
-  _sqlConsoleState.fitAddon = null;
-}
-
-async function openSqlConsole(branch) {
-  // Reopening replaces any live/minimized session for this singleton overlay.
-  teardownSqlConsole();
-  _dropChip('sql-modal');
-  try {
-    await ensureXterm();
-  } catch (e) {
-    showToast('Failed to load terminal assets: ' + e.message, true);
-    return;
-  }
-  document.getElementById('sql-title').textContent = 'SQL \u2014 ' + branch;
-  showModal('sql-modal');
-
-  var container = document.getElementById('sql-terminal');
-  container.innerHTML = '';
-
-  var term = new Terminal({
-    theme: _XTERM_THEME,
-    fontFamily: _XTERM_FONT,
-    fontSize: 14,
-    cursorBlink: true
-  });
-  var fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' sql \u2014 ' + branch + '\x1b[0m\r\n');
-
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/sql');
-
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = function(e) { term.write(e.data); };
-  ws.onclose = function() {
-    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
-  };
-  ws.onerror = function() {
-    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
-  };
-
-  term.onData(function(data) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
-    }
-  });
-  term.onResize(function(size) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    }
-  });
-
-  _sqlConsoleState = { ws: ws, term: term, fitAddon: fitAddon };
-  term.focus();
-}
-
-function closeSqlConsole(event) {
-  if (event && event.target !== event.currentTarget) return;
-  teardownSqlConsole();
-  _dropChip('sql-modal');
-  hideModal('sql-modal');
-}
-
-var _agentConsoleState = { ws: null, term: null, fitAddon: null };
-
-async function openAgentConsole(branch, agentType) {
-  // Reopening replaces any live/minimized session for this singleton overlay.
-  teardownAgentConsole();
-  _dropChip('agent-modal');
+function openAgentConsole(branch, agentType) {
   agentType = (agentType || window.ODU_AGENT_DEFAULT || 'claude').toLowerCase();
-  try {
-    await ensureXterm();
-  } catch (e) {
-    showToast('Failed to load terminal assets: ' + e.message, true);
-    return;
-  }
   var label = agentType === 'codex' ? 'Codex' :
     (agentType === 'opencode' ? 'OpenCode' : 'Claude');
-  document.getElementById('agent-title').textContent = 'Agent · ' + label + ' — ' + branch;
-  showModal('agent-modal');
-
-  var container = document.getElementById('agent-terminal');
-  container.innerHTML = '';
-
-  var term = new Terminal({
-    theme: _XTERM_THEME,
-    fontFamily: _XTERM_FONT,
-    fontSize: 14,
-    cursorBlink: true
-  });
-  var fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' agent (' + label + ') — ' + branch + '\x1b[0m\r\n');
-
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/agent?type=' + encodeURIComponent(agentType));
-
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = function(e) { term.write(e.data); };
-  ws.onclose = function() {
-    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
-  };
-  ws.onerror = function() {
-    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
-  };
-
-  term.onData(function(data) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
-    }
-  });
-  term.onResize(function(size) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    }
-  });
-
-  _agentConsoleState = { ws: ws, term: term, fitAddon: fitAddon };
-  term.focus();
+  return openPtyTerminal('agent-modal', { branch: branch, type: agentType, label: label });
 }
-
-function teardownAgentConsole() {
-  if (_agentConsoleState.ws) { _agentConsoleState.ws.close(); _agentConsoleState.ws = null; }
-  if (_agentConsoleState.term) { _agentConsoleState.term.dispose(); _agentConsoleState.term = null; }
-  _agentConsoleState.fitAddon = null;
-}
-
-function closeAgentConsole(event) {
-  if (event && event.target !== event.currentTarget) return;
-  teardownAgentConsole();
-  _dropChip('agent-modal');
-  hideModal('agent-modal');
-}
+function closeAgentConsole(event) { closePtyTerminal('agent-modal', event); }
 
 function _modalShown(id) {
   var el = document.getElementById(id);
@@ -10632,15 +10594,9 @@ function _modalShown(id) {
 
 window.addEventListener('resize', function() {
   // Skip minimized (hidden) terminals: fitting a 0-size container would break their layout.
-  if (_consoleState.fitAddon && _consoleState.term && _modalShown('console-modal')) {
-    _consoleState.fitAddon.fit();
-  }
-  if (_sqlConsoleState.fitAddon && _sqlConsoleState.term && _modalShown('sql-modal')) {
-    _sqlConsoleState.fitAddon.fit();
-  }
-  if (_agentConsoleState.fitAddon && _agentConsoleState.term && _modalShown('agent-modal')) {
-    _agentConsoleState.fitAddon.fit();
-  }
+  Object.keys(PTY_TERMINALS).forEach(function(id) {
+    if (_modalShown(id)) fitPtyTerminal(id, false);
+  });
 });
 
 var MODAL_CLOSERS = {
@@ -10659,9 +10615,6 @@ var MODAL_CLOSERS = {
   'svc-update-modal': closeUpdateService,
   'create-database-modal': closeCreateDatabaseModal,
   'database-credentials-modal': closeDatabaseCredentials,
-  'console-modal': closeConsole,
-  'sql-modal': closeSqlConsole,
-  'agent-modal': closeAgentConsole,
   'chat-modal': function() { if (window.ChatManager) window.ChatManager.minimize(); },
   'create-svc-modal': closeCreateServiceModal,
   'restore-svc-modal': closeRestoreServiceModal,
@@ -10684,6 +10637,9 @@ var MODAL_CLOSERS = {
   'install-modules-modal': closeInstallModules,
   'upgrade-modules-modal': closeUpgradeModules
 };
+Object.keys(PTY_TERMINALS).forEach(function(id) {
+  MODAL_CLOSERS[id] = function() { closePtyTerminal(id); };
+});
 
 document.addEventListener('keydown', function(e) {
   // Enter/Space activate non-native role="button" elements (copyable names, notes, guides).
@@ -10740,8 +10696,7 @@ document.addEventListener('keydown', function(e) {
   }
   if (!top) return;
   // Escape typed inside a terminal is input for the shell, not "close modal"
-  if ((top.id === 'console-modal' || top.id === 'sql-modal' || top.id === 'agent-modal') &&
-      e.target.closest && e.target.closest('.modal-body')) return;
+  if (PTY_TERMINALS[top.id] && e.target.closest && e.target.closest('.modal-body')) return;
   var closer = MODAL_CLOSERS[top.id];
   if (closer) closer();
 });

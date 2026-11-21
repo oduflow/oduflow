@@ -1282,6 +1282,11 @@ def create_environment(
                     local_path_from_template = True
 
         if local_path:
+            if settings_module.TRANSPORT == "http":
+                raise ValueError(
+                    "HTTP MCP cannot use local_path. Use a Git repo_url or "
+                    "use the local CLI or stdio MCP for live-mount."
+                )
             if not settings.allow_local_path:
                 if local_path_from_template:
                     raise ValueError(
@@ -1310,7 +1315,7 @@ def create_environment(
                     "repo_url",
                     "template_name (which supplies repo_url from its metadata)",
                 ]
-                if settings.allow_local_path:
+                if settings.allow_local_path and settings_module.TRANSPORT != "http":
                     sources.append("local_path=<abs path> (live-mount fast-path)")
                 raise ValueError(
                     "No code source for the environment — provide one of: "
@@ -4054,7 +4059,9 @@ def list_installed_modules(
     _reject_prod_env(env_name)
     settings = _get_settings()
     team = _resolve_team(ctx)
-    result = odoo_ops.run_db_query(settings, team, env_name, query, "csv")
+    # Built here from validated filters only, so it may run next to PostgreSQL
+    # and does not need the environment's Odoo container to be running.
+    result = odoo_ops.run_internal_db_query(settings, team, env_name, query)
     return cast(str, result["output"])
 
 
@@ -4110,8 +4117,11 @@ def reset_admin_password(
     """
     Reset the admin user password in the environment's Odoo database.
 
-    Hashes the password using passlib (pbkdf2_sha512) inside the Odoo container
-    and updates the res_users record where login = 'admin'.
+    The password is hashed by the Oduflow server (pbkdf2_sha512, the format
+    Odoo stores) and written to the res_users record where login = 'admin', as
+    the environment's own database role. A stopped environment is started
+    first. An environment that predates per-environment database roles is
+    refused; update_environment provisions one and keeps the database.
 
     Args:
         env_name: The name of the environment.
@@ -4297,6 +4307,9 @@ def run_db_query(
     """
     Execute a SQL query against the environment's PostgreSQL database.
 
+    The query runs as the environment's own database role, through `psql` in
+    the environment's Odoo container (a stopped environment is started first).
+
     Args:
         env_name: The name of the environment.
         query: SQL query to execute (e.g. "SELECT id, name FROM res_partner LIMIT 10").
@@ -4307,6 +4320,9 @@ def run_db_query(
     """
     settings = _get_settings()
     team = _resolve_team(ctx)
+    # psql runs in the environment's Odoo container, never in the shared
+    # PostgreSQL one, so this is a container-level tool like run_odoo_shell.
+    woke = _wake_for_work(settings, team, env_name)
     result = odoo_ops.run_db_query(settings, team, env_name, query, output_format)
     output = result["output"]
 
@@ -4319,7 +4335,7 @@ def run_db_query(
         truncated.append(f"... ({remaining} more rows, add LIMIT to your query)")
         output = "\n".join(truncated)
 
-    return _maybe_cache(output, "", "run_db_query", f"env={env_name}")
+    return _maybe_cache(output, woke.rstrip("\n"), "run_db_query", f"env={env_name}")
 
 
 # =============================================================================
@@ -8982,6 +8998,7 @@ def _run_cli() -> None:
             # XFS project setup refreshes inode ctime, which the staging sweep
             # uses to distinguish abandoned files from active restores.
             system_ops.sweep_pg_exchange(_settings)
+            system_ops.sweep_dump_conversions(_settings)
             quotas.apply_all(_settings)
             if args.stack_manifest:
                 from oduflow.stack_loader import load_stack, stack_environ
@@ -9267,7 +9284,6 @@ def _start_http() -> None:
     # ui_password for existing configs that still have none. The fail-closed
     # check below only trips if this could not write the config.
     settings = _ensure_web_ui_password(settings)
-    _warn_local_path_security(settings)
     host = "0.0.0.0" if settings.routing_mode == "traefik" else settings.bind_host
     port = settings.port
 

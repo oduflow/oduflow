@@ -109,9 +109,11 @@ database size.
 
 A second base-level directory, `{data_dir}/pg_exchange/`, is mounted the same
 way (as `/exchange`). Database dumps are staged in `pg_exchange/team_{id}/`
-so `pg_dump` writes them once, straight to their final filesystem, and a
-restore reads them in place instead of having a full-size copy pushed into
-the PostgreSQL container's writable layer. Give it the **same XFS project ID**
+so `pg_dump` writes them once, straight to their final filesystem, instead of
+a full-size copy passing through the PostgreSQL container's writable layer.
+(Restores do not use the mount: a dump is read from the host by a separate
+restore client, see [How a dump is loaded](templates.md#how-a-dump-is-loaded).)
+Give it the **same XFS project ID**
 as the rest of the team: besides keeping the accounting right, XFS refuses to
 rename a file into a project-inheriting directory with a different ID, which
 would break moving a finished dump into the team's templates directory.
@@ -154,6 +156,11 @@ from the exact team/database pair, so two teams can never end up sharing a
 database or a role.
 - Environment containers: `oduflow-{team_id}-{env}-{type}` (e.g. `oduflow-1-feature-login-odoo`)
 - Service containers: `oduflow-{team_id}-svc-{name}` (e.g. `oduflow-1-svc-redis`)
+
+Each database has one role that may connect to it — its environment's,
+template's, production's or service's own. Roles of other environments and
+teams share the PostgreSQL server but are refused at connection time; see
+[Database isolation](environments.md#database-isolation).
 
 Containers are additionally labeled with `oduflow.team={team_id}`; listing and
 filtering are label-based, and container names are team-scoped so two teams

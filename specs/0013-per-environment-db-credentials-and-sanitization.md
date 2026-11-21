@@ -3,7 +3,7 @@
 **Status:** Adopted (still in force)
 **Type:** Architecture
 **First introduced:** `cd0b9ec` "two-tier database sanitization" (2026-02-24), `e4949b0` "per-environment PostgreSQL credentials" (2026-02-26)
-**Key code today:** `env_credentials.py` (generate / persist / load / delete per-env creds), `sanitizer.py` (`neutralize_environment` native baseline + two-tier script runner), `docker_ops/env_ops.py` (`_create_pg_role`, post-clone ownership fixup), `docker_ops/system_ops.py` (shared DB, role helpers), `server.py` (`_inject_db_password` — bootstrap superuser secret)
+**Key code today:** `env_credentials.py` (generate / persist / load / delete per-env creds), `sanitizer.py` (`neutralize_environment` native baseline + two-tier script runner), `docker_ops/env_ops.py` (`_create_pg_role`, post-clone ownership fixup), `docker_ops/system_ops.py` (shared DB, role helpers, `provision_scoped_role` for a database that predates its role, `_exec_sql` / `disable_event_triggers` for what the superuser may run inside a tenant's database), `server.py` (`_inject_db_password` — bootstrap superuser secret)
 
 ## Context
 
@@ -122,6 +122,615 @@ needed for admin operations:
   compatible. The matching admin connections rely on local trust auth inside the
   container, so they were unaffected by the change.
 
+The per-env role confines **SQL**; it does not confine the **client** that sends
+it, and that turned out to be the weaker half of the boundary:
+
+- (2026-11-19) — **caller-written SQL no longer runs `psql` inside the shared
+  PostgreSQL container.** The dashboard SQL console and `run_db_query` both
+  picked the scoped role correctly, but executed `psql` via `docker exec` in the
+  shared DB container, as root. `psql` is a client program: `\!` there is a root
+  shell beside every team's data files, and the container's local socket uses
+  trust auth, so `\c <db> <superuser>` (or `\! psql -U <superuser>`) reached the
+  whole cluster regardless of the role the session started with. Filtering
+  meta-commands was rejected as the fix — it is a denylist over a client with
+  many ways to shell out, and it would not help an interactive session at all.
+  Instead the client moved to where the caller is already trusted: both surfaces
+  now run `psql` in the **environment's own Odoo container**, as the image's
+  unprivileged `odoo` user, connecting over the Docker network like Odoo does,
+  with the scoped role's password in `PGPASSWORD` (never argv). There every
+  connection is password-authenticated, so `\c` to another role needs a password
+  the caller does not have, and `\!` lands in a container they already have a
+  shell in. The costs were accepted knowingly: the environment must be running
+  (`run_db_query` now wakes a stopped one, like the other container-level
+  tools), and the Odoo image must ship `psql` (the official ones do). An
+  ephemeral client container was considered as a fallback for those two cases
+  and not taken — it would add a second, rarely exercised transport plus image
+  and cleanup concerns for something a clear error handles; there is
+  deliberately **no** fallback to the DB container. Queries the server composes
+  itself from fixed text and validated values (module-state checks, the
+  module listing, Stack plans) keep running next to PostgreSQL, so they still
+  work on a stopped or legacy environment; that path refuses a leading
+  backslash and is not reachable with caller-written text. What the boundary
+  rests on from here is the superuser's **password** (network auth is always
+  password-based): an install initialised before `#74` with the published
+  default should rotate it, since any tenant container can reach the server.
+
+- (2026-11-19) — **`reset_admin_password` stops trusting the tenant's container
+  and stops using the superuser.** It asked a `python3` *inside the
+  environment's Odoo container* for the passlib hash, pasted that output into
+  an `UPDATE res_users ...` string, and ran it with `psql -U <superuser>` in
+  the shared PostgreSQL container. The Odoo container is the tenant's (root via
+  `run_odoo_command`), so "the hash" was tenant-written SQL executed as the
+  cluster superuser: `x' WHERE false; ALTER ROLE <own role> SUPERUSER; --`.
+  Both halves were wrong independently, so both changed. The hash is now
+  computed **in the Oduflow process** (`odoo_ops.hash_odoo_password`:
+  `hashlib.pbkdf2_hmac` + passlib's adapted base64, emitting the
+  `$pbkdf2-sha512$<rounds>$<salt>$<checksum>` string Odoo's `CryptContext`
+  reads; 600,000 rounds, the value Odoo 15–20 hard-code, so Odoo does not
+  rewrite it on first login) — passlib was not added as a dependency for one
+  KDF call the standard library already has. And the `UPDATE` runs as the
+  environment's **scoped role** through the server-built-query path
+  (`run_internal_db_query`), after the hash is matched against its exact
+  shape. Running as the scoped role matters even with a trustworthy hash: the
+  tenant owns `res_users`, and a trigger on it would otherwise fire with
+  superuser rights. A legacy environment without a credentials file is
+  **refused** rather than served with the superuser; it has to be recreated.
+  The general rule this instance stands for: output of a tenant container is
+  untrusted input, and the superuser should not touch tenant-owned objects.
+  Fixed-SQL superuser reads of environment databases that predate this rule
+  (the "Connect as" user picker, template manifest checks) remain to be moved
+  to the scoped role.
+
+- (2026-11-19) — **template dumps are no longer executed by the superuser, nor
+  inside the shared PostgreSQL container.** "Template loads" sat on the
+  Decision's list of administrative operations the superuser keeps, and
+  `reload_template` ran every dump as it, in that container: `psql -U
+  <superuser> -f` for plain SQL, `pg_restore --no-owner -U <superuser>` for
+  archives. But a dump is tenant input — `import_template` fetches it from a
+  URL, bucket or path the caller names, and `save_as_template` dumps a database
+  whose tenant defines its functions. Plain SQL could simply say `ALTER ROLE
+  ... SUPERUSER`, `COPY ... FROM PROGRAM` or `\!`; an archive needs one more
+  step (a function in a CHECK constraint runs during `COPY`, as the restoring
+  user) and gets to the same place. And `--no-owner` as the superuser left
+  every restored view and SECURITY DEFINER function *owned* by the superuser
+  in a database any role can connect to. So both the executing role and the
+  resulting owner had to change, and the client had to leave the container
+  for the same reason as in the SQL-console change above.
+  A load now uses three roles. The superuser only prepares and hands over: it
+  creates a one-off **loader** role (`oduflow_load_<random>`, no privileges
+  beyond owning the new, empty template database and its `public` schema), and
+  afterwards issues `REASSIGN OWNED` / `DROP OWNED` — utility statements that
+  run no code from the database — and drops the loader. The loader executes
+  the dump, from a throwaway **restore client** container (the cluster's own
+  image, team network, no capabilities, dump mounted read-only, loader
+  password in `PGPASSWORD`), so `\!` lands in a container holding nothing and
+  `\c` to another role needs a password. The result is owned by a per-team
+  **template owner** (`oduflow_tplown_<team>`): an ordinary role that can log
+  in only through the local socket (no password, and `VALID UNTIL 'epoch'`
+  because a role may set its own). Oduflow's own reads of a freshly loaded
+  template (table count, version and module list) run as that owner, since a
+  query over tenant-defined objects resolves the tenant's operators and
+  functions with the caller's rights. Cloning works as before: `CREATE DATABASE
+  ... TEMPLATE` and the per-object reassignment to the environment's role
+  treat the template owner exactly like the superuser they used to find there.
+  But the clone is the same tenant content, and two superuser steps right
+  after it were reachable from a dump: the ownership-reassignment and
+  signaling-sequence blocks compare catalog names with `LIKE`, and with
+  `public` on the search path an operator `public.!~~(name, name)` planted by
+  the dump is a *better* match than the built-in `(name, text)` one. Both
+  blocks now start with `SET LOCAL search_path = pg_catalog` and name what
+  they touch with its schema; the create-time module-version check reads the
+  clone as the environment's role. (That is the "template manifest checks"
+  item from the previous entry; the "Connect as" user picker is still open.)
+  Alternatives weighed: *filtering the dump* (backslash lines, statement
+  denylist) — rejected as the only defence for the same reason as before, and
+  useless against archives; *reassigning the result to the superuser* to keep
+  the old end state — rejected, it is the view/SECURITY DEFINER hole again;
+  *a role per template* — rejected for its lifecycle (rename, delete while
+  clones still hold objects of it, scheduled generations) when a per-team
+  owner plus a per-load loader gives the same confinement with nothing to
+  clean up; *the loader's client inside the PostgreSQL container* — would have
+  kept the in-place read through `pg_exchange`, but trust auth there makes
+  the role a suggestion for `psql`, and one transport for both formats is
+  simpler than two. *Extensions* needed no superuser step after all:
+  `pg_trgm`, `unaccent` and the rest of what Odoo uses are *trusted*
+  extensions on every supported PostgreSQL (15+), so the loader, as database
+  owner, creates them itself and owns them (which `COMMENT ON EXTENSION` in a
+  dump requires — a superuser-pre-created extension would make every archive
+  restore fail on that comment, since `ALTER EXTENSION ... OWNER` does not
+  exist). The accepted cost: a dump that needs an untrusted extension
+  (PostGIS, `pg_stat_statements`) or anything else superuser-only now fails —
+  loudly for archives, statement-by-statement for plain SQL — unless the
+  operator's PostgreSQL image marks that extension trusted. Templates loaded
+  before this change keep their superuser-owned objects until reloaded. Still
+  open, same class: the other `pg_restore`-as-superuser paths (production
+  snapshot restore, seeding a production from a dev database, the PostgreSQL
+  upgrade's whole-cluster restore).
+
+- (2026-11-19) — **the remaining `pg_restore`-as-superuser paths: production
+  data and the PostgreSQL upgrade.** The three paths the previous entry left
+  open were the same hole in the production cluster, where it matters most:
+  `create_production(template_name | from_environment)` and
+  `restore_production(from_environment)` dumped a *development* database and
+  ran `pg_restore -U <superuser> --no-owner` inside the production PostgreSQL
+  container, so a dev tenant's CHECK-constraint function ran as the production
+  cluster's superuser; `restore_production(snapshot_id)` did the same with the
+  production's own snapshot; and the major-version upgrade restored every
+  production and service database with `pg_restore --create` as the superuser
+  of the new cluster.
+  *Production data* now reuses the restricted load, generalised: the restore
+  client takes the cluster as a parameter (the production cluster is on every
+  team network too), and the role is not a one-off loader but the
+  **production's own scoped role** — it already exists, already has a
+  password on record, and is the role the content will run as once Odoo
+  starts, so restoring as it grants the content nothing new and needs no
+  `REASSIGN OWNED` afterwards. That required one reordering:
+  `create_production` used to seed first and create the role after; the role
+  now comes first and owns the database (and its `public` schema) before any
+  of the seed is loaded, and a restore creates its staged `…__restore`
+  database with that owner. A side effect worth knowing: a restored
+  production database used to stay owned by the superuser (only the objects
+  inside were reassigned); it now belongs to the production's role like a
+  freshly created one. The pinned-`search_path` reassignment and
+  signaling-sequence blocks still run afterwards as a no-op safety net.
+  `load_credentials`' superuser fallback is refused on these paths
+  (`production_db_credentials`): with it, a production missing its
+  credentials file would have had its content restored *and owned* by the
+  superuser. Flags are otherwise unchanged (tolerant restore that fails on
+  any error, privileges kept, `-j 2` for snapshots). The dump staged for the
+  client lives under the team's data directory, because the Docker daemon —
+  not the Oduflow process, which may itself be a container — resolves the
+  mount path. Accepted cost, same as for templates: content only a superuser
+  can create (an untrusted extension such as PostGIS, an event trigger, a
+  `FOR ALL TABLES` publication) no longer loads, *including from snapshots
+  taken earlier*; the remedy is an image that marks the extension trusted.
+  Cluster PITR is physical and unaffected.
+  *The upgrade* could not copy that design as is, because it must keep what
+  `--create` restores (locale, tablespace, `ALTER DATABASE ... SET`, database
+  privileges) and may not fail halfway for reasons the operator cannot fix.
+  Splitting by section — schema as the superuser, data as the owner — was
+  rejected: DDL alone executes tenant code (`CREATE AGGREGATE ... INITCOND`
+  and a partition bound both run the input function of their type, and a
+  domain's input function evaluates its CHECK constraints). So each database
+  is restored in two passes: the superuser runs `pg_restore --create` filtered
+  to a schema that cannot exist (`-n pg_…`; the `pg_` prefix is reserved),
+  which leaves exactly the database-level entries, then makes the role *on
+  Oduflow's records* the owner — the records, not `datdba`, since databases
+  restored by older versions are superuser-owned — and that role restores the
+  whole archive with `--no-owner --exit-on-error`. It connects through the
+  cluster's own network namespace like before (loopback, where pg_hba trusts);
+  that is acceptable here and was not for templates, because the client is
+  `pg_restore` reading an archive Oduflow wrote itself, not `psql` reading a
+  caller's SQL. Two refusals move to the plan, while every old cluster is
+  intact: a carried database without a scoped role on record, and an extension
+  of a carried database that the *new image* does not mark trusted (read from
+  its control files). An automatic superuser fallback on failure was rejected
+  — content could fail for its own role on purpose — in favour of an explicit
+  operator switch, `ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<db,…>`, which also
+  is the way out of a restore that stops on superuser-only content after the
+  old cluster is gone. Ownership inside a carried database is no longer
+  replayed: everything belongs to its role, which is what a managed database
+  looked like anyway. Still open, same family but not `pg_restore`: `pg_dump`
+  runs as the superuser against tenant databases (it pins `search_path` and
+  relies on current minor releases), the "Connect as" user picker reads tenant
+  tables as the superuser, and legacy environments without a credentials file
+  still fall back to it for fixed reads.
+
+- (2026-11-19) — **the superuser stops resolving names a tenant controls,
+  and stops sharing databases with every role.** The previous entries moved
+  *content* (dumps, restores) away from the superuser; what remained was the
+  superuser *querying* inside tenant databases. Fixed SQL is not safe there:
+  the tenant owns what the names in it mean. `res_users` can be a view over
+  the tenant's function, an operator `public.!~~(name, name)` beats the
+  built-in `LIKE` for a `name` column, and `ALTER DATABASE ... SET
+  search_path` decides where any unqualified name is looked up — each of them
+  tenant code run with the rights of whoever sent the query. Three rules came
+  out of auditing every `psql` the server starts.
+  *Tenant tables are read as the tenant's role.* The "Connect as" user picker
+  (`list_env_users`) ran its `SELECT` over `res_users` / `res_partner` as the
+  superuser for every environment; it now goes through
+  `run_internal_db_query`, like the module checks, and its JSON answer is
+  treated as data the tenant shaped (non-list answers and rows without a
+  login are dropped). The superuser **fallback for legacy environments** on
+  that path is gone, which withdraws a line from the SQL-console entry above
+  ("so they still work on a stopped *or legacy* environment"): the module
+  state checks and the installed-modules list refuse an environment without
+  a credentials file with `MissingCredentialsError`. Degrading was weighed —
+  skip the check, keep installing — and rejected for the same reason
+  `reset_admin_password` refuses: such an environment has to be recreated
+  anyway, and a verification that silently does not run is worse than an
+  error. `install_odoo_modules` checks for the role *before* running Odoo, so
+  a finished installation is never reported as a failure; `upgrade all`
+  reads nothing and still works; `pull_and_apply`'s plan narrowing was
+  best-effort already and its apply step reports the refusal.
+  *What the superuser still runs, it runs with a pinned `search_path`.*
+  `system_ops._exec_sql` now starts every superuser `psql` with a statement
+  of its own, `SET search_path = pg_catalog, pg_temp`, ahead of the caller's
+  (`psql -q -v ON_ERROR_STOP=1 … -c '<pin>' -tAc '<sql>'`). It is a
+  statement rather than a connection option on purpose: database and role
+  settings take effect while connecting, and a `SET` issued afterwards, in a
+  session where nothing of the tenant's has run yet, replaces them whatever
+  they say. Two `-c` rather
+  than one prefixed string keeps `CREATE DATABASE` and friends outside a
+  transaction block, which is what allowed pinning *every* superuser
+  statement instead of only those inside tenant databases — the maintenance
+  database is safe today because PostgreSQL 15+ lets nobody create in its
+  `public`, and with the pin it no longer depends on that. What is left
+  inside tenant databases is catalog-only or utility: the ownership and
+  signaling-sequence blocks (pinned since the template entry),
+  `ALTER SCHEMA public OWNER`, `REASSIGN OWNED` / `DROP OWNED`, and the
+  upgrade plan's `pg_extension` read and bootstrap-database object count.
+  Statements that run as a scoped role (`user=`) are deliberately not
+  pinned; they are the tenant's and expect its schemas.
+  *A database accepts its own role only.* PostgreSQL grants `CONNECT` and
+  `TEMPORARY` on every new database to `PUBLIC`, pg_hba admits every role
+  from every team network, and only service databases revoked it. So any
+  tenant role could open another team's database: not its tables, but its
+  catalog (table and column names, view and function source), whatever it
+  leaves executable by `PUBLIC`, temporary tables against the other team's
+  tablespace — and a session held on a *template* blocks every
+  `CREATE DATABASE ... TEMPLATE` of it. `restrict_database_access` now issues
+  `REVOKE ALL ... FROM PUBLIC` right after each `CREATE DATABASE`
+  (environments, the staged copy of a scheduled sync, template loads,
+  productions and their staged restores). It is repeated per database on
+  purpose: a copy does **not** inherit its template's privileges. The owner's
+  rights are not `PUBLIC`'s and follow the database through `ALTER DATABASE
+  ... OWNER` and `REASSIGN OWNED`, so cloning, the loader hand-over and the
+  template owner's reads work unchanged. For existing databases a startup
+  reconcile (`restrict_managed_databases`, from `init_system`) was chosen
+  over a one-shot step in `migrations.py`: migrations run before the
+  PostgreSQL containers are ensured, so a cluster that is down at that
+  moment (production hosting switched off, a held WAL guard) would be
+  skipped for good, and a cluster PITR brings old privileges back long after
+  a one-shot step is stamped. The reconcile is one catalog query per cluster
+  once nothing is left. It touches only the `oduflow_` namespace, and it
+  grants `CONNECT, TEMPORARY` to the role on record before revoking, in one
+  transaction — a production restored by an older version is still *owned by
+  the superuser* and its Odoo reached it through `PUBLIC` alone. Accepted
+  cost: a role an operator added by hand loses access to environment
+  databases until granted `CONNECT` explicitly.
+  Still open, same family: `pg_dump` as the superuser, the superuser
+  credential inside legacy tenant containers (`update_environment`,
+  `reconfigure_production`), `init_template`'s build database, and event
+  triggers in a template loaded as the superuser before the template entry
+  above (they fire on the superuser's DDL in its clones until the template
+  is reloaded).
+
+- (2026-11-19) — **the superuser's password stops being handed to
+  containers, and the backward-compatible fallback from the Decision is
+  withdrawn.** "Old environments without a credentials file fall back to the
+  global user" meant, concretely, that `update_environment` recreated such
+  an environment's container with `USER` / `PASSWORD` set to the cluster
+  superuser, and `reconfigure_production` did the same for a production
+  whose credentials file was gone. A tenant is root in its Odoo container,
+  and from there every connection is a network connection authenticated by
+  password — so that one variable undid, for the tenants concerned, every
+  boundary the entries above draw. Refusing to recreate was weighed and
+  rejected: it would have left "recreate the environment", which rebuilds
+  the database from its template, as the only remedy, for environments
+  that are by definition the oldest and most lived-in.
+  Instead the recreate **provisions the role the environment never had**
+  (`system_ops.provision_scoped_role`): `REVOKE ... FROM PUBLIC`, create the
+  role, make it the owner of the database, hand over everything inside with
+  the pinned `reassign_db_ownership`, and only then write the credentials
+  file — last, so that a failure leaves no record of a role that does not
+  own its database and a retry starts over (every statement is idempotent).
+  The end state is the one `create_environment` produces; the signaling
+  sequences are *not* dropped as after a clone, because that fixup exists
+  for sequences the new role could not see, and here it owns them.
+  *Where* it runs was decided by failure, not convenience: between the stop
+  of the old container and its removal. Before the stop, the ownership
+  block would take an exclusive lock on every relation under a live Odoo;
+  after the removal, a failure would leave the environment with no
+  container and no way to describe one (its configuration lives in the
+  container's labels). In between, a failure restarts the old container if
+  it was running and raises — the old container is the state the operator
+  already had, and no *new* container is created with the superuser's login
+  under any outcome. Every path that recreates goes through it
+  (`update_environment`, `switch_branch`, the extra-checkout switch of
+  `pull_and_apply`); `recreate_environment` is delete + create and always
+  made a role.
+  *Productions* never lacked a role by design, so "legacy" there means a
+  lost file, and usually a container still running as the role. Two things
+  follow. A missing record is **drift**, so a plain `reconfigure_production`
+  repairs it instead of reporting a no-op — as is a container that an older
+  version already recreated as the superuser, since what Odoo created
+  meanwhile is the superuser's. And the running container's own `USER` /
+  `PASSWORD` are **kept** when the name is the derived one: a fresh password
+  would lock that container out the moment it is set, and it is the
+  container a failed provisioning falls back to. (Not so for development
+  environments, where `USER` / `PASSWORD` can be overridden by the tenant's
+  own variables and are therefore not evidence of anything; they always get
+  a new password.) The WAL guard is checked again right before the
+  production goes down, and a held guard also keeps the fallback from
+  restarting anything. `_container_spec` refuses the superuser as a last
+  line, so the two callers cannot drift apart.
+  Two smaller placements went the same way. `init_template`'s build
+  container ran the operator-chosen image — which may be one a tenant built
+  — as the superuser; it now gets a one-off role that owns the build
+  database, reusing the template loader. And `load_credentials` itself no
+  longer returns the superuser's password: its fallback names the role and
+  nothing else, which turns "no caller may pass this on" from a convention
+  into something the API cannot do. What still reads `Settings.db_password`
+  is pinned by a test to four functions: the two that initialise a cluster,
+  the upgrade's dump/restore helper, and the check below.
+  *Existing containers* are the part a code change cannot reach: a
+  container's environment is fixed at creation. An automatic repair on
+  start was weighed against the reconcile that closes databases to
+  `PUBLIC`, and rejected — that one is a catalog statement nobody notices,
+  this one stops a container, rewrites the ownership of a database and
+  recreates the container, with failure modes (an image that is gone, a
+  failing dependency install) an operator has to see, and it would run for
+  every old environment at once. So the start **reports**
+  (`superuser_credential_holders`: environment and production containers
+  whose `USER` and `PASSWORD` are the superuser's) and the next recreate
+  repairs. `start_environment` and the restarts are left alone on purpose:
+  they start a container that already holds the password and place nothing.
+  The consequence is spelled out for operators rather than hidden: once the
+  listed containers are recreated, the superuser's password has to be
+  changed, because it has been readable there all along. That costs nothing
+  in Oduflow itself, which reaches both clusters through their local
+  sockets. The tools' refusals now name the real remedy —
+  `update_environment`, which d408fb1 had to stop suggesting while it did
+  not provision a role, or `reconfigure_production`.
+  Still open, same family: `pg_dump` as the superuser, the `postgres:17`
+  conversion helper, and event triggers in a template loaded as the
+  superuser before the template entry above.
+
+- (2026-11-19) — **`pg_dump` runs as the role that owns the database.** The
+  last item every entry above carried forward. Every dump ran `pg_dump -U
+  <superuser>` over tenant content: production snapshots, publishing an
+  environment or a production as a template, the dump that seeds or promotes
+  a production from a development database, `init_template`'s build
+  database, and every database carried through a PostgreSQL upgrade.
+  The risk was assessed before anything was changed, because it is *not* the
+  restore's. `pg_dump` empties `search_path` and qualifies every name, turns
+  `row_security` off, and reads data with `COPY ... TO`, which calls nothing
+  but type output functions — and those take a superuser to define. The
+  catalog is read through deparsing functions, which print an expression
+  without evaluating it; no trigger fires on a read, and event triggers fire
+  on DDL. So on a current release a superuser's dump runs nothing of the
+  tenant's. It did until 12.20 / 13.16 / 14.13 / 15.8 / 16.4, though
+  (CVE-2024-7348): `pg_dump` lists relations, then reads them, and a session
+  that swapped a sequence for a view in between had the view's functions run
+  by whoever dumped. That matters here for a reason specific to Oduflow: a
+  PostgreSQL container is never recreated behind the operator's back, so its
+  minor release is the one it was created with, and a tenant has all the time
+  it needs to hold a transaction open and wait for the nightly snapshot.
+  Pinning the defence instead — `restrict_nonsystem_relation_kind`, which a
+  patched `pg_dump` sets itself — was therefore not enough on its own: the
+  servers that need it are the ones that do not know the setting. Changing
+  *who* dumps removes the class rather than the instance: whatever the next
+  such flaw lets a dump run, it runs with rights the tenant already has.
+  *Who.* An environment's or a production's database is dumped by its scoped
+  role (`system_ops.scoped_dump_role`), a template by the team's template
+  owner (`template_dump_role`), the build database by its one-off builder,
+  and a carried database by the role on Oduflow's records — the role that
+  restores it. All of them own what they read, which is what the ownership
+  hand-overs of the earlier entries were for.
+  *Where.* Next to PostgreSQL, through the local socket, as before — not from
+  the throwaway client container the restores use. That container exists to
+  confine a client that *executes its input* (`psql` meta-commands, an
+  archive's SQL); `pg_dump` takes nothing from the tenant but query results
+  and writes one file whose name Oduflow chose, so the role it was started
+  with is the role it keeps. Staying there kept every property the dumps
+  had: the archive written in place through `pg_exchange` (which is what
+  keeps the offsets a parallel restore uses), the stream to S3 with its
+  hash, and no secret in transit — which has a consequence worth more than
+  the convenience. Only the role's *name* is needed, so a production whose
+  credentials file is lost can still be snapshotted, under the derived name,
+  *before* `reconfigure_production` repairs it; refusing (as the restore
+  does, which needs the password) would have withheld the backup exactly
+  when one is wanted. The name is not taken on trust either way: the cluster
+  is asked whether that role exists and is no superuser, which also covers a
+  credentials file somebody edited.
+  *No fallback to the superuser when a role's dump fails*, for the reason the
+  upgrade got none: the failure is the tenant's to cause (a table with
+  `FORCE ROW LEVEL SECURITY` stops its owner's `pg_dump`, which runs with
+  `row_security` off), so a fallback would be a switch in its hands. A dump
+  fails with PostgreSQL's reason and the remedy instead. What can make it
+  fail honestly is content the role does not own — created while an older
+  version ran the container as the superuser — which the same recreate that
+  provisions a role hands over.
+  *What the superuser still dumps*, and why that was kept rather than
+  refused: a template an older version loaded is the superuser's, so no
+  other role can read all of it, and refusing would have made every existing
+  template unusable for `create_production` until reloaded. No tenant role
+  can connect to a template database, which is the second session the flaw
+  needs. And the databases an operator names for the upgrade
+  (`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE`, which now covers the dump as well:
+  they hold what only a superuser can recreate, and may hold what only a
+  superuser can read; the operator vouches for their content, which the
+  stopped applications alone would not — a session can be held from any
+  container that knows the role's password). Both pass
+  `superuser_dump_environment`: on a server
+  that knows the setting it is sent with the connection (`PGOPTIONS`), so it
+  does not depend on the client's release — in the upgrade the client is the
+  *new* image; on one that does not, sending it would fail the connection,
+  so the dump goes ahead and a warning names the release. A check on every
+  start was weighed and left out: with these two dumps as the only ones
+  left, it would have reported a condition that no longer leads anywhere.
+  *The upgrade* needed one thing more, because there the dump is all that
+  remains of a database once its cluster is removed. A role's `pg_dump`
+  fails on what it may not read — loudly, and before anything is removed —
+  but it *skips* two things with at most a warning: subscriptions, and the
+  options of user mappings it may not see. Neither exists without something
+  a superuser set up, so a database containing either is refused when the
+  upgrade is planned.
+  Roles were never dumped with `pg_dumpall`; they are read from the catalog
+  by the superuser, which resolves nothing of a tenant's.
+  The upgrade's helper container held the superuser's password for every
+  command, including `pg_restore --list`, which connects to nothing. It now
+  gets the password of whoever its command connects as — a scoped role's for
+  the dump and the content restore, the superuser's only for the
+  database-level replay and the operator's exceptions — and drops every
+  capability but the one that lets root read and write the dump directory.
+  The password is what outlives the container: loopback in the cluster's
+  namespace is trusted anyway, but the password opens both clusters from
+  every team network until someone changes it.
+  Accepted costs: a tenant can now end its own dump (a role may signal its
+  own sessions), which fails that snapshot visibly and nothing else; and
+  `save_as_template` joins the tools that refuse an environment without a
+  role.
+  Still open, same family: the `postgres:17` conversion helper, which parses
+  an archive as root, and event triggers in a template loaded as the
+  superuser before the template entry above — on PostgreSQL 17 that includes
+  `ON login` triggers, which fire for the superuser's sessions in such a
+  template, its dump among them.
+- (2026-11-19) — **the conversion helper is confined, and a tenant's files
+  are never followed on the host.** Two places where the tenant's *files*,
+  rather than its SQL, met Oduflow's privileges.
+  *The helper.* An archive written by a newer `pg_dump` than the cluster's is
+  rewritten as SQL by `pg_restore -f` in a `postgres:17` container before the
+  restricted load. That container ran with Docker's defaults: root, the
+  default capabilities, the bridge network, no limits and no deadline — and
+  with the *directory the archive lay in* mounted read-write, because that is
+  where it wrote `dump.sql`. Depending on the caller that directory was the
+  template's (its dump, filestore and metadata), an import's staging tree
+  (where a local-path import *hardlinks* the operator's source files), or the
+  team's dump exchange directory. So a flaw in `pg_restore`'s archive parser,
+  reachable by whoever names the archive, was root with a writable view of a
+  team's data and a network. Nothing in the conversion needs any of that: it
+  connects to nothing and writes one file.
+  It now gets what the conversion needs and no more: no network; a uid that is
+  never 0, no capabilities, `no-new-privileges`; a read-only root filesystem;
+  memory and pids limits; the archive as a single read-only file; and one
+  scratch directory, created per conversion under the team's data directory
+  (where the daemon can mount it and the team's quota counts it), as the only
+  place it can write. *Who it runs as* follows from having no capabilities —
+  it reads by plain permission: `nobody` for a world-readable archive, the
+  owner for a private one, and for root's own private archive a copy in the
+  scratch directory, because the alternative was the one thing ruled out,
+  uid 0. An Oduflow that is not root cannot give a directory away, so there
+  the helper is Oduflow's own account, which inside the container owns
+  nothing but the two mounts.
+  *Its output is input too.* The scratch directory is the helper's to
+  arrange, so the SQL is renamed into its private parent first (a rename
+  moves a link as a link) and only then examined: one regular, non-empty file
+  with a single name, or the load fails. It is re-owned and then read by the
+  same restricted client as any other dump. The helper is removed before
+  that, is stopped at a deadline, and is stopped when the disk nearly fills —
+  an archive of megabytes expands without bound, and the helper should not be
+  what fills the host. The SQL is kept as the template's dump only when the
+  template is being reloaded from its own archive, as before; otherwise it
+  goes with the scratch directory, where it used to be left beside the
+  caller's archive.
+  *Files.* The audit of the other places tenant files are handled found the
+  archive unpackers sound (members are vetted, links are skipped, targets
+  are fresh directories) and the gap elsewhere: a filestore is mounted
+  read-write into its tenant's container, so the tenant can leave a symbolic
+  link in it, and Oduflow handled such trees on the host as root with calls
+  that follow links. `shutil.copytree` copied what a link pointed to — so
+  publishing an environment and creating one from that template in copy
+  mode, or seeding a production, returned any host file to the tenant as an
+  attachment-shaped regular file — and `os.chown` gave what a link pointed
+  to to the Odoo account. Every such copy now goes through one function that
+  keeps links as links and leaves out device nodes, FIFOs and sockets
+  (`fsutil.copy_tenant_tree`; a test pins that `shutil.copytree` is called
+  nowhere else for these trees), and the recursive chown changes the link
+  itself, addressing each entry through its directory's descriptor. Links
+  were kept rather than dropped: inside a container they resolve against the
+  container's own filesystem, which is the tenant's business, and dropping
+  them would have changed what a template holds for no gain once nothing on
+  the host follows them.
+  Still open, same family: a **local path or rsync source** named in
+  `import_template` / `attach_filestore` is read with Oduflow's rights and
+  is not confined to the caller's team — on a hosted server that is another
+  team's template directory for the asking, and wants a policy decision
+  (operator-only, or an allow-listed import root) rather than a patch; the
+  chunkstore restore trusts its manifest, which only the operator's storage
+  can forge; and the event triggers named above.
+- (2026-11-20) — **the superuser fires no event trigger of a tenant's
+  database.** The item every entry since the template one carried forward,
+  and the one object the earlier defences do not reach. An event trigger runs
+  its function *because of who issues a statement*, not because of what the
+  statement names: on every DDL statement of its database and, since
+  PostgreSQL 17, on every login to it, with the rights of the session, called
+  by OID — so neither the pinned `search_path` nor qualified names come into
+  it. Only a superuser can create one, which is exactly what a dump could do
+  while dumps were loaded as the superuser. `CREATE DATABASE ... TEMPLATE`
+  copies it into every clone, and the post-clone hand-over then gives the
+  function behind it to the environment's role, which may rewrite its body.
+  The first statement of that very hand-over (`ALTER SCHEMA public OWNER`)
+  already fired it.
+  *Which sessions.* The audit of every `psql`, `pg_dump` and `pg_restore` the
+  server starts found the superuser inside a tenant's database in few
+  places: DDL in four (`reassign_db_ownership`, `drop_signaling_sequences`,
+  `_own_public_schema`, the loader hand-over's `REASSIGN OWNED` / `DROP
+  OWNED`), catalog reads in the upgrade plan, and the two dumps the previous
+  entries left to it. Everything else — `ALTER DATABASE ... OWNER`, roles,
+  `REVOKE ... ON DATABASE`, `CREATE` / `DROP DATABASE` — runs in the
+  maintenance database on shared objects, for which PostgreSQL fires no event
+  trigger, and where nothing is a tenant's.
+  *Two defences, because there are two events.* A **login** trigger fires
+  while the session is being set up, before any statement could switch it
+  off, so the switch has to arrive with the connection: `event_triggers=off`
+  in `PGOPTIONS`, a setting PostgreSQL 17 introduced together with login
+  triggers, which only a superuser may set and which outranks `ALTER DATABASE
+  ... SET`. `_exec_sql` sends it for every superuser session outside the
+  maintenance database, the superuser's dumps and the upgrade's
+  operator-vouched restore send it too. PostgreSQL 15 and 16 would refuse a
+  connection over a setting they do not know, and have no login triggers, so
+  the cluster is asked its release — once per container, in the maintenance
+  database, which is why sessions there go without.
+  **DDL** triggers exist on every release, and before 17 no session setting
+  silences them (`session_replication_role = replica` leaves `ENABLE ALWAYS`
+  and `ENABLE REPLICA` ones firing). So before the superuser runs DDL inside
+  a database, `disable_event_triggers` reads `pg_event_trigger` and disables
+  what is enabled, then looks again; an answer it cannot read, or a trigger
+  that stays enabled, stops the DDL. Commands on event triggers fire no event
+  trigger themselves, and altering one takes a superuser, so a tenant can
+  neither watch this happen nor undo it. *Disabling* was chosen over the
+  alternatives on their merits. *Refusing* would have stopped every
+  environment made from such a template, and the remedy it would have had to
+  name — loading the template again — fails on the same statement, since the
+  loader cannot create an event trigger. *Dropping* destroys what an operator
+  may want to look at, silently. Disabled is also what a rebuilt template
+  amounts to. It is done in the copy, at the moment DDL is due, not in the
+  template and not on start: a template stays what its dump made it, and the
+  cost is one catalog query per guarded function when there is nothing to
+  disable (two for a clone). And it is done on 17 as well, where the session
+  setting alone would do: one behaviour on every release, and a database that
+  is safe for the superuser sessions that are not Oduflow's. A test pins the
+  rule by reading the source: every superuser statement that names a database
+  is either preceded by the guard in its function or on a short list of
+  reads.
+  *What else an older load could have left.* The same question for every
+  kind of object only a superuser can create, or that stayed the
+  superuser's: functions in an untrusted language (no role's limits apply to
+  what they do, whoever calls them), `SECURITY DEFINER` functions and views
+  still owned by a superuser in a database that has a role (left by versions
+  whose hand-over did not cover them), foreign servers and user mappings
+  (where, and as whom, a foreign table connects), subscriptions, casts
+  between built-in types, `ALTER DATABASE ... SET` of preloaded libraries —
+  and, of no consequence beyond a rebuild refusing them, untrusted
+  extensions, operators, rules and publications. None of these runs for
+  Oduflow's superuser: its statements are catalog-only and pinned, and it
+  executes nothing a tenant defined. They matter to the tenant's and the
+  operator's sessions, and what to do with one is a judgement about content.
+  So the start **reports** them (`superuser_only_objects`, from
+  `init_system`, after the `PUBLIC` reconcile) and repairs nothing, for the
+  reason the credential-holder check reports: a repair here would change or
+  drop a tenant's objects. It is one catalog query per managed database, all
+  of them in a single exec per cluster rather than a round trip through
+  Docker each, bounded in time; connecting briefly to a template does not get
+  in a clone's way, since `CREATE DATABASE` waits for its template to be left
+  alone. Templates that still belong to the superuser and hold nothing else
+  are named once, at a lower level: they work, and rebuilding them is the
+  remedy for everything above.
+  *The upgrade.* A carried database with an event trigger is now refused when
+  the upgrade is planned, next to subscriptions and user mappings: its role's
+  dump includes the trigger and its role's restore cannot create it, which
+  until now surfaced after the old cluster was gone.
+  Accepted costs: an event trigger an operator installed on purpose (in
+  `template1`, or through an extension their image marks trusted) is
+  disabled in new databases like any other, with a log line; and on 17 the
+  superuser's own sessions in a tenant's database do not fire it either.
+  Still open, same family: the local path or rsync source and the chunkstore
+  manifest named in the previous entry; and nothing hands a superuser-owned
+  function or view in an *existing* environment to its role short of
+  recreating the environment — the start names them, the operator decides.
+
 A later layer was added **beneath** the two custom-script tiers — Odoo's own
 native neutralization, rather than re-implementing what Odoo already ships:
 
@@ -172,3 +781,62 @@ native neutralization, rather than re-implementing what Odoo already ships:
 - (2026-07-07) — **native neutralization baseline:** `neutralize_environment` runs
   `odoo-bin neutralize` inside the serving container as the first step of the
   sanitize gate, ahead of the team/repo custom-script tiers (see Evolution).
+- (2026-11-19) — **SQL console and `run_db_query` run `psql` in the environment's
+  Odoo container** (`odoo_ops.ScopedPsql`), not in the shared PostgreSQL
+  container, closing the `\!` / `\c` escalation to cluster superuser (see
+  Evolution).
+- (2026-11-19) — **`reset_admin_password` hashes in the Oduflow process and
+  updates as the scoped role**, closing an SQL injection into a superuser
+  `psql` through the output of the tenant's Odoo container (see Evolution).
+- (2026-11-19) — **template dumps load as a one-off non-superuser role from a
+  throwaway client container** and end up owned by a per-team template owner
+  (`system_ops.reload_template`, `_run_restore_client`), closing superuser
+  code execution through `import_template` / `save_as_template` dumps (see
+  Evolution).
+- (2026-11-19) — **production data and the PostgreSQL upgrade restore as the
+  database's own role** (`system_ops.restore_archive_as_role`,
+  `production_ops.production_db_credentials`,
+  `postgres_migration._restore_database`), closing superuser code execution in
+  the production cluster through a seeded, promoted or snapshot-restored
+  database, and in a new cluster through the upgrade (see Evolution).
+- (2026-11-19) — **tenant tables are read as the tenant's role, every
+  superuser statement pins `search_path`, and managed databases refuse
+  `PUBLIC`** (`odoo_ops.list_env_users` / `run_internal_db_query`,
+  `system_ops._superuser_psql`, `restrict_database_access`,
+  `restrict_managed_databases`), closing superuser code execution through
+  names a tenant controls and cross-tenant connections to another team's
+  database; legacy environments without a credentials file are refused on
+  those paths (see Evolution).
+- (2026-11-19) — **no Odoo container is created with the superuser's login**:
+  an environment or production without a role of its own gets one when its
+  container is recreated (`system_ops.provision_scoped_role`, from
+  `env_ops.update_environment` and `production_ops.reconfigure_production`),
+  the template build runs as a one-off role, `load_credentials` stops
+  returning the superuser's password, and the start reports the containers
+  that still hold it (`superuser_credential_holders`); this withdraws the
+  Decision's fallback for old environments (see Evolution).
+- (2026-11-19) — **`pg_dump` runs as the database's own role**
+  (`system_ops.scoped_dump_role`, `template_dump_role`, `_staged_db_dump`,
+  `backup_ops._dump_stream`, `production_ops._copy_db_into_prod_cluster`,
+  `postgres_migration._dump_database`): snapshots, template publishes,
+  production seeds, the template build and the PostgreSQL upgrade. The
+  superuser keeps templates loaded by older versions and the upgrade's
+  operator-named databases, with `restrict_nonsystem_relation_kind` sent to
+  servers that know it, and the upgrade's helper holds the superuser's
+  password only for the steps the superuser itself takes (see Evolution).
+- (2026-11-19) — **the `postgres:17` conversion helper is confined and a
+  tenant's files are not followed on the host**
+  (`system_ops._converted_sql_dump`, `_take_converted_sql`,
+  `fsutil.copy_tenant_tree`, `client.chown_recursive`): the helper loses root,
+  its capabilities, the network and the read-write mount of the directory
+  holding the archive, and filestore copies and ownership changes stop
+  following the symbolic links a tenant can leave in its filestore (see
+  Evolution).
+- (2026-11-20) — **the superuser's sessions fire no event trigger**
+  (`system_ops.superuser_session_environment`, `disable_event_triggers`,
+  `superuser_only_objects`): `event_triggers=off` with every superuser
+  connection into a tenant's database on PostgreSQL 17+, enabled event
+  triggers disabled before superuser DDL on every release, a report on start
+  of what else only a superuser could have left in managed databases, and a
+  PostgreSQL upgrade that refuses a database with an event trigger up front
+  (see Evolution).

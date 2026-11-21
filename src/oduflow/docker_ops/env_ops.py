@@ -30,6 +30,7 @@ from oduflow import (
     secret_store,
     settings,
 )
+from oduflow import settings as settings_module
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import (
     chown_recursive,
@@ -53,8 +54,10 @@ from oduflow.docker_ops.system_ops import (
     ensure_team_tablespace,
     estimate_new_db_bytes,
     pg_clone_strategy_clause,
+    provision_scoped_role,
     reassign_db_ownership,
     require_postgres_for_odoo,
+    restrict_database_access,
 )
 from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
@@ -68,6 +71,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
     ProtectedError,
 )
+from oduflow.fsutil import copy_tenant_tree
 from oduflow.git_ops import RepoAuthError, git_env_for_team
 from oduflow.hostname_registry import (
     CAPACITY_RESERVATION,
@@ -756,7 +760,7 @@ def _mount_filestore(
         merged = paths["merged"]
         if os.path.exists(merged):
             shutil.rmtree(merged)
-        shutil.copytree(template_filestore, merged)
+        copy_tenant_tree(template_filestore, merged)
         odoo_uid_gid = get_odoo_uid_gid(client, odoo_image)
         uid_str, gid_str = odoo_uid_gid.split(":")
         chown_recursive(merged, int(uid_str), int(gid_str), client, odoo_image)
@@ -1654,8 +1658,14 @@ def _template_module_upgrades(
     odoo_volumes: dict[str, Any],
     odoo_conf_path: str | None,
     env_name: str,
+    *,
+    db_user: str,
 ) -> tuple[dict[str, tuple[str, str]], str | None]:
     """Installed modules whose checkout manifest is newer than the cloned DB.
+
+    The database is a template's content, so it is read as *db_user*, the
+    environment's own role, not as the superuser: ``ir_module_module`` may be
+    a view over a function the template's dump defined.
 
     Compares ``ir_module_module.latest_version`` with the manifests the
     serving Odoo will load: the generated odoo.conf's addons_path, mapped back
@@ -1676,6 +1686,7 @@ def _template_module_upgrades(
             "SELECT COALESCE(json_object_agg(name, latest_version), '{}'::json)::text "
             "FROM ir_module_module WHERE state = 'installed';",
             db=env_db,
+            user=db_user,
         )
         installed = json.loads(raw or "{}")
         # Without a generated conf the image's own odoo.conf applies, which
@@ -1936,9 +1947,7 @@ def _cleanup_old_environment(
     env_db = get_db_name(env_name, team.team_id)
 
     try:
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
+        creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
         _drop_pg_role(client, settings, creds["pg_user"])
     except Exception:
         pass
@@ -2958,6 +2967,8 @@ def _create_environment_impl(
         if local_mount
         else get_repo_path(env_name, team.workspaces_dir)
     )
+    if local_mount and settings_module.TRANSPORT == "http":
+        raise PrerequisiteNotMetError("Live-mount requires the local CLI or stdio MCP.")
     if local_mount and not settings.allow_local_path:
         raise PrerequisiteNotMetError(
             "local_path (live-mount) is disabled. Set allow_local_path = true "
@@ -3120,6 +3131,9 @@ def _create_environment_impl(
             settings,
             f'CREATE DATABASE "{env_db}" TABLESPACE "{ts_name}";',
         )
+    # A copy does not inherit its template's privileges: PUBLIC may connect to
+    # it again. The role created next becomes the owner and keeps its access.
+    restrict_database_access(client, settings, env_db)
 
     env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
     _create_pg_role(
@@ -3127,13 +3141,12 @@ def _create_environment_impl(
     )
 
     if template_name is not None:
-        # A template DB's objects are owned by whatever role created them —
-        # normally the superuser (pg_restore --no-owner), but the plain-SQL /
-        # import_template path (psql without --no-owner) can leave
-        # objects owned by the source env's per-env role (e.g. u_2_fs19). DDL
-        # during module upgrades requires ownership; Odoo connects as the env
-        # role and never SET ROLEs, so per-object ownership — not role
-        # membership — is what actually enables its DDL.
+        # A template DB's objects belong to the team's template owner role
+        # (see system_ops.reload_template), or to the superuser or a source
+        # env's role in a template loaded by an older version. DDL during
+        # module upgrades requires ownership; Odoo connects as the env role
+        # and never SET ROLEs, so per-object ownership — not role membership
+        # — is what actually enables its DDL.
         reassign_db_ownership(client, settings, env_db, env_creds["pg_user"])
         drop_signaling_sequences(client, settings, env_db)
         logger.info(
@@ -3167,7 +3180,13 @@ def _create_environment_impl(
     template_check_error: str | None = None
     if template_name is not None:
         template_upgrades, template_check_error = _template_module_upgrades(
-            client, settings, env_db, odoo_volumes, odoo_conf_to_copy, env_name
+            client,
+            settings,
+            env_db,
+            odoo_volumes,
+            odoo_conf_to_copy,
+            env_name,
+            db_user=env_creds["pg_user"],
         )
         if template_upgrades:
             logger.info(
@@ -4446,9 +4465,7 @@ def delete_environment(
         logger.warning(msg, extra={"env_name": env_name})
         warnings.append(msg)
 
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
     try:
         _drop_pg_role(client, settings, creds["pg_user"])
     except Exception as exc:
@@ -4498,7 +4515,11 @@ def delete_environment(
 
 
 def recreate_environment(
-    settings: Settings, team: TeamSettings, env_name: str
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    allow_host_paths: bool = True,
 ) -> dict[str, Any]:
     """Tear the environment down and provision it again from its recorded
     configuration (repo, image, template, extra addons, git user, env vars,
@@ -4533,6 +4554,10 @@ def recreate_environment(
     git_user = labels.get("oduflow.git_user", "")
     env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
     local_path = labels.get("oduflow.local_path", "")
+    if local_path and (not allow_host_paths or settings_module.TRANSPORT == "http"):
+        raise PrerequisiteNotMetError(
+            "Recreating a live-mounted environment requires the local CLI or stdio MCP."
+        )
     # The environment name and the git branch it tracks can differ (several
     # environments off one branch), so recreate from the recorded branch label
     # rather than from the environment name.
@@ -5145,9 +5170,7 @@ def get_environment_info(
     except docker.errors.NotFound:
         pass
 
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
     result["db_user"] = creds["pg_user"]
 
     result["all_running"] = result["odoo"]["running"] and result["db"]["running"]
@@ -6682,6 +6705,7 @@ def update_environment(
     remove_labels: Collection[str] | None = None,
     rename_to: str | None = None,
     sync_agent_checkout: bool = True,
+    allow_host_paths: bool = True,
 ) -> dict[str, Any]:
     """Re-create an environment's container, preserving DB, repo and filestore.
 
@@ -6693,7 +6717,11 @@ def update_environment(
     SHA mounts during pull_and_apply; that path disables image pulls and
     restores dependencies from the new mounts. The PostgreSQL connection variables
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
-    and image-baked env comes from the image itself.
+    and image-baked env comes from the image itself. An environment without
+    credentials of its own (one created before per-environment roles existed)
+    is given a role first, while its container is stopped: the cluster
+    superuser's login is never put into the new container. A failure there
+    leaves the old container in place and raises.
 
     Dependency installer failures are returned as a nonzero ``exit_code`` with
     setup logs and the resulting identity, after rename bookkeeping finishes.
@@ -6743,6 +6771,13 @@ def update_environment(
     except docker.errors.NotFound:
         raise NotFoundError(
             f"Environment '{env_name}' does not exist. Use create_environment first."
+        )
+
+    if container.labels.get("oduflow.local_path") and (
+        not allow_host_paths or settings_module.TRANSPORT == "http"
+    ):
+        raise PrerequisiteNotMetError(
+            "Updating a live-mounted environment requires the local CLI or stdio MCP."
         )
 
     if rename_to == env_name:
@@ -6885,6 +6920,16 @@ def update_environment(
             client, settings, team, env_name, labels
         )
 
+    # The connection variables of the new container. Without a role of its own
+    # on record the environment would have to connect as the cluster
+    # superuser, which is how environments older than per-environment roles
+    # were created — and its password must not enter a container whose tenant
+    # is root in it. Such an environment gets its role below, once Odoo is
+    # stopped.
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
+    role_provisioned = False
+    was_running = container.status == "running"
+
     logger.info(
         "Updating environment – stopping old container",
         extra={"env_name": env_name, "container": odoo_container_name},
@@ -6897,6 +6942,25 @@ def update_environment(
         container.stop()
     except Exception:
         pass
+    if creds["pg_user"] == settings.db_user:
+        # Between the stop and the removal: the ownership transfer wants no
+        # Odoo session in the database, and a failure can still leave the
+        # environment as it was.
+        try:
+            creds = provision_scoped_role(client, settings, team, env_name)
+        except Exception as exc:
+            if was_running:
+                with contextlib.suppress(Exception):
+                    container.start()
+            raise PrerequisiteNotMetError(
+                f"Environment '{env_name}' has no PostgreSQL role of its own, "
+                f"and one could not be provisioned: {exc} The environment was "
+                "left as it was. Its container is not recreated with the "
+                "cluster superuser's credentials; fix the cause and retry, or "
+                "use recreate_environment to rebuild the environment from "
+                "its template."
+            ) from exc
+        role_provisioned = True
     try:
         container.remove(v=True)
     except docker.errors.APIError:
@@ -6978,10 +7042,7 @@ def update_environment(
                 logger.warning("Could not re-mount filestore overlay: %s", exc)
 
     # Re-create PG role in case PG container was recreated
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
-    if creds["pg_user"] != settings.db_user:
+    if not role_provisioned:
         env_db = get_db_name(env_name, team.team_id)
         try:
             _create_pg_role(
@@ -7109,6 +7170,12 @@ def update_environment(
     # 5. Re-install apt packages and pip requirements
     # ------------------------------------------------------------------
     setup_logs: list[str] = []
+    if role_provisioned:
+        setup_logs.append(
+            f"[DB-ROLE] The environment now connects as its own PostgreSQL "
+            f"role '{creds['pg_user']}' instead of the cluster superuser; its "
+            "database and everything in it were handed to that role."
+        )
     deps_installed = False
     dep_exit = 0
     if install_dependencies:
@@ -7197,4 +7264,5 @@ def update_environment(
         "image_updated": image_updated,
         "env_vars": user_env,
         "setup_logs": setup_logs,
+        "db_role_provisioned": role_provisioned,
     }

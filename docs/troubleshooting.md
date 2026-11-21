@@ -401,6 +401,152 @@ first (or keep the template). The same guard applies to renaming a template.
 
 ---
 
+## A template import fails with `permission denied to create extension`
+
+```
+pg_restore: error: could not execute query: ERROR:  permission denied to create extension "postgis"
+HINT:  Must be superuser to create this extension.
+```
+
+Template dumps are loaded by a restricted PostgreSQL role, never by the
+cluster superuser, so a dump can only create the extensions PostgreSQL marks
+as trusted (`pg_trgm`, `unaccent` and the like). The same applies to
+`must be owner of extension` and `must be superuser` errors during an import,
+and to `permission denied to create event trigger`.
+See [How a dump is loaded](templates.md#how-a-dump-is-loaded) for what is
+allowed and how to make a further extension available.
+
+---
+
+## Creating or restoring a production fails with `permission denied to create extension`
+
+`create_production` with `template_name` or `from_environment`, and
+`restore_production`, load the data as the production's own PostgreSQL role,
+never as the cluster superuser. A database that contains an extension
+PostgreSQL does not mark as trusted (`postgis`, `pg_stat_statements`,
+`dblink`, …), or anything else only a superuser may create, fails to load; a
+restore leaves the production's previous data in place. Use a
+`[database].image` whose control file for that extension sets
+`trusted = true`. See
+[How data is loaded into a production](production.md#how-data-is-loaded-into-a-production).
+
+The same rule holds for a PostgreSQL upgrade, which checks it before changing
+anything — see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
+## A dump fails with `permission denied`
+
+```
+Command 'pg_dump' failed (exit 1): pg_dump: error: query failed: ERROR:  permission denied for table x
+```
+
+`save_as_template`, `save_production_as_template`, production snapshots and
+the dump that seeds or promotes a production run `pg_dump` as the database's
+own PostgreSQL role, never as the cluster superuser, so that role has to be
+able to read everything in the database. It owns everything Odoo created
+through it. What it does not own was created while an older version ran the
+container with the superuser's login: recreate the container
+(`update_environment`, or `reconfigure_production` with no settings changed
+for a production), which hands every table, sequence, view and function back
+to the role, then retry. A table with `FORCE ROW LEVEL SECURITY` has to let
+its owner read every row (`query would be affected by row-level security
+policy`). See
+[How a database is dumped](templates.md#how-a-database-is-dumped).
+
+During a PostgreSQL upgrade the same failure stops the upgrade before anything
+is removed; see [Upgrading PostgreSQL](installation.md#upgrading-postgresql).
+
+---
+
+## `Dumping database ... as the PostgreSQL superuser on PostgreSQL ...` in the server log
+
+The superuser still dumps a template database that an older version loaded
+(when a production is created from it), and the databases named in
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE` during a PostgreSQL upgrade. The
+warning says the cluster runs a release without the fix for CVE-2024-7348
+(before 15.8 or 16.4), where an open session in a database being dumped could
+run SQL as whoever dumps it. No user's role can connect to a template
+database, and the databases named for an upgrade are ones you declared
+trusted, so the dump went ahead. To clear it, move the cluster to a current
+minor release of its PostgreSQL image, and import or publish the template
+again so that it stops being the superuser's.
+
+---
+
+## `Disabled N event trigger(s) in database ...` in the server log
+
+The database was copied from a template that an older version loaded as the
+PostgreSQL superuser, and that dump created an event trigger. An event trigger
+runs its function with the rights of whoever issues a DDL statement, Oduflow's
+superuser included, so Oduflow disabled it before running its own DDL there
+(handing the copy to its role, or giving an old environment or production a
+role). Nothing else in the database was changed, and the trigger is still
+there, disabled. Rebuild the template to stop new environments from getting a
+copy. See
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind),
+also for the `Database ... holds what only a PostgreSQL superuser can create
+or still owns` warning written on each start.
+
+---
+
+## `Environment '...' has no scoped database credentials`
+
+The environment was created before each environment had its own PostgreSQL
+role, so its workspace has no `env_credentials.json`. Oduflow reads, writes
+and dumps an environment's database only as that role and does not substitute
+the cluster superuser, so module installs and upgrades, the module and
+**Connect As** lists, direct SQL, the Odoo shell, tests,
+`reset_admin_password` and `save_as_template` are refused for it. Run `update_environment` on it: the
+container is recreated with a role of its own, and the database and filestore
+are kept. See [Database isolation](environments.md#database-isolation).
+
+For a production the error reads `Production '<name>' has no scoped database
+credentials` (its `env_credentials.json` is gone); `reconfigure_production`
+with no settings changed gives it its role back.
+
+---
+
+## `... run with the PostgreSQL superuser's credentials` in the server log
+
+Environments created before per-environment roles existed were given the
+cluster superuser's login, and their containers still hold it. Update each
+container named in the warning (`update_environment`, or
+`reconfigure_production` for a production), then change the superuser's
+password. The steps are in
+[Database isolation](environments.md#database-isolation).
+
+---
+
+## `... has no PostgreSQL role of its own, and one could not be provisioned`
+
+`update_environment` (or `reconfigure_production`) found no database role on
+record and could not create one; the text after the colon is PostgreSQL's
+reason. Nothing was recreated: the old container is still there, and running
+again if it was running. Fix the cause — most often the database server is not
+running, or the environment's database no longer exists — and repeat the call.
+An environment whose database is gone can only be rebuilt with
+`recreate_environment`.
+
+---
+
+## A role of your own can no longer connect to an environment's database
+
+```
+FATAL:  permission denied for database "oduflow_1_main"
+DETAIL:  User does not have CONNECT privilege.
+```
+
+Oduflow revokes PostgreSQL's default "every role may connect" from the
+databases it manages, at creation and on each server start, so that one
+tenant's role cannot open another tenant's database. A database's own role is
+not affected. Grant a role you added yourself what it needs —
+`GRANT CONNECT ON DATABASE "oduflow_1_main" TO "reporting";` — and repeat it
+after the environment is recreated, since a new database starts closed again.
+See [Database isolation](environments.md#database-isolation).
+
+---
+
 ## A brand-new environment fails its first upgrade
 
 An environment is a *new* database cloned from a template plus *your* branch's

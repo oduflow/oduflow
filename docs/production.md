@@ -373,6 +373,83 @@ To promote into a production that **already exists**, use
 `restore_production(from_environment=…)` instead — see
 [Backups](#backups) for the restore mechanics.
 
+### How data is loaded into a production
+
+A production's database is filled from a template, from a dev environment, or
+from one of its own snapshots. All three are database content that the
+database's users defined, and restoring it runs what it defines: a function
+used in a `CHECK` constraint, for example, is called for every row the restore
+copies. Oduflow therefore never restores this content as the PostgreSQL
+superuser, in either cluster. For `create_production(template_name=…)`,
+`create_production(from_environment=…)` and both forms of `restore_production`
+it:
+
+1. creates the target database for the **production's own PostgreSQL role**
+   (the role its Odoo connects with), which owns it from the start;
+2. starts a short-lived **restore client** container from the production
+   cluster's PostgreSQL image on the team network. It runs
+   `pg_restore --no-owner` as that role, connecting over the network with the
+   role's password like the production's Odoo does, and sees the dump
+   read-only. Nothing is restored inside the PostgreSQL container;
+3. leaves the result with that role: every restored object, and the database
+   itself, belongs to the production's role.
+
+What this means for the data:
+
+- **Extensions.** The role creates the extensions PostgreSQL marks as
+  *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `pgcrypto`, `uuid-ossp` and
+  the rest of that list, which covers what Odoo itself uses. A database that
+  contains an extension only a superuser may create (for example `postgis`,
+  `pg_stat_statements`, `dblink`, `postgres_fdw`) can no longer be seeded,
+  promoted or restored from a snapshot: the restore fails with
+  `permission denied to create extension` and the production keeps its previous
+  data. Use a `[database].image` in which that extension's control file sets
+  `trusted = true`; a database owner may then create it. Snapshots taken
+  earlier become restorable the same way.
+- **Anything else reserved for superusers** — event triggers, publications
+  `FOR ALL TABLES`, subscriptions, functions in an untrusted language — fails
+  the restore the same way.
+- **A production without its credentials file**
+  (`env_credentials.json` in its workspace) is not restored at all, instead of
+  being restored as the superuser. Run `reconfigure_production` on it first,
+  with no settings changed — see
+  [Reconfiguring a production](#reconfiguring-a-production).
+
+The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
+and is not affected.
+
+### How a production's data is dumped
+
+The other direction follows the same rule. A snapshot
+(`snapshot_production`, the daily schedule, the one before a deploy) and
+`save_production_as_template` run `pg_dump` as the **production's own
+PostgreSQL role**, not as the superuser of the production cluster; the
+database a production is seeded or promoted from is dumped by the
+environment's role, or by the role that owns the team's templates. `pg_dump`
+only reads, and on a current PostgreSQL release reading runs nothing a
+database defines — but releases before 15.8 and 16.4 had a flaw that let it
+(CVE-2024-7348), and a PostgreSQL container keeps the release it was created
+with. A dump taken by the database's own role cannot do more than that role
+already can.
+
+Nothing changes in what a snapshot contains or how it is stored. What can
+change is that a dump is refused:
+
+- **Something the role may not read.** Everything in a production's database
+  belongs to its role, unless an older version recreated the container with
+  the superuser's login and Odoo has created tables since. The snapshot then
+  fails with `permission denied for table …`; `reconfigure_production` with no
+  settings changed hands everything back to the role (see
+  [Reconfiguring a production](#reconfiguring-a-production)). A table with
+  `FORCE ROW LEVEL SECURITY` has to let its owner read every row.
+- **No role at all.** A production whose role no longer exists in the cluster
+  is not dumped by the superuser in its place; the error names
+  `reconfigure_production`. A missing `env_credentials.json` alone does not
+  stop a snapshot: the role's name is all a dump needs.
+
+A deploy continues when its pre-update snapshot fails, as before, and logs the
+reason; a failed scheduled snapshot is reported by `production_backup_status`.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
@@ -415,6 +492,27 @@ replacing a secret's value in the dashboard, call
 container when one differs and lists the affected variables by name. A
 reference to a deleted secret is not treated as a change; the next recreate
 reports it. `recreate=true` recreates the container even when nothing differs.
+
+**A production without its database role on record.** A production connects
+to PostgreSQL as its own role, recorded in `env_credentials.json` in its
+workspace. If that file is lost, restores are refused and earlier versions
+recreated the container with the cluster superuser's login. Now
+`reconfigure_production(name="erp")` treats it as drift and repairs it during
+the same container swap: with Odoo stopped, the role is made the owner of the
+database and of everything in it, the database is closed to other roles, and
+the credentials are written back. If the old container still connects as the
+role, its password is kept; otherwise the role gets a new one. The response's
+notes say that a role was provisioned. Event triggers that are enabled in the
+database are disabled first, because the hand-over is DDL run by the
+superuser and an event trigger would run its function with those rights (see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind));
+the server log names them. If the role cannot be provisioned — PostgreSQL is not
+reachable, or WAL protection is holding the cluster — nothing is recreated:
+the old container is left in place and started again if it was running. No
+production container is ever created with the superuser's login; if the server
+log names a production among the containers that still hold it, reconfigure it
+and then change the superuser's password as described under
+[Database isolation](environments.md#database-isolation).
 
 Two things reconfigure deliberately does **not** do:
 
@@ -646,7 +744,11 @@ Restore is swap-based: the dump is restored into a scratch database and
 swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
-`rollback_production` to the matching commit.
+`rollback_production` to the matching commit. The dump is taken and restored
+by the production's own PostgreSQL role, not by the superuser — see
+[How a production's data is dumped](#how-a-productions-data-is-dumped) and
+[How data is loaded into a production](#how-data-is-loaded-into-a-production)
+for what that excludes.
 
 **Restoring from a dev environment.** The same tool also promotes a dev
 environment's data into an *existing* production — the counterpart of
