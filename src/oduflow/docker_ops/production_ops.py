@@ -1950,6 +1950,18 @@ def create_production(
                     generated_conf,
                 )
             )
+            # Odoo seeds a localhost URL before it sees an admin login. Set the
+            # advertised URL before workers cache it or OduMCP builds a link.
+            # Leave custom image defaults and seeded databases alone.
+            _exec_sql(
+                client,
+                settings,
+                f"UPDATE ir_config_parameter SET value = '{prod_url(settings, team, record)}' "
+                f"WHERE key = 'web.base.url' AND value = 'http://localhost:{_HTTP_PORT}'",
+                db=env_db,
+                container_name=settings.prod_db_container,
+                user=env_creds["pg_user"],
+            )
 
         container, run_logs = _run_odoo_container(
             client,
