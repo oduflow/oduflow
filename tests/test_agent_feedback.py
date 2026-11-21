@@ -1,6 +1,13 @@
 """Unit tests for the hidden agent-feedback channel."""
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import pytest
 from fastmcp import Client
@@ -258,3 +265,59 @@ class TestSubmitTool:
     def test_rejects_empty_suggestion(self, monkeypatch):
         with pytest.raises(Exception, match="suggestion is required"):
             self._call(monkeypatch, category="docs", tools="", suggestion="   ")
+
+
+def test_cli_waits_for_feedback_receiver(tmp_path):
+    received = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(
+                json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            )
+            self.send_response(204 if self.path == "/accept" else 503)
+            self.end_headers()
+
+    with HTTPServer(("127.0.0.1", 0), Receiver) as receiver:
+        worker = threading.Thread(target=receiver.serve_forever)
+        worker.start()
+        try:
+            for enabled, path in (
+                (False, "accept"),
+                (True, "accept"),
+                (True, "reject"),
+            ):
+                config = tmp_path / "oduflow.toml"
+                config.write_text(
+                    f'[server]\nagent_feedback = {str(enabled).lower()}\n[storage]\ndata_dir = "{tmp_path}"\n[team.1]\nhostname = "localhost"\n'
+                )
+                before = len(received)
+                run = subprocess.run(
+                    [
+                        str(Path(sys.executable).with_name("oduflow")),
+                        "--no-telemetry",
+                        "call",
+                        "submit_agent_feedback",
+                        "docs",
+                        "read_output",
+                        "Clarify pagination",
+                    ],
+                    env={
+                        **os.environ,
+                        "ODUFLOW_TOML": str(config),
+                        "DOCKER_HOST": f"unix://{tmp_path}/absent.sock",
+                        "ODUFLOW_AGENT_FEEDBACK_URL": f"http://127.0.0.1:{receiver.server_port}/{path}",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                assert len(received) == before + int(enabled)
+                if enabled:
+                    assert received[-1]["suggestion"] == "Clarify pagination"
+                success = enabled and path == "accept"
+                assert (run.returncode == 0) == success, run.stderr
+                assert ("Feedback submitted" in run.stdout) == success
+        finally:
+            receiver.shutdown()
+            worker.join()
