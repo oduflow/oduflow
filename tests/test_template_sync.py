@@ -146,6 +146,26 @@ def test_api_only_queues_and_observes_files(setup, monkeypatch):
     spawn.assert_not_called()
 
 
+def test_api_sync_head_is_read_only_even_while_locked(setup):
+    settings, team = setup
+    app = Starlette()
+    locks = LockManager()
+    mount_web_ui(app, lambda: settings, locks)
+    client = TestClient(app)
+    path = "/api/templates/prod/sync"
+    with locks.env_lock(template_lock_key(team.team_id, "prod")):
+        assert client.delete(path).status_code == 409
+        get = client.get(path)
+        head = client.head(path)
+    assert head.status_code == get.status_code == 200
+    assert head.content == b""
+    assert head.headers["content-length"] == str(len(get.content))
+    assert head.headers["content-type"] == get.headers["content-type"]
+    assert not sync.job_dir(team, "prod").exists()
+    assert client.head("/api/templates/missing/sync").status_code == 404
+    assert client.head(path + "-now").status_code == 405
+
+
 def test_api_environment_opt_in_is_explicit_and_team_scoped(setup, monkeypatch):
     from oduflow.docker_ops import env_ops
     from oduflow.naming import get_workspace_path

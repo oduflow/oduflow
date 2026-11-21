@@ -2889,7 +2889,7 @@ def _build_routes(
             validate_template_name(name)
             if not os.path.isdir(team.get_template_dir(name)):
                 raise NotFoundError(f"Template '{name}' not found")
-            if request.method == "GET":
+            if request.method in {"GET", "HEAD"}:
                 return JSONResponse(
                     {"ok": True, **template_sync.inspect_job(settings, team, name)}
                 )
