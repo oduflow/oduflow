@@ -75,6 +75,33 @@ labels, concrete nouns (template DB, filestore, container), no fluff.
   infrastructure. No external CDNs, fonts, or trackers — every asset ships
   with the package.
 
+## Second Surface: the Shared Workspace
+
+A share link (`/env/<name>`) opens a different page for a different person:
+the chat-first **workspace** (`frontend/workspace/`, built into
+`src/oduflow/templates/static/workspace/`; see
+`specs/0087-chat-first-shared-workspace.md`).
+
+- **User.** Whoever the operator shared one environment with, usually a
+  client or a business user, often not a developer. They came to change their
+  Odoo by describing what they want, not to operate containers.
+- **Purpose.** Start talking at once. The page is the conversation with the
+  environment's coding agent. Odoo opens signed in, in its own tab. The
+  dashboard reduced to this environment stays one menu item away as the
+  Engineer view.
+- **Principles, on top of the ones above:**
+  - **Conversation first.** The message box and the agent's answer own the
+    screen. Everything else (status, Open Odoo, a short menu) is chrome.
+  - **Plain words.** Copy addresses someone who does not know what a template
+    DB or a container is. Machine detail (tool calls, reasoning, logs) is
+    folded away for whoever opens it. It is never removed, and never the
+    first thing shown.
+  - **Show the result.** The agent's screenshot and a link into Odoo beat a
+    description of what changed.
+  - **Same brand.** Lovable-like in layout and flow, not in visuals. The
+    workspace uses the dashboard's tokens verbatim and the same anti-references
+    apply: no gradients, no glossy SaaS grammar, no emoji affordances.
+
 ## Accessibility & Inclusion
 
 Pragmatic baseline, no formal WCAG certification target (internal operator

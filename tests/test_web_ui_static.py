@@ -2902,3 +2902,48 @@ console.log(JSON.stringify({ok: true}));
 """
     )
     assert _run_node(harness) == {"ok": True}
+
+
+def _workspace_assets() -> list[Path]:
+    assets = (
+        Path(__file__).parents[1]
+        / "src"
+        / "oduflow"
+        / "templates"
+        / "static"
+        / "workspace"
+        / "assets"
+    )
+    return sorted(assets.iterdir())
+
+
+def test_workspace_bundle_is_served_without_login_and_cached_for_good(tmp_path):
+    # The hashed bundle sits under /static like the other packaged assets: it
+    # is public (the share-link page loads it) and immutable per file name.
+    settings = Settings(
+        base_data_dir=str(tmp_path),
+        teams={"1": TeamSettings(team_id="1", ui_password="pw")},
+    )
+    app = Starlette()
+    mount_web_ui(app, lambda: settings, LockManager())
+    client = TestClient(app)
+    for asset in _workspace_assets():
+        resp = client.get(f"/static/workspace/assets/{asset.name}")
+        assert resp.status_code == 200, asset.name
+        assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert resp.content == asset.read_bytes()
+    # Unhashed assets keep the short lifetime.
+    assert client.get("/static/chat.js").headers["cache-control"] == (
+        "public, max-age=86400"
+    )
+
+
+def test_static_route_refuses_templates_and_escapes(tmp_path):
+    client = _client(tmp_path)
+    # The workspace page template is rendered by /env/<name>, never served raw.
+    assert client.get("/static/workspace/index.html").status_code == 404
+    assert client.get("/static/workspace/assets/missing.js").status_code == 404
+    assert client.get("/static/%2e%2e/web_ui.py").status_code == 404
+    assert (
+        client.get("/static/workspace/%2e%2e/%2e%2e/dashboard.html").status_code == 404
+    )

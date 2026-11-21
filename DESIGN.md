@@ -395,6 +395,31 @@ modal, Source Code Pro, cursor in Console Blue, ANSI palette mapped to the signa
 colors. It is the dashboard's proof-of-machine — keep it darker than the page
 so it reads as a device, and never decorate it.
 
+### The Shared Workspace
+The chat-first page a share link opens (`frontend/workspace/`, see
+PRODUCT.md, Second Surface). Same tokens: its `:root` blocks are a verbatim
+copy of the dashboard's (`src/styles/tokens.css`, tested). Its components are
+Svelte, scoped per component, and follow every rule in this document.
+- **Layout:** a Surface top bar (logo, environment name in mono, status
+  badge; the theme toggle, Open Odoo and a More menu on the right) over one
+  centered column
+  (`52rem` max) holding the conversation, with the composer docked at the
+  bottom. No sidebars and no split preview.
+- **Messages:** the user's message is a right-aligned bubble with a Console
+  Blue tint. The agent's answer is unboxed body text (rendered markdown).
+  Everything the agent did on the way is one dim, collapsible activity line
+  ("Worked · 3 steps", with "· 1 failed" in Alert Red). A failed step opens it.
+- **The result figure:** the last screenshot the agent took sits under its
+  answer in a hairline frame with a caption. Click enlarges it in an overlay.
+- **Composer:** a Surface box that takes the focus ring as a whole. It holds
+  the textarea, pending files, and a footer row (Attach, model, hint, Send or
+  Stop). Send is the quiet primary; Stop reveals Alert Red on intent.
+- **Approvals and banners:** an amber-tinted strip above the composer for a
+  permission request, with options as buttons. The same strip says Odoo is
+  not running. A red-tinted strip offers Reconnect after a dropped connection.
+- **Working state:** three Console Blue dots pulsing beside "Working", static
+  under reduced motion. It is the workspace's only animation.
+
 ## 6. Do's and Don'ts
 
 ### Do:

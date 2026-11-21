@@ -170,6 +170,16 @@ def test_stock_dashboard_keeps_vendor_surfaces(tmp_path):
     assert client.get("/api/license").status_code == 200
 
 
+def test_shared_workspace_follows_the_brand(tmp_path, sign):
+    """The chat-first page a share link opens (specs/0087) carries the brand."""
+    _install(tmp_path, sign)
+    client = _client(_settings(tmp_path))
+    page = client.get("/env/feature-x").text
+    assert "<title>AcmeFlow</title>" in page
+    assert 'data-brand-name="AcmeFlow"' in page
+    assert "Oduflow" not in page
+
+
 def test_admin_console_login_follows_the_brand(tmp_path, sign):
     from oduflow import admin_ui
 

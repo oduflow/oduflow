@@ -15,7 +15,10 @@ Any change to the web dashboard (`src/oduflow/templates/dashboard.html`, served 
 
 Read both before touching dashboard UI. The same rules apply to the Server
 settings console (`src/oduflow/templates/admin.html`, served by `admin_ui.py`);
-its `:root` tokens must stay identical to the dashboard's. Key hard rules: no external CDNs (all assets ship with the package), every `var(--*)` must be declared in `:root`, status is never conveyed by color alone, no emoji as UI affordances.
+its `:root` tokens must stay identical to the dashboard's. They also apply to the
+shared-environment workspace (`frontend/workspace/`, see below), whose
+`src/styles/tokens.css` must stay identical to the dashboard's `:root` blocks.
+Key hard rules: no external CDNs (all assets ship with the package), every `var(--*)` must be declared in `:root`, status is never conveyed by color alone, no emoji as UI affordances.
 
 The dashboard loads `/static/chat.js` and `/static/acp-client.js` with a
 shared positive integer cache version in the query string, held in the
@@ -27,6 +30,26 @@ busts both at once and prevents a stale mismatch between them. This cache
 version is independent of the Oduflow product version. (The vendored
 third-party assets — `marked.min.js`, `xterm.js`, etc. — are not versioned this
 way; bump the filename if you ever upgrade them.)
+
+### Shared-environment workspace (`frontend/workspace/`)
+
+A share link (`/env/<name>`) opens a chat-first page built with Svelte 5 + Vite
+(`specs/0087-chat-first-shared-workspace.md`). Node is needed **only to work on
+it**: the build is committed to `src/oduflow/templates/static/workspace/`
+(`index.html` is the page template `web_ui._render_workspace` fills in; `assets/`
+holds content-hashed files, so no `CHAT_V`-style versioning). Rules:
+
+- After changing anything in `frontend/workspace/` **or**
+  `src/oduflow/templates/static/acp-client.js` (the bundle embeds it), run
+  `npm run build` there and commit the result. CI (`.github/workflows/frontend.yml`)
+  rebuilds and fails on any diff.
+- Use Node 22 (`frontend/workspace/.nvmrc`) and `npm ci`, so the build stays
+  byte-identical to CI's.
+- The workspace may only call endpoints the share allowlist
+  (`src/oduflow/ui_scope.py`) already grants; widening the allowlist is a
+  security decision, not a UI change.
+- The dashboard chat (`static/chat.js`) and the workspace are two ports of the
+  same ACP chat; a protocol-level fix usually belongs in both.
 
 ## Commands
 
@@ -64,6 +87,15 @@ pytest tests/test_naming.py::test_slugify_branch -v
 # Build & deploy docs
 pip install -r requirements-docs.txt
 mkdocs gh-deploy --force
+
+# Shared-environment workspace (Node 22; only when changing it)
+cd frontend/workspace
+npm ci
+npm run check        # svelte-check (types, a11y)
+npm test             # vitest unit tests
+npm run build        # writes src/oduflow/templates/static/workspace/ — commit it
+npm run dev          # hot reload at :5173, proxied to ODUFLOW_URL (default :8000); open /?env=<name>
+python dev/mock_server.py   # Docker-free mock with a fake agent (see "Testing the workspace UI")
 ```
 
 ## Architecture
@@ -76,6 +108,7 @@ MCP Clients (Cursor, Claude, etc.)
         │         ├── @handle_errors decorator → ToolError
         │         └── LockManager (per-branch / per-team / system) → BusyError
         ├── web_ui.py ── Starlette dashboard + REST API + Basic auth
+        ├── ui_scope.py ── Share-link allowlist for /env/<name> (workspace + Engineer view)
         ├── settings.py ── @dataclass Settings, loads from oduflow.toml (TOML)
         ├── config_schema.py ── Registry of editable TOML keys + apply class (live/restart/recreate/locked)
         ├── config_store.py ── Comment-preserving patch, validate, atomic write + history, live overlay
@@ -110,6 +143,9 @@ MCP Clients (Cursor, Claude, etc.)
             ├── service_ops.py ── Auxiliary services (Redis, Meilisearch, etc.)
             ├── service_presets.py ── Save/restore service configs
             └── stats.py ── Container and system metrics
+
+frontend/workspace/ ── Svelte source of the share-link workspace (outside the
+                       package; its build is committed to templates/static/workspace/)
 ```
 
 **Key patterns:**
@@ -127,6 +163,45 @@ MCP Clients (Cursor, Claude, etc.)
 - Mocking pattern: patch `oduflow.docker_ops.*` functions, not Docker SDK directly
 - `conftest.py` at root ignores `src/**` for collection (tests live in `tests/`)
 - When you launch Oduflow itself for testing (starting the server, `stack apply`), always pass the global `--no-telemetry` flag before any subcommand — e.g. `oduflow --no-telemetry --transport http` — so test runs are not counted in usage telemetry
+
+### Testing the workspace UI without Docker
+
+To look at or demo the shared-environment workspace (`frontend/workspace/`),
+use the mock server, not a real Oduflow:
+
+```bash
+# From the repo root, with Oduflow installed (pip install -e .)
+python frontend/workspace/dev/mock_server.py                 # http://127.0.0.1:8765/env/feature/crm
+python frontend/workspace/dev/mock_server.py --host 0.0.0.0  # reachable from other machines
+python frontend/workspace/dev/mock_server.py --status stopped  # environment not running
+
+# Hot reload on top of it (Svelte changes without rebuilding):
+cd frontend/workspace && ODUFLOW_URL=http://127.0.0.1:8765 npm run dev
+# then open http://localhost:5173/?env=feature/crm
+```
+
+- It serves the real `web_ui` pages with one made-up environment (`feature/crm`)
+  and a scripted fake agent over the ACP WebSocket. Every message plays the same
+  scenario: reasoning, plan, tool calls, a screenshot, a streamed answer with a
+  link into Odoo. A message containing `approve` also raises a permission
+  request. "Open Odoo" and agent links land on a stub page naming the target.
+- Without `npm run dev` it serves the **committed build**. After changing the
+  workspace, run `npm run build` and reload.
+- Only the workspace's own paths are reachable; everything else answers 404,
+  because the real dashboard routes would act on the host's real Docker. So the
+  Engineer view (`?view=console`) is only partly usable in the mock.
+- Conversations live in the mock's memory and reset when it restarts.
+- For screenshots, drive it with a browser (e.g. agent-browser): check both
+  themes (`localStorage['oduflow-theme']`), a narrow viewport (390px) and the
+  approval flow.
+
+**Do not start a second full Oduflow next to a live installation to test the
+UI.** Pointing it at the same data directory makes it run startup migrations and
+a second reaper/backup scheduler, and its environment locks are per process.
+Pointing it at another config does not isolate it either: Docker resource names
+(`oduflow-db`, networks, labels) are fixed, so it sees and may clean up the live
+installation's containers. Testing against a real agent needs a real (or
+dedicated, e.g. Docker-in-Docker) installation with the agent enabled.
 
 ### Testing the FreeSWITCH auxiliary service
 

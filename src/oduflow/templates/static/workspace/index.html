@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preload" href="/static/source-sans-3-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="/favicon.ico?v=__ASSET_VERSION__" sizes="16x16 32x32">
+<link rel="icon" href="/static/icon.png?v=__ASSET_VERSION__" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/apple-icon.png?v=__ASSET_VERSION__">
+<title>__BRAND_NAME__</title>
+<script>
+  // Resolve the theme before first paint, exactly like the dashboard
+  // (DESIGN.md §2, Light theme): 'light' | 'dark' stored, absent = the OS.
+  (function () {
+    try {
+      var stored = localStorage.getItem('oduflow-theme');
+      var mode = (stored === 'light' || stored === 'dark') ? stored : 'system';
+      var eff = mode === 'system'
+        ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : mode;
+      document.documentElement.dataset.theme = eff;
+    } catch (e) {}
+  })();
+</script>
+  <script type="module" crossorigin src="/static/workspace/assets/index-BDGdpLwr.js"></script>
+  <link rel="stylesheet" crossorigin href="/static/workspace/assets/index-C5ZSd2Rn.css">
+</head>
+<!-- Server-filled by oduflow/web_ui.py (_render_workspace), the brand by
+     oduflow/branding.py (white label). -->
+<body data-scoped-env="__SCOPED_ENV__" data-viewer="__VIEWER__" data-brand-name="__BRAND_NAME__" data-logo-class="__LOGO_CLASS__" data-asset-version="__ASSET_VERSION__">
+<div id="app"></div>
+</body>
+</html>

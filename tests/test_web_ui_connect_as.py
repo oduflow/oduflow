@@ -10,6 +10,7 @@ mirroring test_web_ui_create_lock's TestClient harness.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.testclient import TestClient
@@ -334,6 +335,100 @@ def test_connect_land_sets_host_only_cookie_and_redirects(tmp_path):
         follow_redirects=False,
     )
     assert r3.status_code == 400
+
+
+def test_connect_open_lands_on_the_next_path_in_port_mode(tmp_path):
+    client = _client(_open_settings(tmp_path))
+    with (
+        patch("oduflow.web_ui.odoo_ops.connect_as_user", return_value=dict(_MINT)),
+        patch("oduflow.web_ui.activity.touch"),
+    ):
+        resp = client.get(
+            "/api/environments/18.0/connect-open",
+            params={"next": "/odoo/contacts/7?view=form#top"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == (
+        "http://localhost:50001/odoo/contacts/7?view=form#top"
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "//evil.example/odoo",
+        "/\\evil.example",
+        "https://evil.example/odoo",
+        "odoo/contacts",
+        "/odoo\r\nSet-Cookie: x=1",
+    ],
+)
+def test_connect_open_ignores_a_next_that_leaves_the_environment(tmp_path, unsafe):
+    client = _client(_open_settings(tmp_path))
+    with (
+        patch("oduflow.web_ui.odoo_ops.connect_as_user", return_value=dict(_MINT)),
+        patch("oduflow.web_ui.activity.touch"),
+    ):
+        resp = client.get(
+            "/api/environments/18.0/connect-open",
+            params={"next": unsafe},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "http://localhost:50001/web"
+
+
+def test_connect_land_continues_to_the_next_path(tmp_path):
+    from urllib.parse import parse_qs, urlparse
+
+    client = _client(_traefik_settings(tmp_path))
+    with (
+        patch(
+            "oduflow.web_ui.odoo_ops.connect_as_user", return_value=dict(_MINT_TRAEFIK)
+        ),
+        patch("oduflow.web_ui.activity.touch"),
+    ):
+        r1 = client.get(
+            "/api/environments/18.0/connect-open",
+            params={"next": "/odoo/action-12?view_type=list"},
+            follow_redirects=False,
+        )
+    query = parse_qs(urlparse(r1.headers["location"]).query)
+    assert query["next"] == ["/odoo/action-12?view_type=list"]
+
+    r2 = client.get(
+        "/oduflow-connect",
+        params={"token": query["token"][0], "next": query["next"][0]},
+        headers={"host": "180.dev.example.com"},
+        follow_redirects=False,
+    )
+    assert r2.status_code == 303
+    assert r2.headers["location"] == "/odoo/action-12?view_type=list"
+
+
+def test_connect_land_refuses_an_unsafe_next(tmp_path):
+    from urllib.parse import parse_qs, urlparse
+
+    client = _client(_traefik_settings(tmp_path))
+    with (
+        patch(
+            "oduflow.web_ui.odoo_ops.connect_as_user", return_value=dict(_MINT_TRAEFIK)
+        ),
+        patch("oduflow.web_ui.activity.touch"),
+    ):
+        r1 = client.get("/api/environments/18.0/connect-open", follow_redirects=False)
+    assert "next=" not in r1.headers["location"]
+    token = parse_qs(urlparse(r1.headers["location"]).query)["token"][0]
+    # The landing is reachable directly, so it validates `next` on its own.
+    r2 = client.get(
+        "/oduflow-connect",
+        params={"token": token, "next": "//evil.example"},
+        headers={"host": "180.dev.example.com"},
+        follow_redirects=False,
+    )
+    assert r2.status_code == 303
+    assert r2.headers["location"] == "/web"
 
 
 def test_connect_land_rejects_unknown_token(tmp_path):

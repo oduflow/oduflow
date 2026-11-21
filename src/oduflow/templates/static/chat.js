@@ -78,6 +78,26 @@
     });
   }
 
+  // The shared-environment workspace (frontend/workspace) opens each
+  // conversation with standing instructions for the agent, fenced by these
+  // markers. They are not the user's words, so a replayed message drops them
+  // (an unterminated block too: a replay may stream it in pieces).
+  var WORKSPACE_CONTEXT_OPEN = '<oduflow-workspace-context>';
+  var WORKSPACE_CONTEXT_CLOSE = '</oduflow-workspace-context>';
+
+  function stripWorkspaceContext(text) {
+    if (text.indexOf(WORKSPACE_CONTEXT_OPEN) === -1) return text;
+    var result = text;
+    for (;;) {
+      var start = result.indexOf(WORKSPACE_CONTEXT_OPEN);
+      if (start === -1) break;
+      var end = result.indexOf(WORKSPACE_CONTEXT_CLOSE, start);
+      if (end === -1) { result = result.slice(0, start); break; }
+      result = result.slice(0, start) + result.slice(end + WORKSPACE_CONTEXT_CLOSE.length);
+    }
+    return result.replace(/^\s+/, '');
+  }
+
   function contentText(content) {
     if (!content) return '';
     if (typeof content === 'string') return content;
@@ -311,7 +331,7 @@
       inst.userChunkBubble.insertBefore(inst.userChunkText, inst.userChunkBubble.firstChild);
     }
     inst.userChunkBuffer += text;
-    inst.userChunkText.textContent = inst.userChunkBuffer;
+    inst.userChunkText.textContent = stripWorkspaceContext(inst.userChunkBuffer);
     scrollToBottom(inst);
   }
 

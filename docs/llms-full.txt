@@ -6583,7 +6583,7 @@ are registered only when `[production].enabled = true`.
 | `POST` | `/api/environments/{branch}/share/revoke` | Stop sharing the environment |
 | `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As. Read as the environment's own database role; an environment without one gets an error instead of a list, and the dashboard shows it |
 | `POST` | `/api/environments/{branch}/connect-as` | Mint an Odoo session for body `user` and return URL/cookie details |
-| `GET` | `/api/environments/{branch}/connect-open?user=` | Mint a session and redirect toward the environment login handoff |
+| `GET` | `/api/environments/{branch}/connect-open?user=&next=` | Mint a session and redirect toward the environment login handoff; optional `next` is an in-environment path to land on (default `/web`) |
 | `POST` | `/api/environments/{branch}/save-as-template` | Save the environment under body `template_name`; the UI never overwrites an existing template |
 
 Branch parameters use Starlette's `path` converter internally, so names that
@@ -6595,13 +6595,25 @@ or revoke the link it arrived on. See
 
 ## Shared environment links
 
-`/env/{name}` is the same dashboard reduced to a single environment. An operator
-opens **Share UI** on an environment card, which mints a link
+`/env/{name}` is a chat-first **workspace** for a single environment, made for
+clients who are not developers: a conversation with the environment's coding
+agent fills the page, **Open Odoo** opens the environment signed in, and the
+agent's screenshot of the result appears under its answer. The dashboard reduced
+to that environment is its **Engineer view**, at `/env/{name}?view=console` (and
+in the workspace's **More** menu). Operators can open the workspace of any
+environment from the card's **More → Workspace**.
+
+An operator opens **Share UI** on an environment card, which mints a link
 `https://<team-host>/env/<name>?key=<secret>` and hands it to a client. Opening
 it exchanges the key for an HTTP-only, SameSite=Strict cookie and redirects to
 the clean `/env/<name>`, so the key leaves the address bar and browser history.
 The link stays valid until it is regenerated or revoked from the same modal;
 both act immediately on sessions already opened with it.
+
+Links the agent writes into the environment's own Odoo open through
+`GET /api/environments/{name}/connect-open?next=<path>`, which signs the browser
+in and lands it on that path. `next` must be a path on the environment's host;
+anything else falls back to `/web`.
 
 A shared session may only do the following, enforced server-side as a
 default-deny allowlist (`src/oduflow/ui_scope.py`) and re-checked on every
@@ -6622,7 +6634,8 @@ refused with HTTP 403 and WebSockets close with 1008; a browser *navigating* to
 another page — the full dashboard at `/`, a bookmark — is sent back to
 `/env/<name>` with a 303 instead of being shown a raw error.
 
-Leaving the shared view (**Logout**) clears the scoped cookie and returns to
+Leaving the shared view (**Leave** in the workspace, **Logout** in the Engineer
+view) clears the scoped cookie and returns to
 `/env/<name>`, which then explains how to get back in: reopen the full share
 link, or sign in at `/login` if you are an operator who was previewing it.
 
@@ -11754,9 +11767,11 @@ an environment also rotates its token.
 
 ## Shared single-environment dashboard (`/env/<name>`)
 
-The dashboard equivalent of `/mcp/<env>`: a link that opens the dashboard
-reduced to one environment, for a client or collaborator who has no team
-password.
+The dashboard equivalent of `/mcp/<env>`: a link that opens one environment for
+a client or collaborator who has no team password. It lands on a chat-first
+workspace with the environment's coding agent; the dashboard reduced to that
+environment is one click away as its Engineer view (`?view=console`). Both pages
+use the same API, so the same allowlist below applies to both.
 
 Open **More → Share UI** on an environment card and Oduflow mints
 
