@@ -3,11 +3,11 @@ Integration tests driven by fixtures.yaml.
 
 These tests call real MCP tool functions or CLI commands against a live Docker
 environment.
-Run with:  pytest tests/test_integration.py -m integration -v
+Run with:  pytest --run-live-docker tests/test_integration.py -m integration -v
 Skip with: pytest -m "not integration"
 
 Heavyweight scenarios (init/destroy/create/delete env) are skipped by default.
-Run them explicitly:  pytest tests/test_integration.py -m heavyweight -v
+Run them explicitly:  pytest --run-live-docker tests/test_integration.py -m heavyweight -v
 """
 
 from __future__ import annotations
