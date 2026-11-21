@@ -11,6 +11,8 @@ explicit `false`. This module reproduces that PEP 563 condition (note the
 
 from __future__ import annotations
 
+import asyncio
+import re
 import types as _types
 from typing import Any
 
@@ -133,3 +135,41 @@ def test_run_call_missing_required_argument(capsys):
         server._run_call(["create_environment"])
     assert error.value.code == 2
     assert "Usage: oduflow call create_environment <branch>" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_read_output_survives_cli_exit_without_exposing_it_to_mcp(
+    tmp_path, monkeypatch, capsys, compact
+):
+    from oduflow.output_cache import OutputCache
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = _types.SimpleNamespace(toml_path=str(tmp_path / "oduflow.toml"))
+    team = _types.SimpleNamespace(team_id="1")
+    monkeypatch.setattr(server, "_get_settings", lambda: settings)
+    monkeypatch.setattr(server, "_resolve_team", lambda ctx: team)
+    payload = "summary\n" * 1000 + "final line"
+
+    def logs():
+        if compact:
+            return "id=" + server._cache_output(payload, "run_odoo_tests", "").output_id
+        return server._maybe_cache(payload, "Logs", "production_logs", "name=erp")
+
+    _register_tool(monkeypatch, "logs", logs)
+    server._run_call(["logs"])
+    output_id = re.search(r"id=(\w+)", capsys.readouterr().out)[1]
+
+    # A standalone writer must not publish the output to MCP, and an MCP
+    # reader in the same OS account must not fall back to the CLI store.
+    read = server.mcp._tool_manager._tools["read_output"].fn
+    assert "not found" in asyncio.run(read(output_id))
+
+    # A second standalone invocation starts with no in-process cache.
+    monkeypatch.setattr(server, "_output_cache", OutputCache())
+    args = ["read_output", output_id, "lines", "1001", "1001"]
+    server._run_call(args)
+    assert "1001| final line" in capsys.readouterr().out
+
+    team.team_id = "2"
+    server._run_call(args)
+    assert "not found" in capsys.readouterr().out
