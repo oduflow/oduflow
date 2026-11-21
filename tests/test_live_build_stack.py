@@ -8,8 +8,10 @@ so they can execute on nested filesystems without changing the daemon driver.
 """
 
 import json
+import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -276,7 +278,6 @@ def test_unsuccessful_build_leaves_no_staging_image(
         # cancel tool resolves its real team, job and running builder from here.
         monkeypatch.setattr(server, "_settings", settings)
         # Own the worker thread so fixture teardown cannot race a live build.
-        event = store.cancel_event(job.build_id)
         worker = threading.Thread(
             target=build_ops.run_build,
             args=(team, team.image_registry, job, {}, remote),
@@ -295,7 +296,7 @@ def test_unsuccessful_build_leaves_no_staging_image(
             worker.join(timeout=20)
             assert not worker.is_alive(), "BuildKit did not stop after cancellation"
         finally:
-            event.set()
+            store.cancel_path(team, job.build_id).touch()
             worker.join(timeout=30)
     else:
         build_ops.run_build(team, team.image_registry, job, {}, remote)
@@ -314,6 +315,72 @@ def test_unsuccessful_build_leaves_no_staging_image(
         get_client().images.get(
             f"{build_ops.staging_repository(team.team_id)}:{job.build_id}"
         )
+
+
+def test_cli_build_survives_caller_and_cancels_from_another_process(
+    build_team, source, native_builder, tmp_path, monkeypatch
+):
+    url, _, payload = source
+    config = tmp_path / "oduflow.toml"
+    config.write_text(
+        f'[storage]\ndata_dir = "{tmp_path}"\n[routing]\nmode = "port"\n'
+        '[team.1]\nhostname = "localhost"\n[team.1.image_registry]\n'
+        "max_concurrent_builds = 1\nbuild_timeout_seconds = 150\n"
+    )
+    monkeypatch.setenv("ODUFLOW_TOML", str(config))
+    exe = Path(sys.executable).with_name("oduflow")
+
+    def call(tool, **kwargs):
+        return subprocess.run(
+            [str(exe), "--no-telemetry", "call", tool, json.dumps(kwargs)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def ok(tool, **kwargs):
+        result = call(tool, **kwargs)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    client = get_client()
+    for dockerfile, expected in (("Dockerfile", "succeeded"), ("slow", "cancelled")):
+        started = ok("start_image_build", repo_url=url, dockerfile=dockerfile)
+        build_id = re.search(r"^build_id: (bld-[a-f0-9]+)$", started, re.M)[1]
+        tag = f"{build_ops.staging_repository('1')}:{build_id}"
+        try:
+            deadline = time.monotonic() + 140
+            cancelled = False
+            while True:
+                status = ok("get_image_build", build_id=build_id)
+                state = re.search(rf"^Build {build_id}: (\w+)$", status, re.M)[1]
+                if state in image_builds.TERMINAL_STATUSES:
+                    break
+                if dockerfile == "slow" and payload in status and not cancelled:
+                    refused = call("start_image_build", repo_url=url)
+                    assert (
+                        refused.returncode
+                        and "configured maximum is 1" in refused.stderr
+                    )
+                    assert "Cancellation requested" in ok(
+                        "cancel_image_build", build_id=build_id
+                    )
+                    cancelled = True
+                assert time.monotonic() < deadline, status
+                time.sleep(0.2)
+            assert state == expected, status
+            if expected == "succeeded":
+                assert (
+                    client.containers.run(tag, ["cat", "/payload"], remove=True)
+                    == (payload + "\n").encode()
+                )
+            else:
+                assert cancelled
+                with pytest.raises(docker.errors.ImageNotFound):
+                    client.images.get(tag)
+        finally:
+            with suppress(docker.errors.ImageNotFound):
+                client.images.remove(tag)
 
 
 def test_stack_reuses_build_and_reconciles_lifecycle(build_team, source, tmp_path):

@@ -21,6 +21,7 @@ Job directories are deleted only by cleanup (``stale_job_ids`` /
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -33,6 +34,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from oduflow.errors import BusyError, NotFoundError
@@ -232,7 +234,6 @@ class BuildJobStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._active: dict[str, BuildJob] = {}
-        self._cancel_events: dict[str, threading.Event] = {}
         # One flock-ed descriptor per job this process runs. The kernel drops
         # the lock with the process, so it cannot outlive its owner.
         self._owner_locks: dict[str, int] = {}
@@ -266,20 +267,14 @@ class BuildJobStore:
 
     def _claim(self, team: TeamSettings, build_id: str) -> None:
         """Hold the job's owner lock until ``finish`` (or process exit)."""
-        import fcntl
-
-        try:
-            fd = os.open(
-                self._owner_lock_path(team, build_id), os.O_CREAT | os.O_RDWR, 0o600
-            )
-        except OSError:
-            return
+        fd = os.open(
+            self._owner_lock_path(team, build_id), os.O_CREAT | os.O_RDWR, 0o600
+        )
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            # A filesystem without flock: the job runs unclaimed, as before.
             os.close(fd)
-            return
+            raise
         with self._lock:
             self._owner_locks[build_id] = fd
 
@@ -291,18 +286,14 @@ class BuildJobStore:
 
     def _owner_alive(self, team: TeamSettings, build_id: str) -> bool:
         """Whether a process still holds the job's owner lock."""
-        import fcntl
-
         try:
-            fd = os.open(self._owner_lock_path(team, build_id), os.O_RDWR)
-        except OSError:
+            fd = os.open(self._owner_lock_path(team, build_id), os.O_RDONLY)
+        except FileNotFoundError:
             return False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
-        except OSError:
-            return False
         finally:
             os.close(fd)
         return False
@@ -331,9 +322,16 @@ class BuildJobStore:
         commit: str = "",
         build_key: str = "",
     ) -> BuildJob:
-        with self._lock:
+        directory = self.jobs_dir(team)
+        os.makedirs(directory, exist_ok=True)
+        # Serialize count + claim across CLI, Stack and MCP owners. A dead
+        # worker releases its slot with its existing per-job owner lock.
+        with self._lock, open(directory + ".lock", "a") as admission:
+            fcntl.flock(admission, fcntl.LOCK_EX)
             active_count = sum(
-                job.team_id == team.team_id for job in self._active.values()
+                self._owner_alive(team, name)
+                for name in os.listdir(directory)
+                if _BUILD_ID_RE.fullmatch(name)
             )
             if active_count >= max_concurrent_builds:
                 raise BusyError(
@@ -361,18 +359,14 @@ class BuildJobStore:
                 commit=commit,
                 build_key=build_key,
             )
-            self._active[job.build_id] = job
-            self._cancel_events[job.build_id] = threading.Event()
-        try:
             os.makedirs(self.job_dir(team, job.build_id), exist_ok=False)
             self._claim(team, job.build_id)
-            self.save(team, job)
-        except Exception:
-            with self._lock:
-                self._active.pop(job.build_id, None)
-                self._cancel_events.pop(job.build_id, None)
-            self._release(job.build_id)
-            raise
+            try:
+                self.save(team, job)
+            except Exception:
+                self._release(job.build_id)
+                raise
+            self._active[job.build_id] = job
         return job
 
     def save(self, team: TeamSettings, job: BuildJob) -> None:
@@ -391,7 +385,6 @@ class BuildJobStore:
             job.error = error
             job.finished_at = now_iso()
             self._active.pop(job.build_id, None)
-            self._cancel_events.pop(job.build_id, None)
         try:
             self.save(team, job)
             self._drop_workdirs(team, job.build_id)
@@ -490,9 +483,8 @@ class BuildJobStore:
         jobs.sort(key=lambda job: job.finished_at or job.created_at, reverse=True)
         return jobs
 
-    def cancel_event(self, build_id: str) -> threading.Event | None:
-        with self._lock:
-            return self._cancel_events.get(build_id)
+    def cancel_path(self, team: TeamSettings, build_id: str) -> Path:
+        return Path(self.job_dir(team, build_id), "cancel.requested")
 
     def append_publication(
         self, team: TeamSettings, job: BuildJob, publication: dict[str, Any]

@@ -236,7 +236,7 @@ section gets these defaults:
 
 | Bound | Default | What happens at the limit |
 |---|---|---|
-| `max_concurrent_builds` | `2` | A further build is refused as busy. Counted **per process**, so a build started by `oduflow stack apply` does not take one of the server's slots |
+| `max_concurrent_builds` | `2` | A further build is refused as busy. MCP, standalone CLI and Stack builds share the team's slots |
 | `build_timeout_seconds` | `1800` | Hard wall-clock deadline, fetching the source included; the build is terminated and the job fails |
 | `max_context_mb` | `512` | The sealed context is refused before the build starts (a fixed 200 000-file ceiling also applies) |
 | `max_log_mb` | `16` | The persisted log is truncated with a marker; the build continues |

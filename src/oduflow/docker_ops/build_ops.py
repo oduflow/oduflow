@@ -41,6 +41,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable, Collection
+from pathlib import Path
 from typing import Any
 
 import docker
@@ -479,7 +480,7 @@ def admit_git_build(
 def _run_git(
     args: list[str],
     env: dict[str, str],
-    cancel: threading.Event | None,
+    cancel: Path | None,
     deadline: float,
     progress: Callable[[float, str], None] | None = None,
 ) -> tuple[int, str]:
@@ -500,7 +501,7 @@ def _run_git(
                 return proc.returncode, stderr or ""
             except subprocess.TimeoutExpired:
                 now = time.monotonic()
-                if cancel is not None and cancel.is_set():
+                if cancel is not None and cancel.exists():
                     raise _BuildCancelled
                 if now >= deadline:
                     raise _BuildTimedOut
@@ -519,7 +520,7 @@ def _fetch_git_source(
     registry_cfg: ImageRegistrySettings,
     job: BuildJob,
     remote_url: str,
-    cancel: threading.Event | None,
+    cancel: Path,
     deadline: float,
     progress: Callable[[float, str], None] | None = None,
 ) -> None:
@@ -968,7 +969,7 @@ def run_build(
     ``run_build_async`` is the non-blocking entry point. *keep_tags* are
     exempt from the retention pass that follows a successful build.
     """
-    cancel = store.cancel_event(job.build_id)
+    cancel = store.cancel_path(team, job.build_id)
     log_path = store.log_path(team, job.build_id)
     ctx_dir = store.context_dir(team, job.build_id)
     build_root = ctx_dir if job.context == "." else os.path.join(ctx_dir, job.context)
@@ -1001,7 +1002,7 @@ def run_build(
             _append_capped_log(log_path, _LEGACY_BUILDER_NOTICE, max_log_bytes)
         build = runner(build_root, job, local_tag, build_args, log_path, max_log_bytes)
         while build.is_alive():
-            if cancel is not None and cancel.is_set():
+            if cancel.exists():
                 raise _BuildCancelled
             now = time.monotonic()
             remaining = deadline - now
