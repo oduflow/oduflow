@@ -1290,13 +1290,13 @@ class TestRunHelper:
         pm._run_helper(
             client, settings, "sha256:new", "oduflow-db", ["pg_dump", "x"], "/d", "L"
         )
-        stale.remove.assert_called_once_with(force=True)
+        stale.remove.assert_called_once_with(force=True, v=True)
         kwargs = client.containers.run.call_args.kwargs
         assert client.containers.run.call_args.args == ("sha256:new", ["x"])
         assert kwargs["entrypoint"] == "pg_dump"
         assert kwargs["network_mode"] == "container:oduflow-db"
         assert kwargs["volumes"] == {"/d": {"bind": "/dump", "mode": "rw"}}
-        helper.remove.assert_called_once_with(force=True)
+        helper.remove.assert_called_once_with(force=True, v=True)
 
     def test_the_helper_keeps_one_capability(self, tmp_path):
         # It shares the cluster's network namespace. pg_dump and pg_restore
@@ -1372,7 +1372,7 @@ class TestRunHelper:
             pm._run_helper(
                 client, settings, "img", "oduflow-db", ["pg_dump", "x"], "/d", "L"
             )
-        helper.remove.assert_called_once_with(force=True)
+        helper.remove.assert_called_once_with(force=True, v=True)
 
 
 class TestRun:

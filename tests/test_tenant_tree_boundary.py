@@ -330,18 +330,20 @@ def test_chown_recursive_of_a_missing_tree_does_nothing(tmp_path):
         str(tmp_path / "absent"), 101, 101, client, "odoo:17.0"
     )
 
-    client.containers.run.assert_not_called()
+    client.containers.create.assert_not_called()
 
 
 def test_the_container_chown_fallback_does_not_follow_links_either(tmp_path):
     tree, _outside = _tenant_tree(tmp_path)
     client = MagicMock()
+    client.containers.create.return_value.wait.return_value = {"StatusCode": 0}
 
     with patch.object(docker_client.os, "chown", side_effect=PermissionError):
         docker_client.chown_recursive(str(tree), 101, 102, client, "odoo:17.0")
 
-    args, kwargs = client.containers.run.call_args
-    assert args == ("odoo:17.0", "chown -hR 101:102 /mnt/target")
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["image"] == "odoo:17.0"
+    assert kwargs["command"] == "chown -hR 101:102 /mnt/target"
     assert kwargs["volumes"] == {str(tree): {"bind": "/mnt/target", "mode": "rw"}}
 
 

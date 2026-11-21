@@ -154,6 +154,7 @@ def test_stopped_environment_stays_stopped(prepared):
     p = prepared
     p.container.status = "exited"
     refresh(p)
+    p.runner.remove.assert_called_once_with(force=True, v=True)
     p.container.start.assert_not_called()
 
 
@@ -162,6 +163,7 @@ def test_failed_sanitization_never_stops_or_renames_old_database(prepared):
     p.sanitize.return_value = ["[SANITIZE] WARNING: script failed"]
     with pytest.raises(PrerequisiteNotMetError, match="Sanitization"):
         refresh(p)
+    p.runner.remove.assert_called_once_with(force=True, v=True)
     assert Path(p.paths["merged"], "old").read_text() == "old attachment"
     p.container.stop.assert_not_called()
     assert all("RENAME TO" not in c.args[2] for c in p.sql.call_args_list)

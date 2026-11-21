@@ -37,6 +37,7 @@ from oduflow.docker_ops.client import (
     get_client,
     get_odoo_uid_gid,
     pull_with_progress,
+    run_for_output,
 )
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -2017,7 +2018,7 @@ def _init_empty_database(
     """
     init_name = get_resource_name(env_name, "odoo-init", settings.prefix, team.team_id)
     try:
-        client.containers.get(init_name).remove(force=True)
+        client.containers.get(init_name).remove(force=True, v=True)
     except docker.errors.NotFound:
         pass
 
@@ -2054,7 +2055,7 @@ def _init_empty_database(
             logs = ""
     finally:
         try:
-            init_container.remove(force=True)
+            init_container.remove(force=True, v=True)
         except docker.errors.APIError:
             pass
 
@@ -3747,12 +3748,12 @@ if [ -f /run/oduflow/ssh-key ]; then
         /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
 fi
 """
-    client.containers.run(
+    run_for_output(
+        client,
         image=image,
         command=["-eu", "-c", script],
         entrypoint=["/bin/sh"],
         user="root",
-        remove=True,
         network_disabled=True,
         volumes=volumes,
     )

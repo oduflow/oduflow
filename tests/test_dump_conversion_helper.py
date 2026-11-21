@@ -184,7 +184,7 @@ def test_the_helper_has_no_network_no_root_and_no_capabilities(tmp_path):
     assert run["name"].startswith("oduflow-pg-restore-helper-")
     # Removed before its output is looked at, and removed for good.
     assert fake.events == ["run", "remove"]
-    fake.container.remove.assert_called_once_with(force=True)
+    fake.container.remove.assert_called_once_with(force=True, v=True)
     fake.container.logs.assert_called_once_with(stdout=True, stderr=True, tail=200)
 
 

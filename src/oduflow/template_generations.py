@@ -469,7 +469,7 @@ def refresh_environment(
             raise PrerequisiteNotMetError(
                 "Sanitization did not complete cleanly; keeping the previous environment data"
             )
-        runner.remove(force=True)
+        runner.remove(force=True, v=True)
         runner = None
         unmount(stage_paths)
         container.update(restart_policy={"Name": "no"})
@@ -559,7 +559,7 @@ def refresh_environment(
         raise
     finally:
         if runner is not None:
-            runner.remove(force=True)
+            runner.remove(force=True, v=True)
         if not recovery_failed:
             unmount(stage_paths)
             sql(

@@ -91,6 +91,9 @@ def mock_docker_client():
         patch("oduflow.docker_ops.odoo_ops.get_client") as odoo_mock,
     ):
         client_instance = MagicMock()
+        client_instance.containers.create.return_value.wait.return_value = {
+            "StatusCode": 0
+        }
         sys_mock.return_value = client_instance
         env_mock.return_value = client_instance
         odoo_mock.return_value = client_instance
@@ -956,6 +959,7 @@ class TestCreateEnvironment:
             ),
             mock_call.start(),
         ]
+        init_container.remove.assert_called_once_with(force=True, v=True)
         assert mock_docker_client.containers.run.call_count == 1
 
     @patch("oduflow.docker_ops.env_ops._rollback_partial_environment")
@@ -1020,6 +1024,7 @@ class TestCreateEnvironment:
 
         # The DB, role, port and workspace already exist at this point.
         mock_rollback.assert_called_once()
+        init_container.remove.assert_called_once_with(force=True, v=True)
         # The serving container must never start on the broken database.
         mock_docker_client.containers.run.assert_not_called()
 
@@ -5905,12 +5910,14 @@ class TestAgentContainer:
         assert "oduflow-1-agent-workspace" in created
 
         # A short-lived root init migrates/copies persistent data; only the
-        # second call is the long-lived, unprivileged agent container.
-        assert mock_docker_client.containers.run.call_count == 2
-        init_kwargs = mock_docker_client.containers.run.call_args_list[0].kwargs
+        # detached run is the long-lived, unprivileged agent container.
+        mock_docker_client.containers.run.assert_called_once()
+        init_kwargs = mock_docker_client.containers.create.call_args.kwargs
         assert init_kwargs["user"] == "root"
         assert init_kwargs["network_disabled"] is True
-        assert init_kwargs["remove"] is True
+        mock_docker_client.containers.create.return_value.remove.assert_called_once_with(
+            force=True, v=True
+        )
         assert "missing required user 'agent'" in init_kwargs["command"][2]
         assert init_kwargs["volumes"]["oduflow-1-agent-home"]["bind"] == ("/home/agent")
         assert any(
@@ -5918,7 +5925,7 @@ class TestAgentContainer:
             for v in init_kwargs["volumes"].values()
         )
 
-        kwargs = mock_docker_client.containers.run.call_args_list[1].kwargs
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
         assert kwargs["name"] == "oduflow-1-agent"
         assert kwargs["user"] == "agent"
         # Tenant isolation: the agent joins the team network, not a shared one.
@@ -6012,7 +6019,7 @@ class TestAgentContainer:
         env_ops._ensure_agent_container(mock_docker_client, s, team)
 
         existing.remove.assert_called_once_with(force=True)
-        assert mock_docker_client.containers.run.call_count == 2
+        mock_docker_client.containers.run.assert_called_once()
         env = mock_docker_client.containers.run.call_args.kwargs["environment"]
         assert env["OPENAI_API_KEY"] == "new-key"
 
@@ -6048,7 +6055,7 @@ class TestAgentContainer:
             env_ops._ensure_agent_container(mock_docker_client, s, team)
 
         existing.remove.assert_called_once_with(force=True)
-        vols = mock_docker_client.containers.run.call_args_list[0].kwargs["volumes"]
+        vols = mock_docker_client.containers.create.call_args.kwargs["volumes"]
         assert any(v["bind"] == "/run/oduflow/git-credentials" for v in vols.values())
 
     def test_ensure_recreates_when_pinned_image_changes(
