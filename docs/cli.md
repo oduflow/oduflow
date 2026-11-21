@@ -156,6 +156,12 @@ conflicts; no automatic deletion or pruning is performed.
 
 ## System Commands
 
+`destroy` removes the development PostgreSQL catalog volume. It moves the
+configured teams' host tablespace directories into `pg_tablespaces/destroyed-…`
+and prints the path so a new cluster can use the same data root. These files
+are not a database backup: the old catalog is no longer present. They continue
+to occupy disk space until the operator removes them.
+
 ```bash
 # Destroy all shared infrastructure (requires no active environments)
 oduflow destroy

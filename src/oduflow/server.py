@@ -8107,6 +8107,8 @@ def _run_cleanup(
 def _run_destroy(settings: Settings) -> None:
     result = system_ops.destroy_system(settings)
     print(f"System {result['status']}.\nRemoved: {result['removed']}")
+    if result.get("preserved_tablespaces"):
+        print(f"Preserved dev tablespaces: {result['preserved_tablespaces']}")
 
 
 def _run_restore_cluster(settings: Settings, target_time: str, confirm: str) -> None:
