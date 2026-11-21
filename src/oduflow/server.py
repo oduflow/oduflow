@@ -8235,7 +8235,7 @@ def _run_call(argv: list[str]) -> None:
         kwargs = {}
         for i, value in enumerate(tool_argv):
             if i >= len(params):
-                print(f"Warning: extra argument '{value}' ignored", file=sys.stderr)
+                print("Warning: extra argument ignored", file=sys.stderr)
                 continue
             param = params[i]
             hint = hints.get(param.name)
@@ -8247,8 +8247,7 @@ def _run_call(argv: list[str]) -> None:
             except (ValueError, TypeError):
                 expected = getattr(hint, "__name__", None) or hint or "value"
                 print(
-                    f"ERROR: invalid value '{value}' for argument "
-                    f"'{param.name}' (expected {expected})",
+                    f"ERROR: invalid value for argument '{param.name}' (expected {expected})",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -8271,7 +8270,7 @@ def _run_call(argv: list[str]) -> None:
             print(f"Usage: oduflow call {tool_name} {' '.join(parts)}")
             return
 
-    print(f"Calling: {tool_name}({kwargs})")
+    print(f"Calling: {tool_name}")
     print("-" * 60)
     logging.getLogger("oduflow").setLevel(logging.WARNING)
     try:

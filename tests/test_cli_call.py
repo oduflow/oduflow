@@ -101,10 +101,28 @@ def test_run_call_int_positional_is_int(monkeypatch):
     assert isinstance(captured["max_rows"], int)
 
 
-def test_run_call_invalid_int_exits_cleanly(monkeypatch):
+def test_run_call_does_not_echo_credentials(monkeypatch, capsys):
+    secret = "fixture-only-token"
+
+    def configure(token: str):
+        assert token == secret
+        return "configured"
+
+    _register_tool(monkeypatch, "setup_repo_auth", configure)
+    for args in ([secret, secret], ['{"token":"fixture-only-token"}']):
+        server._run_call(["setup_repo_auth", *args])
+        captured = capsys.readouterr()
+        assert "configured" in captured.out
+        assert secret not in captured.out + captured.err
+
+
+def test_run_call_invalid_int_exits_cleanly(monkeypatch, capsys):
     def fake_tool(env_name: str, max_rows: int = 100, ctx: Any = None):
         return "ok"
 
     _register_tool(monkeypatch, "fake_tool_bad_int", fake_tool)
     with pytest.raises(SystemExit):
         server._run_call(["fake_tool_bad_int", "env", "notanint"])
+    error = capsys.readouterr().err
+    assert "max_rows" in error and "int" in error
+    assert "notanint" not in error
