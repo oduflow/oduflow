@@ -1035,6 +1035,15 @@ def _container_image_reference(container: Any) -> str | None:
         return None
 
 
+def _service_ports(container: Any) -> dict[str, Any]:
+    # NetworkSettings includes EXPOSE-only ports and is cleared on stop.
+    # HostConfig retains the port Oduflow actually published. Prefer the live
+    # mapping for that key when present (Docker may allocate the host port).
+    live = container.attrs.get("NetworkSettings", {}).get("Ports") or {}
+    configured = container.attrs.get("HostConfig", {}).get("PortBindings") or {}
+    return {key: live.get(key) or value for key, value in configured.items()} or live
+
+
 def _describe_service_container(
     settings: Settings, team: TeamSettings, container: Any
 ) -> dict[str, Any]:
@@ -1090,7 +1099,7 @@ def _describe_service_container(
             if port_num:
                 url = f"{settings.public_scheme_for(team)}://{team.hostname}:{port_num}"
         else:
-            ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+            ports_dict = _service_ports(container)
             if ports_dict:
                 for port_key, mappings in ports_dict.items():
                     port_match = re.match(r"(\d+)/", port_key)
@@ -1297,7 +1306,7 @@ def _effective_service_config(
             if is_host_mode:
                 pass  # Cannot determine port without preset in host mode
             else:
-                ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+                ports_dict = _service_ports(container)
                 if ports_dict:
                     for port_key in ports_dict:
                         port_match = re.match(r"(\d+)/", port_key)
