@@ -85,6 +85,16 @@ the separate production database, backup, health, and rollback semantics in
 [[0035-production-hosting]] rather than treating production as a flag on the
 development resource.
 
+Services can now reference a sibling service by manifest key
+(`service`/`serviceField: containerName`, optional one-placeholder `format`).
+The value is the deterministic team-network container name, derived from the
+server prefix and team without a Docker lookup, so a manifest no longer embeds
+deployment-specific names and `plan` stays stable before the sibling exists.
+The fixed V1 apply order gains one refinement: services are applied in a
+stable topological order of these references (manifest order otherwise), and
+reference cycles are validation errors. Ordering covers configuration only, not
+readiness.
+
 ## History
 
 - 2026-08-11 — V1 Stack manifest, safe value sources, plan/apply/status,

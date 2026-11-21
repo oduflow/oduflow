@@ -34,11 +34,18 @@ from oduflow.naming import sanitize_repo_url, validate_env_name
 from oduflow.service_runtime import normalize_runtime
 from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import (
+    StackValidationError,
     manifest_hash,
     read_stack_file,
     resolve_env_values,
 )
-from oduflow.stack_models import Service, ServiceDatabase, StackManifest
+from oduflow.stack_models import (
+    Service,
+    ServiceDatabase,
+    StackManifest,
+    service_reference_cycle,
+    service_references,
+)
 from oduflow.stack_state import load_state, save_state
 
 STACK_LABEL = "oduflow.stack"
@@ -383,18 +390,66 @@ def _file_matches(
     return "error" not in result and result.get("output") == expected
 
 
-def _service_env_matches(actual: Mapping[str, Any], desired: Mapping[str, str]) -> bool:
-    """Compare declared values while ignoring untouched image defaults."""
+def _service_env_drift(
+    actual: Mapping[str, Any], desired: Mapping[str, str]
+) -> tuple[bool, list[str]]:
+    """Whether the live env drifted from the declaration, and the keys that did.
+
+    Untouched image defaults are ignored. Only key names are returned, never
+    values, because they end up in plan output; an unreadable live env is
+    drift with no attributable key.
+    """
     effective = actual.get("env_vars", {})
     image_defaults = actual.get("image_env_vars", {})
     if not isinstance(effective, dict) or not isinstance(image_defaults, dict):
-        return False
-    if any(effective.get(key) != value for key, value in desired.items()):
-        return False
-    return not any(
-        key not in desired and image_defaults.get(key) != value
+        return True, []
+    changed = {key for key, value in desired.items() if effective.get(key) != value}
+    changed.update(
+        key
         for key, value in effective.items()
+        if key not in desired and image_defaults.get(key) != value
     )
+    return bool(changed), sorted(changed)
+
+
+def _service_env_matches(actual: Mapping[str, Any], desired: Mapping[str, str]) -> bool:
+    """Compatibility helper for callers that only need the drift verdict."""
+    drifted, _ = _service_env_drift(actual, desired)
+    return not drifted
+
+
+def _service_order(services: Mapping[str, Service]) -> list[str]:
+    """Each service after the siblings it references, otherwise manifest order.
+
+    Manifest validation already rejects cycles and undeclared targets; the
+    guard only covers a spec mutated after loading, and fires before any
+    resource is touched because ``build_plan`` runs first.
+    """
+    graph = service_references(services)
+    placed: list[str] = []
+    remaining = list(services)
+    while remaining:
+        ready = next(
+            (
+                name
+                for name in remaining
+                if all(target in placed for target in graph[name])
+            ),
+            None,
+        )
+        if ready is None:
+            cycle = service_reference_cycle(graph)
+            detail = (
+                " -> ".join(f"services.{name}" for name in cycle)
+                if cycle
+                else ", ".join(f"services.{name}" for name in remaining)
+            )
+            raise StackValidationError(
+                f"service references cannot be ordered: {detail}"
+            )
+        placed.append(ready)
+        remaining.remove(ready)
+    return placed
 
 
 def build_plan(
@@ -627,7 +682,8 @@ def build_plan(
         else {}
     )
     images: dict[str, PlannedImage] = {}
-    for name, desired_service in spec.services.items():
+    for name in _service_order(spec.services):
+        desired_service = spec.services[name]
         resource = f"services.{name}"
         if desired_service.routes and settings.routing_mode != "traefik":
             actions.append(
@@ -736,10 +792,10 @@ def build_plan(
             else []
         )
         drift: list[str] = []
-        if desired_service_env is not None and not _service_env_matches(
-            actual, desired_service_env
-        ):
-            drift.append("env")
+        if desired_service_env is not None:
+            env_drifted, env_keys = _service_env_drift(actual, desired_service_env)
+            if env_drifted:
+                drift.append(f"env ({', '.join(env_keys)})" if env_keys else "env")
         comparisons = (
             (
                 "runtime",
@@ -1035,7 +1091,8 @@ def apply_stack(
                     read_stack_file(manifest_path, item.source),
                 )
 
-        for name, desired_service in spec.services.items():
+        for name in _service_order(spec.services):
+            desired_service = spec.services[name]
             resource = f"services.{name}"
             create_service = ("create", resource) in operations
             update_service = ("update", resource) in operations
