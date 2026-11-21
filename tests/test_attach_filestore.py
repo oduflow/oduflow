@@ -67,6 +67,9 @@ def test_attach_filestore_zip_auto_strips_database_prefix(monkeypatch, tmp_path)
         {
             f"odoo19-mirage/60/{HASH_60}": b"one",
             f"odoo19-mirage/61/{HASH_61}": b"two",
+            f"odoo19-mirage/checklist/60/{HASH_60}": b"",
+            f"odoo19-mirage/checklist/61/{HASH_61}": b"",
+            "odoo19-mirage/checklist/ab/" + "ab" * 20: b"",
         },
     )
 

@@ -195,6 +195,14 @@ def _detect_filestore_strip_prefix(paths: list[str]) -> str:
                 prefix = "/".join(parts[:idx])
                 candidates[prefix] = candidates.get(prefix, 0) + 1
                 break
+    # Odoo's garbage-collection checklist mirrors the attachment hash paths
+    # with empty marker files. It isn't a second filestore (and may have more
+    # entries than the real one). A database wrapper itself named 'checklist'
+    # is still valid when its parent isn't a filestore candidate.
+    for prefix in list(candidates):
+        parent, _, leaf = prefix.rpartition("/")
+        if leaf == "checklist" and parent in candidates:
+            del candidates[prefix]
     if not candidates:
         raise PrerequisiteNotMetError(
             "Could not detect an Odoo filestore layout. Expected files like "
