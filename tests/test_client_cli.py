@@ -46,7 +46,9 @@ def test_client_cli_dispatches_after_a_global_option() -> None:
     from oduflow import server
 
     with (
-        patch.object(sys, "argv", ["oduflow", "-t", "http", "client", "list"]),
+        patch.object(
+            sys, "argv", ["oduflow", "--no-telemetry", "client", "--json", "list"]
+        ),
         patch("oduflow.client.run_client", return_value=0) as run_client,
         patch.object(
             server, "find_toml", side_effect=AssertionError("settings loaded")
@@ -54,4 +56,4 @@ def test_client_cli_dispatches_after_a_global_option() -> None:
     ):
         server._run_cli()
 
-    run_client.assert_called_once_with(["list"])
+    run_client.assert_called_once_with(["--json", "list"])
