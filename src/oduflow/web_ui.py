@@ -2736,7 +2736,7 @@ def _build_routes(
                     stack.enter_context(
                         locks.env_lock(image_cleanup_lock_key(), operation="cleanup")
                     )
-                result: dict[str, Any] = {"dry_run": False}
+                result = {"dry_run": False}
                 if any(orphans.values()):
                     # A create may have resources but no container yet. Only
                     # sweep orphans while no environment operation can race us.
