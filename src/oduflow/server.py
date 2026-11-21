@@ -8282,8 +8282,8 @@ def _run_call(argv: list[str]) -> None:
                     parts.append(f"<{p.name}>")
                 else:
                     parts.append(f"[{p.name}={p.default}]")
-            print(f"Usage: oduflow call {tool_name} {' '.join(parts)}")
-            return
+            print(f"Usage: oduflow call {tool_name} {' '.join(parts)}", file=sys.stderr)
+            sys.exit(2)
 
     print(f"Calling: {tool_name}")
     print("-" * 60)
