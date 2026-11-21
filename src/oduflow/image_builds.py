@@ -30,8 +30,10 @@ import posixpath
 import re
 import secrets
 import shutil
+import tempfile
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -228,6 +230,25 @@ class BuildJob:
         return BuildJob(**{k: v for k, v in data.items() if k in known})
 
 
+def _inherit_owner(fd: int, parent: str | int) -> None:
+    if os.geteuid() == 0:
+        owner = os.stat(parent)
+        if owner.st_uid != 0 and os.fstat(fd).st_uid != owner.st_uid:
+            os.fchown(fd, owner.st_uid, owner.st_gid)
+
+
+@contextmanager
+def _build_directory(path: str, *, exist_ok: bool) -> Iterator[int]:
+    """Keep the team data owner's access when a root caller creates storage."""
+    os.makedirs(path, mode=0o700, exist_ok=exist_ok)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _inherit_owner(fd, os.path.dirname(path))
+        yield fd
+    finally:
+        os.close(fd)
+
+
 class BuildJobStore:
     """In-memory registry of active jobs + on-disk job.json history per team."""
 
@@ -323,16 +344,24 @@ class BuildJobStore:
         build_key: str = "",
     ) -> BuildJob:
         directory = self.jobs_dir(team)
-        os.makedirs(directory, exist_ok=True)
         # Serialize count + claim across CLI, Stack and MCP owners. A dead
         # worker releases its slot with its existing per-job owner lock.
-        with self._lock, open(directory + ".lock", "a") as admission:
+        with self._lock, _build_directory(directory, exist_ok=True) as admission:
             fcntl.flock(admission, fcntl.LOCK_EX)
-            active_count = sum(
-                self._owner_alive(team, name)
-                for name in os.listdir(directory)
-                if _BUILD_ID_RE.fullmatch(name)
-            )
+            active_count = 0
+            for name in os.listdir(admission):
+                if not _BUILD_ID_RE.fullmatch(name):
+                    continue
+                try:
+                    active_count += self._owner_alive(team, name)
+                except PermissionError:
+                    # An older root build can leave a private owner.lock.
+                    # Its terminal record no longer needs a slot. Otherwise
+                    # fail closed instead of overbooking a potentially live job.
+                    legacy = self._read(team, name)
+                    active_count += (
+                        legacy is None or legacy.status not in TERMINAL_STATUSES
+                    )
             if active_count >= max_concurrent_builds:
                 raise BusyError(
                     f"Team '{team.team_id}' already has {active_count} active image "
@@ -359,7 +388,19 @@ class BuildJobStore:
                 commit=commit,
                 build_key=build_key,
             )
-            os.makedirs(self.job_dir(team, job.build_id), exist_ok=False)
+            with _build_directory(
+                self.job_dir(team, job.build_id), exist_ok=False
+            ) as d:
+                # Only hand over freshly created files. Never chown a path
+                # supplied by another process, or relax the caller's umask.
+                for name in ("owner.lock", "build.log"):
+                    fd = os.open(
+                        name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600, dir_fd=d
+                    )
+                    try:
+                        _inherit_owner(fd, d)
+                    finally:
+                        os.close(fd)
             self._claim(team, job.build_id)
             try:
                 self.save(team, job)
@@ -371,10 +412,15 @@ class BuildJobStore:
 
     def save(self, team: TeamSettings, job: BuildJob) -> None:
         path = self.job_json_path(team, job.build_id)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(job.to_dict(), f, indent=2)
-        os.replace(tmp, path)
+        directory = os.path.dirname(path)
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as f:
+            try:
+                json.dump(job.to_dict(), f, indent=2)
+                f.flush()
+                _inherit_owner(f.fileno(), directory)
+                os.replace(f.name, path)
+            finally:
+                Path(f.name).unlink(missing_ok=True)
 
     def finish(
         self, team: TeamSettings, job: BuildJob, status: str, error: str = ""

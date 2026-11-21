@@ -2566,9 +2566,9 @@ outcome.
 ### `cancel_image_build`
 
 Terminate a running build and its Docker connection — even when the current
-Dockerfile step produces no output — and move the job to `cancelled`. A build
-that `oduflow stack apply` started runs inside that command and is cancelled by
-interrupting it, not through this tool.
+Dockerfile step produces no output — and move the job to `cancelled`. The
+request also reaches builds owned by a standalone CLI worker or a running
+`oduflow stack apply` on the same host and team data directory.
 
 **Parameters**
 
