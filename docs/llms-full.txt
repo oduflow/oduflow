@@ -12858,7 +12858,9 @@ containers, while leaving every restart under operator control.
 
 ## Running destructive Docker tests
 
-`pytest` runs the unit suite without Docker. For integration tests, provision a disposable Linux host with its own Docker Engine, Docker CLI and buildx, Git, and free ports 80 and 51000–51100. Run pytest inside that host: Docker bind mounts and temporary directories must refer to the same filesystem. Do not enroll a shared or production daemon. Tests create and destroy real databases, containers, networks, and volumes.
+`pytest` runs the unit suite without Docker. For integration tests, provision a disposable Linux host with its own Docker Engine, Docker CLI and buildx, Git, SSH, rsync, fuse-overlayfs and `/dev/fuse`. Reserve ports 80, 443, 51000–51100 and 52100–52399. Run pytest from a Git checkout inside that host: Docker bind mounts and temporary directories must refer to the same filesystem. Do not enroll a shared or production daemon. Tests create and destroy real databases, containers, networks, and volumes, and prune the daemon's build cache.
+
+The full run needs access to public Git repositories, Docker images, distribution package indexes and the WAL-G binary. The test registry and S3 bucket run inside the disposable host; no production registry or backup credentials are needed. The Linux bridge gateway must be reachable from both Docker and pytest. On a host with an HTTP proxy, exclude local fixture addresses from the proxy.
 
 After confirming this is the disposable host, enroll its **local** engine once as an administrator:
 
