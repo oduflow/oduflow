@@ -6,6 +6,7 @@ import atexit
 import hashlib
 import os
 import time
+from contextlib import closing
 
 import pytest
 
@@ -23,6 +24,26 @@ _TEST_TRAEFIK_CONTAINER = "oduflowtest-traefik"
 _TEST_TRAEFIK_ACME_VOLUME = "oduflowtest-traefik-acme"
 _TEST_PROD_DB_CONTAINER = "oduflowtest-prod-db"
 _TEST_PROD_DB_VOLUME = "oduflowtest-prod-db-data"
+
+
+@pytest.fixture(autouse=True)
+def _no_new_live_volumes(request):
+    """An image VOLUME gets no Oduflow labels. Check the serial test's delta."""
+    if not any(
+        request.node.get_closest_marker(m) for m in ("integration", "heavyweight")
+    ):
+        yield
+        return
+    with closing(get_client()) as client:
+
+        def names():
+            return {v["Name"] for v in client.api.volumes()["Volumes"] or []}
+
+        before = names()
+        yield
+        assert not (remaining := names() - before), (
+            f"Docker volumes survived teardown: {sorted(remaining)}"
+        )
 
 
 @pytest.fixture(autouse=True)

@@ -235,8 +235,10 @@ def write_file_in_volume(
         tar_stream.seek(0)
         container.put_archive(parent, tar_stream)
     finally:
-        container.stop(timeout=1)
-        container.remove(force=True)
+        try:
+            container.stop(timeout=1)
+        finally:
+            container.remove(force=True, v=True)
 
     return {"path": path, "size": len(data)}
 

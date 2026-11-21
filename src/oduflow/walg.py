@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from oduflow import branding
+from oduflow.docker_ops.client import run_for_output
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
 from oduflow.settings import Settings
 
@@ -336,7 +337,7 @@ def _postgres_uid_gid(client: Any, image: str) -> tuple[int, int]:
     uid_gid = (999, 999)
     try:
         raw = (
-            client.containers.run(image, ["id", "postgres"], entrypoint="", remove=True)
+            run_for_output(client, image, ["id", "postgres"], entrypoint="")
             .decode()
             .strip()
         )
@@ -389,12 +390,12 @@ def apply_walg_config_ownership(settings: Settings, client: Any) -> None:
         logger.warning("Could not chown walg.json to postgres: %s", exc)
         return
     try:
-        client.containers.run(
+        run_for_output(
+            client,
             image,
             f"chown {uid}:{gid} /mnt/walg/walg.json",
             entrypoint="",
             user="root",
-            remove=True,
             volumes={conf_host_dir(settings): {"bind": "/mnt/walg", "mode": "rw"}},
         )
     except Exception as exc:
@@ -982,7 +983,7 @@ def pitr_restore_cluster(
         logs = helper.logs().decode("utf-8", errors="replace")
     finally:
         try:
-            helper.remove(force=True)
+            helper.remove(force=True, v=True)
         except Exception:
             pass
     if exit_code != 0:

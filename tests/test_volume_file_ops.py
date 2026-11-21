@@ -29,6 +29,9 @@ TEST_SETTINGS = Settings(
 def mock_docker_client():
     with patch("oduflow.docker_ops.volume_file_ops.get_client") as mock:
         client_instance = MagicMock()
+        client_instance.containers.create.return_value.wait.return_value = {
+            "StatusCode": 0
+        }
         mock.return_value = client_instance
         yield client_instance
 
@@ -74,7 +77,7 @@ class TestSafePath:
 class TestReadFileInVolume:
     def test_read_file(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = (
+        mock_docker_client.containers.create.return_value.logs.return_value = (
             b"TYPE:FILE\nSIZE:42\nCONTENT_START\nhello world\n"
         )
 
@@ -88,7 +91,7 @@ class TestReadFileInVolume:
 
     def test_read_directory(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = (
+        mock_docker_client.containers.create.return_value.logs.return_value = (
             b"TYPE:DIR\ntotal 4\ndrwxr-xr-x 2 root root 4096 data\n"
         )
 
@@ -101,7 +104,9 @@ class TestReadFileInVolume:
 
     def test_not_found(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b"TYPE:NOTFOUND\n"
+        mock_docker_client.containers.create.return_value.logs.return_value = (
+            b"TYPE:NOTFOUND\n"
+        )
 
         result = volume_file_ops.read_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "missing.txt"
@@ -112,7 +117,9 @@ class TestReadFileInVolume:
 
     def test_binary_file(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b"TYPE:BINARY\nSIZE:1024\n"
+        mock_docker_client.containers.create.return_value.logs.return_value = (
+            b"TYPE:BINARY\nSIZE:1024\n"
+        )
 
         result = volume_file_ops.read_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "data.bin"
@@ -123,7 +130,9 @@ class TestReadFileInVolume:
 
     def test_file_too_large(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b"TYPE:TOOLARGE\nSIZE:200000\n"
+        mock_docker_client.containers.create.return_value.logs.return_value = (
+            b"TYPE:TOOLARGE\nSIZE:200000\n"
+        )
 
         result = volume_file_ops.read_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "big.log"
@@ -134,7 +143,7 @@ class TestReadFileInVolume:
 
     def test_read_range(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = (
+        mock_docker_client.containers.create.return_value.logs.return_value = (
             b"TYPE:FILE\nSIZE:5000\nCONTENT_START\nline 10\nline 11\n"
         )
 
@@ -214,7 +223,7 @@ class TestWriteFileInVolume:
         mock_container.exec_run.assert_called_once()
         mock_container.put_archive.assert_called_once()
         mock_container.stop.assert_called_once()
-        mock_container.remove.assert_called_once()
+        mock_container.remove.assert_called_once_with(force=True, v=True)
 
     def test_content_too_large(self, mock_docker_client):
         with pytest.raises(ConflictError):
@@ -257,7 +266,7 @@ class TestWriteFileInVolume:
 
         # Container should still be cleaned up
         mock_container.stop.assert_called_once()
-        mock_container.remove.assert_called_once()
+        mock_container.remove.assert_called_once_with(force=True, v=True)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +277,7 @@ class TestWriteFileInVolume:
 class TestSearchInVolume:
     def test_matches_found(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = (
+        mock_docker_client.containers.create.return_value.logs.return_value = (
             b"/mnt/volume/config/app.conf:3:key=value\n"
             b"/mnt/volume/config/app.conf:7:key=other\n"
         )
@@ -285,13 +294,9 @@ class TestSearchInVolume:
 
     def test_no_matches(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.side_effect = docker.errors.ContainerError(
-            container=MagicMock(),
-            exit_status=1,
-            command="grep",
-            image="alpine",
-            stderr=b"",
-        )
+        helper = mock_docker_client.containers.create.return_value
+        helper.wait.return_value = {"StatusCode": 1}
+        helper.logs.return_value = b""
 
         result = volume_file_ops.search_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "nonexistent"
@@ -303,7 +308,9 @@ class TestSearchInVolume:
     def test_truncation(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
         lines = "\n".join(f"/mnt/volume/file.txt:{i}:match" for i in range(100))
-        mock_docker_client.containers.run.return_value = lines.encode()
+        mock_docker_client.containers.create.return_value.logs.return_value = (
+            lines.encode()
+        )
 
         result = volume_file_ops.search_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "match", max_results=10
@@ -322,13 +329,9 @@ class TestSearchInVolume:
 
     def test_non_exit1_error_reraised(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.side_effect = docker.errors.ContainerError(
-            container=MagicMock(),
-            exit_status=2,
-            command="grep",
-            image="alpine",
-            stderr=b"grep: invalid option",
-        )
+        helper = mock_docker_client.containers.create.return_value
+        helper.wait.return_value = {"StatusCode": 2}
+        helper.logs.return_value = b"grep: invalid option"
 
         with pytest.raises(docker.errors.ContainerError):
             volume_file_ops.search_in_volume(
@@ -337,7 +340,7 @@ class TestSearchInVolume:
 
     def test_search_with_path(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = (
+        mock_docker_client.containers.create.return_value.logs.return_value = (
             b"/mnt/volume/subdir/file.txt:1:found\n"
         )
 
@@ -352,11 +355,11 @@ class TestSearchInVolume:
         `--include` — the old command exited 2 on every real search. The
         default glob needs no filter at all."""
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b""
+        mock_docker_client.containers.create.return_value.logs.return_value = b""
 
         volume_file_ops.search_in_volume(TEST_SETTINGS, TEST_TEAM, "mydata", "key")
 
-        cmd = mock_docker_client.containers.run.call_args.args[1]
+        cmd = mock_docker_client.containers.create.call_args.kwargs["command"]
         assert cmd == [
             "grep",
             "-rnH",
@@ -370,13 +373,13 @@ class TestSearchInVolume:
         """A real filename filter goes through find -name … -exec grep {} + —
         POSIX/busybox primitives only, still a plain exec array (no shell)."""
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b""
+        mock_docker_client.containers.create.return_value.logs.return_value = b""
 
         volume_file_ops.search_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "key", glob="*.conf"
         )
 
-        cmd = mock_docker_client.containers.run.call_args.args[1]
+        cmd = mock_docker_client.containers.create.call_args.kwargs["command"]
         assert cmd == [
             "find",
             volume_file_ops._MOUNT_POINT,
@@ -404,7 +407,9 @@ class TestSearchInVolume:
 class TestDeleteFileInVolume:
     def test_delete_file(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b"DELETED\n"
+        mock_docker_client.containers.create.return_value.logs.return_value = (
+            b"DELETED\n"
+        )
 
         result = volume_file_ops.delete_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "old/data.txt"
@@ -415,7 +420,9 @@ class TestDeleteFileInVolume:
 
     def test_not_found(self, mock_docker_client):
         mock_docker_client.volumes.get.return_value = MagicMock()
-        mock_docker_client.containers.run.return_value = b"NOTFOUND\n"
+        mock_docker_client.containers.create.return_value.logs.return_value = (
+            b"NOTFOUND\n"
+        )
 
         result = volume_file_ops.delete_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "missing.txt"
@@ -456,23 +463,20 @@ class TestDeleteFileInVolume:
 # ---------------------------------------------------------------------------
 
 
-def _docker_py_run(output: bytes):
-    """Mimic docker-py on a daemon whose default log driver is ``local``.
+def _helper_with_logs(output: bytes):
+    def create(**kwargs):
+        assert kwargs["log_config"] == {"type": "json-file"}
+        helper = MagicMock()
+        helper.wait.return_value = {"StatusCode": 0}
+        helper.logs.return_value = output
+        return helper
 
-    ``containers.run()`` returns the output only for containers logging through
-    ``json-file`` or ``journald``; otherwise it returns ``None``.
-    """
-
-    def run(image, command, **kwargs):
-        log_type = (kwargs.get("log_config") or {}).get("type", "local")
-        return output if log_type in ("json-file", "journald") else None
-
-    return run
+    return create
 
 
 class TestNonJsonFileLogDriver:
     def test_read_returns_file_content(self, mock_docker_client):
-        mock_docker_client.containers.run.side_effect = _docker_py_run(
+        mock_docker_client.containers.create.side_effect = _helper_with_logs(
             b"TYPE:FILE\nSIZE:6\nCONTENT_START\nhello\n"
         )
 
@@ -483,7 +487,7 @@ class TestNonJsonFileLogDriver:
         assert result == {"type": "file", "output": "hello\n", "size": 6}
 
     def test_search_reports_real_matches(self, mock_docker_client):
-        mock_docker_client.containers.run.side_effect = _docker_py_run(
+        mock_docker_client.containers.create.side_effect = _helper_with_logs(
             f"{_MOUNT_POINT}/a.conf:1:needle\n".encode()
         )
 
@@ -494,7 +498,9 @@ class TestNonJsonFileLogDriver:
         assert result["output"] == "a.conf:1:needle"
 
     def test_delete_reports_success(self, mock_docker_client):
-        mock_docker_client.containers.run.side_effect = _docker_py_run(b"DELETED\n")
+        mock_docker_client.containers.create.side_effect = _helper_with_logs(
+            b"DELETED\n"
+        )
 
         result = volume_file_ops.delete_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "old.txt"
@@ -503,10 +509,11 @@ class TestNonJsonFileLogDriver:
         assert result == {"path": "old.txt", "status": "deleted"}
 
     def test_helper_containers_are_removed(self, mock_docker_client):
-        mock_docker_client.containers.run.return_value = b"TYPE:NOTFOUND\n"
+        helper = mock_docker_client.containers.create.return_value
+        helper.logs.return_value = b"TYPE:NOTFOUND\n"
 
         volume_file_ops.read_file_in_volume(
             TEST_SETTINGS, TEST_TEAM, "mydata", "missing.txt"
         )
 
-        assert mock_docker_client.containers.run.call_args.kwargs["remove"] is True
+        helper.remove.assert_called_once_with(force=True, v=True)

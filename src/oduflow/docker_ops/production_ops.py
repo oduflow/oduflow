@@ -1387,7 +1387,7 @@ def _cleanup_partial_production(
     try:
         container = _get_container(client, settings, team, name)
         if container is not None:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
     except Exception:
         pass
     db_left = False

@@ -837,7 +837,7 @@ def _run_helper(
     name = f"{settings.prefix}{_HELPER}"
     stale = _container(client, name)
     if stale is not None:
-        stale.remove(force=True)
+        stale.remove(force=True, v=True)
     environment = {}
     if superuser:
         environment["PGPASSWORD"] = settings.db_password
@@ -880,7 +880,7 @@ def _run_helper(
             raise ExternalCommandError(command[0], code, output[-2000:])
     finally:
         with contextlib.suppress(docker.errors.APIError):
-            helper.remove(force=True)
+            helper.remove(force=True, v=True)
 
 
 def _stop_applications(

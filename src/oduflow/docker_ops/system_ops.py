@@ -2817,7 +2817,7 @@ def _convert_dump_in_helper(
         # Before its output is looked at: nothing may still be writing there.
         if helper is not None:
             with contextlib.suppress(Exception):
-                helper.remove(force=True)
+                helper.remove(force=True, v=True)
     if exit_code != 0:
         raise ExternalCommandError("pg_restore", exit_code, output)
     return _take_converted_sql(scratch, out_dir)
@@ -3732,7 +3732,7 @@ def _run_restore_client(
     finally:
         if container is not None:
             with contextlib.suppress(Exception):
-                container.remove(force=True)
+                container.remove(force=True, v=True)
 
 
 def restore_archive_as_role(
@@ -4975,7 +4975,7 @@ def init_template(
 
     try:
         old = client.containers.get(temp_container_name)
-        old.remove(force=True)
+        old.remove(force=True, v=True)
     except docker.errors.NotFound:
         pass
 
