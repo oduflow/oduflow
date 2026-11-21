@@ -1,15 +1,16 @@
 """System recovery, orphan cleanup and the team coder on a disposable engine."""
 
+import io
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import docker
-from oduflow import health
-from oduflow.docker_ops import stats, system_ops
+from oduflow import agent_uploads, health
+from oduflow.docker_ops import env_ops, stats, system_ops
 from oduflow.docker_ops.client import get_client
-from oduflow.naming import get_agent_container_name
+from oduflow.naming import get_agent_container_name, get_agent_upload_dir
 
 pytestmark = pytest.mark.integration
 
@@ -76,3 +77,55 @@ def test_coder_config_drift_preserves_home(live_environment, monkeypatch):
     system_ops.init_system(settings)
     with pytest.raises(docker.errors.NotFound):
         client.containers.get(name)
+
+
+def test_coder_attachment_follows_environment_rename(live_environment):
+    settings, team = live_environment
+    team = replace(
+        team,
+        agent_enabled=True,
+        agent_env=dict.fromkeys(
+            (
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENCODE_API_KEY",
+            ),
+            "",
+        ),
+    )
+    settings = replace(settings, teams={team.team_id: team})
+    system_ops.init_system(settings)
+    env_ops.create_environment(
+        settings,
+        team,
+        "main",
+        "https://github.com/oduist/oduflow_test.git",
+        "odoo:19.0",
+        env_name="old",
+    )
+    coder = get_client().containers.get(
+        get_agent_container_name(team.team_id, settings.prefix)
+    )
+    uid = env_ops.agent_env_uid(coder, team, "old")
+    assert uid is not None
+    payload = b"Read this attachment.\n"
+    item = agent_uploads.store_attachment(
+        settings,
+        team,
+        "old",
+        "notes.txt",
+        "text/plain",
+        io.BytesIO(payload),
+        len(payload),
+    )
+    user = f"{uid}:{uid}"
+    assert coder.exec_run(["cat", item["path"]], user=user) == (0, payload)
+    env_ops.update_environment(settings, team, "old", rename_to="new", pull_image=False)
+    assert env_ops.agent_env_uid(coder, team, "new") == uid
+    moved = f"{get_agent_upload_dir('new')}/{item['id']}/notes.txt"
+    assert coder.exec_run(["cat", moved], user=user) == (0, payload)
+    agent_uploads.delete_attachment(settings, team, "new", item["id"])
+    assert coder.exec_run(["test", "!", "-e", moved], user=user).exit_code == 0
+    env_ops.delete_environment(settings, team, "new")
+    assert coder.exec_run(["getent", "passwd", str(uid)]).exit_code != 0
