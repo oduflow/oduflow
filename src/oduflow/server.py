@@ -4080,13 +4080,14 @@ def run_odoo_command(
 
     The command runs through `sh -c`, so pipes, redirections, `&&`, `cd x && y`,
     `$VAR` and quoting all behave as written — one call, one shell line.
+    The container terminates the command after 60 minutes, even if the client disconnects.
 
     Args:
         env_name: The name of the environment.
         command: The shell command to execute (e.g. "ls /mnt/extra-addons | head", "python3 -c 'print(1)'").
         user: The OS user to run the command as (default "odoo"). Use "root" for privileged operations.
         shell: Run via `sh -c` (default True). Pass False for exact argv semantics —
-            the string is then split on whitespace and executed directly, so `|`, `>`,
+            the string is split into shell-style arguments and executed directly, so `|`, `>`,
             `&&`, `*` and `$VAR` reach the program as literal arguments instead of
             being interpreted.
     """

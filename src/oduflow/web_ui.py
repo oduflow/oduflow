@@ -2728,8 +2728,7 @@ def _build_routes(
                 result["images"] = image_cleanup.list_unused_images()
                 result["build_cache"] = image_cleanup.build_cache_usage()
                 return result
-            # Hold locks in the worker so disconnects cannot unlock live work,
-            # and take them all before deleting anything.
+            # Hold locks in the worker so disconnects cannot unlock live work.
             with contextlib.ExitStack() as stack:
                 if image_ids or build_cache:
                     # One image or build cache cleanup at a time across all
@@ -2737,10 +2736,25 @@ def _build_routes(
                     stack.enter_context(
                         locks.env_lock(image_cleanup_lock_key(), operation="cleanup")
                     )
-                with locks.team_lock(team.team_id, operation="cleanup"):
-                    result = system_ops.cleanup_orphans(
-                        settings, team, dry_run=False, only=orphans
-                    )
+                result: dict[str, Any] = {"dry_run": False}
+                if any(orphans.values()):
+                    # A create may have resources but no container yet. Only
+                    # sweep orphans while no environment operation can race us.
+                    with contextlib.ExitStack() as orphan_stack:
+                        try:
+                            orphan_stack.enter_context(
+                                locks.team_lock(team.team_id, operation="cleanup")
+                            )
+                        except BusyError as exc:
+                            if not (image_ids or build_cache):
+                                raise
+                            result["errors"] = [
+                                f"Orphan cleanup skipped: {exc} Scan again when the team is idle."
+                            ]
+                        else:
+                            result = system_ops.cleanup_orphans(
+                                settings, team, dry_run=False, only=orphans
+                            )
                 result["images"] = (
                     image_cleanup.remove_unused_images(image_ids)
                     if image_ids

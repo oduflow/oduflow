@@ -1220,7 +1220,11 @@ with file paths and line numbers.
 
 Execute an arbitrary shell command inside the Odoo container. The command runs
 through `sh -c`, so pipes, redirections, `&&`, `cd x && y`, `$VAR` and quoting
-all behave as written — one call, one shell line.
+all behave as written — one call, one shell line. After 60 minutes, the
+container sends the command's process group `SIGTERM`, followed by `SIGKILL`
+after five seconds if it is still running. This deadline applies even if the
+client disconnects. It does not cover processes that detach into a separate
+process group. Custom Odoo images need GNU `timeout` on `PATH`.
 
 Lock: environment.
 { .odu-tool-meta }
@@ -1237,7 +1241,7 @@ Lock: environment.
 :   *str · default `"odoo"`* — OS user to run as. Use `"root"` for privileged operations.
 
 `shell`
-:   *bool · default `True`* — Run via `sh -c`. Pass `False` for exact argv semantics: the string is split on whitespace and executed directly, so `|`, `>`, `&&`, `*` and `$VAR` reach the program as literal arguments.
+:   *bool · default `True`* — Run via `sh -c`. Pass `False` for exact argv semantics: the string is split into shell-style arguments and executed directly, so `|`, `>`, `&&`, `*` and `$VAR` reach the program as literal arguments.
 
 **Use it when**
 

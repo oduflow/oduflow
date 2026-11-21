@@ -128,7 +128,7 @@ def test_confirm_without_reviewed_orphans_removes_none(setup):
     client, _, _, cleanup, _, remove = setup
     response = client.post("/api/cleanup", json={"force": True})
     assert response.status_code == 200
-    assert cleanup.call_args.kwargs == {"dry_run": False, "only": {}}
+    cleanup.assert_not_called()
     remove.assert_not_called()
 
 
@@ -232,9 +232,8 @@ def test_build_cache_is_pruned_after_images_under_the_image_lock(setup, cache):
 
 
 def test_build_cache_alone_is_pruned_under_the_image_lock(setup, cache):
-    client, settings, locks, cleanup, scan, remove = setup
+    client, _, locks, cleanup, scan, remove = setup
     usage, prune = cache
-    cleanup.return_value = {"dry_run": False}
 
     def prune_cache():
         with pytest.raises(BusyError):
@@ -242,14 +241,15 @@ def test_build_cache_alone_is_pruned_under_the_image_lock(setup, cache):
         return {"reclaimed_bytes": 400}
 
     prune.side_effect = prune_cache
-    response = client.post("/api/cleanup", json={"force": True, "build_cache": True})
+    with locks.env_lock("building", team_id="2", operation="create_environment"):
+        response = client.post(
+            "/api/cleanup", json={"force": True, "build_cache": True}
+        )
     assert response.status_code == 200
     result = response.json()["result"]
     assert result["build_cache"] == {"reclaimed_bytes": 400}
     assert result["images"] == {"removed": [], "skipped": [], "errors": []}
-    cleanup.assert_called_once_with(
-        settings, settings.teams["2"], dry_run=False, only={}
-    )
+    cleanup.assert_not_called()
     prune.assert_called_once_with()
     remove.assert_not_called()
     scan.assert_not_called()
@@ -279,7 +279,12 @@ def test_build_cache_failure_is_reported_with_the_other_results(setup, cache):
     prune.return_value = {"reclaimed_bytes": 0, "error": "Docker could not remove it."}
     response = client.post(
         "/api/cleanup",
-        json={"force": True, "image_ids": [IMAGE_ID], "build_cache": True},
+        json={
+            "force": True,
+            "orphans": REVIEWED,
+            "image_ids": [IMAGE_ID],
+            "build_cache": True,
+        },
     )
     assert response.status_code == 200
     result = response.json()["result"]
@@ -303,22 +308,34 @@ def test_busy_image_cleanup_keeps_the_build_cache(setup, cache, image_ids):
     prune.assert_not_called()
 
 
-def test_team_busy_does_not_release_another_operations_lock(setup):
+@pytest.mark.parametrize("image_ids", [[], [IMAGE_ID]])
+def test_team_busy_protects_orphans_without_blocking_image_removal(setup, image_ids):
     client, _, locks, cleanup, _, remove = setup
     with locks.env_lock("building", team_id="2", operation="create_environment"):
-        response = client.post("/api/cleanup", json={"force": True})
-        assert response.status_code == 409
-        with pytest.raises(BusyError):
-            locks.acquire_team("2")
+        response = client.post(
+            "/api/cleanup",
+            json={"force": True, "orphans": REVIEWED, "image_ids": image_ids},
+        )
+        if image_ids:
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["images"]["removed"] == image_ids
+            assert not result.get("orphan_databases")
+            assert "Orphan cleanup skipped" in result["errors"][0]
+        else:
+            assert response.status_code == 409
+            remove.assert_not_called()
+        with pytest.raises(BusyError, match="create_environment"):
+            locks.acquire_env("building", team_id="2")
     cleanup.assert_not_called()
-    remove.assert_not_called()
 
 
 def test_failure_is_scrubbed_and_releases_locks(setup):
     client, _, locks, cleanup, _, _ = setup
     cleanup.side_effect = ExternalCommandError("docker", 1, "secret command output")
     response = client.post(
-        "/api/cleanup", json={"force": True, "image_ids": [IMAGE_ID]}
+        "/api/cleanup",
+        json={"force": True, "orphans": REVIEWED, "image_ids": [IMAGE_ID]},
     )
     assert response.status_code == 500
     assert "secret command output" not in response.text

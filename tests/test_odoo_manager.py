@@ -4843,22 +4843,34 @@ class TestRunCommandInEnvironment:
         )
 
         assert container.exec_run.call_args[0][0] == [
+            "timeout",
+            "--verbose",
+            "--kill-after=5s",
+            "60m",
             "sh",
             "-c",
             "ls /mnt/extra-addons | wc -l",
         ]
         assert container.exec_run.call_args.kwargs["user"] == "odoo"
 
-    def test_shell_false_passes_the_raw_command(self, mock_docker_client):
+    def test_shell_false_preserves_quoted_arguments(self, mock_docker_client):
         container = MagicMock()
         container.exec_run.return_value = (0, b"")
         mock_docker_client.containers.get.return_value = container
 
         odoo_ops.run_command_in_environment(
-            TEST_SETTINGS, TEST_TEAM, "main", "odoo --version", shell=False
+            TEST_SETTINGS, TEST_TEAM, "main", "printf '%s' 'a | b'", shell=False
         )
 
-        assert container.exec_run.call_args[0][0] == "odoo --version"
+        assert container.exec_run.call_args[0][0] == [
+            "timeout",
+            "--verbose",
+            "--kill-after=5s",
+            "60m",
+            "printf",
+            "%s",
+            "a | b",
+        ]
 
 
 class TestRunOdooShell:
