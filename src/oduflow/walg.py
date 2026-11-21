@@ -44,9 +44,11 @@ import threading
 import time
 import urllib.request
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+import docker
 from oduflow import branding
 from oduflow.docker_ops.client import run_for_output
 from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
@@ -284,7 +286,9 @@ def write_walg_config(settings: Settings) -> str | None:
     finally:
         if os.path.exists(wrapper_tmp):
             os.unlink(wrapper_tmp)
-    # The directory is shared with postgres; credentials themselves stay 0600.
+    # postgres must traverse both bind mounts even under systemd UMask=0077.
+    # Neither directory needs to be writable by the container user.
+    os.chmod(bin_dir, 0o755)
     os.chmod(conf_dir, 0o755)
     config: dict[str, str] = {
         "WALG_S3_PREFIX": f"s3://{backup.bucket}/{backup.prefix}/walg",
@@ -654,10 +658,16 @@ def prepare_archiving(
 
 
 def _exec_walg(
-    client: Any, settings: Settings, args: list[str], *, timeout: int | None = None
+    client: Any,
+    settings: Settings,
+    args: list[str],
+    *,
+    timeout: int | None = None,
+    container: Any = None,
 ) -> str:
-    """Run wal-g inside the production PG container as the postgres OS user."""
-    container = client.containers.get(settings.prod_db_container)
+    """Run wal-g as postgres, normally inside the production PG container."""
+    if container is None:
+        container = client.containers.get(settings.prod_db_container)
     cmd = [WALG_BIN, "--config", WALG_CONF, *args]
     if timeout is not None:
         # Bound the process inside the container, not just the Docker HTTP
@@ -690,24 +700,51 @@ def backup_push(client: Any, settings: Settings) -> str:
 
 
 def backup_list(
-    client: Any, settings: Settings, *, timeout: int = 30
+    client: Any,
+    settings: Settings,
+    *,
+    timeout: int = 30,
+    allow_restore_helper: bool = False,
 ) -> list[dict[str, Any]]:
     """Parsed ``wal-g backup-list --detail --json`` (empty list when none)."""
-    try:
-        text = _exec_walg(
-            client, settings, ["backup-list", "--detail", "--json"], timeout=timeout
-        )
-    except ExternalCommandError as exc:
-        # No backups yet is not an error condition for status reporting.
-        if "No backups found" not in exc.output:
-            raise
-        text = exc.output
-    text = text.strip()
-    if "No backups found" in text:
-        # v3.0.3's detailed listing checks len(backups) before its storage
-        # error, so it can print this even when ListObjects failed.
-        _exec_walg(client, settings, ["st", "ls"], timeout=timeout)
-        return []
+    with ExitStack() as stack:
+        try:
+            container = client.containers.get(settings.prod_db_container)
+        except docker.errors.NotFound:
+            if not allow_restore_helper:
+                raise
+            # A fresh restore host has no PGDATA. Listing S3 needs only the
+            # configured binary and credentials, not a new database cluster.
+            container = client.containers.create(
+                settings.postgres_image,
+                entrypoint=["sleep", "infinity"],
+                user="postgres",
+                volumes={
+                    bin_host_dir(settings): {"bind": BIN_MOUNT, "mode": "ro"},
+                    conf_host_dir(settings): {"bind": CONF_MOUNT, "mode": "ro"},
+                },
+            )
+            stack.callback(container.remove, force=True, v=True)
+            container.start()
+        try:
+            text = _exec_walg(
+                client,
+                settings,
+                ["backup-list", "--detail", "--json"],
+                timeout=timeout,
+                container=container,
+            )
+        except ExternalCommandError as exc:
+            if "No backups found" not in exc.output:
+                raise
+            text = exc.output
+        text = text.strip()
+        if "No backups found" in text:
+            # Detailed listing can report no backups even if ListObjects failed.
+            _exec_walg(
+                client, settings, ["st", "ls"], timeout=timeout, container=container
+            )
+            return []
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -816,7 +853,7 @@ def _select_pitr_base_backup(client: Any, settings: Settings, target_time: str) 
     best_name = ""
     best_ts: _dt.datetime | None = None
     parsed_any = False
-    for entry in backup_list(client, settings):
+    for entry in backup_list(client, settings, allow_restore_helper=True):
         name = entry.get("backup_name") or entry.get("BackupName") or ""
         ts = _parse_walg_time(
             entry.get("finish_time")
@@ -991,6 +1028,11 @@ def pitr_restore_cluster(
 
     # 3. Recreate the container; PostgreSQL replays WAL and promotes.
     system_labels = {settings.managed_label: "true", settings.system_label: "true"}
+    # The standalone restore CLI does not run init_system on a fresh host.
+    try:
+        client.networks.get(settings.shared_network)
+    except docker.errors.NotFound:
+        client.networks.create(settings.shared_network, labels=system_labels)
     _ensure_prod_pg_container(client, settings, system_labels)
     _wait_pg_ready(
         client,
