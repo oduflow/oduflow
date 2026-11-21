@@ -15,6 +15,41 @@ from oduflow.naming import get_agent_container_name, get_agent_upload_dir
 pytestmark = pytest.mark.integration
 
 
+def test_destroy_then_import_on_same_host_data(live_environment, tmp_path):
+    settings, team = live_environment
+    dump = tmp_path / "seed.sql"
+    dump.write_text(
+        "CREATE TABLE ir_module_module (name text, state text, latest_version text);\n"
+        "INSERT INTO ir_module_module VALUES ('base', 'installed', '19.0.1.0');\n"
+    )
+    system_ops.init_system(settings)
+    system_ops.import_template(settings, team, source=str(dump), template_name="first")
+    old_team_dir = (
+        Path(settings.base_data_dir) / "pg_tablespaces" / f"team_{team.team_id}"
+    )
+    old_inode = old_team_dir.stat().st_ino
+    result = system_ops.destroy_system(settings)
+    system_ops.init_system(settings)
+    imported = system_ops.import_template(
+        settings, team, source=str(dump), template_name="second"
+    )
+    assert imported["dump_reloaded"]
+    assert (
+        system_ops._exec_sql(
+            get_client(),
+            settings,
+            "SELECT latest_version FROM public.ir_module_module WHERE name='base'",
+            db=system_ops.get_template_db_name("second", team.team_id),
+            user=system_ops.get_template_owner_role(team.team_id),
+        ).strip()
+        == "19.0.1.0"
+    )
+    assert old_team_dir.stat().st_ino != old_inode
+    assert (
+        Path(result["preserved_tablespaces"]) / old_team_dir.name
+    ).stat().st_ino == old_inode
+
+
 def test_health_recovery_and_reviewed_cleanup(live_environment):
     settings, team = live_environment
     system_ops.init_system(settings)

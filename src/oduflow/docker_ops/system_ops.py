@@ -6179,6 +6179,19 @@ def destroy_system(settings: Settings) -> dict[str, str]:
     except docker.errors.NotFound:
         pass
 
+    # The catalog is gone, but its tablespaces live on a host bind mount.
+    # Preserve them by rename on that filesystem; the next cluster needs
+    # fresh team directories. A repeated destroy must leave old archives alone.
+    tablespaces = pathlib.Path(_pg_tablespaces_host_dir(settings))
+    archive = None
+    for team in settings.teams.values():
+        directory = tablespaces / f"team_{team.team_id}"
+        if directory.is_dir():
+            if archive is None:
+                archive = tablespaces / f"destroyed-{uuid.uuid4().hex}"
+                archive.mkdir(mode=0o700)
+            directory.rename(archive / directory.name)
+
     # Production PostgreSQL container + volume. The prod tier persists even after
     # the last production is deleted (_prod_infra_required), and it is attached
     # to the shared network, so it must be removed here — both to free its data
@@ -6224,7 +6237,10 @@ def destroy_system(settings: Settings) -> dict[str, str]:
         )
 
     logger.info("System destroyed, removed=%s", removed)
-    return {"status": "destroyed", "removed": ", ".join(removed)}
+    result = {"status": "destroyed", "removed": ", ".join(removed)}
+    if archive is not None:
+        result["preserved_tablespaces"] = str(archive)
+    return result
 
 
 def import_template(
