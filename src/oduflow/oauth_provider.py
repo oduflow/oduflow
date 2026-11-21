@@ -304,14 +304,28 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
         The SDK would otherwise bake the internal placeholder issuer into static
         ``/.well-known/...`` documents. Each team's OAuth flow instead runs on
         its own hostname behind Traefik or another TLS-terminating upstream such
-        as Cloudflare Tunnel. ``/authorize`` and ``/token`` are path-only and
-        need no change.
+        as Cloudflare Tunnel.
         """
         routes = super().get_routes(mcp_path)
         patched: list[Route] = []
         for route in routes:
             if not isinstance(route, Route):
                 patched.append(route)
+            elif route.path == "/authorize" and route.methods is not None:
+                # GET issues a code, so do not run it for Starlette's implicit
+                # HEAD. Match HEAD explicitly or the dashboard mount takes it.
+                route.methods.discard("HEAD")
+                patched.append(route)
+                patched.append(
+                    Route(
+                        route.path,
+                        endpoint=Response(
+                            status_code=405,
+                            headers={"Allow": ", ".join(sorted(route.methods))},
+                        ),
+                        methods=["HEAD"],
+                    )
+                )
             elif route.path.startswith("/.well-known/oauth-authorization-server"):
                 patched.append(
                     Route(
