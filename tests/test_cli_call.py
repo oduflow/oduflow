@@ -126,3 +126,10 @@ def test_run_call_invalid_int_exits_cleanly(monkeypatch, capsys):
     error = capsys.readouterr().err
     assert "max_rows" in error and "int" in error
     assert "notanint" not in error
+
+
+def test_run_call_missing_required_argument(capsys):
+    with pytest.raises(SystemExit) as error:
+        server._run_call(["create_environment"])
+    assert error.value.code == 2
+    assert "Usage: oduflow call create_environment <branch>" in capsys.readouterr().err
