@@ -5064,11 +5064,76 @@ injected into the Odoo environment.
 because an environment cannot depend on an output that exists only after that
 same environment has been created. Resolved values are passed directly to the
 container. They are never written to the Stack state file or printed by
-`plan`.
+`plan`; a service update names the variables that changed, not their values.
 
 Docker can expose container environment values to host administrators through
 `docker inspect`; Stack value sources do not change that existing Docker trust
 boundary. Configure private Git credentials separately with `setup_repo_auth`.
+
+### Sibling service references
+
+A service can refer to another service declared in the same manifest by its
+key under `spec.services`. Oduflow resolves that sibling's internal Docker DNS
+name on the team network at apply time, so the manifest and `.env` never spell
+out the server prefix or team ID:
+
+```yaml
+services:
+  redis:
+    image: redis:7
+    port: 6379
+
+  redis-http:
+    image: hiett/serverless-redis-http:0.0.10
+    port: 8888
+    env:
+      REDIS_HOST:
+        service: redis
+        serviceField: containerName   # oduflow-2-svc-redis on team 2
+
+  app:
+    image: example/app:1
+    port: 3000
+    env:
+      UPSTASH_REDIS_URL:
+        service: redis-http
+        serviceField: containerName
+        format: "http://{value}:80"   # http://oduflow-2-svc-redis-http:80
+```
+
+`containerName` is the only `serviceField` today. It is computed from the server
+prefix, the team ID, and the service key — the name Oduflow gives the
+container — without asking Docker, so `plan` can resolve it before the sibling
+exists and the same unchanged manifest applies to any team on any server.
+
+`format` wraps the name in a fixed string. It must contain exactly one
+`{value}` and no other braces; Oduflow replaces that single placeholder and
+nothing else. It is not a template language: there is no `${...}`, shell, or
+`str.format` expansion, and literal values that happen to contain braces are
+never interpreted.
+
+`stack validate` checks the references before anything is planned:
+
+- the target must be declared under `spec.services`, and a service cannot
+  reference itself;
+- both services must be on the team network: a `hostMode: true` service can
+  neither reference a sibling nor be referenced, because a host-network
+  container does not take part in the team network's DNS;
+- references are accepted only in `spec.services.<name>.env`, not in
+  `spec.environment.env` or `spec.production.env`;
+- references must not form a cycle; the error shows the loop, for example
+  `service reference cycle: services.a -> services.b -> services.a`.
+
+A referenced service is created or updated before the services that consume
+it; services without references between them keep their manifest order. This
+orders configuration, not readiness: a consumer can start before the process
+it points at is listening, so it must retry its connection.
+
+References are by manifest key, so renaming a key is a configuration change for
+its consumers. Changing the server prefix or moving the Stack to another team
+changes the resolved name, and the next `plan` updates only the consuming
+services. Restarting or replacing a referenced service keeps its name and does
+not touch them.
 
 ## Reconciliation and ownership
 
@@ -5092,7 +5157,8 @@ The V1 apply order is:
 3. managed PostgreSQL databases;
 4. the Odoo environment;
 5. text files in volumes;
-6. auxiliary services;
+6. auxiliary services, each after the [services it
+   references](#sibling-service-references), otherwise in manifest order;
 7. missing Odoo modules.
 
 Module installation happens after services so an install hook can connect to a

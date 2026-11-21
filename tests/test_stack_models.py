@@ -9,7 +9,7 @@ from oduflow.stack_loader import (
     load_stack,
     read_stack_file,
 )
-from oduflow.stack_models import Service, ServiceRoute, StackManifest
+from oduflow.stack_models import Service, ServiceRoute, StackManifest, ValueFrom
 
 VALID = """\
 apiVersion: oduflow.dev/v1alpha1
@@ -233,3 +233,286 @@ def test_shipped_json_schema_matches_models():
     shipped = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert shipped == StackManifest.model_json_schema(by_alias=True)
+
+
+SERVICE_REFERENCES = """\
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: inbox
+spec:
+  environment:
+    name: inbox-dev
+    branch: main
+    repoUrl: https://github.com/acme/addons.git
+    odooImage: odoo:18.0
+  services:
+    app:
+      image: example/app:1
+      port: 3000
+      env:
+        UPSTASH_REDIS_URL:
+          service: redis-http
+          serviceField: containerName
+          format: "http://{value}:80"
+    redis-http:
+      image: hiett/serverless-redis-http:0.0.10
+      port: 8888
+      env:
+        REDIS_HOST:
+          service: redis
+          serviceField: containerName
+    redis:
+      image: redis:7
+      port: 8888
+"""
+
+_DEV_TARGET = {
+    "name": "acme-dev",
+    "branch": "main",
+    "repoUrl": "https://github.com/acme/addons.git",
+    "odooImage": "odoo:18.0",
+}
+_PROD_TARGET = {
+    "name": "control",
+    "domain": "example.org",
+    "repoUrl": "https://github.com/acme/app.git",
+    "branch": "production",
+    "odooImage": "odoo:19.0",
+}
+
+
+def _ref(service: str, **extra: str) -> dict[str, str]:
+    return {"service": service, "serviceField": "containerName", **extra}
+
+
+def _svc(env: dict | None = None, **extra: object) -> dict:
+    return {"image": "example/svc:1", "port": 8080, "env": env or {}, **extra}
+
+
+def _stack(services: dict, *, target_env: dict | None = None, production=False):
+    target = dict(_PROD_TARGET if production else _DEV_TARGET, env=target_env or {})
+    return StackManifest.model_validate(
+        {
+            "metadata": {"name": "acme"},
+            "spec": {
+                "production" if production else "environment": target,
+                "services": services,
+            },
+        }
+    )
+
+
+def test_service_references_load_raw_and_formatted(tmp_path):
+    manifest = load_stack(_write(tmp_path, SERVICE_REFERENCES))
+
+    raw = manifest.spec.services["redis-http"].env["REDIS_HOST"]
+    formatted = manifest.spec.services["app"].env["UPSTASH_REDIS_URL"]
+    assert (raw.service, raw.service_field, raw.format) == (
+        "redis",
+        "containerName",
+        None,
+    )
+    assert (formatted.service, formatted.format) == ("redis-http", "http://{value}:80")
+
+
+def test_service_reference_round_trips_through_its_dump():
+    manifest = _stack(
+        {
+            "redis": _svc(),
+            "app": _svc({"REDIS_URL": _ref("redis", format="redis://{value}:6379")}),
+        }
+    )
+
+    dumped = manifest.model_dump(mode="json", by_alias=True)
+
+    assert dumped["spec"]["services"]["app"]["env"]["REDIS_URL"] == {
+        "fromEnv": None,
+        "environmentField": None,
+        "productionField": None,
+        "database": None,
+        "databaseField": None,
+        "service": "redis",
+        "serviceField": "containerName",
+        "format": "redis://{value}:6379",
+    }
+    assert StackManifest.model_validate(dumped) == manifest
+
+
+def test_unset_service_source_keys_are_absent_from_dumps():
+    """Ownership hashes are taken over these dumps; the later-added keys must
+    not appear as nulls in a manifest that does not use them."""
+    manifest = _stack({"svc": _svc({"TOKEN": {"fromEnv": "TOKEN"}})})
+
+    dumped = manifest.spec.services["svc"].env["TOKEN"].model_dump(by_alias=True)
+
+    assert not {"service", "serviceField", "format"} & set(dumped)
+
+
+@pytest.mark.parametrize(
+    "value,message",
+    [
+        ({"service": "redis"}, "service and serviceField must be set together"),
+        ({"serviceField": "containerName"}, "set exactly one of"),
+        ({"fromEnv": "HOST", "format": "{value}"}, "format is only allowed"),
+        ({"service": "redis", "serviceField": "hostname"}, "containerName"),
+        (dict(_ref("redis"), fromEnv="HOST"), "set exactly one of"),
+        (dict(_ref("redis"), port=6379), "Extra inputs are not permitted"),
+    ],
+)
+def test_service_reference_shape_is_strict(value, message):
+    with pytest.raises(ValidationError, match=message):
+        _stack({"redis": _svc(), "app": _svc({"REDIS_HOST": value})})
+
+
+@pytest.mark.parametrize(
+    "template,message",
+    [
+        ("http://redis:80", "exactly one '{value}'"),
+        ("{value}:{value}", "exactly one '{value}'"),
+        ("{value}:{port}", "braces other than '{value}'"),
+        ("{{value}}", "braces other than '{value}'"),
+        ("${value}}", "braces other than '{value}'"),
+        ("{value}\x00", "NUL"),
+    ],
+)
+def test_service_reference_format_is_narrow(template, message):
+    with pytest.raises(ValidationError, match=f"format .*{message}"):
+        _stack(
+            {
+                "redis": _svc(),
+                "app": _svc({"REDIS_URL": _ref("redis", format=template)}),
+            }
+        )
+
+
+def test_value_from_itself_refuses_an_invalid_format():
+    """resolve_env_values trusts the model, so a ValueFrom built
+    programmatically must be refused here, not silently misresolved later."""
+    with pytest.raises(ValidationError, match="format must contain exactly one"):
+        ValueFrom(
+            service="redis", serviceField="containerName", format="redis://host:6379"
+        )
+
+
+def test_service_reference_format_whitespace_is_preserved():
+    """The docs promise a literal one-shot replace, so declared whitespace
+    must survive the model-wide strip_whitespace."""
+    manifest = _stack(
+        {"redis": _svc(), "app": _svc({"URL": _ref("redis", format=" {value} ")})}
+    )
+
+    assert manifest.spec.services["app"].env["URL"].format == " {value} "
+
+
+def test_service_reference_format_is_not_a_template_language():
+    """Shell-looking text around the one placeholder is passed through."""
+    manifest = _stack(
+        {"redis": _svc(), "app": _svc({"URL": _ref("redis", format="$HOME/{value}")})}
+    )
+
+    assert manifest.spec.services["app"].env["URL"].format == "$HOME/{value}"
+
+
+def test_literal_braces_stay_literal_strings():
+    manifest = _stack({"app": _svc({"TEMPLATE": "${REDIS_HOST}:{value}"})})
+
+    assert manifest.spec.services["app"].env["TEMPLATE"] == "${REDIS_HOST}:{value}"
+
+
+def test_service_reference_target_must_be_declared():
+    with pytest.raises(
+        ValidationError,
+        match="service 'app' env 'REDIS_HOST' references undeclared service 'redis'",
+    ):
+        _stack({"app": _svc({"REDIS_HOST": _ref("redis")})})
+
+
+def test_service_cannot_reference_itself():
+    with pytest.raises(
+        ValidationError,
+        match="service 'redis' env 'REDIS_HOST' cannot reference itself",
+    ):
+        _stack({"redis": _svc({"REDIS_HOST": _ref("redis")})})
+
+
+def test_service_reference_rejects_host_mode_target():
+    with pytest.raises(
+        ValidationError,
+        match="service 'app' env 'REDIS_HOST' cannot reference host-mode service 'redis'",
+    ):
+        _stack(
+            {"redis": _svc(hostMode=True), "app": _svc({"REDIS_HOST": _ref("redis")})}
+        )
+
+
+def test_host_mode_service_cannot_reference_a_sibling():
+    with pytest.raises(
+        ValidationError,
+        match="host-mode service 'app' env 'REDIS_HOST' cannot reference",
+    ):
+        _stack(
+            {"redis": _svc(), "app": _svc({"REDIS_HOST": _ref("redis")}, hostMode=True)}
+        )
+
+
+@pytest.mark.parametrize("production", [False, True])
+def test_odoo_target_cannot_reference_a_service(production):
+    kind = "production" if production else "environment"
+    with pytest.raises(
+        ValidationError,
+        match=f"{kind} env 'REDIS_HOST' cannot reference a service; service "
+        "references are only available to auxiliary services",
+    ):
+        _stack(
+            {"redis": _svc()},
+            target_env={"REDIS_HOST": _ref("redis")},
+            production=production,
+        )
+
+
+@pytest.mark.parametrize(
+    "graph,cycle",
+    [
+        ({"a": ["b"], "b": ["a"]}, "services.a -> services.b -> services.a"),
+        (
+            {"a": ["b"], "b": ["c"], "c": ["a"]},
+            "services.a -> services.b -> services.c -> services.a",
+        ),
+        (
+            {"entry": ["a"], "a": ["b"], "b": ["a"]},
+            "services.a -> services.b -> services.a",
+        ),
+    ],
+)
+def test_service_reference_cycle_shows_its_path(graph, cycle):
+    services = {
+        name: _svc({f"{target.upper()}_HOST": _ref(target) for target in targets})
+        for name, targets in graph.items()
+    }
+
+    with pytest.raises(ValidationError, match=f"service reference cycle: {cycle}"):
+        _stack(services)
+
+
+def test_shared_reference_target_is_not_a_cycle():
+    manifest = _stack(
+        {
+            "app": _svc({"CACHE": _ref("redis"), "BRIDGE": _ref("redis-http")}),
+            "redis-http": _svc({"REDIS_HOST": _ref("redis")}),
+            "redis": _svc(),
+        }
+    )
+
+    assert list(manifest.spec.services) == ["app", "redis-http", "redis"]
+
+
+def test_cycle_in_yaml_fails_validation_before_planning(tmp_path):
+    content = SERVICE_REFERENCES.replace(
+        "    redis:\n      image: redis:7\n      port: 8888\n",
+        "    redis:\n      image: redis:7\n      port: 8888\n      env:\n"
+        "        UPSTREAM:\n          service: app\n          serviceField: containerName\n",
+    )
+
+    with pytest.raises(StackValidationError, match="service reference cycle"):
+        load_stack(_write(tmp_path, content))

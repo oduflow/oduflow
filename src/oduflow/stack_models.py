@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import posixpath
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Mapping
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -71,6 +73,31 @@ class Metadata(StackModel):
     name: ResourceName
 
 
+SERVICE_VALUE_PLACEHOLDER = "{value}"
+
+# The docs promise the template is substituted literally ("that single
+# placeholder and nothing else"), so declared whitespace must survive the
+# model-wide strip_whitespace.
+ServiceFormat = Annotated[str, StringConstraints(strip_whitespace=False)]
+
+
+def service_format_error(template: str) -> str | None:
+    """Why a service-reference ``format`` is unusable, or None when it is valid.
+
+    Exactly one literal ``{value}`` and no other braces: the substitution is a
+    plain one-shot replace, so anything resembling a second placeholder or a
+    template expression is refused rather than passed through verbatim.
+    """
+    if template.count(SERVICE_VALUE_PLACEHOLDER) != 1:
+        return f"must contain exactly one '{SERVICE_VALUE_PLACEHOLDER}'"
+    rest = template.replace(SERVICE_VALUE_PLACEHOLDER, "", 1)
+    if "{" in rest or "}" in rest:
+        return f"must not contain braces other than '{SERVICE_VALUE_PLACEHOLDER}'"
+    if "\x00" in template:
+        return "must not contain NUL bytes"
+    return None
+
+
 class ValueFrom(StackModel):
     """A value loaded at apply time rather than persisted in the manifest."""
 
@@ -81,6 +108,9 @@ class ValueFrom(StackModel):
     database_field: (
         Literal["url", "host", "port", "database", "username", "password"] | None
     ) = None
+    service: ResourceName | None = None
+    service_field: Literal["containerName"] | None = None
+    format: ServiceFormat | None = None
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> ValueFrom:
@@ -91,19 +121,45 @@ class ValueFrom(StackModel):
                 self.environment_field,
                 self.production_field,
                 self.database,
+                self.service,
             )
         )
         if sources != 1:
             raise ValueError(
-                "set exactly one of fromEnv, environmentField, productionField, or database"
+                "set exactly one of fromEnv, environmentField, productionField, "
+                "database, or service"
             )
         if (self.database is None) != (self.database_field is None):
             raise ValueError("database and databaseField must be set together")
+        if (self.service is None) != (self.service_field is None):
+            raise ValueError("service and serviceField must be set together")
+        if self.format is not None and self.service is None:
+            raise ValueError("format is only allowed with a service source")
+        if self.format is not None:
+            problem = service_format_error(self.format)
+            if problem:
+                raise ValueError(f"format {problem}")
         if self.from_env is not None and not re.fullmatch(
             r"[A-Za-z_][A-Za-z0-9_]*", self.from_env
         ):
             raise ValueError("fromEnv must be a valid environment-variable name")
         return self
+
+    @model_serializer(mode="wrap")
+    def omit_unset_service_source(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Keep manifests without service references hashing as before.
+
+        Every Stack ownership hash (manifest, service, environment, production)
+        is taken over a dump of these models, so emitting the later-added keys
+        as nulls would report drift on every existing Stack.
+        """
+        data: dict[str, Any] = handler(self)
+        for key in ("service", "serviceField", "service_field", "format"):
+            if key in data and data[key] is None:
+                del data[key]
+        return data
 
 
 EnvValue = str | ValueFrom
@@ -337,6 +393,50 @@ class Service(StackModel):
         return self
 
 
+def service_references(services: Mapping[str, Service]) -> dict[str, list[str]]:
+    """The sibling services each service's env references, in first-use order."""
+    graph: dict[str, list[str]] = {}
+    for name, service in services.items():
+        targets: list[str] = []
+        for value in service.env.values():
+            if (
+                isinstance(value, ValueFrom)
+                and value.service is not None
+                and value.service not in targets
+            ):
+                targets.append(value.service)
+        graph[name] = targets
+    return graph
+
+
+def service_reference_cycle(graph: Mapping[str, list[str]]) -> list[str] | None:
+    """The first reference cycle in manifest order, closed on its start node.
+
+    Iterative so a long (if absurd) reference chain cannot exhaust the
+    interpreter stack during validation.
+    """
+    on_path, finished = 1, 2
+    state: dict[str, int] = {}
+    for root in graph:
+        if root in state:
+            continue
+        state[root] = on_path
+        path = [root]
+        pending = [iter(graph[root])]
+        while pending:
+            target = next(pending[-1], None)
+            if target is None:
+                state[path.pop()] = finished
+                pending.pop()
+            elif state.get(target) == on_path:
+                return path[path.index(target) :] + [target]
+            elif target not in state and target in graph:
+                state[target] = on_path
+                path.append(target)
+                pending.append(iter(graph[target]))
+    return None
+
+
 class StackSpec(StackModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -421,13 +521,49 @@ class StackSpec(StackModel):
                             f"service '{service_name}' env '{key}' references "
                             f"undeclared database '{value.database}'"
                         )
+                if isinstance(value, ValueFrom) and value.service is not None:
+                    self._check_service_reference(service_name, service, key, value)
         for key, value in odoo_target.env.items():
             if isinstance(value, ValueFrom) and value.database is not None:
                 raise ValueError(
                     f"environment env '{key}' cannot reference a managed database; "
                     "database value sources are only available to auxiliary services"
                 )
+            if isinstance(value, ValueFrom) and value.service is not None:
+                target_kind = "environment" if self.environment else "production"
+                raise ValueError(
+                    f"{target_kind} env '{key}' cannot reference a service; "
+                    "service references are only available to auxiliary services"
+                )
+        cycle = service_reference_cycle(service_references(self.services))
+        if cycle:
+            raise ValueError(
+                "service reference cycle: "
+                + " -> ".join(f"services.{name}" for name in cycle)
+            )
         return self
+
+    def _check_service_reference(
+        self, consumer: str, service: Service, key: str, value: ValueFrom
+    ) -> None:
+        assert value.service is not None
+        where = f"service '{consumer}' env '{key}'"
+        target = self.services.get(value.service)
+        if target is None:
+            raise ValueError(f"{where} references undeclared service '{value.service}'")
+        if value.service == consumer:
+            raise ValueError(f"{where} cannot reference itself")
+        # Container names resolve only through the team network's Docker DNS,
+        # which a host-network container neither queries nor joins.
+        if service.host_mode:
+            raise ValueError(
+                f"host-mode {where} cannot reference service '{value.service}'; "
+                "only team-network services can resolve sibling container names"
+            )
+        if target.host_mode:
+            raise ValueError(
+                f"{where} cannot reference host-mode service '{value.service}'"
+            )
 
 
 class StackManifest(StackModel):

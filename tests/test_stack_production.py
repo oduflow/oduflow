@@ -421,6 +421,68 @@ def test_production_field_is_deferred_until_creation(setup):
     ]
 
 
+def test_service_references_order_production_stack_services(setup):
+    from oduflow.stack_models import Service
+
+    settings, team, manifest, _ = setup
+    manifest.spec.services["gateway"] = Service(
+        image="gateway:1",
+        port=8080,
+        env={
+            "ODOO_HOST": ValueFrom(productionField="containerName"),
+            "CACHE_URL": ValueFrom(
+                service="cache",
+                serviceField="containerName",
+                format="redis://{value}:6379",
+            ),
+        },
+    )
+    manifest.spec.services["cache"] = Service(image="redis:7", port=6379)
+
+    def create(_settings, _team, name, **kwargs):
+        metadata = kwargs.pop("stack_metadata")
+        kwargs.pop("template_name")
+        return production_registry.create_production(
+            team, name, {**kwargs, "meta": {"stack": metadata}}
+        )
+
+    created = []
+    with (
+        patch(
+            "oduflow.stack_production.production_ops.create_production",
+            side_effect=create,
+        ),
+        patch("oduflow.stack_production.get_client"),
+        patch(
+            "oduflow.stack_production.production_ops.wait_production_healthy",
+            return_value=True,
+        ),
+        patch(
+            "oduflow.stack_ops.service_ops.create_service",
+            side_effect=lambda _s, _t, name, **kwargs: created.append(
+                (name, kwargs["env_vars"])
+            ),
+        ),
+    ):
+        actions = apply_stack(*setup).actions
+
+    assert [(a.operation, a.resource) for a in actions] == [
+        ("create", "production"),
+        ("create", "services.cache"),
+        ("create", "services.gateway"),
+    ]
+    assert created == [
+        ("cache", None),
+        (
+            "gateway",
+            {
+                "ODOO_HOST": "oduflow-1-prod-control-odoo",
+                "CACHE_URL": "redis://oduflow-1-svc-cache:6379",
+            },
+        ),
+    ]
+
+
 def test_runtime_inspection_detects_effective_drift(setup):
     # Exercise the actual inspector, rather than the orchestration fixture's stub.
     from unittest.mock import Mock

@@ -1,18 +1,35 @@
+from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from oduflow import stack_production
 from oduflow.errors import ConflictError, ExternalCommandError
 from oduflow.settings import Settings, TeamSettings
-from oduflow.stack_loader import StackValidationError, load_stack, resolve_env_values
-from oduflow.stack_models import ServiceDatabase, ServiceRoute, ValueFrom
+from oduflow.stack_loader import (
+    StackValidationError,
+    load_stack,
+    manifest_hash,
+    resolve_env_values,
+)
+from oduflow.stack_models import (
+    ServiceDatabase,
+    ServiceRoute,
+    StackManifest,
+    ValueFrom,
+)
 from oduflow.stack_ops import (
+    STACK_SPEC_HASH_LABEL,
     PlanAction,
     StackPlan,
     _environment_hash_with_sanitize,
+    _environment_labels,
     _file_matches,
     _resource_hash,
+    _service_kwargs,
+    _service_order,
     apply_stack,
     build_plan,
 )
@@ -835,3 +852,404 @@ def test_stack_update_dependency_failure_preserves_actionable_error(stack_fixtur
     service.assert_not_called()
     install.assert_not_called()
     save.assert_not_called()
+
+
+# --- Sibling service references -------------------------------------------
+
+REFERENCES_MANIFEST = """\
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: inbox
+spec:
+  environment:
+    name: inbox-dev
+    branch: main
+    repoUrl: https://github.com/acme/addons.git
+    odooImage: odoo:18.0
+  services:
+    app:
+      image: example/app:1
+      port: 3000
+      env:
+        UPSTASH_REDIS_URL:
+          service: redis-http
+          serviceField: containerName
+          format: "http://{value}:80"
+    mailer:
+      image: example/mailer:1
+      port: 2525
+    redis-http:
+      image: hiett/serverless-redis-http:0.0.10
+      port: 8888
+      env:
+        REDIS_HOST:
+          service: redis
+          serviceField: containerName
+    redis:
+      image: redis:7
+      port: 6379
+    docs:
+      image: example/docs:1
+      port: 8000
+"""
+
+# Targets first, unrelated services in manifest order (mailer before docs).
+REFERENCE_ORDER = ["mailer", "redis", "redis-http", "app", "docs"]
+
+
+@pytest.fixture
+def references(stack_fixture, tmp_path):
+    settings, team, _manifest, _path = stack_fixture
+    path = tmp_path / "references" / "oduflow.yaml"
+    path.parent.mkdir()
+    path.write_text(REFERENCES_MANIFEST, encoding="utf-8")
+    return settings, team, load_stack(path), str(path)
+
+
+def _live_services(settings, team, manifest):
+    """What create_service records for each service of an applied manifest."""
+    live = []
+    for name, desired in manifest.spec.services.items():
+        kwargs = _service_kwargs(settings, team, manifest, name, desired, None)
+        live.append(
+            {
+                "name": name,
+                "image": kwargs["image"],
+                "port": kwargs["port"],
+                "hostname": kwargs["hostname"],
+                "env_vars": dict(kwargs["env_vars"] or {}),
+                "image_env_vars": {},
+                "host_mode": kwargs["host_mode"],
+                "volumes": kwargs["volumes"] or [],
+                "cap_add": kwargs["cap_add"] or [],
+                "privileged": kwargs["privileged"],
+                "routes": kwargs["routes"] or [],
+                "command": kwargs["command"] or [],
+                "runtime": kwargs["runtime"],
+                "stack": manifest.metadata.name,
+                "stack_resource": f"services.{name}",
+                "stack_spec_hash": kwargs["stack_labels"][STACK_SPEC_HASH_LABEL],
+            }
+        )
+    return live
+
+
+def _plan_against(settings, team, manifest, path, live_services):
+    """Plan with the Odoo environment already applied and the given services."""
+    environment = {
+        "env_name": "inbox-dev",
+        "stack": "inbox",
+        "stack_resource": "environment",
+        "repo_url": "https://github.com/acme/addons.git",
+        "git_branch": "main",
+        "template_name": None,
+        "extra_addons": {},
+        "odoo_image": "odoo:18.0",
+        "stack_sanitize": "true",
+    }
+    with ExitStack() as patches:
+        for target, value in (
+            ("oduflow.extra_addons.list_extra_repos", []),
+            ("oduflow.stack_ops.volume_ops.list_volumes", []),
+            ("oduflow.stack_ops.env_ops.list_environments", [environment]),
+            ("oduflow.stack_ops.env_ops.get_environment_info", {"env_vars": {}}),
+            ("oduflow.stack_ops.service_ops.list_services", live_services),
+        ):
+            patches.enter_context(patch(target, return_value=value))
+        return build_plan(settings, team, manifest, path)
+
+
+@pytest.mark.parametrize(
+    "prefix,team_id,service,expected",
+    [
+        ("oduflow-", "1", "redis", "oduflow-1-svc-redis"),
+        ("oduflow-", "2", "redis", "oduflow-2-svc-redis"),
+        ("acme-", "7", "redis", "acme-7-svc-redis"),
+        ("oduflow-", "2", "inbox.cache_1", "oduflow-2-svc-inbox.cache_1"),
+    ],
+)
+def test_service_reference_resolves_to_the_team_container_name(
+    stack_fixture, prefix, team_id, service, expected
+):
+    settings, team, _manifest, _path = stack_fixture
+    value = ValueFrom(service=service, serviceField="containerName")
+
+    # Pure naming: the sibling need not exist, and Docker is never asked.
+    with patch(
+        "oduflow.docker_ops.client.get_client", side_effect=AssertionError("docker")
+    ):
+        resolved = resolve_env_values(
+            {"REDIS_HOST": value},
+            settings=replace(settings, prefix=prefix),
+            team=replace(team, team_id=team_id),
+        )
+
+    assert resolved == {"REDIS_HOST": expected}
+
+
+@pytest.mark.parametrize(
+    "template,expected",
+    [
+        ("redis://{value}:6379", "redis://oduflow-1-svc-redis:6379"),
+        ("http://{value}:80", "http://oduflow-1-svc-redis:80"),
+    ],
+)
+def test_service_reference_format_wraps_the_name_once(
+    stack_fixture, template, expected
+):
+    settings, team, _manifest, _path = stack_fixture
+    value = ValueFrom(service="redis", serviceField="containerName", format=template)
+
+    resolved = resolve_env_values({"URL": value}, settings=settings, team=team)
+
+    assert resolved == {"URL": expected}
+
+
+def test_service_reference_needs_the_server_context():
+    value = ValueFrom(service="redis", serviceField="containerName")
+
+    with pytest.raises(StackValidationError, match="service 'redis'"):
+        resolve_env_values({"REDIS_HOST": value}, environ={})
+
+
+def test_service_order_puts_targets_first_and_keeps_manifest_order(references):
+    _settings, _team, manifest, _path = references
+
+    assert list(manifest.spec.services) == [
+        "app",
+        "mailer",
+        "redis-http",
+        "redis",
+        "docs",
+    ]
+    assert _service_order(manifest.spec.services) == REFERENCE_ORDER
+
+
+@patch("oduflow.extra_addons.list_extra_repos", return_value=[])
+@patch("oduflow.stack_ops.volume_ops.list_volumes", return_value=[])
+@patch("oduflow.stack_ops.env_ops.list_environments", return_value=[])
+@patch("oduflow.stack_ops.service_ops.list_services", return_value=[])
+def test_plan_creates_referenced_services_before_consumers(
+    _services, _envs, _volumes, _repos, references
+):
+    settings, team, manifest, path = references
+
+    plan = build_plan(settings, team, manifest, path)
+
+    assert [(item.operation, item.resource) for item in plan.actions] == [
+        ("create", "environment"),
+        *(("create", f"services.{name}") for name in REFERENCE_ORDER),
+    ]
+
+
+@pytest.mark.parametrize(
+    "prefix,team_id",
+    [("oduflow-", "1"), ("oduflow-", "2"), ("acme-", "1")],
+)
+def test_apply_creates_services_in_reference_order(references, prefix, team_id):
+    settings, team, manifest, path = references
+    settings = replace(settings, prefix=prefix)
+    team = replace(team, team_id=team_id)
+    # Deliberately in YAML order: apply must not depend on the plan's order.
+    plan = StackPlan(
+        "inbox",
+        (
+            PlanAction("create", "environment"),
+            *(
+                PlanAction("create", f"services.{name}")
+                for name in manifest.spec.services
+            ),
+        ),
+    )
+    created = []
+
+    with (
+        patch("oduflow.stack_ops.build_plan", return_value=plan),
+        patch("oduflow.stack_ops.env_ops.create_environment"),
+        patch(
+            "oduflow.stack_ops.service_ops.create_service",
+            side_effect=lambda _s, _t, name, **kwargs: created.append((name, kwargs)),
+        ),
+    ):
+        apply_stack(settings, team, manifest, path)
+
+    assert [name for name, _ in created] == REFERENCE_ORDER
+    env_by_service = {name: kwargs["env_vars"] for name, kwargs in created}
+    assert env_by_service["redis-http"] == {
+        "REDIS_HOST": f"{prefix}{team_id}-svc-redis"
+    }
+    assert env_by_service["app"] == {
+        "UPSTASH_REDIS_URL": f"http://{prefix}{team_id}-svc-redis-http:80"
+    }
+    # Ownership hashes and the state record keep the declarative reference,
+    # so the same manifest carries the same hashes on every team and server.
+    for name, kwargs in created:
+        assert kwargs["stack_labels"][STACK_SPEC_HASH_LABEL] == _resource_hash(
+            manifest.spec.services[name]
+        )
+    state = (Path(team.data_dir) / "stacks/inbox.json").read_text(encoding="utf-8")
+    assert "-svc-" not in state
+
+
+@pytest.mark.parametrize(
+    "prefix,team_id",
+    [("oduflow-", "1"), ("oduflow-", "2"), ("acme-", "1")],
+)
+def test_applied_service_references_report_no_drift(references, prefix, team_id):
+    settings, team, manifest, path = references
+    settings = replace(settings, prefix=prefix)
+    team = replace(team, team_id=team_id)
+    live = _live_services(settings, team, manifest)
+
+    plan = _plan_against(settings, team, manifest, path, live)
+
+    assert plan.actions == ()
+
+
+def test_prefix_change_updates_only_the_consumers(references):
+    settings, team, manifest, path = references
+    live = _live_services(settings, team, manifest)
+
+    plan = _plan_against(replace(settings, prefix="acme-"), team, manifest, path, live)
+
+    assert [(a.operation, a.resource, a.detail) for a in plan.actions] == [
+        ("update", "services.redis-http", "env (REDIS_HOST)"),
+        ("update", "services.app", "env (UPSTASH_REDIS_URL)"),
+    ]
+    assert not any("acme-" in action.detail for action in plan.actions)
+
+
+def test_unreadable_live_env_is_reported_as_bare_env_drift(references):
+    settings, team, manifest, path = references
+    live = _live_services(settings, team, manifest)
+    # A degraded inspect result: the live env cannot be read at all. That is
+    # drift with no attributable key, rendered as plain "env" in the plan.
+    next(item for item in live if item["name"] == "redis")["env_vars"] = None
+
+    plan = _plan_against(settings, team, manifest, path, live)
+
+    assert [(a.operation, a.resource, a.detail) for a in plan.actions] == [
+        ("update", "services.redis", "env"),
+    ]
+
+
+def test_replacing_a_referenced_service_leaves_consumers_alone(references):
+    settings, team, manifest, path = references
+    live = _live_services(settings, team, manifest)
+    manifest.spec.services["redis"].image = "redis:8"
+
+    plan = _plan_against(settings, team, manifest, path, live)
+
+    assert [(a.operation, a.resource, a.detail) for a in plan.actions] == [
+        ("update", "services.redis", "image"),
+    ]
+
+
+def test_unorderable_references_fail_before_any_mutation(references):
+    settings, team, manifest, path = references
+    # Validation rejects cycles at load; a spec mutated afterwards must still
+    # be refused before apply touches anything.
+    manifest.spec.services["redis"].env["UPSTREAM"] = ValueFrom(
+        service="app", serviceField="containerName"
+    )
+
+    with (
+        patch("oduflow.extra_addons.list_extra_repos", return_value=[]),
+        patch("oduflow.stack_ops.volume_ops.list_volumes", return_value=[]),
+        patch("oduflow.stack_ops.env_ops.list_environments", return_value=[]),
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=[]),
+        patch("oduflow.stack_ops.env_ops.create_environment") as create_environment,
+        patch("oduflow.stack_ops.service_ops.create_service") as create_service,
+    ):
+        with pytest.raises(
+            StackValidationError,
+            match=(
+                "cannot be ordered: services.app -> services.redis-http "
+                "-> services.redis -> services.app"
+            ),
+        ):
+            apply_stack(settings, team, manifest, path)
+
+    create_environment.assert_not_called()
+    create_service.assert_not_called()
+    assert not (Path(team.data_dir) / "stacks/inbox.json").exists()
+
+
+def test_existing_manifests_keep_their_hashes():
+    """Digests computed before service references existed. Adding optional
+    ValueFrom keys must not move any of them, or every existing Stack would
+    report drift (and productions would be recreated)."""
+    dev = StackManifest.model_validate(
+        {
+            "metadata": {"name": "legacy"},
+            "spec": {
+                "environment": {
+                    "name": "legacy-dev",
+                    "branch": "main",
+                    "repoUrl": "https://github.com/acme/addons.git",
+                    "odooImage": "odoo:18.0",
+                    "env": {
+                        "LOG_LEVEL": "info",
+                        "API_KEY": {"fromEnv": "ACME_API_KEY"},
+                    },
+                },
+                "databases": {"events": {}},
+                "services": {
+                    "worker": {
+                        "image": "example/worker:1",
+                        "port": 8080,
+                        "env": {
+                            "ODOO_URL": {"environmentField": "url"},
+                            "DATABASE_URL": {
+                                "database": "events",
+                                "databaseField": "url",
+                            },
+                            "SECRET": {"fromEnv": "WORKER_SECRET"},
+                        },
+                    }
+                },
+            },
+        }
+    )
+    prod = StackManifest.model_validate(
+        {
+            "metadata": {"name": "legacy-prod"},
+            "spec": {
+                "production": {
+                    "name": "control",
+                    "domain": "example.org",
+                    "repoUrl": "https://github.com/acme/app.git",
+                    "branch": "production",
+                    "odooImage": "odoo:19.0",
+                    "env": {"MODE": "production", "KEY": {"fromEnv": "CONTROL_KEY"}},
+                },
+                "services": {
+                    "gateway": {
+                        "image": "acme/gateway:1",
+                        "port": 8080,
+                        "env": {"ODOO_HOST": {"productionField": "containerName"}},
+                    }
+                },
+            },
+        }
+    )
+
+    assert manifest_hash(dev) == (
+        "4541a1fac67f25faa0cd36245e5ce1236734c41a7d77b275431354c38d25e7c4"
+    )
+    assert _environment_labels("legacy", dev)[STACK_SPEC_HASH_LABEL] == (
+        "7811f30e643626803931a5d98eacaf9cf140a84508a37ca6bf642830f1600e20"
+    )
+    assert _resource_hash(dev.spec.services["worker"]) == (
+        "f1c9111d4557a21353c16c051bc23bf668b2bd3ab927b4f6b64dd060758c28d7"
+    )
+    assert manifest_hash(prod) == (
+        "7a401b202d301305d0ad88a3589772ac05eb2329487aad7585d02b712e2da7a5"
+    )
+    assert stack_production.spec_hash(prod) == (
+        "576e04b45bb8f8c8674d0edee6ccac0da82cc9e3b244fc836e7ec39f1860711e"
+    )
+    assert _resource_hash(prod.spec.services["gateway"]) == (
+        "b5a0d064f8eb45fcdb163d75b7d24a3410bcaed8cb42941d368b636d51737593"
+    )

@@ -12,7 +12,13 @@ from typing import Any, Mapping
 import yaml
 from pydantic import ValidationError
 
-from oduflow.stack_models import EnvValue, StackManifest, ValueFrom
+from oduflow.naming import get_service_container_name
+from oduflow.stack_models import (
+    SERVICE_VALUE_PLACEHOLDER,
+    EnvValue,
+    StackManifest,
+    ValueFrom,
+)
 
 _MAX_MANIFEST_BYTES = 1_000_000
 _MAX_FILE_BYTES = 1_000_000
@@ -92,7 +98,7 @@ def resolve_env_values(
     production_name: str = "",
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve literal, host-env, Odoo, and database values at apply time."""
+    """Resolve literal, host-env, Odoo, database, and service values at apply time."""
     source_env = os.environ if environ is None else environ
     result: dict[str, str] = {}
     # One lookup per database, not per variable: a full PG* set is six keys
@@ -130,6 +136,23 @@ def resolve_env_values(
                 )
             field = raw.database_field or ""
             result[key] = str(database[field])
+            continue
+        if raw.service is not None:
+            if settings is None or team is None:
+                raise StackValidationError(
+                    f"'{key}' requires the Oduflow prefix and team of service "
+                    f"'{raw.service}'"
+                )
+            # Pure naming, no Docker lookup: the sibling may not exist yet,
+            # and plan must resolve the same value before and after apply.
+            name = get_service_container_name(
+                raw.service, settings.prefix, team.team_id
+            )
+            result[key] = (
+                raw.format.replace(SERVICE_VALUE_PLACEHOLDER, name, 1)
+                if raw.format is not None
+                else name
+            )
             continue
         if raw.production_field is not None:
             if settings is None or team is None or not production_name:
