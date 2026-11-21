@@ -21,9 +21,10 @@ import json
 import logging
 import os
 import re
-import threading
 from collections.abc import Collection
 from urllib.request import Request, urlopen
+
+from oduflow.errors import FlowError
 
 logger = logging.getLogger("oduflow")
 
@@ -141,7 +142,7 @@ def build_payload(
     }
 
 
-def _post(payload: dict[str, object]) -> None:
+def send(payload: dict[str, object]) -> None:
     """POST the payload. Logs the outcome only — never the feedback text."""
     from oduflow.telemetry import SHARED_TOKEN as token
 
@@ -167,16 +168,10 @@ def _post(payload: dict[str, object]) -> None:
                 resp.status,
             )
     except Exception as exc:
-        logger.info(
-            "Agent feedback delivery failed (category=%s): %s",
-            payload.get("category"),
-            type(exc).__name__,
-        )
-
-
-def send(payload: dict[str, object]) -> None:
-    """Deliver the payload in a daemon thread; never blocks the tool call."""
-    threading.Thread(target=_post, args=(payload,), daemon=True).start()
+        # Do not include the endpoint, response body or submitted text.
+        raise FlowError(
+            f"Agent feedback delivery failed ({type(exc).__name__})."
+        ) from None
 
 
 # --- Instruction text injected only while the feature is enabled -------------

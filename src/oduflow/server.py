@@ -2028,6 +2028,9 @@ def submit_agent_feedback(
         )
 
     settings = _get_settings()
+    # Direct CLI calls bypass MCP's tool catalogue, including its enable flag.
+    if not settings.agent_feedback or branding.is_white_label():
+        raise ToolError("Agent feedback is disabled.")
     team = _resolve_team(ctx)
 
     # Identifiers that look like ordinary words and so cannot be caught by a
