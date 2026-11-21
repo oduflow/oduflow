@@ -382,7 +382,10 @@ def test_snapshot_pair_integrity_and_retention(backed_up_settings, repo):
     _attachment(settings, team, PROD, b"snapshot B")
 
 
-def test_cluster_pitr_replays_only_through_target(backed_up_settings, repo):
+@pytest.mark.parametrize("empty_cluster", [False, True], ids=["existing", "empty"])
+def test_cluster_pitr_replays_only_through_target(
+    backed_up_settings, repo, empty_cluster
+):
     settings, team = backed_up_settings
     system_ops.init_system(settings)
     _create(settings, team, repo)
@@ -425,16 +428,29 @@ def test_cluster_pitr_replays_only_through_target(backed_up_settings, repo):
             pytest.fail(f"WAL segment {segment} was not archived (last: {last})")
         time.sleep(1)
 
+    if empty_cluster:
+        # Only the archived cluster can supply the restored data here.
+        prod.stop_production(settings, team, NAME)
+        pg = client.containers.get(settings.prod_db_container)
+        pg.stop()
+        pg.remove(v=True)
+        client.volumes.get(settings.prod_db_volume).remove()
     restored = backup_ops.restore_cluster_pitr(
         settings, LockManager(), target_time=target, confirm="RESTORE-CLUSTER"
     )
-    assert restored["restarted"] == [f"{team.team_id}/{NAME}"]
+    assert restored["restarted"] == (
+        [] if empty_cluster else [f"{team.team_id}/{NAME}"]
+    )
     pg = client.containers.get(settings.prod_db_container)
     data_dir = sql("SHOW data_directory")
     old = f"{data_dir}/{restored['displaced_data_dir']}"
-    assert pg.exec_run(["test", "-s", f"{old}/global/pg_control"]).exit_code == 0
+    assert (pg.exec_run(["test", "-s", f"{old}/global/pg_control"]).exit_code == 0) == (
+        not empty_cluster
+    )
     assert sql("SELECT pg_is_in_recovery()") == "f"
     assert sql("SELECT value FROM live_replay", tenant=True) == "before"
+    if empty_cluster:
+        prod.start_production(settings, team, NAME)
     assert prod.wait_production_healthy(client, settings, team, NAME)
 
 

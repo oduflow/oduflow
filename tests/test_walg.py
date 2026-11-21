@@ -106,6 +106,7 @@ class TestWalgConfig:
             walg.write_walg_config(_settings(tmp_path, BACKUP))
         finally:
             os.umask(previous)
+        assert (tmp_path / "bin").stat().st_mode & 0o111 == 0o111
         assert (tmp_path / "walg").stat().st_mode & 0o777 == 0o755
         assert (
             tmp_path / "walg" / "ca-certificates.crt"
