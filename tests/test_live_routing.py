@@ -77,11 +77,16 @@ def test_same_name_in_two_teams_routes_to_the_right_network(live_environment, tm
             headers = {"Host": "files." + team.hostname}
             deadline = time.monotonic() + 30
             while True:
-                response = web.get("https://127.0.0.1/proof", headers=headers)
-                if response.status_code == 200:
-                    assert response.text == uid + "\n"
-                    break
-                assert time.monotonic() < deadline, response.status_code
+                try:
+                    response = web.get("https://127.0.0.1/proof", headers=headers)
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    if time.monotonic() >= deadline:
+                        raise
+                else:
+                    if response.status_code == 200:
+                        assert response.text == uid + "\n"
+                        break
+                    assert time.monotonic() < deadline, response.status_code
                 time.sleep(0.25)
             redirect = web.get("http://127.0.0.1/proof", headers=headers)
             assert (
