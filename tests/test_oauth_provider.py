@@ -337,6 +337,30 @@ class TestOduflowOAuthProvider:
         # Revocation is enabled so minted tokens can be invalidated at runtime.
         assert "/revoke" in paths
 
+    def test_authorize_rejects_head_without_issuing_code(self):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        provider = OduflowOAuthProvider(_settings())
+        app = Starlette(routes=provider.get_routes("/mcp"))
+        app.mount("/", Starlette())  # The dashboard is mounted here in production.
+        client = TestClient(app)
+        response = client.head(
+            "/authorize",
+            params={
+                "client_id": "team_1",
+                "response_type": "code",
+                "redirect_uri": "http://localhost/callback",
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 405
+        assert set(response.headers["allow"].split(", ")) == {"GET", "POST"}
+        assert not response.content and "location" not in response.headers
+        assert not provider.auth_codes
+
     def test_metadata_via_test_client(self):
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
