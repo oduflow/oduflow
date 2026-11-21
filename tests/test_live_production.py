@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import time
 import zipfile
 from dataclasses import replace
@@ -226,6 +227,75 @@ def _create(settings, team, repo, source=None):
     assert info["commit"] == _git(repo, "rev-parse", "HEAD")
     assert prod.wait_production_healthy(get_client(), settings, team, NAME)
     return info
+
+
+@pytest.mark.parametrize(
+    "command", [("wal", "status"), ("call", "production_wal_status")]
+)
+def test_wal_status_in_fresh_cli(live_environment, tmp_path, command):
+    settings, _ = live_environment
+    settings = replace(settings, prod_enabled=True)
+    config = tmp_path / "oduflow.toml"
+    config.write_text(
+        f'[storage]\ndata_dir = "{settings.base_data_dir}"\n'
+        '[production]\nenabled = true\n[team.1]\nhostname = "wal.example.test"\n'
+        "[server]\ndisable_telemetry = true\n"
+    )
+    client = get_client()
+    pg = client.containers.run(
+        settings.postgres_image,
+        ["postgres", "-c", "archive_mode=on", "-c", "archive_command=false"],
+        name=settings.prod_db_container,
+        environment={"POSTGRES_USER": settings.db_user, "POSTGRES_PASSWORD": "test"},
+        labels={settings.managed_label: "true"},
+        network_disabled=True,
+        detach=True,
+    )
+    try:
+        system_ops._wait_pg_ready(client, settings, container_name=pg.name, timeout=120)
+        code, output = pg.exec_run(
+            [
+                "psql",
+                "-U",
+                settings.db_user,
+                "-d",
+                "postgres",
+                "-Atc",
+                "SELECT pg_create_restore_point('queue_test'); SELECT pg_switch_wal()",
+            ]
+        )
+        assert code == 0, output
+        monitor = wal_monitor.Monitor()
+        monitor.tick(settings, client)
+        assert monitor.latest["ready_bytes"] >= 16 * 1024**2
+        assert monitor.latest["disk_free_bytes"] > 0
+
+        # Only the monitor needs Docker. A reader must not tick (which can stop PG).
+        cli = subprocess.run(
+            [Path(sys.executable).with_name("oduflow"), "--no-telemetry", *command],
+            env={
+                **os.environ,
+                "PYTHONPATH": str(Path(wal_monitor.__file__).resolve().parents[1]),
+                "ODUFLOW_TOML": str(config),
+                "DOCKER_HOST": f"unix://{tmp_path}/no-reader.sock",
+            },
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        assert cli.returncode == 0, cli.stderr
+        result = json.loads(cli.stdout[cli.stdout.index("{") :])
+        assert not result["stale"], result
+        for field in (
+            "ready_count",
+            "ready_bytes",
+            "disk_free_bytes",
+            "archiver",
+            "sampled_at",
+        ):
+            assert result[field] == monitor.latest[field]
+    finally:
+        pg.remove(force=True, v=True)
 
 
 def _attachment(settings, team, env_name, expected, *, write=False):
