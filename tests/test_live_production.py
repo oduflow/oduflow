@@ -15,6 +15,7 @@ import re
 import secrets
 import subprocess
 import time
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,13 +23,22 @@ import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
 import docker
-from oduflow import backup_ops, chunkstore, production_registry, s3_client, walg
+from oduflow import (
+    backup_ops,
+    backup_scheduler,
+    chunkstore,
+    postgres_migration,
+    production_registry,
+    s3_client,
+    wal_monitor,
+    walg,
+)
 from oduflow.docker_ops import env_ops, odoo_ops, system_ops
 from oduflow.docker_ops import production_ops as prod
 from oduflow.docker_ops.client import get_client
-from oduflow.errors import ExternalCommandError
+from oduflow.errors import ExternalCommandError, PrerequisiteNotMetError
 from oduflow.locking import LockManager
-from oduflow.naming import prod_env_name
+from oduflow.naming import get_db_name, prod_env_name
 from oduflow.settings import BackupSettings
 
 pytestmark = pytest.mark.integration
@@ -182,6 +192,20 @@ def backed_up_settings(production_settings, tmp_path, monkeypatch):
                     raise
                 time.sleep(0.5)
         s3.create_bucket(Bucket=backup.bucket)
+        # The filer can list buckets before a data volume accepts writes.
+        # Verify the object path before asking PostgreSQL to enable archiving.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                s3.put_object(Bucket=backup.bucket, Key="ready", Body=b"ready")
+                with s3.get_object(Bucket=backup.bucket, Key="ready")["Body"] as body:
+                    assert body.read() == b"ready"
+                s3.delete_object(Bucket=backup.bucket, Key="ready")
+                break
+            except (EndpointConnectionError, ClientError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.5)
         yield replace(settings, backup=backup), team
     finally:
         container.remove(force=True, v=True)
@@ -377,8 +401,15 @@ def test_cluster_pitr_replays_only_through_target(backed_up_settings, repo):
         ).strip()
 
     sql("CREATE TABLE live_replay (value text PRIMARY KEY)", tenant=True)
-    walg.backup_push(client, settings)
-    assert walg.backup_list(client, settings)
+    locks = LockManager()
+    backup_scheduler.tick(settings, locks)
+    snapshots = backup_ops.list_snapshots(settings, team, NAME, refresh=True)
+    assert [s["trigger"] for s in snapshots] == ["schedule"]
+    bases = walg.backup_list(client, settings)
+    assert len(bases) == 1
+    backup_scheduler.tick(settings, locks)
+    assert backup_ops.list_snapshots(settings, team, NAME, refresh=True) == snapshots
+    assert walg.backup_list(client, settings) == bases
     sql("INSERT INTO live_replay VALUES ('before')", tenant=True)
     target = sql("SELECT clock_timestamp()::text")
     sql("INSERT INTO live_replay VALUES ('after')", tenant=True)
@@ -405,3 +436,130 @@ def test_cluster_pitr_replays_only_through_target(backed_up_settings, repo):
     assert sql("SELECT pg_is_in_recovery()") == "f"
     assert sql("SELECT value FROM live_replay", tenant=True) == "before"
     assert prod.wait_production_healthy(client, settings, team, NAME)
+
+
+def test_pitr_fetch_failure_keeps_original_cluster(backed_up_settings, repo):
+    settings, team = backed_up_settings
+    system_ops.init_system(settings)
+    _create(settings, team, repo)
+    _attachment(settings, team, PROD, b"keep on fetch failure", write=True)
+    # This private bucket has no base backup. Let the real fetch fail after
+    # the helper has mounted PGDATA, then restart from the original files.
+    with pytest.raises(ExternalCommandError, match="backup-fetch"):
+        backup_ops.restore_cluster_pitr(
+            settings, LockManager(), confirm="RESTORE-CLUSTER"
+        )
+    prod.start_production(settings, team, NAME)
+    assert prod.wait_production_healthy(get_client(), settings, team, NAME)
+    _attachment(settings, team, PROD, b"keep on fetch failure")
+    pg = get_client().containers.get(settings.prod_db_container)
+    assert pg.exec_run(
+        ["find", "/var/lib/postgresql/data", "-maxdepth", "1", "-name", ".pitr-*"]
+    ) == (0, b"")
+
+
+def test_wal_disk_guard_stops_and_releases_cluster(backed_up_settings, repo):
+    settings, team = backed_up_settings
+    system_ops.init_system(settings)
+    info = _create(settings, team, repo)
+    client = get_client()
+    monitor = wal_monitor.Monitor()
+    # Raise the reserve above total capacity rather than filling the host disk.
+    total = wal_monitor.sample_local(client, settings)["disk_total_bytes"] / 2**30
+    monitor.tick(replace(settings, wal_stop_free_gb=total + 1), client)
+    assert wal_monitor.state(settings)["latched"]
+    pg = client.containers.get(settings.prod_db_container)
+    app = client.containers.get(info["odoo_container"])
+    assert pg.status == app.status == "exited"
+    assert app.attrs["HostConfig"]["RestartPolicy"]["Name"] == "no"
+    wal_monitor.control(settings, client, "recover", "ALL-PRODUCTIONS")
+    deadline = time.monotonic() + settings.wal_upload_timeout + 75
+    while True:
+        try:
+            wal_monitor.control(settings, client, "release", "ALL-PRODUCTIONS")
+            break
+        except PrerequisiteNotMetError as exc:
+            if "archiving progress" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+    app.reload()
+    assert not wal_monitor.state(settings)["latched"] and app.status == "exited"
+    assert app.attrs["HostConfig"]["RestartPolicy"]["Name"] == "unless-stopped"
+    prod.start_production(settings, team, NAME)
+    assert prod.wait_production_healthy(client, settings, team, NAME)
+
+
+def test_shared_pg_upgrade_preserves_production(production_settings, repo):
+    settings, team = production_settings
+    before = replace(
+        settings, postgres_image="postgres:16", postgres_image_explicit=True
+    )
+    after = replace(before, postgres_image="postgres:17")
+    system_ops.init_system(before)
+    info = _create(before, team, repo)
+    _attachment(before, team, PROD, b"through major upgrade", write=True)
+    postgres_migration.preflight(after)
+    postgres_migration.upgrade(after)
+    client = get_client()
+    for name in (after.prod_db_container, after.shared_db_container):
+        version = system_ops._exec_sql(
+            client, after, "SHOW server_version_num", container_name=name
+        )
+        assert int(version.strip()) // 10000 == 17
+    assert prod.wait_production_healthy(client, after, team, NAME)
+    assert prod.get_production_info(after, team, NAME)["commit"] == info["commit"]
+    _attachment(after, team, PROD, b"through major upgrade")
+
+
+def test_s3_template_import_archive_and_prefix(backed_up_settings, repo, tmp_path):
+    settings, team = backed_up_settings
+    settings = replace(settings, prod_enabled=False)
+    system_ops.init_system(settings)
+    env_ops.create_environment(
+        settings, team, "main", repo.as_uri(), IMAGE, env_name="seed"
+    )
+    _attachment(settings, team, "seed", b"remote template", write=True)
+    system_ops.publish_env_as_template(settings, team, "seed", "exported")
+    backup = settings.backup
+    s3 = s3_client.make_client(backup)
+    root = Path(team.get_template_filestore_path("exported"))
+    pg = get_client().containers.get(settings.shared_db_container)
+    rc, (dump, log) = pg.exec_run(
+        [
+            "pg_dump",
+            "--no-owner",
+            "--no-acl",
+            "-U",
+            settings.db_user,
+            get_db_name("seed", team.team_id),
+        ],
+        demux=True,
+    )
+    assert rc == 0, log
+    s3.put_object(Bucket=backup.bucket, Key="raw/dump.sql", Body=dump)
+    archive = tmp_path / "export.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as out:
+        out.writestr("dump.sql", dump)
+        for path in root.rglob("*"):
+            if path.is_file():
+                name = "filestore/" + path.relative_to(root).as_posix()
+                out.write(path, name)
+                s3.upload_file(str(path), backup.bucket, "raw/" + name)
+    s3.upload_file(str(archive), backup.bucket, "export.zip")
+    for key, name in (("export.zip", "archive"), ("raw", "prefix")):
+        source = f"s3://{backup.bucket}/{key}"
+        params = dict(source=source, template_name=name, s3_endpoint=backup.endpoint)
+        imported = system_ops.import_template(settings, team, **params)
+        assert imported["dump_reloaded"] and imported["includes_filestore"]
+        env_ops.create_environment(
+            settings,
+            team,
+            "main",
+            repo.as_uri(),
+            IMAGE,
+            env_name=name,
+            template_name=name,
+        )
+        _attachment(settings, team, name, b"remote template")
+        again = system_ops.import_template(settings, team, overwrite=True, **params)
+        assert not again["dump_reloaded"] and again["downloaded_files"] == 0
