@@ -49,6 +49,10 @@ _HTTP_ROUTES_LABEL = "oduflow.http_routes"
 # reference. Lives on the container (not only in the preset) so read surfaces
 # keep showing the reference even if the preset is deleted.
 _SECRET_ENV_LABEL = "oduflow.secret_env"
+# Sorted JSON list of system-looking keys (HOSTNAME, PATH, ...) the operator
+# configured explicitly. Read surfaces hide those keys as image noise unless
+# they appear here, so a declared HOSTNAME stays visible and comparable.
+_CONFIGURED_SYSTEM_ENV_LABEL = "oduflow.system_env"
 
 _SYSTEM_ENV_KEYS = {
     "PATH",
@@ -467,6 +471,9 @@ def create_service(
     }
     if secret_env:
         labels[_SECRET_ENV_LABEL] = json.dumps(secret_env, sort_keys=True)
+    configured_system_env = sorted(set(env_vars or {}) & _SYSTEM_ENV_KEYS)
+    if configured_system_env:
+        labels[_CONFIGURED_SYSTEM_ENV_LABEL] = json.dumps(configured_system_env)
     if runtime:
         labels[RUNTIME_LABEL] = json.dumps(runtime, sort_keys=True)
     if stack_labels:
@@ -955,6 +962,20 @@ def _secret_env_refs(container: Any) -> dict[str, str]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _configured_system_env_keys(container: Any) -> set[str]:
+    """System-looking env keys the operator set explicitly at creation time."""
+    raw = (container.labels or {}).get(_CONFIGURED_SYSTEM_ENV_LABEL, "")
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(parsed, list):
+        return set()
+    return {key for key in parsed if isinstance(key, str)}
+
+
 def _raw_container_env(container: Any) -> dict[str, str]:
     """Config.Env of a container as a dict — the values it actually runs with."""
     return container_env(container)
@@ -982,15 +1003,18 @@ def _image_env_vars(container: Any) -> dict[str, str]:
 def _container_env_vars(container: Any) -> dict[str, str]:
     """Env of a service container without the keys every image sets anyway.
 
+    A system-looking key (HOSTNAME, PATH, ...) is kept when the operator set it
+    explicitly, so a declared value is visible and a Stack can compare it.
     Keys configured as secret references come back as the reference, not the
     resolved value the container actually runs with: every read surface built
     on container inspection (get_service_info, list_services, the legacy
     no-preset update path) must never expose a secret value.
     """
+    configured_system = _configured_system_env_keys(container)
     env_vars = {
         key: value
         for key, value in _raw_container_env(container).items()
-        if key not in _SYSTEM_ENV_KEYS
+        if key not in _SYSTEM_ENV_KEYS or key in configured_system
     }
     for key, ref in _secret_env_refs(container).items():
         if key in env_vars:
