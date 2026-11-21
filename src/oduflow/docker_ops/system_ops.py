@@ -1394,6 +1394,9 @@ def _prod_shared_devices(client: DockerClient, settings: Settings) -> set[int] |
         mountpoint = attrs.get("Mountpoint", "")
         if isinstance(mountpoint, str) and mountpoint and os.path.isdir(mountpoint):
             return {os.stat(mountpoint).st_dev}
+    except docker.errors.NotFound:
+        # Dev can be provisioned before prod PG. Keep the conservative reserve.
+        return None
     except Exception:
         logger.warning("Could not locate production DB volume device", exc_info=True)
     return None

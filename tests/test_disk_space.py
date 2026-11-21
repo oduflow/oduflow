@@ -14,6 +14,7 @@ of the disk size rather than of current free space.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import namedtuple
 from contextlib import nullcontext
@@ -21,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import docker
 from oduflow.docker_ops import system_ops
 from oduflow.docker_ops.system_ops import (
     _CLONE_BUDGET_BYTES,
@@ -153,6 +155,28 @@ def test_reserve_is_capped_on_large_disks():
     assert _reserve_bytes(60 * GB) == 5 * GB  # 5% = 3 GB, floor wins
     assert _reserve_bytes(100 * GB) == 5 * GB  # 5% = floor
     assert _reserve_bytes(1000 * GB) == 10 * GB  # 5% = 50 GB, cap wins
+
+
+@pytest.mark.parametrize(
+    "error,warning",
+    [
+        (docker.errors.NotFound("no such volume"), False),
+        (docker.errors.APIError("daemon error"), True),
+    ],
+)
+def test_prod_volume_lookup_failure_keeps_full_reserve(
+    tmp_path, caplog, error, warning
+):
+    settings, _ = _make_env(tmp_path, prod_enabled=True)
+    client = MagicMock()
+    client.volumes.get.side_effect = error
+    with caplog.at_level(logging.WARNING, logger="oduflow"):
+        assert system_ops._prod_shared_devices(client, settings) is None
+    if warning:
+        (record,) = caplog.records
+        assert record.exc_info and record.exc_info[1] is error
+    else:
+        assert not caplog.records
 
 
 # --- check_disk_space ------------------------------------------------------

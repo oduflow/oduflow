@@ -1,14 +1,18 @@
 """Real Odoo development and snapshot workflows on the enrolled Docker engine."""
 
 import base64
+import logging
 import re
 import shutil
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+import docker
 from oduflow.docker_ops import env_ops, odoo_ops, odoo_rpc, system_ops
+from oduflow.docker_ops.client import get_client
 from oduflow.errors import ConflictError, NotFoundError, ProtectedError
 
 pytestmark = pytest.mark.integration
@@ -80,6 +84,20 @@ def _attachment(settings, team, name, attachment_id):
         "Expected file-backed attachment, not database storage"
     )
     return base64.b64decode(record["datas"]), record["store_fname"]
+
+
+def test_create_before_production_volume_exists(local_checkout, caplog):
+    isolated, team, checkout = local_checkout
+    # Production is enabled for admission control, but only dev PG is provisioned.
+    settings = replace(isolated, prod_enabled=True)
+    with closing(get_client()) as client, pytest.raises(docker.errors.NotFound):
+        client.volumes.get(settings.prod_db_volume)
+
+    env = (settings, team, "first-dev")
+    with caplog.at_level(logging.WARNING, logger="oduflow"):
+        _create(*env, checkout)
+    assert env_ops.wait_for_odoo_ready(*env)
+    assert settings.prod_db_volume not in caplog.text
 
 
 def test_live_mount_install_test_and_upgrade(local_checkout):
