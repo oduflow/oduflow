@@ -144,11 +144,11 @@ also_copy = ["src/oduflow/templates", "docker"]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 norecursedirs = ["src"]
-# Docker-backed tests are opt-in (`-m integration`, `-m heavyweight`): they create
+# Docker-backed tests also require --run-live-docker and engine enrollment: they create
 # and destroy real containers, and a bare `pytest` on a developer machine must not
 # touch the Oduflow server running there.
 addopts = "-m 'not integration and not heavyweight'"
 markers = [
     "integration: integration tests against live Docker (may be slow)",
-    "heavyweight: slow tests (init/destroy/create/delete env) — run with pytest -m heavyweight",
+    "heavyweight: slow integration tests (init/destroy/create/delete env)",
 ]

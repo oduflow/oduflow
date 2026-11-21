@@ -256,3 +256,16 @@ explicit preview/apply boundary because several PostgreSQL settings require a
 restart and operator-authored configs must never be silently replaced. Applying
 the plan also stages regenerated worker settings in existing production Odoo
 containers, while leaving every restart under operator control.
+
+## Running destructive Docker tests
+
+`pytest` runs the unit suite without Docker. For integration tests, provision a disposable Linux host with its own Docker Engine, Docker CLI and buildx, Git, and free ports 80 and 51000–51100. Run pytest inside that host: Docker bind mounts and temporary directories must refer to the same filesystem. Do not enroll a shared or production daemon. Tests create and destroy real databases, containers, networks, and volumes.
+
+After confirming this is the disposable host, enroll its **local** engine once as an administrator:
+
+```sh
+sudo install -d -m 0755 /etc/oduflow-test
+docker --host unix:///var/run/docker.sock info --format '{{.ID}}' | sudo tee /etc/oduflow-test/engine-id
+```
+
+With the project's test dependencies installed, run `pytest --run-live-docker -m integration` **serially**. `-m heavyweight` selects just the heavyweight subset. Collection is safe without enrollment: `pytest --collect-only -m integration`. Before fixture setup, pytest requires both the explicit flag and an engine ID matching the Docker SDK and CLI. Replacing the daemon invalidates enrollment; remove `/etc/oduflow-test/engine-id` to revoke it.

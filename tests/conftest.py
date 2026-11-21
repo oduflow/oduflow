@@ -127,6 +127,8 @@ def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
     )
     settings = Settings(
         routing_mode="port",
+        disable_telemetry=True,
+        etc_dir=tmp_dir,
         db_user="odoo",
         db_password="odoo",
         prefix=f"{_TEST_PREFIX}{suffix}-",
@@ -149,18 +151,21 @@ def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
 
 def _cleanup_test_resources(settings: Settings, team: TeamSettings) -> None:
     """Remove all test containers and system resources."""
-    try:
-        for env in env_ops.list_environments(settings, team):
-            try:
-                env_ops.delete_environment(settings, team, env["env_name"])
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        system_ops.destroy_system(settings)
-    except Exception:
-        pass
+    for env in env_ops.list_environments(settings, team):
+        env_ops.delete_environment(settings, team, env["env_name"])
+    system_ops.destroy_system(settings)
+    client = get_client()
+    filters = {"label": f"{settings.managed_label}=true"}
+    remaining = [
+        resource.name
+        for group in (
+            client.containers.list(all=True, filters=filters),
+            client.volumes.list(filters=filters),
+            client.networks.list(filters=filters),
+        )
+        for resource in group
+    ]
+    assert not remaining, f"Docker resources survived teardown: {remaining}"
 
 
 def _create_main_environment(settings: Settings, team: TeamSettings) -> None:

@@ -10,7 +10,7 @@
 #
 # Usage:
 #   CLI:    flow call <tool_name> [args...]
-#   pytest: pytest tests/test_integration.py -m integration
+#   pytest: pytest --run-live-docker tests/test_integration.py -m integration
 ##
 
 scenarios:
@@ -64,8 +64,11 @@ scenarios:
 
   list_envs:
     tool: list_environments
+    needs_env: true
     args: {}
-    expect_contains: []
+    expect_contains:
+      - "19.0 (Status: running)"
+      - "Git Branch: main"
 
   # ── PostgreSQL storage for auxiliary services ───────────────────
   create_service_database:
@@ -140,7 +143,8 @@ scenarios:
     args:
       env_name: "19.0"
       n_lines: 50
-    expect_contains: []
+    expect_contains:
+      - "Odoo version 19.0"
 
   # Mints a real Odoo session in the live container and checks the cookie
   # payload comes back — the passwordless "Connect as user" (issue #78). Runs
@@ -161,9 +165,11 @@ scenarios:
     needs_env: true
     args:
       env_name: "19.0"
-      modules: "sale"
+      modules: "base"
+      test_tags: "/base:TestMergeSequences.test_merge_sequences"
+      summary_only: true
     expect_contains:
-      - "Test Results"
+      - "0 failed, 0 error(s) of 1 test"
 
   install_modules:
     tool: install_odoo_modules
