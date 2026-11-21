@@ -138,6 +138,26 @@ scheduled backup work runs only while `[production].enabled = true`.
 
 ## History
 
+- 2026-11-19 — a production's container is never created with the cluster
+  superuser's login. `reconfigure_production` treats a missing credentials
+  file (or a container an older version recreated as the superuser) as
+  drift and provisions the production's role during the container swap,
+  with Odoo stopped; on failure the old container is put back. Rationale in
+  [[0013-per-environment-db-credentials-and-sanitization]].
+- 2026-11-19 — a production's data is dumped by the production's own
+  PostgreSQL role as well: snapshots and `save_production_as_template` run
+  `pg_dump` as it, next to PostgreSQL, and the database a production is
+  seeded from is dumped by its own role. A production whose role is gone is
+  refused; a lost credentials file alone does not stop a snapshot, since a
+  dump needs the role's name only. Rationale in
+  [[0013-per-environment-db-credentials-and-sanitization]].
+- 2026-11-19 — a production's data is loaded by the production's own
+  PostgreSQL role, never by the cluster superuser: seeding
+  (`template_name`, `from_environment`) and both forms of
+  `restore_production` restore from a throwaway client container into a
+  database that role owns, so the role is created before the seed.
+  Content that needs a superuser (an untrusted extension) no longer loads.
+  Rationale in [[0013-per-environment-db-credentials-and-sanitization]].
 - 2026-10-14 — the repo `.oduflow/odoo.prod.conf` was dropped from the
   production conf chain: anyone who can push to the deployed branch could
   otherwise tune the production server. Operator-only per-production

@@ -160,8 +160,11 @@ For anything the simple `host → url` form can't express — middleware, header
 rewrites, custom TLS options, sticky sessions, multiple services — Oduflow
 mounts a **dynamic-config directory** that Traefik watches:
 
-- On the host it is `<config-dir>/traefik-dynamic/` — `/etc/oduflow/traefik-dynamic/`
-  when writable, otherwise `~/.oduflow/conf/traefik-dynamic/`.
+- On the host it is `<config-dir>/traefik-dynamic/` — the config dir is the
+  directory of the loaded `oduflow.toml` (`/etc/oduflow` or `~/.oduflow/conf`)
+  unless `[storage].etc_dir` says otherwise. When Oduflow itself runs in Docker
+  that directory must be a host path mounted at the same path inside the
+  container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)).
 - Oduflow writes and overwrites only `oduflow.yml` there (its own routers). Any
   **other** `*.yml`/`*.yaml`/`*.toml` file you place in that directory is loaded
   by Traefik and **never touched by Oduflow** — it survives restarts and

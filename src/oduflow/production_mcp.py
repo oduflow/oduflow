@@ -420,7 +420,6 @@ def _shell(
         prod_env_name(name),
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     uid, gid = map(

@@ -1985,6 +1985,20 @@
     </div>
   </div>
 </div>
+<div class="modal-overlay" id="svc-shell-modal" onclick="closeServiceShell(event)">
+  <div class="modal modal-terminal">
+    <div class="modal-header">
+      <h2 id="svc-shell-title">Shell</h2>
+      <div class="modal-header-actions">
+        <button class="modal-min" onclick="minimizePanel('svc-shell-modal')" aria-label="Minimize" title="Minimize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 18h12"/></svg></button>
+        <button class="modal-close" onclick="closeServiceShell()" aria-label="Close" title="Close and end the session">&times;</button>
+      </div>
+    </div>
+    <div class="modal-body" style="flex:1; padding:0; overflow:hidden;">
+      <div id="svc-shell-terminal" style="height:100%;"></div>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="agent-modal" onclick="closeAgentConsole(event)">
   <div class="modal modal-terminal">
     <div class="modal-header">
@@ -2568,13 +2582,17 @@
       <button class="modal-close" id="cleanup-close" aria-label="Close" onclick="closeCleanupModal()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">Orphaned resources belong to this team. Docker images are shared across the server.</p>
+      <p class="modal-note">Orphaned resources belong to this team. Docker images and the build cache are shared across the server.</p>
       <pre id="cleanup-output" tabindex="-1" aria-live="polite"></pre>
       <div class="form-group check-row">
         <input type="checkbox" id="cleanup-images" onchange="updateCleanupConfirm()" disabled>
         <label for="cleanup-images">Remove unused Docker images</label>
       </div>
-      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed.</p>
+      <div class="form-group check-row">
+        <input type="checkbox" id="cleanup-build-cache" onchange="updateCleanupConfirm()" disabled>
+        <label for="cleanup-build-cache">Remove Docker build cache (shared by all teams)</label>
+      </div>
+      <p class="modal-note">Images used by running or stopped containers, base images of other images, image build staging images and images requested by an operation in the last 6 hours are kept. Image sizes include shared layers; their sum is not the space that will be freed. Build cache in use by a running build is kept; the next build of each image runs without cache.</p>
       <div class="form-actions">
         <button class="btn" id="cleanup-cancel" onclick="closeCleanupModal()">Cancel</button>
         <button class="btn" id="cleanup-scan" onclick="scanCleanup()">Scan again</button>
@@ -2734,7 +2752,10 @@
       <button class="modal-close" onclick="closeShare()">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As and Agent Chat. Other team environments and team-wide pages are unavailable, as is Agent CLI. Important: Agent Chat runs in the team's shared coder container, so the agent may read other team checkouts and Git credentials available there. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
+      <!-- This security disclosure is duplicated in docs/security.md
+           ("Scoped environment sharing"), docs/web-api.md and
+           specs/0055-scoped-environment-ui-sharing.md — keep them in sync. -->
+      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As, Agent Chat and Agent CLI. Other team environments and team-wide pages are unavailable. Agent Chat and Agent CLI run as this environment's own user in the team's coder container, so they cannot reach other environments' checkouts or conversations. Important: they still use the team's Git credentials and deploy key, the team-wide agent provider keys, any agent login made in this environment and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
       <div class="form-group" id="share-link-group">
         <label for="share-url">Share link</label>
         <div class="copy-row">
@@ -3124,6 +3145,10 @@ let containerStatsMap = {};
 // per-card refresh button (walking a filestore is too slow for the poll loop).
 let envStorageMap = {};
 let storageRefreshing = {};
+// Same for productions (DB lives on the production cluster, filestore is a
+// plain directory in the prod workspace).
+let prodStorageMap = {};
+let prodStorageRefreshing = {};
 let cachedTemplates = [];
 let cachedEnvs = [];
 let cachedServices = [];
@@ -3186,17 +3211,168 @@ function hideModal(id) {
   if (prev && document.contains(prev)) prev.focus();
 }
 
+// --- PTY terminals: one registry for every xterm + WebSocket window ---
+// Each entry is keyed by its overlay id and describes one singleton terminal.
+// MIN_ICONS, restorePanel, the resize handler, MODAL_CLOSERS and the Escape
+// check all derive from this registry, and openPtyTerminal / closePtyTerminal
+// drive every entry, so a new terminal is one entry plus its overlay markup.
+//   termId / titleId  ids of the xterm mount point and the header <h2>
+//   icon              dock chip icon shown while the window is minimized
+//   title(p)          header text for the session opened with params `p`
+//   banner(p)         text after "# <brand> " on the terminal's first line
+//   wsPath(p)         WebSocket path, including any query string
+var _PTY_ICON_SHELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8"/></svg>';
+var PTY_TERMINALS = {
+  // Shell inside the Odoo container of an environment.
+  'console-modal': {
+    termId: 'console-terminal',
+    titleId: 'console-title',
+    icon: _PTY_ICON_SHELL,
+    title: function(p) { return 'Console — ' + p.branch; },
+    banner: function(p) { return 'console — ' + p.branch; },
+    wsPath: function(p) { return '/api/environments/' + encodeURIComponent(p.branch) + '/terminal'; }
+  },
+  // psql session on the environment database.
+  'sql-modal': {
+    termId: 'sql-terminal',
+    titleId: 'sql-title',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
+    title: function(p) { return 'SQL — ' + p.branch; },
+    banner: function(p) { return 'sql — ' + p.branch; },
+    wsPath: function(p) { return '/api/environments/' + encodeURIComponent(p.branch) + '/sql'; }
+  },
+  // `sh` inside a service container — the dashboard's `docker exec -it <container> sh`.
+  'svc-shell-modal': {
+    termId: 'svc-shell-terminal',
+    titleId: 'svc-shell-title',
+    icon: _PTY_ICON_SHELL,
+    title: function(p) { return 'Shell — ' + p.name; },
+    banner: function(p) { return 'shell — ' + p.name; },
+    wsPath: function(p) { return '/api/services/' + encodeURIComponent(p.name) + '/shell'; }
+  },
+  // Coding-agent CLI for an environment; `p.type` picks the agent.
+  'agent-modal': {
+    termId: 'agent-terminal',
+    titleId: 'agent-title',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M12 3v4M8 13h.01M16 13h.01"/></svg>',
+    title: function(p) { return 'Agent · ' + p.label + ' — ' + p.branch; },
+    banner: function(p) { return 'agent (' + p.label + ') — ' + p.branch; },
+    wsPath: function(p) {
+      return '/api/environments/' + encodeURIComponent(p.branch) + '/agent?type=' + encodeURIComponent(p.type);
+    }
+  }
+};
+// Live session per terminal. `seq` is bumped by every open and close, so an
+// open that was superseded while the xterm assets loaded gives up.
+var _ptyState = {};
+Object.keys(PTY_TERMINALS).forEach(function(id) {
+  _ptyState[id] = { ws: null, term: null, fitAddon: null, seq: 0 };
+});
+
+function teardownPtyTerminal(modalId) {
+  var st = _ptyState[modalId];
+  st.seq++;
+  if (st.ws) {
+    // Its terminal is disposed right below: nothing is left to report to.
+    st.ws.onopen = st.ws.onmessage = st.ws.onclose = st.ws.onerror = null;
+    st.ws.close();
+    st.ws = null;
+  }
+  if (st.term) { st.term.dispose(); st.term = null; }
+  st.fitAddon = null;
+}
+
+async function openPtyTerminal(modalId, params) {
+  var spec = PTY_TERMINALS[modalId];
+  var st = _ptyState[modalId];
+  // Reopening replaces any live/minimized session for this singleton overlay.
+  teardownPtyTerminal(modalId);
+  _dropChip(modalId);
+  var seq = st.seq;
+  try {
+    await ensureXterm();
+  } catch (e) {
+    showToast('Failed to load terminal assets: ' + e.message, true);
+    return;
+  }
+  // A second click (or a close) while the terminal assets were loading
+  // supersedes this open; going on would orphan a connected shell.
+  if (seq !== st.seq) return;
+  document.getElementById(spec.titleId).textContent = spec.title(params);
+  showModal(modalId);
+
+  var container = document.getElementById(spec.termId);
+  container.innerHTML = '';
+
+  var term = new Terminal({
+    theme: _XTERM_THEME,
+    fontFamily: _XTERM_FONT,
+    fontSize: 14,
+    cursorBlink: true
+  });
+  var fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' ' + spec.banner(params) + '\x1b[0m\r\n');
+
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var ws = new WebSocket(proto + '//' + location.host + spec.wsPath(params));
+
+  ws.onopen = function() {
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onmessage = function(e) { term.write(e.data); };
+  ws.onclose = function() {
+    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
+  };
+  ws.onerror = function() {
+    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
+  };
+
+  term.onData(function(data) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', data: data }));
+    }
+  });
+  term.onResize(function(size) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+    }
+  });
+
+  st.ws = ws;
+  st.term = term;
+  st.fitAddon = fitAddon;
+  term.focus();
+}
+
+// Overlay onclick passes its event so only a click on the backdrop closes.
+function closePtyTerminal(modalId, event) {
+  if (event && event.target !== event.currentTarget) return;
+  teardownPtyTerminal(modalId);
+  _dropChip(modalId);
+  hideModal(modalId);
+}
+
+// Refit a live terminal to its container; false when no session is open.
+function fitPtyTerminal(modalId, focus) {
+  var st = _ptyState[modalId];
+  if (!st || !st.fitAddon || !st.term) return false;
+  st.fitAddon.fit();
+  if (focus) st.term.focus();
+  return true;
+}
+
 // --- Minimize/restore: dock log & console windows without tearing them down ---
 // Overlays are singletons, so at most one window of each type is minimized.
 // Minimizing only drops the .show class; the WebSocket, xterm buffer and log
 // state stay alive so restoring resumes the exact session.
 var _minimized = {};   // id -> { title, returnFocus }
 var MIN_ICONS = {
-  'console-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8"/></svg>',
-  'sql-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
-  'logs-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>',
-  'agent-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M12 3v4M8 13h.01M16 13h.01"/></svg>'
+  'logs-modal': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>'
 };
+Object.keys(PTY_TERMINALS).forEach(function(id) { MIN_ICONS[id] = PTY_TERMINALS[id].icon; });
 
 function renderMinDock() {
   var dock = document.getElementById('min-dock');
@@ -3241,15 +3417,8 @@ function restorePanel(id) {
   if (returnFocus && document.contains(returnFocus)) {
     _modalReturnFocus[id] = returnFocus;
   }
-  if (id === 'console-modal' && _consoleState.fitAddon && _consoleState.term) {
-    _consoleState.fitAddon.fit();
-    _consoleState.term.focus();
-  } else if (id === 'sql-modal' && _sqlConsoleState.fitAddon && _sqlConsoleState.term) {
-    _sqlConsoleState.fitAddon.fit();
-    _sqlConsoleState.term.focus();
-  } else if (id === 'agent-modal' && _agentConsoleState.fitAddon && _agentConsoleState.term) {
-    _agentConsoleState.fitAddon.fit();
-    _agentConsoleState.term.focus();
+  if (PTY_TERMINALS[id]) {
+    fitPtyTerminal(id, true);
   } else if (id === 'logs-modal') {
     document.getElementById('logs-search').focus();
   }
@@ -3503,17 +3672,25 @@ function applyStats() {
   });
   document.querySelectorAll('[data-storage-for]').forEach(function(el) {
     var branch = el.getAttribute('data-storage-for');
-    var s = envStorageMap[branch];
-    var btn = storageRefreshing[branch]
-      ? '<span class="spinner" aria-hidden="true"></span>'
-      : '<button class="stat-refresh" onclick="refreshStorage(\'' + escAttr(branch) + '\')" ' +
-          'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
-          'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
-    el.innerHTML =
-      '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
-      '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
-      btn;
+    el.innerHTML = _storageHtml(
+      envStorageMap[branch], storageRefreshing[branch], 'refreshStorage', branch);
   });
+  document.querySelectorAll('[data-prod-storage-for]').forEach(function(el) {
+    var name = el.getAttribute('data-prod-storage-for');
+    el.innerHTML = _storageHtml(
+      prodStorageMap[name], prodStorageRefreshing[name], 'refreshProdStorage', name);
+  });
+}
+
+function _storageHtml(s, refreshing, fnName, key) {
+  var btn = refreshing
+    ? '<span class="spinner" aria-hidden="true"></span>'
+    : '<button class="stat-refresh" onclick="' + fnName + '(\'' + escAttr(key) + '\')" ' +
+        'title="' + (s ? 'Recompute DB and disk usage (measured ' + esc(relTime(s.computed_at)) + ')' : 'Compute DB and disk usage') + '" ' +
+        'aria-label="Recompute DB and disk usage">' + REFRESH_SVG + '</button>';
+  return '<span>DB size <span class="stat-val">' + (s ? fmtBytes(s.db_bytes) : '—') + '</span></span>' +
+    '<span>Disk <span class="stat-val">' + (s ? fmtBytes(s.disk_bytes) : '—') + '</span></span>' +
+    btn;
 }
 
 async function refreshStorage(branch) {
@@ -3532,6 +3709,25 @@ async function refreshStorage(branch) {
     showToast('Failed to measure usage: ' + e, true);
   }
   delete storageRefreshing[branch];
+  applyStats();
+}
+
+async function refreshProdStorage(name) {
+  if (prodStorageRefreshing[name]) return;
+  prodStorageRefreshing[name] = true;
+  applyStats();
+  try {
+    const r = await fetch(API_PRODUCTIONS + '/' + encodeURIComponent(name) + '/storage/refresh', { method: 'POST' });
+    const data = await readResult(r);
+    if (data.ok) {
+      prodStorageMap[name] = data.storage;
+    } else {
+      showToast(data.error || 'Failed to measure usage', true);
+    }
+  } catch (e) {
+    showToast('Failed to measure usage: ' + e, true);
+  }
+  delete prodStorageRefreshing[name];
   applyStats();
 }
 
@@ -3700,7 +3896,7 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
       (allStopped ? 'disabled' : '') + '>Open console</button>' +
     '<button role="menuitem" title="psql session on the environment database" onclick="openSqlConsole(\'' + escAttr(env.branch) + '\')" ' +
       (allStopped ? 'disabled' : '') + '>Open SQL console</button>' +
-    (showAgent && !SCOPED_ENV
+    (showAgent
       ? '<button role="menuitem" title="Terminal session with the coding agent for this environment" onclick="openAgentConsole(\'' + escAttr(env.branch) + '\')">Agent CLI</button>'
       : '');
   var modules = '<button role="menuitem" title="Install modules with odoo -i, then restart" onclick="openInstallModules(\'' + escAttr(env.branch) + '\')" ' + dis +
@@ -3710,7 +3906,7 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
   var access = '<button role="menuitem" title="Scoped MCP endpoint and Secret Key for this environment only" onclick="openMcpAccess(\'' + escAttr(env.branch) + '\')">MCP Access</button>' +
     (SCOPED_ENV
       ? ''
-      : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and Agent Chat, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>');
+      : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and coding agent, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>');
   var management = SCOPED_ENV ? '' :
     '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
       (env.note ? 'Edit note' : 'Add note') + '</button>' +
@@ -3734,7 +3930,11 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
     '<div class="env-menu-separator" role="separator"></div>' +
     '<button role="menuitem" class="danger" onclick="doRecreate(\'' + escAttr(env.branch) + '\')" ' + dis +
       (env.protected ? 'disabled title="Environment is protected"' : 'title="Delete and rebuild from template: replaces the current database"') + '>Recreate</button>';
-  var root = '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>' +
+  // env-vars may carry secrets, so GET …/env-vars is not in the
+  // scoped allowlist (ui_scope.py) — don't render a dead item.
+  var root = (SCOPED_ENV
+      ? ''
+      : '<button role="menuitem" title="Environment variables of the Odoo container" onclick="showEnvInfo(\'' + escAttr(env.branch) + '\')">Info</button>') +
     group('consoles', 'Consoles', consoles) +
     group('modules', 'Modules', modules) +
     group('access', 'Access', access) +
@@ -4629,7 +4829,9 @@ var cleanupGroups = [
   ['orphan_databases', 'Databases'],
   ['orphan_workspaces', 'Workspaces'],
   ['orphan_ports', 'Port registry entries'],
-  ['orphan_roles', 'PostgreSQL roles']
+  ['orphan_roles', 'PostgreSQL roles'],
+  ['orphan_extra_checkouts', 'Extra-addons checkouts'],
+  ['orphan_build_jobs', 'Image build jobs']
 ];
 
 function cleanupCount(result) {
@@ -4638,9 +4840,13 @@ function cleanupCount(result) {
 
 function updateCleanupConfirm() {
   var images = document.getElementById('cleanup-images');
+  var buildCache = document.getElementById('cleanup-build-cache');
   images.disabled = cleanupBusy || !cleanupPreview || !cleanupPreview.images.length;
+  var cacheOffered = !!cleanupPreview && (cleanupPreview.build_cache || {}).reclaimable_bytes > 0;
+  if (!cacheOffered) buildCache.checked = false;
+  buildCache.disabled = cleanupBusy || !cacheOffered;
   document.getElementById('cleanup-confirm').disabled = cleanupBusy || !cleanupPreview ||
-    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length));
+    !(cleanupCount(cleanupPreview) || (images.checked && cleanupPreview.images.length) || buildCache.checked);
 }
 
 function setCleanupBusy(busy, applying) {
@@ -4656,12 +4862,19 @@ function setCleanupBusy(busy, applying) {
 
 function renderCleanup(result) {
   var lines = [result.dry_run ? '[DRY RUN] Orphaned resources:' : '[CLEANUP] Removed resources:'];
+  var checkoutSizes = result.orphan_extra_checkout_sizes || {};
   cleanupGroups.forEach(function(group) {
     var names = result[group[0]] || [];
     if (!names.length) return;
     lines.push('  ' + group[1] + ' (' + names.length + '):');
-    names.forEach(function(name) { lines.push('    - ' + name); });
+    names.forEach(function(name) {
+      var size = checkoutSizes[name];
+      lines.push('    - ' + name + (size !== undefined ? ' — ' + fmtBytes(size) : ''));
+    });
   });
+  if (typeof result.extra_checkouts_freed_bytes === 'number' && result.extra_checkouts_freed_bytes > 0) {
+    lines.push('  Extra-addons checkouts freed ' + fmtBytes(result.extra_checkouts_freed_bytes) + '.');
+  }
   var count = cleanupCount(result);
   lines.push(count ? '\n' + count + ' resource(s) ' + (result.dry_run ? 'would be removed.' : 'removed.') :
     (result.dry_run ? 'No orphaned resources found.' : 'No orphaned resources removed.'));
@@ -4673,11 +4886,23 @@ function renderCleanup(result) {
     });
     if (!result.images.length) lines.push('  No unused images found.');
     else lines.push('Select "Remove unused Docker images" to include these images.');
+    var cache = result.build_cache || {};
+    if (cache.error) lines.push('\nDocker build cache: ' + cache.error);
+    else if (!cache.size_bytes) lines.push('\nDocker build cache: none found.');
+    else {
+      lines.push('\nDocker build cache: ' + fmtBytes(cache.size_bytes) + ' total, ' +
+        fmtBytes(cache.reclaimable_bytes) + ' reclaimable.');
+      if (cache.reclaimable_bytes > 0) lines.push('Select "Remove Docker build cache" to include it.');
+    }
   } else {
     lines.push('\nDocker images removed (' + result.images.removed.length + '):');
     result.images.removed.forEach(function(id) { lines.push('  ' + id); });
     result.images.skipped.forEach(function(item) { lines.push('Skipped ' + item.id + ': ' + item.reason); });
     result.images.errors.forEach(function(item) { lines.push('Error ' + item.id + ': ' + item.reason); });
+    if (result.build_cache) {
+      lines.push(result.build_cache.error ? '\nError Docker build cache: ' + result.build_cache.error :
+        '\nDocker build cache removed: ' + fmtBytes(result.build_cache.reclaimed_bytes) + ' reclaimed.');
+    }
   }
   (result.errors || []).forEach(function(error) { lines.push('Error: ' + error); });
   document.getElementById('cleanup-output').textContent = lines.join('\n');
@@ -4699,8 +4924,9 @@ async function scanCleanup() {
   if (cleanupBusy) return;
   cleanupPreview = null;
   document.getElementById('cleanup-images').checked = false;
+  document.getElementById('cleanup-build-cache').checked = false;
   document.getElementById('cleanup-cancel').textContent = 'Cancel';
-  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources and unused Docker images…';
+  document.getElementById('cleanup-output').textContent = 'Scanning orphaned resources, unused Docker images and the build cache…';
   setCleanupBusy(true, false);
   try {
     var response = await fetch('/api/cleanup', {
@@ -4720,6 +4946,7 @@ async function scanCleanup() {
 async function confirmCleanup() {
   if (cleanupBusy || !cleanupPreview || document.getElementById('cleanup-confirm').disabled) return;
   var imageIds = document.getElementById('cleanup-images').checked ? cleanupPreview.images.map(function(image) { return image.id; }) : [];
+  var buildCache = document.getElementById('cleanup-build-cache').checked;
   // Send the reviewed names: the server removes only these, and only if still orphaned.
   var orphans = {};
   cleanupGroups.forEach(function(group) { orphans[group[0]] = cleanupPreview[group[0]] || []; });
@@ -4727,7 +4954,7 @@ async function confirmCleanup() {
   try {
     var response = await fetch('/api/cleanup', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds })
+      body: JSON.stringify({ force: true, orphans: orphans, image_ids: imageIds, build_cache: buildCache })
     });
     var data = await readResult(response);
     if (!data.ok) throw new Error(data.error || 'Cleanup failed.');
@@ -4752,6 +4979,7 @@ async function loadStats() {
     containerStatsMap = {};
     (data.containers || []).forEach(c => { containerStatsMap[c.name] = c; });
     envStorageMap = (data.storage && data.storage.envs) || {};
+    prodStorageMap = (data.storage && data.storage.productions) || {};
 
     const sys = data.system;
     document.getElementById('sys-cpu').innerHTML =
@@ -5156,18 +5384,38 @@ async function doRecreate(branch) {
 }
 
 async function doDelete(branch) {
+  var env = cachedEnvs.find(function(e) { return e.branch === branch; });
+  var gitBranch = (env && env.git_branch) || branch;
+  // Live-mounted environments own no git state, so no branch option there.
+  // Checked by default only when Oduflow created the branch for this
+  // environment (the oduflow.git_branch_created label).
+  var checkbox = (env && env.local_path) ? null : {
+    label: 'Also delete git branch "' + gitBranch + '" on origin',
+    checked: !!(env && env.git_branch_created)
+  };
   if (!(await confirmDialog({
     title: 'Delete environment',
     message: 'Remove the container, database, and workspace of "' + branch + '"?',
     confirmLabel: 'Delete environment',
-    danger: true
+    danger: true,
+    checkbox: checkbox
   }))) return;
   setBusy(branch, 'Deleting');
   try {
-    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/delete', { method: 'POST' });
+    const opts = { method: 'POST' };
+    if (checkbox && checkbox.checked) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ delete_branch: true });
+    }
+    const r = await fetch(API + '/' + encodeURIComponent(branch) + '/delete', opts);
     const data = await readResult(r);
     if (data.ok) {
-      showToast(branch + ': deleted');
+      var warnings = (data.result && data.result.warnings) || [];
+      if (warnings.length) {
+        showToast(branch + ': deleted. ' + warnings.join(' '), true);
+      } else {
+        showToast(branch + ': deleted');
+      }
     } else {
       showToast(data.error || 'Delete failed', true);
     }
@@ -7641,6 +7889,10 @@ function renderServices(services) {
             (svc.protected ? 'disabled title="Service is protected"' : '') + '>Update</button>' +
           '<button class="btn btn-restart" onclick="doRestartService(\'' + escAttr(svc.name) + '\')">Restart</button>' +
           '<button class="btn btn-logs" onclick="showServiceLogs(\'' + escAttr(svc.name) + '\')">Logs</button>' +
+          '<button class="btn btn-logs" onclick="openServiceShell(\'' + escAttr(svc.name) + '\')" ' +
+            (svc.status === 'running'
+              ? 'title="Shell inside the service container (sh)"'
+              : 'disabled title="Service is not running"') + '>Shell</button>' +
           '<button class="btn btn-protect" title="' + (svc.protected ? 'Allow Update, Restore and Delete again' : 'Disable Update, Restore and Delete') + '" ' +
             'onclick="doProtectService(\'' + escAttr(svc.name) + '\',' + (svc.protected ? 'true' : 'false') + ')">' +
             (svc.protected ? 'Unprotect' : 'Protect') + '</button>' +
@@ -10316,224 +10568,24 @@ function openChat(branch, type) {
 var _XTERM_THEME = { background: '#060a12', foreground: '#e6e8eb', cursor: '#2e79f5' };
 var _XTERM_FONT = getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim();
 
-var _consoleState = { ws: null, term: null, fitAddon: null };
+// The four terminals are thin entry points over the PTY_TERMINALS registry;
+// the overlay markup and the launcher buttons call them by name.
+function openConsole(branch) { return openPtyTerminal('console-modal', { branch: branch }); }
+function closeConsole(event) { closePtyTerminal('console-modal', event); }
 
-function teardownConsole() {
-  if (_consoleState.ws) { _consoleState.ws.close(); _consoleState.ws = null; }
-  if (_consoleState.term) { _consoleState.term.dispose(); _consoleState.term = null; }
-  _consoleState.fitAddon = null;
-}
+function openSqlConsole(branch) { return openPtyTerminal('sql-modal', { branch: branch }); }
+function closeSqlConsole(event) { closePtyTerminal('sql-modal', event); }
 
-async function openConsole(branch) {
-  // Reopening replaces any live/minimized session for this singleton overlay.
-  teardownConsole();
-  _dropChip('console-modal');
-  try {
-    await ensureXterm();
-  } catch (e) {
-    showToast('Failed to load terminal assets: ' + e.message, true);
-    return;
-  }
-  document.getElementById('console-title').textContent = 'Console \u2014 ' + branch;
-  showModal('console-modal');
+function openServiceShell(name) { return openPtyTerminal('svc-shell-modal', { name: name }); }
+function closeServiceShell(event) { closePtyTerminal('svc-shell-modal', event); }
 
-  var container = document.getElementById('console-terminal');
-  container.innerHTML = '';
-
-  var term = new Terminal({
-    theme: _XTERM_THEME,
-    fontFamily: _XTERM_FONT,
-    fontSize: 14,
-    cursorBlink: true
-  });
-  var fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' console \u2014 ' + branch + '\x1b[0m\r\n');
-
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/terminal');
-
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = function(e) { term.write(e.data); };
-  ws.onclose = function() {
-    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
-  };
-  ws.onerror = function() {
-    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
-  };
-
-  term.onData(function(data) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
-    }
-  });
-  term.onResize(function(size) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    }
-  });
-
-  _consoleState = { ws: ws, term: term, fitAddon: fitAddon };
-  term.focus();
-}
-
-function closeConsole(event) {
-  if (event && event.target !== event.currentTarget) return;
-  teardownConsole();
-  _dropChip('console-modal');
-  hideModal('console-modal');
-}
-
-var _sqlConsoleState = { ws: null, term: null, fitAddon: null };
-
-function teardownSqlConsole() {
-  if (_sqlConsoleState.ws) { _sqlConsoleState.ws.close(); _sqlConsoleState.ws = null; }
-  if (_sqlConsoleState.term) { _sqlConsoleState.term.dispose(); _sqlConsoleState.term = null; }
-  _sqlConsoleState.fitAddon = null;
-}
-
-async function openSqlConsole(branch) {
-  // Reopening replaces any live/minimized session for this singleton overlay.
-  teardownSqlConsole();
-  _dropChip('sql-modal');
-  try {
-    await ensureXterm();
-  } catch (e) {
-    showToast('Failed to load terminal assets: ' + e.message, true);
-    return;
-  }
-  document.getElementById('sql-title').textContent = 'SQL \u2014 ' + branch;
-  showModal('sql-modal');
-
-  var container = document.getElementById('sql-terminal');
-  container.innerHTML = '';
-
-  var term = new Terminal({
-    theme: _XTERM_THEME,
-    fontFamily: _XTERM_FONT,
-    fontSize: 14,
-    cursorBlink: true
-  });
-  var fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' sql \u2014 ' + branch + '\x1b[0m\r\n');
-
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/sql');
-
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = function(e) { term.write(e.data); };
-  ws.onclose = function() {
-    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
-  };
-  ws.onerror = function() {
-    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
-  };
-
-  term.onData(function(data) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
-    }
-  });
-  term.onResize(function(size) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    }
-  });
-
-  _sqlConsoleState = { ws: ws, term: term, fitAddon: fitAddon };
-  term.focus();
-}
-
-function closeSqlConsole(event) {
-  if (event && event.target !== event.currentTarget) return;
-  teardownSqlConsole();
-  _dropChip('sql-modal');
-  hideModal('sql-modal');
-}
-
-var _agentConsoleState = { ws: null, term: null, fitAddon: null };
-
-async function openAgentConsole(branch, agentType) {
-  // Reopening replaces any live/minimized session for this singleton overlay.
-  teardownAgentConsole();
-  _dropChip('agent-modal');
+function openAgentConsole(branch, agentType) {
   agentType = (agentType || window.ODU_AGENT_DEFAULT || 'claude').toLowerCase();
-  try {
-    await ensureXterm();
-  } catch (e) {
-    showToast('Failed to load terminal assets: ' + e.message, true);
-    return;
-  }
   var label = agentType === 'codex' ? 'Codex' :
     (agentType === 'opencode' ? 'OpenCode' : 'Claude');
-  document.getElementById('agent-title').textContent = 'Agent · ' + label + ' — ' + branch;
-  showModal('agent-modal');
-
-  var container = document.getElementById('agent-terminal');
-  container.innerHTML = '';
-
-  var term = new Terminal({
-    theme: _XTERM_THEME,
-    fontFamily: _XTERM_FONT,
-    fontSize: 14,
-    cursorBlink: true
-  });
-  var fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-  term.write('\x1b[90m# ' + BRAND_NAME.toLowerCase() + ' agent (' + label + ') — ' + branch + '\x1b[0m\r\n');
-
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var ws = new WebSocket(proto + '//' + location.host + '/api/environments/' + encodeURIComponent(branch) + '/agent?type=' + encodeURIComponent(agentType));
-
-  ws.onopen = function() {
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = function(e) { term.write(e.data); };
-  ws.onclose = function() {
-    term.write('\r\n\x1b[31m[Session ended]\x1b[0m\r\n');
-  };
-  ws.onerror = function() {
-    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
-  };
-
-  term.onData(function(data) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
-    }
-  });
-  term.onResize(function(size) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    }
-  });
-
-  _agentConsoleState = { ws: ws, term: term, fitAddon: fitAddon };
-  term.focus();
+  return openPtyTerminal('agent-modal', { branch: branch, type: agentType, label: label });
 }
-
-function teardownAgentConsole() {
-  if (_agentConsoleState.ws) { _agentConsoleState.ws.close(); _agentConsoleState.ws = null; }
-  if (_agentConsoleState.term) { _agentConsoleState.term.dispose(); _agentConsoleState.term = null; }
-  _agentConsoleState.fitAddon = null;
-}
-
-function closeAgentConsole(event) {
-  if (event && event.target !== event.currentTarget) return;
-  teardownAgentConsole();
-  _dropChip('agent-modal');
-  hideModal('agent-modal');
-}
+function closeAgentConsole(event) { closePtyTerminal('agent-modal', event); }
 
 function _modalShown(id) {
   var el = document.getElementById(id);
@@ -10542,15 +10594,9 @@ function _modalShown(id) {
 
 window.addEventListener('resize', function() {
   // Skip minimized (hidden) terminals: fitting a 0-size container would break their layout.
-  if (_consoleState.fitAddon && _consoleState.term && _modalShown('console-modal')) {
-    _consoleState.fitAddon.fit();
-  }
-  if (_sqlConsoleState.fitAddon && _sqlConsoleState.term && _modalShown('sql-modal')) {
-    _sqlConsoleState.fitAddon.fit();
-  }
-  if (_agentConsoleState.fitAddon && _agentConsoleState.term && _modalShown('agent-modal')) {
-    _agentConsoleState.fitAddon.fit();
-  }
+  Object.keys(PTY_TERMINALS).forEach(function(id) {
+    if (_modalShown(id)) fitPtyTerminal(id, false);
+  });
 });
 
 var MODAL_CLOSERS = {
@@ -10569,9 +10615,6 @@ var MODAL_CLOSERS = {
   'svc-update-modal': closeUpdateService,
   'create-database-modal': closeCreateDatabaseModal,
   'database-credentials-modal': closeDatabaseCredentials,
-  'console-modal': closeConsole,
-  'sql-modal': closeSqlConsole,
-  'agent-modal': closeAgentConsole,
   'chat-modal': function() { if (window.ChatManager) window.ChatManager.minimize(); },
   'create-svc-modal': closeCreateServiceModal,
   'restore-svc-modal': closeRestoreServiceModal,
@@ -10594,6 +10637,9 @@ var MODAL_CLOSERS = {
   'install-modules-modal': closeInstallModules,
   'upgrade-modules-modal': closeUpgradeModules
 };
+Object.keys(PTY_TERMINALS).forEach(function(id) {
+  MODAL_CLOSERS[id] = function() { closePtyTerminal(id); };
+});
 
 document.addEventListener('keydown', function(e) {
   // Enter/Space activate non-native role="button" elements (copyable names, notes, guides).
@@ -10650,8 +10696,7 @@ document.addEventListener('keydown', function(e) {
   }
   if (!top) return;
   // Escape typed inside a terminal is input for the shell, not "close modal"
-  if ((top.id === 'console-modal' || top.id === 'sql-modal' || top.id === 'agent-modal') &&
-      e.target.closest && e.target.closest('.modal-body')) return;
+  if (PTY_TERMINALS[top.id] && e.target.closest && e.target.closest('.modal-body')) return;
   var closer = MODAL_CLOSERS[top.id];
   if (closer) closer();
 });
@@ -10973,9 +11018,15 @@ function renderProductions() {
         lastHtml +
         snapHtml +
       '</div>' +
+      // DB/disk usage: cached, recomputed only via the per-card refresh
+      // button (filled in by applyStats, same as environment cards).
+      '<div class="containers">' +
+        '<span class="container-stats env-storage" data-prod-storage-for="' + esc(p.name) + '"></span>' +
+      '</div>' +
       (open ? '<div class="prod-section" id="prod-section-' + esc(p.name) + '">Loading…</div>' : '') +
     '</div>';
   }).join('');
+  applyStats();
   Object.keys(_prodOpen).forEach(function(name) {
     if (_prodOpen[name]) _loadProdSection(name, _prodOpen[name]);
   });
@@ -11609,7 +11660,9 @@ async function loadHealth() {
     if (!el || !data.checks) return;
     var labels = {
       dev_pg: 'PG DEV', prod_pg: 'PG PROD', traefik: 'TRAEFIK', s3: 'S3', disk: 'DISK',
-      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK'
+      overlays: 'OVERLAY', walg: 'WAL-G', prod_wal_disk: 'PG DISK',
+      // Docker-out-of-Docker only: 'off' (and therefore hidden) elsewhere.
+      self_mounts: 'MOUNTS'
     };
     el.innerHTML = Object.keys(labels).map(function(key) {
       var check = data.checks[key];

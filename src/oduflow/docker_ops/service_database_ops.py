@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import quote
 
 from oduflow.docker_ops.client import get_client
@@ -19,7 +19,12 @@ from oduflow.docker_ops.system_ops import (
     ensure_team_tablespace,
 )
 from oduflow.env_credentials import generate_pg_password
-from oduflow.errors import ConflictError, PrerequisiteNotMetError, ProtectedError
+from oduflow.errors import (
+    ConflictError,
+    NotFoundError,
+    PrerequisiteNotMetError,
+    ProtectedError,
+)
 from oduflow.locking import keyed_mutex, service_database_registry_key
 from oduflow.naming import (
     get_service_database_name,
@@ -352,11 +357,26 @@ def get_database(
     }
 
 
-def list_databases(settings: Settings, team: TeamSettings) -> list[dict[str, Any]]:
+def list_databases(
+    settings: Settings,
+    team: TeamSettings,
+    names: Iterable[str] | None = None,
+    *,
+    reveal_password: bool = False,
+) -> list[dict[str, Any]]:
+    """Inspect the team's databases, or only ``names`` (unknown ones are skipped).
+
+    Each inspection waits for the cluster and probes PostgreSQL, so callers
+    interested in a few databases pass their names rather than scanning.
+    """
     result: list[dict[str, Any]] = []
-    for name in list_names(team):
+    for name in list_names(team) if names is None else names:
         try:
-            result.append(get_database(settings, team, name))
+            result.append(
+                get_database(settings, team, name, reveal_password=reveal_password)
+            )
+        except NotFoundError:
+            continue
         except PrerequisiteNotMetError:
             # Ownership is unknowable when the record cannot be read. Report
             # the keys anyway so consumers distinguish this row by its status

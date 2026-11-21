@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from oduflow.errors import PrerequisiteNotMetError
-from oduflow.fsutil import atomic_write_private_json
+from oduflow.fsutil import atomic_write_private_json, copy_tenant_tree
 from oduflow.naming import (
     get_db_name,
     get_filestore_paths,
@@ -151,7 +151,11 @@ def snapshot(team: TeamSettings, template: str) -> str:
         if source.is_dir():
             # Odoo attachment names are content hashes. Our imports replace
             # files by rename and never edit these inodes in place.
-            shutil.copytree(source, root / "filestore", copy_function=os.link)
+            # Links stay links: followed, a link out of the filestore would
+            # hardlink whatever host file it names into the generation.
+            copy_tenant_tree(
+                str(source), str(root / "filestore"), copy_function=os.link
+            )
         else:
             (root / "filestore").mkdir()
         metadata = Path(team.get_template_metadata_path(template))
@@ -292,7 +296,6 @@ def refresh_environment(
         env_name,
         team.workspaces_dir,
         settings.db_user,
-        settings.db_password,
         allow_fallback=False,
     )
     system_ops.check_disk_space(
@@ -365,6 +368,7 @@ def refresh_environment(
         sql(
             f'CREATE DATABASE "{staged_db}" TEMPLATE "{tpl_db}"{strategy} TABLESPACE "{tablespace}" OWNER "{creds["pg_user"]}";'
         )
+        system_ops.restrict_database_access(client, settings, staged_db)
         system_ops.reassign_db_ownership(client, settings, staged_db, creds["pg_user"])
         system_ops.drop_signaling_sequences(client, settings, staged_db)
         volumes: dict[str, Any] = {}
@@ -465,7 +469,7 @@ def refresh_environment(
             raise PrerequisiteNotMetError(
                 "Sanitization did not complete cleanly; keeping the previous environment data"
             )
-        runner.remove(force=True)
+        runner.remove(force=True, v=True)
         runner = None
         unmount(stage_paths)
         container.update(restart_policy={"Name": "no"})
@@ -555,7 +559,7 @@ def refresh_environment(
         raise
     finally:
         if runner is not None:
-            runner.remove(force=True)
+            runner.remove(force=True, v=True)
         if not recovery_failed:
             unmount(stage_paths)
             sql(

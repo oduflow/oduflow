@@ -108,6 +108,10 @@ def _patch_create_stack(client, **overrides):
         ),
         "_exec_sql": patch.object(production_ops, "_exec_sql"),
         "_create_pg_role": patch.object(production_ops, "_create_pg_role"),
+        "_own_public_schema": patch.object(production_ops, "_own_public_schema"),
+        "restrict_database_access": patch.object(
+            production_ops, "restrict_database_access"
+        ),
         "create_credentials": patch.object(
             production_ops,
             "create_credentials",
@@ -830,30 +834,34 @@ class TestRuntimeStatus:
 
 
 class TestProdConfChain:
-    def test_bundled_fallback(self, team, tmp_path):
+    def test_bundled_fallback(self, settings, team, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
-        path = production_ops._prod_base_conf_path(team, str(repo))
+        path = production_ops._prod_base_conf_path(settings, team, str(repo))
         assert path.endswith("odoo-prod.conf")
 
-    def test_repo_conf_is_ignored(self, team, tmp_path, caplog):
+    def test_repo_conf_is_ignored(self, settings, team, tmp_path, caplog):
         # Whoever can push to the branch must not tune the production server.
         repo = tmp_path / "repo"
         (repo / ".oduflow").mkdir(parents=True)
         (repo / ".oduflow" / "odoo.prod.conf").write_text("[options]\n")
-        path = production_ops._prod_base_conf_path(team, str(repo))
+        path = production_ops._prod_base_conf_path(settings, team, str(repo))
         assert path.endswith("odoo-prod.conf")
         assert "Ignoring" in caplog.text
         team_conf = tmp_path / "team_1" / "odoo.prod.conf"
         team_conf.write_text("[options]\n")
-        assert production_ops._prod_base_conf_path(team, str(repo)) == str(team_conf)
+        assert production_ops._prod_base_conf_path(settings, team, str(repo)) == str(
+            team_conf
+        )
 
-    def test_team_conf_beats_bundled(self, team, tmp_path):
+    def test_team_conf_beats_bundled(self, settings, team, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
         team_conf = tmp_path / "team_1" / "odoo.prod.conf"
         team_conf.write_text("[options]\n")
-        assert production_ops._prod_base_conf_path(team, str(repo)) == str(team_conf)
+        assert production_ops._prod_base_conf_path(settings, team, str(repo)) == str(
+            team_conf
+        )
 
 
 class TestTombstone:
@@ -1819,6 +1827,217 @@ class TestReconfigureProduction:
         assert production_registry.get_production(team, "erp")["git_user"] == ""
 
 
+class TestReconfigureGivesAProductionItsRole:
+    """A production's container never gets the cluster superuser's login.
+
+    Without a role on record (its credentials file is gone) the container
+    used to be recreated as the superuser. Recreating it now provisions the
+    role instead, in the production cluster and with Odoo stopped; where
+    that fails, the old container stays.
+    """
+
+    SECRET = "cluster-superuser-secret"
+    ROLE = "u_1_prod-erp"
+    DB = "oduflow_1_prod-erp"
+
+    def _stack(self, settings, team, env, *, failures=None, running=True):
+        from pg_helpers import PgContainer
+
+        settings = replace(settings, db_password=self.SECRET)
+        _seed_prod_record(team)
+        record = production_registry.get_production(team, "erp")
+        events: list[str] = []
+        pg = PgContainer(
+            settings.db_user,
+            name="prod",
+            events=events,
+            answers={"FROM pg_database": "1"},
+            failures=failures,
+        )
+        container = MagicMock(name="prod-odoo")
+        container.status = "running" if running else "exited"
+        container.labels = {
+            settings.team_label: "1",
+            "oduflow.server_mode": production_ops.server_mode_of(record),
+            **production_ops.prod_routing_labels(settings, team, "erp", record),
+        }
+        container.attrs = {"Config": {"Env": [f"{k}={v}" for k, v in env.items()]}}
+        for step in ("stop", "start", "remove"):
+            getattr(container, step).side_effect = lambda *a, _step=step, **kw: (
+                events.append(_step)
+            )
+        known = {
+            settings.prod_db_container: pg.container,
+            production_ops._odoo_container_name(settings, team, "erp"): container,
+        }
+
+        def get(name):
+            if name in known:
+                return known[name]
+            raise docker.errors.NotFound(name)
+
+        client = MagicMock(name="docker")
+        client.containers.get.side_effect = get
+        client.containers.run.side_effect = lambda **kw: (
+            events.append("run") or MagicMock(name="new-container")
+        )
+        patches = _patch_reconfigure_stack(client)
+        del patches["load_credentials"]  # the real one: no file, no role
+        return settings, client, pg, events, patches
+
+    def _on_record(self, team):
+        path = os.path.join(team.workspaces_dir, "prod-erp", "env_credentials.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as fh:
+            return json.load(fh)
+
+    def test_a_lost_credentials_file_is_restored_from_the_running_role(
+        self, settings, team
+    ):
+        # The container still connects as the production's role. Its password
+        # is kept, so a failure halfway cannot lock that container out.
+        in_use = {"HOST": "db", "USER": self.ROLE, "PASSWORD": "in-use-pw"}
+        settings, client, pg, events, patches = self._stack(settings, team, in_use)
+
+        with _PatchAll(patches):
+            result = production_ops.reconfigure_production(settings, team, "erp")
+
+        assert self._on_record(team) == {
+            "pg_user": self.ROLE,
+            "pg_password": "in-use-pw",
+        }
+        environment = client.containers.run.call_args.kwargs["environment"]
+        assert (environment["USER"], environment["PASSWORD"]) == (
+            self.ROLE,
+            "in-use-pw",
+        )
+        # In the production cluster: closed to PUBLIC, owned by the role,
+        # objects handed over by the pinned block.
+        maintenance, tenant = pg.sql("postgres"), pg.sql(self.DB)
+        assert f'REVOKE ALL ON DATABASE "{self.DB}" FROM PUBLIC;' in maintenance
+        assert f'ALTER DATABASE "{self.DB}" OWNER TO "{self.ROLE}";' in maintenance
+        assert any("PASSWORD 'in-use-pw'" in sql for sql in maintenance)
+        assert tenant[0] == f'ALTER SCHEMA public OWNER TO "{self.ROLE}";'
+        assert "SET LOCAL search_path = pg_catalog;" in tenant[1]
+        # With Odoo stopped and the old container still there to fall back to.
+        statements = [i for i, event in enumerate(events) if event == "sql:prod"]
+        assert events.index("stop") < statements[0]
+        assert statements[-1] < events.index("remove") < events.index("run")
+        assert "start" not in events
+        assert result["db_role_provisioned"] is True
+        assert any(self.ROLE in note for note in result["notes"])
+        assert not any("drifted" in note for note in result["notes"])
+
+    def test_a_container_recreated_as_the_superuser_gets_a_role(self, settings, team):
+        # What an older version did to a production without its file.
+        held = {"HOST": "db", "USER": "odoo", "PASSWORD": self.SECRET}
+        settings, client, pg, events, patches = self._stack(settings, team, held)
+
+        with _PatchAll(patches):
+            result = production_ops.reconfigure_production(settings, team, "erp")
+
+        on_record = self._on_record(team)
+        assert on_record["pg_user"] == self.ROLE
+        assert on_record["pg_password"] not in ("", self.SECRET)
+        environment = client.containers.run.call_args.kwargs["environment"]
+        assert (environment["USER"], environment["PASSWORD"]) == (
+            self.ROLE,
+            on_record["pg_password"],
+        )
+        assert self.SECRET not in repr(client.containers.run.call_args)
+        assert any(
+            f"PASSWORD '{on_record['pg_password']}'" in sql
+            for sql in pg.sql("postgres")
+        )
+        assert result["changed"] == []
+        assert result["db_role_provisioned"] is True
+
+    def test_a_recorded_role_is_reused_when_the_container_ran_as_the_superuser(
+        self, settings, team
+    ):
+        # The file came back after an older version had recreated the
+        # container: what Odoo created meanwhile belongs to the superuser.
+        held = {"HOST": "db", "USER": "odoo", "PASSWORD": self.SECRET}
+        settings, client, pg, _events, patches = self._stack(settings, team, held)
+        os.makedirs(os.path.join(team.workspaces_dir, "prod-erp"), exist_ok=True)
+        recorded = {"pg_user": self.ROLE, "pg_password": "recorded-pw"}
+        with open(
+            os.path.join(team.workspaces_dir, "prod-erp", "env_credentials.json"), "w"
+        ) as fh:
+            json.dump(recorded, fh)
+
+        with _PatchAll(patches):
+            production_ops.reconfigure_production(settings, team, "erp")
+
+        assert self._on_record(team) == recorded
+        environment = client.containers.run.call_args.kwargs["environment"]
+        assert environment["PASSWORD"] == "recorded-pw"
+        assert len(pg.sql(self.DB)) == 2  # ownership is handed over again
+
+    @pytest.mark.parametrize("running", [True, False])
+    def test_a_failed_provisioning_puts_the_production_back(
+        self, settings, team, running
+    ):
+        held = {"HOST": "db", "USER": "odoo", "PASSWORD": self.SECRET}
+        settings, client, _pg, events, patches = self._stack(
+            settings,
+            team,
+            held,
+            failures={"DECLARE r RECORD": "ERROR: deadlock detected"},
+            running=running,
+        )
+
+        with _PatchAll(patches), pytest.raises(PrerequisiteNotMetError) as excinfo:
+            production_ops.reconfigure_production(settings, team, "erp")
+
+        message = str(excinfo.value)
+        assert "could not be provisioned" in message
+        assert "deadlock detected" in message
+        client.containers.run.assert_not_called()
+        assert "remove" not in events
+        # No record of a role that does not own everything in its database.
+        assert self._on_record(team) is None
+        assert ("start" in events) is running
+
+    def test_the_wal_guard_is_checked_before_the_production_goes_down(
+        self, settings, team
+    ):
+        held = {"HOST": "db", "USER": "odoo", "PASSWORD": self.SECRET}
+        settings, client, pg, events, patches = self._stack(settings, team, held)
+        latched = PrerequisiteNotMetError("Production disk protection is active.")
+
+        with (
+            _PatchAll(patches),
+            # Free when the call starts, held by the time the swap is due.
+            patch("oduflow.wal_monitor.assert_writable", side_effect=[None, latched]),
+            pytest.raises(PrerequisiteNotMetError, match="disk protection"),
+        ):
+            production_ops.reconfigure_production(settings, team, "erp")
+
+        assert events == []
+        assert not any("ALTER" in sql or "REVOKE" in sql for sql in pg.sql())
+        client.containers.run.assert_not_called()
+
+    def test_no_container_is_specified_with_the_superusers_login(self, settings, team):
+        _seed_prod_record(team)
+        record = production_registry.get_production(team, "erp")
+
+        with pytest.raises(PrerequisiteNotMetError, match="superuser"):
+            production_ops._container_spec(
+                settings,
+                team,
+                "erp",
+                record,
+                {"pg_user": settings.db_user, "pg_password": settings.db_password},
+                [],
+            )
+
+    def test_restores_point_at_the_tool_that_brings_the_role_back(self, settings, team):
+        with pytest.raises(PrerequisiteNotMetError, match="reconfigure_production"):
+            production_ops.production_db_credentials(settings, team, "erp")
+
+
 class TestHealthWaitCrashLoop:
     """A container whose main process keeps dying fails the health wait early
     instead of holding the production's lock for the whole timeout."""
@@ -2468,6 +2687,153 @@ class TestServerMode:
                 settings, team, "erp", set_options=options
             )
         assert production_registry.get_production(team, "erp")["odoo_conf"] == {}
+
+
+class TestSeedRunsAsTheProductionsRole:
+    """A seed is a tenant's database content: the production's own role
+    restores it, so that role exists and owns the database before any of it
+    is loaded — the superuser used to restore it and create the role after."""
+
+    CREDS = {"pg_user": "u_1_prod-erp", "pg_password": "pw"}
+
+    def _stack(self, client, order):
+        def log(step):
+            return lambda *args, **kwargs: order.append(step)
+
+        patches = _patch_create_stack(client)
+        patches["_exec_sql"] = patch.object(
+            production_ops,
+            "_exec_sql",
+            side_effect=lambda client, settings, sql, *a, **k: order.append(sql),
+        )
+        for name in (
+            "restrict_database_access",
+            "_create_pg_role",
+            "_own_public_schema",
+            "reassign_db_ownership",
+            "drop_signaling_sequences",
+            "_seed_db_from_template",
+            "_seed_db_from_environment",
+        ):
+            patches[name] = patch.object(production_ops, name, side_effect=log(name))
+        patches["get_filestore_paths"] = patch.object(
+            production_ops,
+            "get_filestore_paths",
+            return_value={"merged": tempfile.mkdtemp(prefix="env-filestore-")},
+        )
+        patches["create_worktree"] = patch(
+            "oduflow.extra_addons.create_worktree",
+            side_effect=lambda team, repo, branch, path: os.makedirs(
+                path, exist_ok=True
+            ),
+        )
+        return patches
+
+    def test_template_seed_follows_the_role_and_gets_its_credentials(
+        self, settings, team
+    ):
+        client = _mock_client()
+        order = []
+        with _PatchAll(self._stack(client, order)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "erp.example.com",
+                "odoo:18.0",
+                template_name="tpl",
+            )
+
+        db = production_ops.prod_db_name(team, "erp")
+        assert order[:7] == [
+            f'CREATE DATABASE "{db}";',
+            "restrict_database_access",
+            "_create_pg_role",
+            "_own_public_schema",
+            "_seed_db_from_template",
+            "reassign_db_ownership",
+            "drop_signaling_sequences",
+        ]
+        # PUBLIC loses the database in the production cluster before any role
+        # owns it or anything is loaded into it.
+        assert mocks["restrict_database_access"].call_args.args[2:] == (db,)
+        assert mocks["restrict_database_access"].call_args.kwargs == {
+            "container_name": settings.prod_db_container
+        }
+        mocks["_seed_db_from_template"].assert_called_once_with(
+            client, settings, team, "tpl", db, self.CREDS
+        )
+        # The role owns the database, and its public schema, in the
+        # production cluster before the seed arrives.
+        assert mocks["_create_pg_role"].call_args.args[2:] == ("u_1_prod-erp", "pw", db)
+        assert mocks["_create_pg_role"].call_args.kwargs == {
+            "container_name": settings.prod_db_container
+        }
+        assert mocks["_own_public_schema"].call_args.args[2:] == (db, "u_1_prod-erp")
+        assert mocks["_own_public_schema"].call_args.kwargs == {
+            "container_name": settings.prod_db_container
+        }
+        mocks["_init_empty_database"].assert_not_called()
+
+    def test_environment_seed_follows_the_role_and_gets_its_credentials(
+        self, settings, team
+    ):
+        helper = TestCreateFromEnvironment()
+        env_container = helper._env_container(settings)
+        client = helper._client_with_env(settings, env_container)
+        order = []
+        with _PatchAll(self._stack(client, order)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "",
+                "",
+                "erp.example.com",
+                "",
+                from_environment="feature-x",
+            )
+
+        db = production_ops.prod_db_name(team, "erp")
+        assert order[:7] == [
+            f'CREATE DATABASE "{db}";',
+            "restrict_database_access",
+            "_create_pg_role",
+            "_own_public_schema",
+            "_seed_db_from_environment",
+            "reassign_db_ownership",
+            "drop_signaling_sequences",
+        ]
+        mocks["_seed_db_from_environment"].assert_called_once_with(
+            client, settings, team, "feature-x", db, self.CREDS
+        )
+
+    def test_an_empty_production_needs_no_schema_handover(self, settings, team):
+        client = _mock_client()
+        order = []
+        with _PatchAll(self._stack(client, order)) as mocks:
+            production_ops.create_production(
+                settings,
+                team,
+                "erp",
+                "https://github.com/o/r.git",
+                "main",
+                "erp.example.com",
+                "odoo:18.0",
+            )
+
+        db = production_ops.prod_db_name(team, "erp")
+        assert order[:3] == [
+            f'CREATE DATABASE "{db}";',
+            "restrict_database_access",
+            "_create_pg_role",
+        ]
+        mocks["_own_public_schema"].assert_not_called()
+        mocks["_seed_db_from_template"].assert_not_called()
+        mocks["reassign_db_ownership"].assert_not_called()
+        mocks["_init_empty_database"].assert_called_once()
 
 
 class TestCreateFromEnvironment:

@@ -7,6 +7,7 @@
 - **Git**
 - **fuse-overlayfs** (Linux only, for filestore overlay mounting) — auto-installed on first launch; see below
 - **rsync** (all platforms, for incremental filestore copies) — auto-installed on first launch; see below
+- **docker CLI with the buildx plugin** (optional, for [container image builds](mcp-tools.md#container-image-builds)) — included in the official Oduflow image. Without it images are built by the Docker Engine's legacy builder, which fails on Dockerfiles that need BuildKit
 
 !!! note "macOS support"
     On macOS, Docker Desktop runs containers inside a Linux VM and projects
@@ -187,8 +188,9 @@ Both clusters are upgraded together. Prepare the server first:
 
 On startup, before changing anything, Oduflow checks that no environment
 remains, that the clusters hold only databases it can restore, that the new
-image provides every extension those databases use, and that there is room for
-the dumps. It then stops services and production Odoo containers, and dumps
+image provides every extension those databases use and marks the ones in
+production and service databases as trusted, and that there is room for the
+dumps. It then stops services and production Odoo containers, and dumps
 service databases and production databases (including productions deleted
 with their data kept) together with all PostgreSQL roles and their passwords.
 With `[backup]` configured, it then deletes the old WAL-G archive. Only then
@@ -199,6 +201,46 @@ verified), and a new base backup is taken shortly afterwards. Template
 databases are restored from their dumps on disk last, and the dumps are
 deleted. Productions and services are down while their databases are dumped
 and restored.
+
+Each production and service database is dumped out of the old cluster and
+restored into the new one by its own PostgreSQL role, the one recorded in its
+credentials file, never by the superuser: restoring a database runs what its
+content defines, and the old cluster may run a PostgreSQL release in which
+dumping one could too. The superuser dumps only the roles, and recreates only
+the database itself (locale, tablespace, `ALTER DATABASE` settings, privileges
+on the database), making that role its owner. Everything inside ends up owned
+by that role, and privileges are restored as recorded. Three consequences are
+checked before anything is changed:
+
+- an extension that only a superuser may create (for example `postgis` or
+  `pg_stat_statements`) must be marked `trusted = true` in the new image's
+  control file, or be dropped first;
+- a database whose credentials file is missing has no role to dump and
+  restore it. For a production, `reconfigure_production` with no settings
+  changed provisions the role again and writes the file;
+- a database that contains a subscription or a user mapping is refused:
+  `pg_dump` leaves those out of a dump it does not take as a superuser;
+- a database that contains an event trigger is refused: its dump includes the
+  trigger, and only a superuser could create it again in the new cluster. Drop
+  it (`DROP EVENT TRIGGER <name>;`) unless you need it — one that came with a
+  template loaded by an older version is described under
+  [What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind).
+
+The role also has to be able to read everything in its database. If it cannot
+— a table that still belongs to another role, a table with
+`FORCE ROW LEVEL SECURITY` — the dump fails with PostgreSQL's reason, the
+upgrade stops, the services and productions it had stopped are started again,
+and nothing has been removed.
+
+If you trust everything a database contains, you can let the superuser dump
+and restore it as before by starting Oduflow with
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE=<database>[,<database>…]` in its
+environment. The same variable is the way out when a restore stops on content
+that only a superuser can recreate (a publication `FOR ALL TABLES`, a function
+in an untrusted language): the error names the database and its kept dump; set
+the variable and restart to resume. On PostgreSQL 17 and newer the superuser
+restores such a database with event triggers switched off for the session, so
+one that the archive creates does not fire during the rest of the restore.
 
 A failure before an old cluster is removed, including a refused S3 delete,
 leaves everything as it was, and setting the image back cancels the upgrade; if
@@ -224,7 +266,11 @@ All settings are configured via a TOML file. Oduflow searches for `oduflow.toml`
 
 If no config file exists when Oduflow starts, the bundled default is copied to
 `/etc/oduflow/oduflow.toml` when that directory is writable, otherwise to
-`~/.oduflow/conf/oduflow.toml`. The copied file is populated with generated
+`~/.oduflow/conf/oduflow.toml`. The directory the loaded `oduflow.toml` lives
+in becomes the **config directory** — where `postgresql.conf`,
+`postgresql-prod.conf`, `traefik-dynamic/` and `license.key` live — unless
+`[storage].etc_dir` overrides it. Pointing `ODUFLOW_TOML` at a file therefore
+relocates the whole config directory with it. The copied file is populated with generated
 values for `[database].password`, `[team.1].auth_token`,
 `[team.1].ui_password` and `[admin].password`. The file is created with mode
 `0600` and the generated secrets are never printed to the log — read them from
@@ -234,6 +280,11 @@ the config file:
 sudo grep -E 'auth_token|ui_password' /etc/oduflow/oduflow.toml 2>/dev/null \
   || grep -E 'auth_token|ui_password' ~/.oduflow/conf/oduflow.toml
 ```
+
+Team passwords and tokens, `[admin].password` and the `[backup]` S3 keys can
+also come from environment variables such as `ODUFLOW_TEAM_1_UI_PASSWORD`,
+which win over the file. See
+[Credentials from environment variables](security.md#credentials-from-environment-variables).
 
 You do not have to edit this file by hand afterwards: in HTTP mode the
 [Server settings console](admin.md) at `/admin` edits every section and every
@@ -286,6 +337,7 @@ image = "postgres:16"       # PostgreSQL Docker image (15-17; a newer major upgr
 # ── Storage ───────────────────────────────────────────
 [storage]
 # data_dir = "/srv/oduflow"         # base directory for all data (default: /srv/oduflow or ~/.oduflow/data)
+# etc_dir = "/etc/oduflow"          # config directory (default: the directory of the loaded oduflow.toml)
 overlay_threshold_mb = 50            # template filestore size threshold (MB) — larger uses fuse-overlayfs, smaller uses copy
 
 # ── Lifecycle ─────────────────────────────────────────
@@ -299,7 +351,7 @@ prod_purge_hours = 0        # purge DB/files kept by a production deletion after
 # from the dashboard (Agent Chat / Agent CLI). Opt-in per team via
 # agent_enabled below.
 # [agent]
-# image = "oduist/oduflow-coder:0.4.0"
+# image = "oduist/oduflow-coder:0.4.1"
 # claude_model = ""         # optional Claude model override; empty = CLI default
 # codex_model = ""          # optional Codex model override; empty = CLI default
 # opencode_model = ""       # optional provider/model override; empty = OpenCode default
@@ -356,8 +408,9 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 # ANTHROPIC_API_KEY = ""
 # OPENAI_API_KEY = ""
 # OPENCODE_API_KEY = ""              # OpenCode Zen; arbitrary provider vars also work
-# [team.1.image_registry]            # enables the image build/publish MCP tools for this team
-# repository_prefix = "acme"         # registry namespace all published images live under (required)
+# [team.1.image_registry]            # image build limits and the registry builds are published to
+# builds_enabled = true              # false refuses new image builds for this team
+# repository_prefix = "acme"         # registry namespace published images live under; omit to build without publishing
 # host = "docker.io"                 # plain registry hostname, optionally with :port
 # username = "acme-ci"               # optional; with token, request-scoped push credentials
 # token = "<registry-token>"         # registry token/password stored in this config
@@ -375,7 +428,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | `[server].bind` | `0.0.0.0` | HTTP server listener address. The legacy key `[server].host` remains accepted with a deprecation warning; if both are present they must have the same value |
 | `[server].host` | *(legacy)* | Deprecated alias for `[server].bind` |
 | `[server].port` | `8000` | HTTP server port |
-| `[server].allow_local_path` | `true` | Allow trusted local-development live-mounts that bind a host checkout read/write. Set `false` on hosted, remote, or multi-user servers, or whenever only git-clone delivery is required |
+| `[server].allow_local_path` | `true` | Allow local CLI and stdio MCP to bind a host checkout read/write. HTTP MCP and the dashboard cannot create or rebuild live-mounted environments, regardless of this setting |
 | `[server].allow_insecure_http` | `false` | Serve the `/mcp` endpoint over plain HTTP with **no** authentication. Only enable behind your own authenticating proxy |
 | `[server].trace` | `false` | Enable detailed trace logging for git analysis and environment operations |
 | `[server].disable_telemetry` | `false` | Disable anonymous usage telemetry (see [Telemetry](#telemetry)) |
@@ -384,7 +437,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 
 | Key | Default | Description |
 |---|---|---|
-| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable` |
+| `[admin].password` | *(empty; generated on fresh installs)* | Password of the deployment-wide [Server settings console](admin.md) at `/admin`, which edits this whole file from the browser. Empty = the console does not exist (404). Must differ from every team `ui_password`, `auth_token` and `production_token`. Enable it on an existing install with `oduflow admin enable`. Overridden by `ODUFLOW_ADMIN_PASSWORD` (at least 12 characters) |
 
 ### Routing settings
 
@@ -408,6 +461,7 @@ port_range = [50000, 50100]          # port range for Odoo containers [start, en
 | Key | Default | Description |
 |---|---|---|
 | `[storage].data_dir` | `/srv/oduflow` or `~/.oduflow/data` | Base directory for all data. Team data directories are `team_{ID}` subdirectories inside |
+| `[storage].etc_dir` | directory of the loaded `oduflow.toml` | Config directory: `postgresql.conf`, `postgresql-prod.conf`, `traefik-dynamic/`, `license.key` (the overridable `odoo.conf` lives in each team's data directory, not here). The PostgreSQL and Traefik containers bind-mount files from here, so when Oduflow itself runs in Docker it must be a host path mounted at the same path inside the container (see [Running in Docker](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host)). Must exist and be writable at startup. Locked: existing containers keep mounting the old path, so move the files, edit it in Raw TOML, then recreate `oduflow-db` and Traefik |
 | `[storage].overlay_threshold_mb` | `50` | Template filestore size threshold (MB). Templates smaller than this use a simple copy per environment; larger templates use fuse-overlayfs. The decision is stored in `metadata.json` at template creation time |
 | `[lifecycle].auto_stop_hours` | `48` | Auto-stop environments after N hours without work (env-scoped MCP calls or dashboard actions). `0` disables. Protected environments are exempt |
 | `[lifecycle].auto_delete_hours` | `0` | Auto-delete stopped environments N hours after they stopped (manual stops count). Default `0` = **disabled** — auto-delete is opt-in and destructive; set a positive value to enable. Protected environments are exempt; `pull_and_apply` wakes a stopped environment automatically |
@@ -419,7 +473,7 @@ The global `[agent]` section holds deployment-wide settings for the per-team cod
 
 | Key | Default | Description |
 |---|---|---|
-| `[agent].image` | `oduist/oduflow-coder:0.4.0` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
+| `[agent].image` | `oduist/oduflow-coder:0.4.1` | Immutable image for the per-team coding-agent container (Claude Code + OpenAI Codex + OpenCode); the default is coupled to the Oduflow release |
 | `[agent].claude_model` | *(empty)* | Optional Claude model override for the agent; empty = CLI default |
 | `[agent].codex_model` | *(empty)* | Optional Codex model override for the agent; empty = CLI default |
 | `[agent].opencode_model` | *(empty)* | Optional OpenCode model override in `provider/model` format; empty = OpenCode default |
@@ -463,8 +517,8 @@ and `secret_key` are all required; remove the whole section to disable backups.
 | Key | Default | Description |
 |---|---|---|
 | `[backup].bucket` | *(required)* | S3-compatible bucket name |
-| `[backup].access_key` | *(required)* | S3 access key |
-| `[backup].secret_key` | *(required)* | S3 secret key |
+| `[backup].access_key` | *(required)* | S3 access key. Overridden by `ODUFLOW_BACKUP_ACCESS_KEY` |
+| `[backup].secret_key` | *(required)* | S3 secret key. Overridden by `ODUFLOW_BACKUP_SECRET_KEY` |
 | `[backup].endpoint` | *(empty)* | Custom S3 endpoint for MinIO, R2, or another compatible service; enables path-style addressing |
 | `[backup].region` | *(empty)* | S3 region |
 | `[backup].prefix` | `oduflow` | Object-key prefix, normalized without leading or trailing `/` |
@@ -485,9 +539,9 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `environment_slots` | `20` | Maximum concurrent development environments for the team in port or Traefik mode. Stopped environments count; deleting one frees its reservation. `0` disables the cap |
 | `environment_hostname_mode` | `branch` | Traefik public hostname strategy. `branch` keeps environment-derived names such as `feature.dev.example.com`; `slots` reuses `dev1.example.com` through `devN.example.com` and requires `environment_slots > 0` |
 | `service_slots` | `10` | Maximum number of managed auxiliary services for the team. Stopped services count; deleting a service frees its slot. `0` disables the cap |
-| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token |
-| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
-| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it |
+| `production_token` | *(empty)* | Separate 32..512 character Bearer credential for `/production`; required for new production creation and synchronized to the Odoo administrator by OduMCP. Must differ from every dev and production token. Overridden by `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` |
+| `auth_token` | *(generated in fresh config)* | Bearer token for MCP HTTP auth and OAuth client secret. Empty disables MCP auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_AUTH_TOKEN` |
+| `ui_password` | *(generated in fresh config)* | Password for Web UI login (user: `admin`). Separate from MCP auth token. Empty disables UI auth only when explicitly allowed with `[server].allow_insecure_http = true`; otherwise HTTP startup refuses it. Overridden by `ODUFLOW_TEAM_<ID>_UI_PASSWORD` |
 | `port_range` | `[50000, 50100]` | Port range for Odoo containers `[start, end)` — supports up to 100 concurrent environments |
 | `agent_enabled` | `false` | Enable the per-team coding agent (dashboard Agent Chat / Agent CLI). Off by default |
 | `agent_default` | `claude` | Which agent consoles/chats open by default: `claude`, `codex`, or `opencode` |
@@ -495,7 +549,7 @@ Each `[team.*]` section defines an isolated team with its own workspaces, templa
 | `disk_quota_gb` | `0` | Kernel-enforced cap for team files and databases when the data filesystem supports XFS project quotas. `0` disables it |
 | `public_scheme` | *(empty — global value)* | Per-team override of `[routing].public_scheme` (`http` or `https`) for the URLs handed out for this team. Lets one `tls = false` deployment mix a plain-HTTP LAN team with a team fronted by a TLS-terminating upstream such as a Cloudflare tunnel — see [Traefik routing](traefik.md#mixing-http-and-https-teams-in-one-deployment). Same wire-reality rules as the global setting: `https` is rejected in port mode, `http` is rejected with `tls = true` or `tls = {}` |
 | `[team.X.agent_env]` | *(empty)* | Sub-table of environment variables injected into the team's agent container — provider credentials (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENCODE_API_KEY`, or any provider-specific OpenCode variable) and custom vars |
-| `[team.X.image_registry]` | *(absent — image building disabled)* | Sub-table enabling the container image build/publish MCP tools for the team. `repository_prefix` (required) is the registry namespace agents may publish under — the authorization boundary; `host` (default `docker.io`) is a plain registry hostname; `username` + `token` (set together) provide request-scoped push credentials directly from the Oduflow config — omit both to use the host Docker daemon's own `docker login` credentials. Resource bounds are `build_timeout_seconds` (default `1800`, hard wall-clock deadline), `max_context_mb` (default `512`), `max_log_mb` (default `16`), and `max_concurrent_builds` (default `2`). `keep_images` (default `10`, `0` disables pruning) retains that many local staging builds; temporary publish tags are removed after push and older untagged image objects are deleted once unused. Protect the config file and use a least-privilege registry token restricted to the prefix |
+| `[team.X.image_registry]` | *(absent — default limits, no publishing)* | Sub-table for the container image build MCP tools. Building works without it; the section tunes the build limits, enables publishing, and can switch building off. Its keys are documented under [Image registry settings](#image-registry-settings) |
 
 `environment_hostname_mode = "slots"` requires Traefik and a hostname with a
 distinct host prefix and parent domain, such as `dev.example.com`. A bare
@@ -516,22 +570,54 @@ team_{ID}/
 └── agent_guides/         # AI agent guides (markdown)
 ```
 
+### Image registry settings
+
+The `[team.X.image_registry]` sub-table is **optional, and building works
+without it**: a team with no section builds with the defaults below and can run
+the result locally, but cannot publish it. The section does three things —
+tunes the build limits, enables publishing (`repository_prefix`), and gives the
+operator a switch to refuse builds entirely (`builds_enabled = false`). See
+[Container Image Builds](image-builds.md) for the workflow and the trust model.
+
+A present section must be valid, so a misconfigured registry fails at startup
+rather than at the first build.
+
+| Key | Default | Description |
+|---|---|---|
+| `[team.X.image_registry].builds_enabled` | `true` | Operator switch. A build runs a Dockerfile on the host's Docker daemon; `false` refuses every new build for the team — `start_image_build` on both the team and the scoped `/mcp/<env>` endpoint, and `build` on a Stack service. Must be `true` or `false` |
+| `[team.X.image_registry].repository_prefix` | *(empty — publishing disabled)* | Registry namespace every published image lives under, e.g. `acme` or `acme/odoo`. **This is the authorization boundary** for [`publish_image_build`](mcp-tools.md#publish_image_build): agents choose any repository and tag below it and can reach nothing outside it. Leave it out to build and run images on this host without a registry. Must be a lowercase OCI namespace — letters and digits, `.`, `_`, `-` as separators, `/` between components; leading and trailing `/` are stripped |
+| `[team.X.image_registry].host` | `docker.io` | Plain registry hostname, optionally with a port (`ghcr.io`, `registry.example.com:5000`). No scheme and no path: `https://…` or `host/namespace` is rejected. Lowercased |
+| `[team.X.image_registry].username` | *(empty)* | Registry user for pushes. Must be set **together with** `token`, or both left empty to use the host Docker daemon's own `docker login` credentials; setting only one is rejected at startup, as is setting them without `repository_prefix` |
+| `[team.X.image_registry].token` | *(empty)* | Registry token or password, passed per-push to the Docker API as request-scoped auth — never a daemon-wide login, and never stored in build jobs. Use a least-privilege token restricted to `repository_prefix` and keep the config file readable only by the Oduflow user |
+| `[team.X.image_registry].build_timeout_seconds` | `1800` | Hard wall-clock deadline per build, including fetching a repository source; the build is terminated and the job fails. Must be `> 0` |
+| `[team.X.image_registry].max_context_mb` | `512` | Size cap for the sealed build context exported from the commit, checked before the build starts. A fixed ceiling of 200 000 files also applies. Must be `> 0` |
+| `[team.X.image_registry].max_log_mb` | `16` | Cap for the persisted build log per build; beyond it the log is truncated with a marker and the build continues. Must be `> 0` |
+| `[team.X.image_registry].max_concurrent_builds` | `2` | Active builds allowed for the team, counted per process — a build started by `oduflow stack apply` does not take one of the server's slots. Further builds are refused as busy. Must be `> 0` |
+| `[team.X.image_registry].keep_images` | `10` | Local staging images (`oduflow-build/team-<id>:<build-id>`) kept per team; older ones are untagged after each successful build, and tags referenced by a running or stopped container are always preserved. `0` disables pruning. Must be `>= 0` |
+
 ### Configuration file overrides
 
 On first startup, Oduflow generates `postgresql.conf` from one host-wide
-resource plan and copies the bundled `odoo.conf` if it does not exist. These
+resource plan into the config directory, and reconciles the bundled `odoo.conf`
+into each team's data directory (`{data_dir}/team_{ID}/odoo.conf`). These
 files take **priority** over the bundled defaults — edit them to customize
 PostgreSQL tuning or Odoo settings globally:
 
 ```
-/etc/oduflow/             (or ~/.oduflow/conf/)
+/etc/oduflow/             (or ~/.oduflow/conf/; see [storage].etc_dir)
   oduflow.toml            ← main configuration file
   postgresql.conf         ← dev PostgreSQL tuning (used by oduflow-db)
   postgresql-prod.conf    ← production PostgreSQL tuning (created lazily)
-  odoo.conf               ← custom Odoo defaults (used by new environments)
   license.key             ← license file (optional)
-  traefik/                ← Traefik dynamic configuration (auto-generated)
+  traefik-dynamic/        ← Traefik dynamic configuration (auto-generated + drop-ins)
 ```
+
+`postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/` are
+**bind-mounted** into `oduflow-db`, the production PostgreSQL container and
+Traefik. The Docker daemon resolves a bind source on the host, so this
+directory must be one the daemon can see — on a native install it always is;
+in a Docker-out-of-Docker deployment read
+[the same-path rule](docker.md#the-one-rule-both-directories-must-be-the-same-path-on-the-host).
 
 `pg_hba.conf` remains in the PostgreSQL data volume rather than this config
 directory. On every startup Oduflow reads the active file reported by

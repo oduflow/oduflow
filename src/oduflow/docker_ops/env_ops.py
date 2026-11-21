@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,12 +30,14 @@ from oduflow import (
     secret_store,
     settings,
 )
+from oduflow import settings as settings_module
 from oduflow.docker_ops import image_cleanup
 from oduflow.docker_ops.client import (
     chown_recursive,
     get_client,
     get_odoo_uid_gid,
     pull_with_progress,
+    run_for_output,
 )
 from oduflow.docker_ops.stats import default_env_limits
 from oduflow.docker_ops.system_ops import (
@@ -53,8 +55,10 @@ from oduflow.docker_ops.system_ops import (
     ensure_team_tablespace,
     estimate_new_db_bytes,
     pg_clone_strategy_clause,
+    provision_scoped_role,
     reassign_db_ownership,
     require_postgres_for_odoo,
+    restrict_database_access,
 )
 from oduflow.domains import env_hostname
 from oduflow.env_credentials import create_credentials, load_credentials
@@ -68,6 +72,7 @@ from oduflow.errors import (
     PrerequisiteNotMetError,
     ProtectedError,
 )
+from oduflow.fsutil import copy_tenant_tree
 from oduflow.git_ops import RepoAuthError, git_env_for_team
 from oduflow.hostname_registry import (
     CAPACITY_RESERVATION,
@@ -756,7 +761,7 @@ def _mount_filestore(
         merged = paths["merged"]
         if os.path.exists(merged):
             shutil.rmtree(merged)
-        shutil.copytree(template_filestore, merged)
+        copy_tenant_tree(template_filestore, merged)
         odoo_uid_gid = get_odoo_uid_gid(client, odoo_image)
         uid_str, gid_str = odoo_uid_gid.split(":")
         chown_recursive(merged, int(uid_str), int(gid_str), client, odoo_image)
@@ -1654,8 +1659,14 @@ def _template_module_upgrades(
     odoo_volumes: dict[str, Any],
     odoo_conf_path: str | None,
     env_name: str,
+    *,
+    db_user: str,
 ) -> tuple[dict[str, tuple[str, str]], str | None]:
     """Installed modules whose checkout manifest is newer than the cloned DB.
+
+    The database is a template's content, so it is read as *db_user*, the
+    environment's own role, not as the superuser: ``ir_module_module`` may be
+    a view over a function the template's dump defined.
 
     Compares ``ir_module_module.latest_version`` with the manifests the
     serving Odoo will load: the generated odoo.conf's addons_path, mapped back
@@ -1676,6 +1687,7 @@ def _template_module_upgrades(
             "SELECT COALESCE(json_object_agg(name, latest_version), '{}'::json)::text "
             "FROM ir_module_module WHERE state = 'installed';",
             db=env_db,
+            user=db_user,
         )
         installed = json.loads(raw or "{}")
         # Without a generated conf the image's own odoo.conf applies, which
@@ -1936,9 +1948,7 @@ def _cleanup_old_environment(
     env_db = get_db_name(env_name, team.team_id)
 
     try:
-        creds = load_credentials(
-            env_name, team.workspaces_dir, settings.db_user, settings.db_password
-        )
+        creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
         _drop_pg_role(client, settings, creds["pg_user"])
     except Exception:
         pass
@@ -2008,7 +2018,7 @@ def _init_empty_database(
     """
     init_name = get_resource_name(env_name, "odoo-init", settings.prefix, team.team_id)
     try:
-        client.containers.get(init_name).remove(force=True)
+        client.containers.get(init_name).remove(force=True, v=True)
     except docker.errors.NotFound:
         pass
 
@@ -2045,7 +2055,7 @@ def _init_empty_database(
             logs = ""
     finally:
         try:
-            init_container.remove(force=True)
+            init_container.remove(force=True, v=True)
         except docker.errors.APIError:
             pass
 
@@ -2257,6 +2267,323 @@ def _push_new_branch(
             raise ExternalCommandError(label, -1, f"{label} timed out ({timeout}s).")
 
 
+# Set on the environment's container when _clone_or_start_branch created the
+# branch (as opposed to cloning one that already existed on origin). Only a
+# hint for the dashboard's delete dialog default — an explicit delete_branch
+# request is honoured for any branch.
+GIT_BRANCH_CREATED_LABEL = "oduflow.git_branch_created"
+# The base branch named when the environment was created. delete_branch
+# accepts "merged into the base" as merged: in a repository with one branch
+# per Odoo version the work lands on 17.0, not on origin's default branch.
+GIT_BASE_BRANCH_LABEL = "oduflow.git_base_branch"
+# Both describe the branch the environment was created on: recreate carries
+# them over, switch_branch drops them.
+_GIT_BRANCH_PROVENANCE_LABELS = (GIT_BRANCH_CREATED_LABEL, GIT_BASE_BRANCH_LABEL)
+
+# History depths fetched, in turn, to decide whether a branch is merged. The
+# managed clone is shallow; an unbounded fetch of another branch into it can
+# pull that branch's entire history, so the check deepens in bounded steps and
+# gives up (the branch is kept) past the last one.
+_MERGE_CHECK_DEPTHS = (50, 1000)
+
+_GitRunner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+def _parse_ls_remote(output: str) -> tuple[str, dict[str, str]]:
+    """Parse ``git ls-remote --symref origin HEAD refs/heads/...`` output.
+
+    Returns origin's default branch ('' when the remote does not advertise
+    where HEAD points) and the tip of every listed branch, the default
+    included when it could be named.
+    """
+    default = ""
+    head_sha = ""
+    tips: dict[str, str] = {}
+    for line in output.splitlines():
+        value, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if value.startswith("ref: refs/heads/") and ref == "HEAD":
+            default = value.removeprefix("ref: refs/heads/").strip()
+        elif ref == "HEAD":
+            head_sha = value.strip()
+        elif ref.startswith("refs/heads/"):
+            tips[ref.removeprefix("refs/heads/")] = value.strip()
+    if default and head_sha:
+        tips.setdefault(default, head_sha)
+    return default, tips
+
+
+def _branch_merged_into(
+    git: _GitRunner, branch: str, targets: list[str]
+) -> tuple[str, str, str]:
+    """Find the branch among *targets* that contains origin's *branch* tip.
+
+    Returns ``(target, tip, "")`` when the fetched tip is an ancestor of that
+    target — *tip* being the exact commit that was checked, for the caller to
+    pin its delete to — else ``("", "", reason)``. Only a real ancestry
+    counts: a squash- or rebase-merge
+    leaves the branch's own commits outside the target, so it reads as
+    unmerged. History is fetched to a bounded depth and deepened once; a
+    shallow graph is a subgraph of the real one, so it can miss an old merge
+    (the branch is then kept) but never invent one.
+    """
+    names = " or ".join(f"'{target}'" for target in targets)
+    # Only on the two "not merged" verdicts, not on a failed git command.
+    by_hand = (
+        ". A squash- or rebase-merged branch is not recognised as merged; if "
+        "this one is no longer needed, delete it yourself "
+        f"(git push origin --delete {branch})."
+    )
+    depth = 0
+    for depth in _MERGE_CHECK_DEPTHS:
+        # Scratch refs, fresh for every depth: git only deepens the refs it
+        # has to download, and silently skips one whose local copy is already
+        # at origin's tip — which the environment's own branch always is. The
+        # clone is removed with the workspace right after, refs included.
+        scratch = f"refs/oduflow/merge-check/{depth}"
+        fetch = git(
+            "fetch",
+            f"--depth={depth}",
+            "origin",
+            # Full refspecs: a branch name can never be read as an option.
+            *(f"+refs/heads/{name}:{scratch}/{name}" for name in (*targets, branch)),
+        )
+        if fetch.returncode != 0:
+            stderr = redact_url_credentials(fetch.stderr or "").strip()
+            return "", "", f"git fetch failed: {stderr}"
+        branch_ref = f"{scratch}/{branch}"
+        histories_meet = True
+        for target in targets:
+            target_ref = f"{scratch}/{target}"
+            ancestor = git("merge-base", "--is-ancestor", branch_ref, target_ref)
+            if ancestor.returncode == 0:
+                tip = git("rev-parse", "--verify", f"{branch_ref}^{{commit}}")
+                if tip.returncode != 0 or not tip.stdout.strip():
+                    stderr = redact_url_credentials(tip.stderr or "").strip()
+                    return "", "", f"could not read the checked tip: {stderr}"
+                return target, tip.stdout.strip(), ""
+            if ancestor.returncode != 1:
+                stderr = redact_url_credentials(ancestor.stderr or "").strip()
+                return "", "", f"could not compare it with '{target}': {stderr}"
+            # A common ancestor in view means the two histories already meet
+            # at this depth and the branch tip is simply not part of the
+            # target. Without one the fetch was too shallow to tell.
+            if git("merge-base", branch_ref, target_ref).returncode != 0:
+                histories_meet = False
+        if histories_meet:
+            return "", "", f"it has commits that are not merged into {names}{by_hand}"
+    return (
+        "",
+        "",
+        (
+            f"it could not be confirmed as merged into {names} (the most recent "
+            f"{depth} commits of history were checked){by_hand}"
+        ),
+    )
+
+
+def _delete_branch_on_origin(
+    repo_url: str,
+    branch: str,
+    repo_path: str,
+    team: TeamSettings,
+    *,
+    base_branch: str = "",
+    timeout: int = 60,
+) -> str | None:
+    """Delete *branch* on origin, pushing from the clone at *repo_path*.
+
+    The branch is deleted only when its tip is contained in origin's default
+    branch or in *base_branch* (the base recorded at creation, when known), so
+    no commit is lost with it; the delete is pinned to the checked tip, so a
+    commit pushed meanwhile keeps the branch. Returns a warning string when the branch is left
+    alone (not merged, push denied, undeterminable default branch, ...) and
+    None when it was deleted. Never raises: the caller is tearing the
+    environment down, and the teardown must not fail over git.
+    """
+    git_env = git_env_for_team(team.git_credentials_file(), team.ssh_dir())
+    pretty_url = sanitize_repo_url(repo_url) or "origin"
+    not_deleted = f"Branch '{branch}' was not deleted on {pretty_url}"
+
+    def git(*args: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            ["git", "-C", repo_path, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=git_env,
+        )
+
+    try:
+        # One round trip for everything the decision needs from origin: where
+        # HEAD points (the managed clone is single-branch and cannot say) and
+        # the tips of the branches involved.
+        wanted = [branch]
+        if base_branch and base_branch != branch:
+            wanted.append(base_branch)
+        listing = git(
+            "ls-remote",
+            "--symref",
+            "origin",
+            "HEAD",
+            *(f"refs/heads/{name}" for name in wanted),
+        )
+        if listing.returncode != 0:
+            stderr = redact_url_credentials(listing.stderr or "").strip()
+            return f"{not_deleted}: git ls-remote failed: {stderr}"
+        default, tips = _parse_ls_remote(listing.stdout)
+        if not default:
+            return f"{not_deleted}: could not determine the default branch of origin."
+        if branch == default:
+            return (
+                f"Branch '{branch}' was not deleted: it is the default branch "
+                f"of {pretty_url}."
+            )
+        if branch not in tips:
+            return f"Branch '{branch}' no longer exists on {pretty_url}; nothing to delete."
+
+        # A base branch that is gone from origin is simply not a candidate.
+        targets = [
+            name
+            for name in dict.fromkeys((base_branch, default))
+            if name and name != branch and name in tips
+        ]
+        if not targets:
+            return (
+                f"{not_deleted}: origin's default branch '{default}' has no "
+                "commits to compare it with."
+            )
+        # Same tip as a target (a branch that never got a commit of its own):
+        # merged by definition, nothing to fetch.
+        merged_into = next((t for t in targets if tips[t] == tips[branch]), "")
+        checked_tip = tips[branch]
+        if not merged_into:
+            merged_into, checked_tip, reason = _branch_merged_into(git, branch, targets)
+            if not merged_into:
+                return f"{not_deleted}: {reason}"
+
+        # Pinned to the commit that was checked: a push to the branch since
+        # then (a laptop, a CI bot, GitHub's "Update branch") makes origin
+        # refuse the delete instead of taking unmerged commits down with it.
+        push = git(
+            "push",
+            f"--force-with-lease=refs/heads/{branch}:{checked_tip}",
+            "origin",
+            "--delete",
+            f"refs/heads/{branch}",
+        )
+        if push.returncode != 0:
+            stderr = redact_url_credentials(push.stderr or "")
+            if "stale info" in stderr:
+                return (
+                    f"{not_deleted}: it received new commits while it was "
+                    "being checked."
+                )
+            if any(kw in stderr.lower() for kw in _PUSH_DENIED_KEYWORDS):
+                return (
+                    f"Branch '{branch}' was not deleted: the git credential "
+                    f"cannot delete branches on {pretty_url}. Delete it "
+                    f"yourself (git push origin --delete {branch})."
+                )
+            return f"{not_deleted}: git push failed: {stderr.strip()}"
+    except subprocess.TimeoutExpired:
+        return f"{not_deleted}: git timed out."
+    except OSError as exc:
+        return f"{not_deleted}: {exc}"
+    logger.info(
+        "Deleted branch '%s' on %s (merged into '%s')",
+        branch,
+        pretty_url,
+        merged_into,
+        extra={"branch": branch},
+    )
+    return None
+
+
+def _maybe_delete_env_branch(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    labels: dict[str, str],
+) -> str | None:
+    """Policy gate for delete_environment's opt-in git-branch deletion.
+
+    *labels* are the environment container's labels, captured before the
+    container was removed. Returns a warning (the branch is left alone) or
+    None (deleted). All refusals are warnings, never errors: the environment
+    teardown must not fail over git state.
+    """
+    if not labels:
+        # No container (or one of another team): which branch and repository
+        # the environment tracked, and whether it was live-mounted, is unknown.
+        # Its name is not evidence — an environment "staging" may well have
+        # been created from "develop" — so never guess for an irreversible
+        # deletion.
+        return (
+            "No git branch was deleted on origin: the environment's container "
+            "is gone, so the branch it tracked cannot be confirmed. Delete the "
+            "branch yourself if it is no longer needed."
+        )
+    if labels.get("oduflow.local_path"):
+        return (
+            "delete_branch does not apply to a live-mounted environment: its "
+            "git state belongs to the local checkout, not to Oduflow."
+        )
+    # Containers older than the git_branch label track the branch they are
+    # named after; the same fallback applies to the other environments below.
+    branch = labels.get("oduflow.git_branch") or env_name
+    repo_url = labels.get(settings.repo_label, "")
+    repo_path = get_repo_path(env_name, team.workspaces_dir)
+    if not os.path.isdir(os.path.join(repo_path, ".git")):
+        return (
+            f"Branch '{branch}' was not deleted on origin: the environment has "
+            "no local git clone to push from."
+        )
+
+    # Several environments can sit on one branch; include stopped containers —
+    # same scan mechanics as the extra-repo consumer checks.
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{settings.managed_label}=true",
+                    f"{settings.team_label}={team.team_id}",
+                ]
+            },
+            ignore_removed=True,
+        )
+    except Exception as exc:
+        return (
+            f"Branch '{branch}' was not deleted on origin: could not check "
+            f"whether another environment uses it: {exc}"
+        )
+    others = set()
+    for c in containers:
+        other_env = c.labels.get(settings.branch_label)
+        # Only environment containers carry the branch (name) label.
+        if not other_env or other_env == env_name:
+            continue
+        if (c.labels.get("oduflow.git_branch") or other_env) != branch:
+            continue
+        if repo_url and c.labels.get(settings.repo_label, "") != repo_url:
+            continue
+        others.add(other_env)
+    if others:
+        return (
+            f"Branch '{branch}' was not deleted on origin: still used by "
+            f"environment(s) {', '.join(sorted(others))}."
+        )
+    return _delete_branch_on_origin(
+        repo_url,
+        branch,
+        repo_path,
+        team,
+        base_branch=labels.get(GIT_BASE_BRANCH_LABEL, ""),
+    )
+
+
 def build_env_traefik_labels(
     settings: Settings,
     team: TeamSettings,
@@ -2389,12 +2716,18 @@ def create_environment(
     hostname: str = "",
     hostname_source: str = "",
     base_branch: str = "",
+    branch_provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Allocate routing state, then provision the environment itself.
 
     *base_branch*, when given, is where a *branch* missing on origin starts
     from. The new branch is pushed to origin and stays there even when a later
     provisioning step fails: a retry then simply clones it.
+
+    *branch_provenance* is recreate_environment handing over the replaced
+    container's git-branch provenance labels (created-by-Oduflow hint, base
+    branch): on a recreate the branch already exists, so they cannot be
+    derived again.
     """
     resolved_env_name = env_name or branch
     requested_hostname = validate_env_hostname(hostname) if hostname else ""
@@ -2495,6 +2828,7 @@ def create_environment(
             hostname=assigned_hostname,
             hostname_source=assigned_hostname_source,
             base_branch=base_branch,
+            branch_provenance=branch_provenance,
         )
     except Exception:
         if reservation_active:
@@ -2531,6 +2865,7 @@ def _create_environment_impl(
     hostname: str = "",
     hostname_source: str = "",
     base_branch: str = "",
+    branch_provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     env_name = env_name or branch
     from oduflow.naming import PROD_ENV_PREFIX
@@ -2633,6 +2968,8 @@ def _create_environment_impl(
         if local_mount
         else get_repo_path(env_name, team.workspaces_dir)
     )
+    if local_mount and settings_module.TRANSPORT == "http":
+        raise PrerequisiteNotMetError("Live-mount requires the local CLI or stdio MCP.")
     if local_mount and not settings.allow_local_path:
         raise PrerequisiteNotMetError(
             "local_path (live-mount) is disabled. Set allow_local_path = true "
@@ -2721,6 +3058,24 @@ def _create_environment_impl(
             git_user=git_user,
             base_branch=base_branch,
         )
+        if branch_provenance:
+            # Recreate: the branch exists by now, so what the replaced
+            # container recorded about it is carried over as is.
+            labels.update(
+                {
+                    key: value
+                    for key, value in branch_provenance.items()
+                    if key in _GIT_BRANCH_PROVENANCE_LABELS and value
+                }
+            )
+        if base_branch and base_branch != branch:
+            # delete_branch treats "merged into the base" as merged.
+            labels[GIT_BASE_BRANCH_LABEL] = base_branch
+        if branch_created:
+            # Only a UI hint (the delete dialog's default for "also delete the
+            # git branch on origin") — deletion itself is allowed for any
+            # branch when explicitly requested.
+            labels[GIT_BRANCH_CREATED_LABEL] = "true"
 
     # The template database is a snapshot of some commit; this checkout may sit
     # before or after it. Report the drift now, while the agent is still deciding
@@ -2777,6 +3132,9 @@ def _create_environment_impl(
             settings,
             f'CREATE DATABASE "{env_db}" TABLESPACE "{ts_name}";',
         )
+    # A copy does not inherit its template's privileges: PUBLIC may connect to
+    # it again. The role created next becomes the owner and keeps its access.
+    restrict_database_access(client, settings, env_db)
 
     env_creds = create_credentials(env_name, team.team_id, team.workspaces_dir)
     _create_pg_role(
@@ -2784,13 +3142,12 @@ def _create_environment_impl(
     )
 
     if template_name is not None:
-        # A template DB's objects are owned by whatever role created them —
-        # normally the superuser (pg_restore --no-owner), but the plain-SQL /
-        # import_template path (psql without --no-owner) can leave
-        # objects owned by the source env's per-env role (e.g. u_2_fs19). DDL
-        # during module upgrades requires ownership; Odoo connects as the env
-        # role and never SET ROLEs, so per-object ownership — not role
-        # membership — is what actually enables its DDL.
+        # A template DB's objects belong to the team's template owner role
+        # (see system_ops.reload_template), or to the superuser or a source
+        # env's role in a template loaded by an older version. DDL during
+        # module upgrades requires ownership; Odoo connects as the env role
+        # and never SET ROLEs, so per-object ownership — not role membership
+        # — is what actually enables its DDL.
         reassign_db_ownership(client, settings, env_db, env_creds["pg_user"])
         drop_signaling_sequences(client, settings, env_db)
         logger.info(
@@ -2824,7 +3181,13 @@ def _create_environment_impl(
     template_check_error: str | None = None
     if template_name is not None:
         template_upgrades, template_check_error = _template_module_upgrades(
-            client, settings, env_db, odoo_volumes, odoo_conf_to_copy, env_name
+            client,
+            settings,
+            env_db,
+            odoo_volumes,
+            odoo_conf_to_copy,
+            env_name,
+            db_user=env_creds["pg_user"],
         )
         if template_upgrades:
             logger.info(
@@ -3385,12 +3748,12 @@ if [ -f /run/oduflow/ssh-key ]; then
         /run/oduflow/ssh-key /home/agent/.ssh/id_ed25519
 fi
 """
-    client.containers.run(
+    run_for_output(
+        client,
         image=image,
         command=["-eu", "-c", script],
         entrypoint=["/bin/sh"],
         user="root",
-        remove=True,
         network_disabled=True,
         volumes=volumes,
     )
@@ -4000,6 +4363,7 @@ def delete_environment(
     env_name: str,
     *,
     preserve_access: bool = False,
+    delete_branch: bool = False,
 ) -> list[str]:
     """Tear the environment down.
 
@@ -4009,6 +4373,14 @@ def delete_environment(
     on the replacement environment. A plain delete revokes both: a *future*
     unrelated environment under the same name must not be reachable with
     credentials handed out for this one.
+
+    ``delete_branch=True`` additionally deletes the environment's git branch
+    on origin (strictly opt-in; recreate never passes it). Any refusal —
+    live-mount, another environment on the branch, unmerged commits, denied
+    push — is a returned warning, never a failure: git state must not block
+    the teardown. The push runs only once the container and database are
+    gone: it is irreversible, so a teardown that fails half-way must not
+    leave a working environment whose branch no longer exists.
     """
     if is_protected(settings, team, env_name):
         raise ProtectedError(
@@ -4039,6 +4411,7 @@ def delete_environment(
         raise NotFoundError(f"Environment '{env_name}' does not exist.")
 
     container_exists = True
+    container_labels: dict[str, str] = {}
     try:
         existing = client.containers.get(odoo_container_name)
         # Defence in depth on top of team-scoped names: never stop/remove a
@@ -4047,6 +4420,8 @@ def delete_environment(
         label = existing.labels.get(settings.team_label)
         if label is not None and label != team.team_id:
             container_exists = False
+        else:
+            container_labels = dict(existing.labels or {})
     except docker.errors.NotFound:
         container_exists = False
 
@@ -4091,15 +4466,29 @@ def delete_environment(
         logger.warning(msg, extra={"env_name": env_name})
         warnings.append(msg)
 
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
     try:
         _drop_pg_role(client, settings, creds["pg_user"])
     except Exception as exc:
         msg = f'Failed to drop PG role "{creds["pg_user"]}": {exc}'
         logger.warning(msg, extra={"env_name": env_name})
         warnings.append(msg)
+
+    if delete_branch:
+        # Deliberately late: every step that can still abort the teardown
+        # (agent cleanup, container stop/remove) is behind us, so the
+        # irreversible push never outlives a failed delete. And before the
+        # rmtree below: it pushes from the environment's own clone with the
+        # team's git credentials.
+        try:
+            branch_warning = _maybe_delete_env_branch(
+                client, settings, team, env_name, container_labels
+            )
+        except Exception as exc:
+            branch_warning = f"The git branch was not deleted on origin: {exc}"
+        if branch_warning:
+            logger.warning(branch_warning, extra={"env_name": env_name})
+            warnings.append(branch_warning)
 
     if os.path.exists(workspace_path):
         _unmount_filestore(env_name, team)
@@ -4127,7 +4516,11 @@ def delete_environment(
 
 
 def recreate_environment(
-    settings: Settings, team: TeamSettings, env_name: str
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    *,
+    allow_host_paths: bool = True,
 ) -> dict[str, Any]:
     """Tear the environment down and provision it again from its recorded
     configuration (repo, image, template, extra addons, git user, env vars,
@@ -4162,10 +4555,19 @@ def recreate_environment(
     git_user = labels.get("oduflow.git_user", "")
     env_vars = json.loads(labels.get("oduflow.env_vars", "{}")) or None
     local_path = labels.get("oduflow.local_path", "")
+    if local_path and (not allow_host_paths or settings_module.TRANSPORT == "http"):
+        raise PrerequisiteNotMetError(
+            "Recreating a live-mounted environment requires the local CLI or stdio MCP."
+        )
     # The environment name and the git branch it tracks can differ (several
     # environments off one branch), so recreate from the recorded branch label
     # rather than from the environment name.
     git_branch = labels.get("oduflow.git_branch", env_name)
+    # The branch exists by the time the environment is created again, so the
+    # new container cannot re-derive what this one knows about its origin.
+    branch_provenance = {
+        key: labels[key] for key in _GIT_BRANCH_PROVENANCE_LABELS if labels.get(key)
+    }
     recreate_labels = dict(labels)
     _reconcile_environment_hostname_for_update(
         client, settings, team, env_name, recreate_labels
@@ -4226,6 +4628,7 @@ def recreate_environment(
             local_path=local_path,
             hostname=hostname,
             hostname_source=hostname_source,
+            branch_provenance=branch_provenance or None,
         )
     except BaseException:
         # The old environment is gone and its replacement never appeared, so
@@ -4272,6 +4675,8 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
                 "env_name": env_name,
                 "branch": env_name,  # backward compat alias
                 "git_branch": git_branch,
+                "git_branch_created": container.labels.get(GIT_BRANCH_CREATED_LABEL)
+                == "true",
                 "containers": [],
                 "status": "running",
                 "url": None,
@@ -4703,6 +5108,7 @@ def get_environment_info(
         result["local_path"] = labels.get("oduflow.local_path", "")
         result["odoo_image"] = labels.get(settings.image_label, "")
         result["git_branch"] = labels.get("oduflow.git_branch", env_name)
+        result["git_branch_created"] = labels.get(GIT_BRANCH_CREATED_LABEL) == "true"
         result["git_user"] = labels.get("oduflow.git_user", "")
         result["extra_addons"] = _normalize_extra_addons(
             json.loads(labels.get("oduflow.extra_addons", "{}")),
@@ -4765,9 +5171,7 @@ def get_environment_info(
     except docker.errors.NotFound:
         pass
 
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
     result["db_user"] = creds["pg_user"]
 
     result["all_running"] = result["odoo"]["running"] and result["db"]["running"]
@@ -5972,6 +6376,9 @@ def switch_environment_branch(
 
     fetch_branch(repo_path, branch, cred_file=team.git_credentials_file())
 
+    # fetch_branch above succeeded, so the target branch exists on origin and
+    # was not created by this switch: what the container recorded about the
+    # previous branch (created-by-Oduflow hint, base branch) no longer applies.
     label_overrides = {"oduflow.git_branch": branch}
     if extra_override is not None:
         label_overrides["oduflow.extra_addons"] = json.dumps(extra_override)
@@ -5993,6 +6400,7 @@ def switch_environment_branch(
         team,
         env_name,
         label_overrides=label_overrides,
+        remove_labels=_GIT_BRANCH_PROVENANCE_LABELS,
         pull_image=False,
         install_dependencies=False,
         rename_to=rename_to or None,
@@ -6295,8 +6703,10 @@ def update_environment(
     pull_image: bool = True,
     install_dependencies: bool = True,
     label_overrides: dict[str, str] | None = None,
+    remove_labels: Collection[str] | None = None,
     rename_to: str | None = None,
     sync_agent_checkout: bool = True,
+    allow_host_paths: bool = True,
 ) -> dict[str, Any]:
     """Re-create an environment's container, preserving DB, repo and filestore.
 
@@ -6308,7 +6718,11 @@ def update_environment(
     SHA mounts during pull_and_apply; that path disables image pulls and
     restores dependencies from the new mounts. The PostgreSQL connection variables
     (HOST/USER/PASSWORD) are always re-derived from the environment credentials,
-    and image-baked env comes from the image itself.
+    and image-baked env comes from the image itself. An environment without
+    credentials of its own (one created before per-environment roles existed)
+    is given a role first, while its container is stopped: the cluster
+    superuser's login is never put into the new container. A failure there
+    leaves the old container in place and raises.
 
     Dependency installer failures are returned as a nonzero ``exit_code`` with
     setup logs and the resulting identity, after rename bookkeeping finishes.
@@ -6318,6 +6732,9 @@ def update_environment(
     ``hostname_override`` changes the short public hostname in Traefik mode.
     Empty or omitted values keep the current hostname policy. Conflicts are
     rejected before stopping the current container.
+
+    ``label_overrides`` sets labels on the new container and ``remove_labels``
+    drops them; every other label is carried over unchanged.
 
     ``rename_to`` additionally moves the environment onto another name. The
     container has to be re-created for that anyway — it carries the name in its
@@ -6357,6 +6774,13 @@ def update_environment(
             f"Environment '{env_name}' does not exist. Use create_environment first."
         )
 
+    if container.labels.get("oduflow.local_path") and (
+        not allow_host_paths or settings_module.TRANSPORT == "http"
+    ):
+        raise PrerequisiteNotMetError(
+            "Updating a live-mounted environment requires the local CLI or stdio MCP."
+        )
+
     if rename_to == env_name:
         rename_to = None
     if rename_to:
@@ -6372,10 +6796,14 @@ def update_environment(
             source_labels=dict(container.labels),
         )
 
-    # Labels
+    # Labels. They are frozen at container creation, so this recreate is the
+    # only point where one can be changed (label_overrides) or dropped
+    # (remove_labels).
     labels = dict(container.labels)
     if label_overrides:
         labels.update(label_overrides)
+    for key in remove_labels or ():
+        labels.pop(key, None)
 
     # Image (current → target). A digest-pinned recreation leaves Config.Image
     # as sha256:..., so prefer the persisted tag before falling back to it.
@@ -6493,6 +6921,16 @@ def update_environment(
             client, settings, team, env_name, labels
         )
 
+    # The connection variables of the new container. Without a role of its own
+    # on record the environment would have to connect as the cluster
+    # superuser, which is how environments older than per-environment roles
+    # were created — and its password must not enter a container whose tenant
+    # is root in it. Such an environment gets its role below, once Odoo is
+    # stopped.
+    creds = load_credentials(env_name, team.workspaces_dir, settings.db_user)
+    role_provisioned = False
+    was_running = container.status == "running"
+
     logger.info(
         "Updating environment – stopping old container",
         extra={"env_name": env_name, "container": odoo_container_name},
@@ -6505,6 +6943,25 @@ def update_environment(
         container.stop()
     except Exception:
         pass
+    if creds["pg_user"] == settings.db_user:
+        # Between the stop and the removal: the ownership transfer wants no
+        # Odoo session in the database, and a failure can still leave the
+        # environment as it was.
+        try:
+            creds = provision_scoped_role(client, settings, team, env_name)
+        except Exception as exc:
+            if was_running:
+                with contextlib.suppress(Exception):
+                    container.start()
+            raise PrerequisiteNotMetError(
+                f"Environment '{env_name}' has no PostgreSQL role of its own, "
+                f"and one could not be provisioned: {exc} The environment was "
+                "left as it was. Its container is not recreated with the "
+                "cluster superuser's credentials; fix the cause and retry, or "
+                "use recreate_environment to rebuild the environment from "
+                "its template."
+            ) from exc
+        role_provisioned = True
     try:
         container.remove(v=True)
     except docker.errors.APIError:
@@ -6586,10 +7043,7 @@ def update_environment(
                 logger.warning("Could not re-mount filestore overlay: %s", exc)
 
     # Re-create PG role in case PG container was recreated
-    creds = load_credentials(
-        env_name, team.workspaces_dir, settings.db_user, settings.db_password
-    )
-    if creds["pg_user"] != settings.db_user:
+    if not role_provisioned:
         env_db = get_db_name(env_name, team.team_id)
         try:
             _create_pg_role(
@@ -6717,6 +7171,12 @@ def update_environment(
     # 5. Re-install apt packages and pip requirements
     # ------------------------------------------------------------------
     setup_logs: list[str] = []
+    if role_provisioned:
+        setup_logs.append(
+            f"[DB-ROLE] The environment now connects as its own PostgreSQL "
+            f"role '{creds['pg_user']}' instead of the cluster superuser; its "
+            "database and everything in it were handed to that role."
+        )
     deps_installed = False
     dep_exit = 0
     if install_dependencies:
@@ -6805,4 +7265,5 @@ def update_environment(
         "image_updated": image_updated,
         "env_vars": user_env,
         "setup_logs": setup_logs,
+        "db_role_provisioned": role_provisioned,
     }

@@ -118,7 +118,9 @@ flowchart LR
 
 - **Snapshots** are logical, per-database backups: a `pg_dump` plus the
   filestore deduplicated by the built-in chunkstore engine. They restore one
-  production at a time (`restore_production`), including to a brand-new host.
+  production at a time (`restore_production`). A brand-new host can restore
+  them too, once a production with the same name exists there; see
+  [Restoring a snapshot on a new server](production.md#restoring-a-snapshot-on-a-new-server).
 - **WAL-G** continuously archives WAL and takes scheduled base backups of the
   whole production cluster. Cluster PITR — an operator action in the `/admin`
   console or `oduflow restore-cluster`, deliberately not an MCP tool — rewinds

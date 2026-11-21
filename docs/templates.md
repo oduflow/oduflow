@@ -30,6 +30,11 @@ This will:
 4. Extract the filestore to `{data_dir}/team_{ID}/templates/{name}/filestore/`
 5. Load the dump into the template database automatically
 
+The temporary Odoo container connects as a one-off PostgreSQL role that owns
+only the build database, not as the cluster superuser: the build runs whatever
+the image contains. The same role dumps the result. The role and the build
+database are removed afterwards.
+
 ### Install additional modules during generation
 
 ```bash
@@ -73,6 +78,8 @@ This operation:
 6. Remounts those overlays against the new baseline, **preserving each environment's filestore changes** by default
 7. Restarts the affected containers
 
+The dump is taken by the **environment's own PostgreSQL role**, not by the cluster superuser (see [How a database is dumped](#how-a-database-is-dumped)). An environment created before each environment had a role of its own is refused with `has no scoped database credentials`; run `update_environment` on it first — it keeps its database and filestore.
+
 The **source environment** is always reset to the new baseline (its data just became the template). **Other environments keep their filestore changes** (the overlay `upper` layer) — this is non-destructive by default. Their existing files shadow the new template (env-local edits win); files they deleted stay deleted; new template files show through.
 
 To instead discard other environments' changes and reset them to the clean new baseline:
@@ -87,6 +94,9 @@ oduflow template-from-env my-branch --template-name default --reset-env-changes
 !!! info "Copy-mode templates"
     Environments created from a small (copy-mode, `use_overlay=false`) template have an independent filestore copy, not an overlay. They are not affected by template filestore updates and are left untouched.
 
+!!! info "Symbolic links and special files in a filestore"
+    An Odoo filestore holds regular files and directories. If an environment's filestore contains anything else, Oduflow never follows it: a symbolic link is carried into the template — and from there into environments and productions created from it — as a link, not as a copy of what it points to on the Oduflow host, and ownership is changed on the link itself. Device nodes, FIFOs and sockets are left out of the template.
+
 ## Create a Template from Production
 
 A [production](production.md) can be published as a dev template — the reverse of seeding a production from a template. The production database is dumped out of the production cluster and restored into the dev cluster as the template database, and the production filestore becomes the template's baseline:
@@ -95,7 +105,7 @@ A [production](production.md) can be published as a dev template — the reverse
 oduflow call save_production_as_template '{"prod_name":"erp","template_name":"erp-2026-09"}'
 ```
 
-The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`).
+The production **keeps serving throughout**: the dump is a consistent `pg_dump` snapshot, nothing is stopped or changed on the production side (the same trade-off as `snapshot_production`). It is taken by the production's own PostgreSQL role, not by the production cluster's superuser — see [How a production's data is dumped](production.md#how-a-productions-data-is-dumped).
 
 The template records the production's `repo_url`, `odoo_image`, `git_user` and extra addons, plus [provenance](#template-metadata) — the production's branch, the commit its checkout is on, and the snapshot time — so environments created from it report code/database drift like any other template.
 
@@ -479,6 +489,189 @@ no cron daemon is started inside the Oduflow server/container. **Do not run a
 separate worker container**: overlay mounts must be created in the same mount
 namespace as the server. The native installation uses the configured Python
 executable directly.
+
+## How a dump is loaded
+
+A dump is input from outside: it comes from a URL, a bucket or a path someone
+named, or from an environment's database, which holds whatever its users put
+there. Oduflow therefore never runs a dump as the PostgreSQL superuser, and
+never inside the shared PostgreSQL container. This applies to every way a
+template database is built — `init-template`, `import-template` in all its
+forms, saving a branch or a production as a template, a scheduled sync, and
+the template rebuild after a PostgreSQL upgrade.
+
+For each load Oduflow:
+
+1. creates a one-off **loader role** — not a superuser, unable to create
+   databases or roles — and an empty template database owned by it;
+2. starts a short-lived **restore client** container from the cluster's own
+   PostgreSQL image on the team network. It runs `psql` (plain SQL) or
+   `pg_restore --no-owner` (custom format) as the loader role, connecting over
+   the network with a password like an Odoo container does, and sees the dump
+   file read-only;
+3. hands everything the load created to the team's **template owner** role
+   (`oduflow_tplown_<team>`, not a superuser and without a password) and drops
+   the loader role.
+
+Environments created from the template get their own role as owner of the
+copy, exactly as before.
+
+What this means for a dump:
+
+- **Extensions.** `CREATE EXTENSION` works for the extensions PostgreSQL marks
+  as *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `btree_gist`,
+  `fuzzystrmatch`, `pgcrypto`, `uuid-ossp`, `citext`, `hstore` and the rest of
+  that list — which covers what Odoo itself uses. An extension that needs a
+  superuser (for example `postgis`, `pg_stat_statements`, `dblink` or
+  `postgres_fdw`) or an untrusted language (`plpython3u`) cannot be created by
+  a dump any more. If you need one, use a `[database].image` in which the
+  extension's control file sets `trusted = true`; that is the PostgreSQL-native
+  way to let a database owner install it.
+- **Anything else reserved for superusers** — `ALTER ROLE ... SUPERUSER`,
+  `COPY ... FROM PROGRAM`, `ALTER SYSTEM`, event triggers, subscriptions — is
+  refused by PostgreSQL. `psql` meta-commands in a dump (`\!`, `\c`) take
+  effect only inside the restore client, which holds nothing but the dump and
+  the loader role's connection.
+- **Custom-format dumps fail on the first such statement**, because
+  `pg_restore` reports any error as a failed restore; the error message names
+  the statement. An archive from an old server (PostgreSQL 10 or earlier)
+  usually contains `COMMENT ON EXTENSION plpgsql`, which now fails the same way
+  (`must be owner of extension plpgsql`): convert it with
+  `pg_restore --no-owner -f dump.sql dump.pgdump` and import the SQL instead.
+- **Plain SQL and SQL.gz fail on statement errors**, except for known
+  compatibility errors: refused ownership changes, a comment on the existing
+  `plpgsql` extension, and `transaction_timeout` on older PostgreSQL versions.
+  Skipped ownership changes are reported as a single summary line.
+
+A template database loaded by an older Oduflow keeps its previous owner until
+it is next rebuilt (`import-template ... --overwrite` or `--refresh`, or saving
+an environment over it).
+
+### What an older load may have left behind
+
+Older versions loaded dumps as the PostgreSQL superuser, so a dump could
+create what only a superuser can. Such objects stay in the template database
+until it is rebuilt, and `CREATE DATABASE ... TEMPLATE` copies most of them
+into every environment made from it. A template loaded by a current version
+cannot contain them: the loader role is refused each one.
+
+**Event triggers** are the ones that matter to Oduflow itself. An event trigger
+runs its function with the rights of whoever issues the statement that fires
+it — any DDL statement in that database and, since PostgreSQL 17, any login to
+it — and in an environment the function belongs to the environment's role,
+which can rewrite it. Oduflow's superuser still runs a few statements inside
+such databases (handing a copy's objects to its role, giving an old
+environment or production a role of its own). So:
+
+- **Before the superuser runs DDL inside a database, Oduflow disables the
+  event triggers that are enabled there** and writes
+  `Disabled N event trigger(s) in database ...` to the server log, with each
+  trigger's name, event and function. They are disabled, not dropped, and stay
+  disabled: only a superuser can alter an event trigger. This happens in the
+  database those statements run in (the environment, the staged database of
+  a scheduled sync, a production being given its role) and on every
+  PostgreSQL release; an existing template is left as it is. A database
+  without event triggers pays one catalog query for it.
+- **On PostgreSQL 17 and newer, every superuser session that enters a database
+  other than `postgres` also connects with `event_triggers=off`**, so that an
+  `ON login` trigger cannot run before Oduflow's first statement. This covers
+  the `pg_dump` of a template the superuser still owns. PostgreSQL 15 and 16
+  have neither that setting nor login triggers.
+
+If you rely on an event trigger in an environment, an operator can turn it
+back on as the superuser (`ALTER EVENT TRIGGER <name> ENABLE;`); Oduflow
+disables it again the next time its superuser has DDL to run in that database.
+A rebuilt template does not bring it back: `CREATE EVENT TRIGGER` in a dump is
+refused like everything else reserved for superusers.
+
+**On each start Oduflow reports**, per cluster, which managed databases hold
+such objects. It reads catalog tables only and changes nothing; the statements
+in the last column are yours to run, as the superuser, in the database named
+(`docker exec <postgres container> psql -U <superuser> -d <database>`):
+
+| In the server log | What it is | What to do |
+|---|---|---|
+| `event triggers` (enabled) | Fires for every DDL statement or login, as whoever issues it. | Rebuild the template; or `DROP EVENT TRIGGER <name>;` in that database. |
+| `functions in an untrusted language` | A C, `internal` or `plpython3u`-style function outside any extension: no role's limits apply to what it does, whoever calls it. | Check what it does. Drop it, or revoke `EXECUTE` from the environment's role. |
+| `SECURITY DEFINER functions owned by a superuser`, `views owned by a superuser` | Run, or read their tables, with the superuser's rights for whoever may use them. Left in an environment by a version that did not hand functions and views to its role. | `ALTER FUNCTION ... OWNER TO "<role>";` / `ALTER VIEW ... OWNER TO "<role>";` with the role from `get_environment_info`, or recreate the environment. |
+| `foreign servers`, `user mappings`, `subscriptions` | Decide where, and as whom, a foreign table or a subscription connects. | Drop them unless you set them up yourself. |
+| `casts between built-in types`, `libraries preloaded by ALTER DATABASE ... SET` | Change how every session in that database behaves, Oduflow's included. | Drop the cast; `ALTER DATABASE ... RESET <setting>;`. |
+
+These are logged as warnings, one line per database. Extensions the image
+does not mark trusted, operators, rules and publications that are the
+superuser's, and event triggers that are already disabled hand nothing to
+anybody; they are listed in one informational line because a rebuild of the
+template will refuse them. Templates that still belong to the superuser and
+hold none of the above are named in one informational line as well.
+
+The remedy for a template is always the same: rebuild it
+(`import-template ... --overwrite` or `--refresh`, or save an environment over
+it), fixing the dump first if the load now refuses something in it. Existing
+environments keep what they were copied with until they are recreated
+(`recreate_environment`); one that still carries an event trigger, disabled or
+not, cannot be saved as a template until the trigger is dropped.
+
+### Archives from a newer `pg_dump`
+
+A custom-format archive written by a newer `pg_dump` than the cluster's
+PostgreSQL cannot be read by the cluster's own `pg_restore`
+(`unsupported version ... in file header`). Oduflow then converts it to plain
+SQL with `pg_restore -f` from a short-lived `postgres:17` **conversion helper**
+container and loads that SQL through the same loader role and restore client.
+
+The helper reads a file from outside, so it is confined on its own terms: it
+has no network (it connects to nothing), is never root, holds no capabilities
+and no password, has a read-only root filesystem, and sees exactly two things
+of the host — the archive, read-only, and a scratch directory created for this
+conversion under `team_<ID>/.dump_convert/`. It does not see the template
+directory. Oduflow moves the SQL out of that scratch directory and checks that
+it is one regular, non-empty file before anything reads it; the scratch
+directory is removed afterwards.
+
+- When a template is reloaded from its own archive (`import-template --refresh`,
+  a database-only pull from a running Odoo, a push import from Odoo.sh), the
+  SQL replaces the archive as the template's `dump.sql`, so the conversion is
+  not repeated. An archive you import from S3 or a local path is stored as it
+  is; nothing is written next to it.
+- The SQL is several times the size of the archive and counts against the
+  team's disk while the load runs. The helper is stopped if it runs longer than
+  six hours or the disk holding the team's data falls below 1 GiB free, and the
+  import fails with that reason.
+- A private archive owned by root (mode `0600`) is copied into the scratch
+  directory for the helper instead of being read as root, which needs the
+  archive's size once more for the duration of the conversion.
+
+## How a database is dumped
+
+Dumping is the same question from the other side: `pg_dump` reads a database
+whose tables, views and functions its users defined. On a current PostgreSQL
+release reading runs none of it, but releases before 15.8 and 16.4 had a flaw
+that let a database's user run SQL as whoever dumped it (CVE-2024-7348), and a
+PostgreSQL container keeps the release it was created with. So Oduflow runs
+`pg_dump` as the role the database belongs to, which gains nothing by it:
+
+| What is dumped | By |
+|---|---|
+| An environment (`template-from-env` / `save_as_template`, `create_production(from_environment=…)`, `restore_production(from_environment=…)`) | the environment's own role |
+| A production (snapshots, `save_production_as_template`) | the production's own role |
+| A template (`create_production(template_name=…)`) | the team's template owner |
+| The build database of `init-template` | the one-off build role |
+| A production or service database during a [PostgreSQL upgrade](installation.md#upgrading-postgresql) | the role in its credentials file |
+
+The dump format, where it is written and how it is restored are unchanged.
+
+Two dumps are still the superuser's. A template database that an older Oduflow
+loaded belongs to the superuser, so nobody else can read all of it; no user's
+role can connect to a template database, which is what the flaw needs. It is
+dumped as before until the template is imported or published again. And a
+PostgreSQL upgrade lets the superuser dump the databases you name in
+`ODUFLOW_PG_UPGRADE_SUPERUSER_RESTORE`. In both cases the server is told not to
+expand views and foreign tables during the dump; a server too old to know that
+setting is named in a warning in the server log instead.
+
+A dump its role cannot finish fails with PostgreSQL's reason, usually
+`permission denied for table …`; see
+[Troubleshooting](troubleshooting.md#a-dump-fails-with-permission-denied).
 
 ## Listing and Dropping Templates
 

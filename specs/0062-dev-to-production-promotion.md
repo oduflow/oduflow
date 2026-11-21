@@ -72,3 +72,11 @@ design, since the data flows *into* production rather than out of it.
 
 - Introduced together with the pre-filled create-production modal and docs
   (`docs/production.md` "Promoting a dev environment").
+- 2026-11-19 — the environment's database is restored into the production
+  cluster by the production's own role, not by that cluster's superuser: a
+  dev tenant's database content must not execute as it. See
+  [[0013-per-environment-db-credentials-and-sanitization]].
+- 2026-11-19 — and it is dumped out of the development cluster by the
+  environment's own role (a template by the team's template owner), not by
+  that cluster's superuser; an environment without a role is refused before
+  anything is dumped.

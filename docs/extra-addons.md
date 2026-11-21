@@ -236,6 +236,11 @@ environment's read-only mount, and performs the required install, upgrade, or
 restart. Other environments continue using their previous checkout.
 
 Cached checkouts are deliberately not reference-counted or removed with an
-environment. Deleting the extra repository removes its bare repo and every
-cached revision after Oduflow verifies that no environment or production still
-depends on it.
+environment, so checkouts of older commits accumulate as a branch moves.
+`oduflow cleanup` and the dashboard's **Cleanup** button list and remove the
+ones nothing uses any more: no container (running or stopped) mounts or pins
+them, they are not the current tip of a downloaded branch, and they were last
+handed out more than six hours ago. Removing a downloaded branch drops its
+unused checkouts too. Deleting the extra repository removes its bare repo and
+every cached revision after Oduflow verifies that no environment or production
+still depends on it.

@@ -516,3 +516,98 @@ def test_cycle_in_yaml_fails_validation_before_planning(tmp_path):
 
     with pytest.raises(StackValidationError, match="service reference cycle"):
         load_stack(_write(tmp_path, content))
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        (
+            {
+                "extraRepositories": {
+                    "addons": {
+                        "repoUrl": "https://github.com/acme/app",
+                        "branch": "main",
+                    }
+                }
+            },
+            "extraRepositories requires",
+        ),
+        (
+            {
+                "services": {
+                    "api": {
+                        "image": "api",
+                        "port": 80,
+                        "env": {"URL": {"environmentField": "url"}},
+                    }
+                }
+            },
+            "environmentField requires",
+        ),
+        (
+            {
+                "services": {
+                    "api": {
+                        "image": "api",
+                        "port": 80,
+                        "env": {"URL": {"productionField": "url"}},
+                    }
+                }
+            },
+            "productionField requires",
+        ),
+        ({"databases": {"app": {"cluster": "primary"}}}, "cluster"),
+        ({}, "at least one resource"),
+    ],
+)
+def test_service_stack_rejects_invalid_spec(spec, message):
+    with pytest.raises(ValidationError, match=message):
+        StackManifest.model_validate({"metadata": {"name": "app"}, "spec": spec})
+
+
+SERVICE_ONLY_BUILD = """\
+apiVersion: oduflow.dev/v1alpha1
+kind: Stack
+metadata:
+  name: paseo
+spec:
+  services:
+    paseo:
+      build:
+        repoUrl: https://github.com/acme/paseo.git
+        ref: main
+        dockerfile: docker/base/Dockerfile
+        args:
+          PASEO_VERSION: "1.2.3"
+      port: 6767
+"""
+
+
+def test_service_build_replaces_image(tmp_path):
+    path = tmp_path / "oduflow.yaml"
+    path.write_text(SERVICE_ONLY_BUILD, encoding="utf-8")
+
+    service = load_stack(path).spec.services["paseo"]
+
+    assert service.image is None
+    assert service.build.repo_url == "https://github.com/acme/paseo.git"
+    assert (service.build.ref, service.build.context) == ("main", ".")
+    assert service.build.dockerfile == "docker/base/Dockerfile"
+    assert service.build.args == {"PASEO_VERSION": "1.2.3"}
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        {"port": 80},
+        {"port": 80, "image": "redis:7", "build": {"repoUrl": "https://g.example/a"}},
+        {"port": 80, "build": {"repoUrl": "https://g.example/a", "ref": "-x"}},
+        {"port": 80, "build": {"repoUrl": "https://g.example/a", "context": "../x"}},
+        {"port": 80, "build": {"repoUrl": "https://g.example/a", "dockerfile": "."}},
+        {"port": 80, "build": {"repoUrl": "https://ci:token@g.example/a"}},
+        {"port": 80, "build": {"repoUrl": "https://g.example/a", "args": {"1A": "x"}}},
+    ],
+)
+def test_service_build_rejects_invalid_sources(service):
+    with pytest.raises(ValidationError):
+        Service.model_validate(service)

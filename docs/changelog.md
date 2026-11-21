@@ -1,5 +1,291 @@
 # Changelog
 
+## v1.93.0
+
+### Features
+
+- **Build service images from a repository** — `start_image_build` now
+  accepts a repository URL and ref, so building an image no longer needs an
+  environment checkout or a configured registry; only publishing needs
+  `[team.X.image_registry]`. Builds run under BuildKit (the Oduflow image now
+  ships the docker CLI and buildx) and fall back to the legacy builder when
+  buildx is missing. A team can opt out with `builds_enabled = false`. (#363)
+- **Stack `build:` on services** — a Stack service can declare a build instead
+  of a fixed image. `stack plan` and `apply` resolve the ref, reuse a
+  succeeded build of the same build key, and build only what is missing. The
+  builds run before the team lock is taken, and the plan is checked again
+  under the lock. Decision record `specs/0085-repository-image-builds.md`.
+  (#363)
+- **`connect_link` MCP tool** — `connect_link(env_name, user="")` returns a
+  single-use browser sign-in link (300 s, bound to the environment's host)
+  that opens the environment already logged in as `user`. The default user is
+  the database admin, resolved through `base.user_admin`. Another application
+  can put an "Open as admin" button on it, which a raw `connect_as_user`
+  cookie cannot do across origins. The Odoo session is created only when the
+  link is opened. A plain GET changes nothing, so link-preview bots do not
+  spend the link, and a failed or busy start keeps it valid. An unknown user
+  fails at the call, before a stopped environment is woken. The tool needs
+  Traefik routing and a running web UI. Decision record
+  `specs/0086-mcp-connect-link.md`. (#365)
+- **Share links include Agent CLI** — a shared environment (`/env/<name>`)
+  now offers the coding agent's terminal next to Agent Chat. Since every
+  environment runs as its own Linux user in the team's agent container
+  (v1.89.0), a CLI session reaches only that environment's checkout,
+  conversations and scoped MCP token, exactly like Chat. The Share modal and
+  the security docs now name what both still share with the team: its git
+  credentials and deploy key, provider credentials, any agent login made in
+  the environment, and the container network. For shared environments, set
+  provider credentials in `[team.X.agent_env]` instead of signing in with a
+  personal subscription. Share links minted before this release gain the CLI
+  too after upgrading — it grants nothing an existing link's Agent Chat did
+  not already allow, but rotate or revoke a share if even that terminal form
+  of the access is unwanted. (#347)
+- **Cleanup reclaims unused shared extra-addons checkouts** — `oduflow
+  cleanup` and the dashboard **Cleanup** action now remove
+  `shared_extra_checkouts/<repo>/<sha>` revisions that no container pins (by
+  label or bind mount), that are not any branch's current tip, and that are
+  older than the grace period. The preview lists them with sizes, and confirm
+  removes only the reviewed names. `cleanup --force` takes the same team lock
+  as the server. A repo whose refs cannot be read is skipped and reported
+  rather than guessed at. (#362)
+- **Image-build cleanup** — cleanup also removes stale image-build job
+  directories: failed, cancelled, interrupted and abandoned jobs, plus
+  succeeded jobs whose image is gone. The dashboard can prune the
+  server-wide Docker build cache as a separate opt-in. (#363)
+- **Production sizes in storage stats** — storage stats and `/api/usage` now
+  cover productions: each one reports its database size (production cluster)
+  and workspace disk size. The dashboard shows them on the production card
+  with its own refresh button (`POST /api/productions/{name}/storage/refresh`),
+  and the team refresh adds `team.prod_db_bytes`. `team.db_bytes` is still
+  the dev-cluster total that `db_quota_gb` applies to. If the production
+  cluster can't be reached, the refresh still succeeds and the production DB
+  sizes come back as `null`. (#358)
+
+### Bug Fixes
+
+- **Concurrent storage refreshes no longer lose updates** — read-modify-writes
+  of `storage_stats.json` are serialised per team and each write uses its own
+  temp file, which fixes lost updates and `os.replace` failures when refreshes
+  overlap. (#358)
+- **No zombie process per agent container** — the coder entrypoint's
+  background Claude Code refresh is now double-forked so `docker-init` reaps
+  it, instead of leaving one `<defunct>` process per container start. Coder
+  image bumped to `oduist/oduflow-coder:0.4.1`; agent containers are recreated
+  on 0.4.1 automatically at the next server start. (#359)
+- **A failed uid:gid lookup is no longer cached** — one transient Docker
+  failure used to pin the `100:101` fallback for an image until restart, and
+  every later filestore chown used it. Only real lookups are cached now. (#361)
+- **Template builds never leak the builder** — `init_template` now tears down
+  `flow-template-builder` and the build database on every exit path, including
+  a `wait()` timeout. (#361)
+- **Streamed S3 backups past ~156 GiB** — the multipart part size now grows
+  from 16 MiB up to 256 MiB as a stream goes on, so a large production
+  `pg_dump` no longer fails at the 10,001st part. Up to ~1.7 TiB fits within
+  S3's limit of 10,000 parts. Small backups are unchanged. (#361)
+- **`/healthz` reports an unreadable production registry** — a corrupt or
+  unreadable `productions.json` now fails the productions check, naming the
+  team, instead of reporting "ok". The exception goes to the server log only.
+  (#361)
+
+### Security
+
+- **Credentials kept out of logs** — tool results that carry credentials
+  (`connect_link`, `connect_as_user`, `reset_admin_password`, the
+  service-database tools, artifact URLs) are scrubbed from everything
+  `handle_errors` logs, including errors. Before, they could leak into the
+  200-character result preview. Env-var listings log as `[redacted]`, and the
+  `uvicorn.access` log masks `token`, `key` and `access_token` query
+  parameters. (#365)
+- **Generic errors on the Agent CLI WebSocket** — `ws_agent_console` no
+  longer sends raw exception text to a (possibly share-link) visitor. It logs
+  the error on the server and closes with a generic message, the same as
+  Agent Chat. Scoped sessions no longer see the dashboard's **Info** menu
+  item. (#347)
+
+### Documentation
+
+- **Container image builds** — new `docs/image-builds.md` page (trust model,
+  prerequisites, lifecycle, running a staging image as a service, publishing,
+  Stack `build:`, BuildKit, troubleshooting). It comes with an *Image registry
+  settings* table in the installation reference and a test that keeps every
+  `[team.X.image_registry]` key documented. (#364)
+- **How production backups and restores work** — `docs/production.md` now
+  explains the S3 layout, the snapshot commit order, how a restore stages and
+  swaps, restoring on a new server, schedule and retention semantics, bucket
+  permissions and cluster PITR. `docs/security.md` gains a *Backup data in S3*
+  section. (#360)
+- The Share modal and docs no longer claim that a shared visitor's Agent Chat
+  can read other environments' checkouts; that stopped being true in v1.89.0.
+  (#347)
+
+## v1.92.0
+
+### Features
+
+- **Service-only Stacks** — a Stack may now declare zero or one Odoo target
+  (`spec.environment` or `spec.production`). Without a target it deploys only
+  services, service databases, volumes and files, so a stack such as Multica
+  (web, API, PostgreSQL database, attachment volume) no longer has to provision
+  Odoo. Odoo can be added to the same Stack later without recreating services
+  and data that still match the manifest. `environmentField` /
+  `productionField` value references and add-on repositories require the
+  matching target, and a Stack must declare at least one resource. (#356)
+- **Choose the PostgreSQL cluster per service database** — each Stack service
+  database selects its cluster at creation with `cluster: dev` (the default,
+  also for existing `{}` declarations, whose ownership hashes are unchanged) or
+  `cluster: prod`. The production cluster requires production hosting to be
+  enabled and puts the database under cluster-wide WAL-G backups from its first
+  deployment; moving an existing database to another cluster needs a separate
+  data migration. (#356)
+- **Odoo 20 development guide** — `get_odoo_development_guide("20")` now
+  returns a guide instead of "No development guide found". It covers the
+  runtime baseline, `ir.access` (which replaces `ir.model.access` and
+  `ir.rule`), ORM and data-file changes, Owl 3 hooks, a removed/replaced map
+  and a 19 → 20 migration section, all checked against the `odoo:20.0` image.
+  Agent instructions, the README and the MCP tool reference now say guides
+  cover Odoo 15–20. Existing installs pick the guide up automatically. (#354)
+
+### Bug Fixes
+
+- **Stack plans restart stopped services** — a stopped Stack service is now
+  plan drift: `plan` shows a `start` action and `apply` restarts it, so
+  `inSync` again means "the plan is empty". (#356)
+- **Stack plans report every blocking conflict at once** — services that
+  consume a blocked database still go through ownership and drift checks, so
+  one `plan` lists all conflicts. `productionField` URLs resolve from the
+  manifest domain in both `plan` and `apply`, and the planner probes each
+  declared database only once. (#356)
+
+### Documentation
+
+- `docs/stacks.md` documents service-only Stacks and per-database cluster
+  selection; decision record `specs/0084-service-only-stacks.md`. The
+  `odoo_rpc.py` docstring now says the legacy `/jsonrpc` and `/xmlrpc/2`
+  endpoints are scheduled for removal in Odoo 22, not 20. (#354, #356)
+
+## v1.91.0
+
+### Features
+
+- **Secrets from environment variables** — team credentials, the console
+  password and the backup S3 keys can now come from the Oduflow process's
+  environment instead of `oduflow.toml`, so container deployments keep them out
+  of the config file: `ODUFLOW_TEAM_<ID>_UI_PASSWORD`,
+  `ODUFLOW_TEAM_<ID>_AUTH_TOKEN`, `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN`,
+  `ODUFLOW_ADMIN_PASSWORD`, `ODUFLOW_BACKUP_ACCESS_KEY` and
+  `ODUFLOW_BACKUP_SECRET_KEY` (`<ID>` is the team id upper-cased, with
+  non-alphanumerics replaced by `_`). A non-empty variable wins over the file;
+  values are trimmed, so `.env` files with CRLF line endings work. Every
+  existing validation rule applies to them, `ODUFLOW_ADMIN_PASSWORD` must be at
+  least 12 characters like a console-set password, and startup refuses a
+  variable that two team ids would share (`acme-dev` and `acme_dev`). The
+  variables only replace values: backups are still enabled by a `[backup]`
+  section in the file. On upgrade, a team whose `ui_password` comes from the
+  environment no longer gets a generated one written to the file. (#353)
+- **The Server settings console respects environment overrides** — a key taken
+  from a variable is shown read-only with an **Env** badge and the variable's
+  name; the console refuses to change or reveal the unused file value (from the
+  forms, Raw TOML or a history revert), and its state API names the variable,
+  never its value. `oduflow admin enable|disable` refuses to run while
+  `ODUFLOW_ADMIN_PASSWORD` is set, instead of reporting a change that would
+  have no effect. (#353)
+
+### Documentation
+
+- New "Credentials from environment variables" section in
+  `docs/security.md`, with a Compose example in `docs/docker.md` and the
+  variable names in the configuration reference. Rotating
+  `ODUFLOW_TEAM_<ID>_PRODUCTION_TOKEN` needs a restart **and**
+  `sync_production_mcp` for each of the team's productions. (#353)
+
+## v1.90.0
+
+### Features
+
+- **Configurable config directory (`[storage].etc_dir`)** — the directory
+  holding `postgresql.conf`, `postgresql-prod.conf` and `traefik-dynamic/`
+  can now be set explicitly, exactly like `[storage].data_dir`. Its default is
+  the directory of the `oduflow.toml` that actually loaded (unchanged for both
+  standard locations, `/etc/oduflow` and `~/.oduflow/conf`), so pointing
+  `ODUFLOW_TOML` at a file relocates the config directory with it. This is the
+  fix for Docker-out-of-Docker deployments: the host daemon resolves every
+  bind source, so a config dir that existed only inside the Oduflow container
+  was auto-created empty on the host and `oduflow-db` crash-looped with
+  `input in flex scanner failed at file "/etc/postgresql/postgresql.conf"`,
+  while Traefik watched an empty dynamic directory. The key is locked in the
+  Server settings console (existing containers keep mounting the old path);
+  startup refuses a config dir that does not exist or is not writable with a
+  single actionable line. **Upgrade note:** if your `ODUFLOW_TOML` points
+  outside `/etc/oduflow` and `~/.oduflow/conf`, the config directory moves
+  with it — startup now warns when the old location still holds
+  `license.key`, branding assets, `.instance_id` or tuned
+  `postgresql.conf`/`traefik-dynamic/` files; move them across (or set
+  `[storage].etc_dir` to the old path) or they are silently ignored. (#352)
+- **Docker-out-of-Docker mount diagnostic** — when Oduflow runs in a
+  container, startup and `GET /healthz` (`self_mounts`, the dashboard's
+  `MOUNTS` chip) check that both the data directory and the config directory
+  sit under a bind mount whose host path equals the container path. A named
+  volume, a differing host path or the container's writable layer is reported
+  as a warning naming the offending mount and the fix; it never degrades
+  `/healthz` on its own, and the public detail names no host paths. (#352)
+- **Environment-scoped sanitize script subfolders** — in both sanitize tiers
+  (team-level `{data_dir}/odoo_sanitize/` and repo-level
+  `.oduflow/odoo_sanitize/`), a subdirectory named after an environment now
+  runs after that tier's top-level scripts, so environments cloned from the
+  same template can be sanitized differently — a staff debugging environment
+  keeping neutralized documents where a contractor environment ships no
+  transaction history at all. Top-level files still run for every
+  environment; directories starting with `_` or `.` never match, so shared
+  assets stay shareable; environment names containing `/` match their
+  dash-folded folder name. (#345)
+
+### Bug Fixes
+
+- **The Docker image no longer accumulates zombie processes** — running as
+  PID 1, Oduflow never reaped children it did not spawn itself, so
+  daemonized `fuse-overlayfs` mount helpers and detached
+  `git maintenance run --auto` processes piled up as zombies (about ten an
+  hour on a live server). The image now starts under `tini`, which reaps
+  orphans and forwards signals. Host and systemd installations were never
+  affected. Takes effect once a container is recreated from the new image.
+  (#348)
+
+### Documentation
+
+- `docs/docker.md` states the Docker-out-of-Docker rule plainly and its
+  examples (including the Compose file, which used a named `oduflow_etc`
+  volume — exactly the trap) now bind both `/srv/oduflow` and `/etc/oduflow`
+  from the host at the same path. (#352)
+
+## v1.89.1
+
+### Bug Fixes
+
+- **Large database imports no longer fill the host's `/tmp`** — importing a
+  database used to build a full-size tar archive on the host before uploading
+  it to Docker, which could exhaust a small `/tmp`. The archive is now streamed
+  through a pipe. Where possible, restore inputs are exposed to the container
+  as readable hardlinks in `pg_exchange`, so nothing is copied at all. Older
+  containers, inputs on another filesystem, and unreadable links fall back to
+  streaming the copy. Both paths remove their staged inputs on exit. (#346)
+- **Abandoned staging files are reclaimed at startup** — leftover import
+  staging files, including incomplete production dumps ending in
+  `.pgdump.part`, are cleaned up when the server starts. The cleanup runs
+  before XFS quota setup refreshes inode `ctime`, so old files are still
+  recognised as abandoned. (#346)
+
+### Dashboard
+
+- **Environment actions grouped in a two-level menu** — the environment's long,
+  flat *More* menu now has a root with *Info*, five groups (*Consoles*,
+  *Modules*, *Access*, *Management*, *Data*) and a separate *Delete*. Each
+  submenu has a *Back* control, and *Recreate* is set apart and marked
+  destructive. Confirmations, shared-view restrictions and the
+  stopped/protected/busy availability rules are unchanged. The panel fits the
+  viewport, opens above its trigger when there is no room below, and scrolls
+  in short windows. It supports arrow keys, Home/End, Escape, Tab and focus
+  restoration. Service and production menus are unchanged. (#344)
+
 ## v1.89.0
 
 ### Security

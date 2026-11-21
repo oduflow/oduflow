@@ -373,6 +373,83 @@ To promote into a production that **already exists**, use
 `restore_production(from_environment=…)` instead — see
 [Backups](#backups) for the restore mechanics.
 
+### How data is loaded into a production
+
+A production's database is filled from a template, from a dev environment, or
+from one of its own snapshots. All three are database content that the
+database's users defined, and restoring it runs what it defines: a function
+used in a `CHECK` constraint, for example, is called for every row the restore
+copies. Oduflow therefore never restores this content as the PostgreSQL
+superuser, in either cluster. For `create_production(template_name=…)`,
+`create_production(from_environment=…)` and both forms of `restore_production`
+it:
+
+1. creates the target database for the **production's own PostgreSQL role**
+   (the role its Odoo connects with), which owns it from the start;
+2. starts a short-lived **restore client** container from the production
+   cluster's PostgreSQL image on the team network. It runs
+   `pg_restore --no-owner` as that role, connecting over the network with the
+   role's password like the production's Odoo does, and sees the dump
+   read-only. Nothing is restored inside the PostgreSQL container;
+3. leaves the result with that role: every restored object, and the database
+   itself, belongs to the production's role.
+
+What this means for the data:
+
+- **Extensions.** The role creates the extensions PostgreSQL marks as
+  *trusted* — `pg_trgm`, `unaccent`, `btree_gin`, `pgcrypto`, `uuid-ossp` and
+  the rest of that list, which covers what Odoo itself uses. A database that
+  contains an extension only a superuser may create (for example `postgis`,
+  `pg_stat_statements`, `dblink`, `postgres_fdw`) can no longer be seeded,
+  promoted or restored from a snapshot: the restore fails with
+  `permission denied to create extension` and the production keeps its previous
+  data. Use a `[database].image` in which that extension's control file sets
+  `trusted = true`; a database owner may then create it. Snapshots taken
+  earlier become restorable the same way.
+- **Anything else reserved for superusers** — event triggers, publications
+  `FOR ALL TABLES`, subscriptions, functions in an untrusted language — fails
+  the restore the same way.
+- **A production without its credentials file**
+  (`env_credentials.json` in its workspace) is not restored at all, instead of
+  being restored as the superuser. Run `reconfigure_production` on it first,
+  with no settings changed — see
+  [Reconfiguring a production](#reconfiguring-a-production).
+
+The cluster-wide WAL-G restore (see [Backups](#backups)) is a physical restore
+and is not affected.
+
+### How a production's data is dumped
+
+The other direction follows the same rule. A snapshot
+(`snapshot_production`, the daily schedule, the one before a deploy) and
+`save_production_as_template` run `pg_dump` as the **production's own
+PostgreSQL role**, not as the superuser of the production cluster; the
+database a production is seeded or promoted from is dumped by the
+environment's role, or by the role that owns the team's templates. `pg_dump`
+only reads, and on a current PostgreSQL release reading runs nothing a
+database defines — but releases before 15.8 and 16.4 had a flaw that let it
+(CVE-2024-7348), and a PostgreSQL container keeps the release it was created
+with. A dump taken by the database's own role cannot do more than that role
+already can.
+
+Nothing changes in what a snapshot contains or how it is stored. What can
+change is that a dump is refused:
+
+- **Something the role may not read.** Everything in a production's database
+  belongs to its role, unless an older version recreated the container with
+  the superuser's login and Odoo has created tables since. The snapshot then
+  fails with `permission denied for table …`; `reconfigure_production` with no
+  settings changed hands everything back to the role (see
+  [Reconfiguring a production](#reconfiguring-a-production)). A table with
+  `FORCE ROW LEVEL SECURITY` has to let its owner read every row.
+- **No role at all.** A production whose role no longer exists in the cluster
+  is not dumped by the superuser in its place; the error names
+  `reconfigure_production`. A missing `env_credentials.json` alone does not
+  stop a snapshot: the role's name is all a dump needs.
+
+A deploy continues when its pre-update snapshot fails, as before, and logs the
+reason; a failed scheduled snapshot is reported by `production_backup_status`.
+
 ## Reconfiguring a production
 
 A production's settings are not frozen at creation.
@@ -415,6 +492,27 @@ replacing a secret's value in the dashboard, call
 container when one differs and lists the affected variables by name. A
 reference to a deleted secret is not treated as a change; the next recreate
 reports it. `recreate=true` recreates the container even when nothing differs.
+
+**A production without its database role on record.** A production connects
+to PostgreSQL as its own role, recorded in `env_credentials.json` in its
+workspace. If that file is lost, restores are refused and earlier versions
+recreated the container with the cluster superuser's login. Now
+`reconfigure_production(name="erp")` treats it as drift and repairs it during
+the same container swap: with Odoo stopped, the role is made the owner of the
+database and of everything in it, the database is closed to other roles, and
+the credentials are written back. If the old container still connects as the
+role, its password is kept; otherwise the role gets a new one. The response's
+notes say that a role was provisioned. Event triggers that are enabled in the
+database are disabled first, because the hand-over is DDL run by the
+superuser and an event trigger would run its function with those rights (see
+[What an older load may have left behind](templates.md#what-an-older-load-may-have-left-behind));
+the server log names them. If the role cannot be provisioned — PostgreSQL is not
+reachable, or WAL protection is holding the cluster — nothing is recreated:
+the old container is left in place and started again if it was running. No
+production container is ever created with the superuser's login; if the server
+log names a production among the containers that still hold it, reconfigure it
+and then change the superuser's password as described under
+[Database isolation](environments.md#database-isolation).
 
 Two things reconfigure deliberately does **not** do:
 
@@ -646,7 +744,11 @@ Restore is swap-based: the dump is restored into a scratch database and
 swapped in by rename; the filestore is rebuilt beside the live one and
 swapped in. A failed restore leaves the previous state untouched. If the
 snapshot's commit differs from the checkout, the result warns you to
-`rollback_production` to the matching commit.
+`rollback_production` to the matching commit. The dump is taken and restored
+by the production's own PostgreSQL role, not by the superuser — see
+[How a production's data is dumped](#how-a-productions-data-is-dumped) and
+[How data is loaded into a production](#how-data-is-loaded-into-a-production)
+for what that excludes.
 
 **Restoring from a dev environment.** The same tool also promotes a dev
 environment's data into an *existing* production — the counterpart of
@@ -669,7 +771,8 @@ exclusive.
 The filestore engine (a clean-room, duplicacy-inspired content-defined
 chunking store) deduplicates across daily revisions *and* across a team's
 productions; retention (`keep`) is applied weekly with safe two-step fossil
-collection.
+collection. [How snapshots work](#how-snapshots-work) covers the format,
+ordering and restore mechanics in detail.
 
 **WAL-G — cluster disaster recovery.** Continuous WAL archiving plus daily
 base backups of the whole production cluster. This is the "server burned
@@ -692,6 +795,221 @@ section can resurrect the cluster the same way with the CLI command above.
 `production_backup_status()` shows per-production snapshot state, WAL
 archiver health (`pg_stat_archiver`), base backup inventory, and S3
 reachability.
+
+### What lands in the bucket
+
+Everything lives under `[backup] prefix` (default `oduflow`) in one bucket:
+
+```text
+<prefix>/
+├── walg/                                  WAL-G: base backups + WAL archive (whole cluster)
+├── snapshots/<team>/<production>/
+│   ├── db/<id>.pgdump                     pg_dump -Fc of the production database
+│   └── manifests/<id>.json                the snapshot itself (see below)
+└── filestore/<team>/                      one chunkstore per team
+    ├── config                             chunker seed + hash keys — never delete
+    ├── chunks/<xx>/<id>                   content-addressed, zstd-compressed chunks
+    ├── snapshots/<production>/<revision>  filestore revisions (one per snapshot)
+    └── fossils/<id>.json                  prune bookkeeping
+```
+
+`<team>` is the `X` of the `[team.X]` section, and `<id>` is the snapshot's UTC
+timestamp (`20260711T020000Z`). Keep every object inside one prefix together.
+The chunkstore `config` object holds the keys that every chunk name and
+integrity check derives from: without it, **no filestore revision of the team
+can be restored**. Never delete objects by hand. Retention is applied by
+[prune](#schedule-and-retention), which knows which chunks are still
+referenced.
+
+### How snapshots work
+
+A snapshot is written in a fixed order, so a failure at any step never produces
+a snapshot that looks healthy but cannot be restored:
+
+1. **Database first.** `pg_dump -Fc` streams straight into an S3 multipart upload
+   in 16 MiB parts, with no temporary file on the server. Its sha256 is computed
+   on the way. If `pg_dump` exits non-zero, even after it has produced output,
+   the upload is aborted and the snapshot fails.
+2. **Filestore second.** A new chunkstore revision is created (details below).
+   Odoo references attachments by content hash, so files added after the dump
+   are harmless extras. The reverse order could leave the database pointing at
+   files missing from the copy.
+3. **Manifest last.** The JSON manifest records the snapshot id, trigger
+   (`schedule`, `pre-update`, `mcp`), note, deployed `commit_sha`, the dump's
+   key, size and sha256, and the filestore revision. **A snapshot exists only
+   once its manifest is written.** A dump or chunks left behind by an
+   interrupted run are reclaimed by prune.
+
+Manifests are also cached under `<team-data>/production/<name>/snapshots/`, but
+S3 is the source of truth: `list_production_snapshots(refresh=true)` re-reads
+the bucket and reconciles the cache. Use it after reinstalling the server or
+when snapshots were taken elsewhere.
+
+**Filestore revisions.** Every revision is *full*: any revision restores on its
+own, without replaying a chain. Each one is still built *incrementally*: a file
+whose size and mtime match the previous revision is not read again, and its
+chunk references are carried over. Odoo filestores are content-addressed and
+files never change in place, so after the first snapshot only the new
+attachments are read. New and changed files are packed into one stream and cut
+by a rolling hash into chunks of 1–16 MiB (4 MiB on average). A chunk is
+uploaded only if an object with the same content-derived name does not exist
+yet. This deduplicates across revisions and across all productions of a team.
+Uploads run on `upload_threads` parallel connections (default 16), and memory is
+bounded by `max(64 MiB, threads × 4 MiB)`. Chunking is pure Python (about
+10 MB/s), so the **first** snapshot of a large filestore takes a while; later
+ones are fast.
+
+When `[backup]` is configured, a snapshot runs before every update that has
+something to apply (`update_production`, a webhook or a dashboard deploy). A
+pull with nothing to apply takes no snapshot. The pre-update snapshot is
+best-effort: if it fails, the failure is logged and the deploy continues. Take an explicit `snapshot_production` before
+a risky migration if you need a guaranteed restore point.
+
+### How a snapshot restore runs
+
+`restore_production(snapshot_id=…)` prepares everything **while the production
+keeps serving**, and stops Odoo only for the final swap:
+
+1. Rebuild the filestore revision into a hidden sibling directory of the live
+   filestore. Every chunk is verified against its keyed hash, and every file
+   against its recorded size. A revision of `0` means the filestore was empty
+   at snapshot time, and the restore produces an empty filestore.
+2. Download the dump, verify its sha256 against the manifest, and restore it
+   with `pg_restore` into a scratch database `<db>__restore`. Then reassign
+   ownership to the production's own PostgreSQL role.
+3. Stop the production's Odoo container, then swap by rename: the live database
+   becomes `<db>__old` and the restored one takes its name, and the filestore
+   directory is replaced. If the filestore swap fails, the database rename is
+   rolled back, so a restored database is never paired with old attachments.
+   The old database and filestore are deleted only after both swaps succeed.
+4. Start Odoo again and wait for the health check, then record a `restore`
+   entry in the deploy history.
+
+Free space requirements:
+
+- about **twice the dump size** in `<team-data>/tmp` (the download, checked
+  before anything starts);
+- a **full copy of the filestore** on the volume that holds the production
+  workspace, because the old and new filestore coexist until the swap. This
+  one is not pre-checked.
+
+A production that was stopped before the restore stays stopped afterwards and
+is not health-probed. If a rollback inside the swap itself fails, Odoo is
+deliberately left stopped, and the server log names both databases
+(`<db>` and `<db>__old`) to inspect before you restart it. The
+code checkout is never changed. When the snapshot's `commit_sha` differs from
+the deployed commit, the result suggests the matching `rollback_production`.
+
+### Restoring a snapshot on a new server
+
+Snapshots only need the bucket, so a production can be rebuilt on another
+Oduflow server from its latest snapshot without the WAL-G archive:
+
+1. Configure the new server with the **same `[backup]` bucket and `prefix`**, and
+   put the production in a team with the **same team id** (`[team.X]`): both
+   are part of the snapshot path.
+2. Create the production with the **same name**, repository and branch. Its
+   initial data does not matter, because the restore replaces it.
+3. `list_production_snapshots(name="erp", refresh=true)` lists the snapshots from
+   S3.
+4. `restore_production(name="erp", snapshot_id="…", confirm="erp")`, then
+   `rollback_production(to_commit=…)` if the result reports a commit mismatch.
+
+!!! warning "Decide on cluster recovery first"
+    The new server's production cluster archives into the same `<prefix>/walg/`
+    as soon as it provisions a production. Its base backups then sit next to
+    the old cluster's. If you want the whole old cluster back
+    (`oduflow restore-cluster`), do that **before** creating productions on the
+    new server. Use the snapshot path when you need specific productions, or
+    when the WAL-G archive is unavailable.
+
+### Schedule and retention
+
+A background scheduler checks every minute and runs three jobs, one at a time:
+
+| Job | When | What |
+|---|---|---|
+| Snapshot | daily at `snapshot_time` (default 02:00), per production; override or `off` via `set_production_backup_schedule` | `snapshot_production` |
+| Base backup | daily at `basebackup_time` (default 03:30), while the production cluster is running | `wal-g backup-push`, then keep the newest `walg_keep_full` (default 7) |
+| Prune | weekly, Sunday 04:30 | snapshot retention + chunkstore cleanup (same as `prune_production_backups`) |
+
+Times are server-local. A job whose slot passed while the server was down runs
+once on the first check after startup. A restart right after a successful run
+does not run it again. A failing job is retried on later checks, up to
+three attempts per slot. A job skipped because a deploy, restore or prune held
+the lock is not counted as a failed attempt. Results appear in
+`production_backup_status()`. While the WAL disk guard is latched, the
+scheduler does nothing.
+
+**Retention (`keep`).** Each `"interval:age"` pair means *for snapshots older
+than `age` days, keep one per `interval` days*. `interval = 0` drops everything
+older than `age`. The strictest matching pair applies; snapshots younger than
+every `age` are all kept, and the newest snapshot is always kept. The default
+`["30:180", "7:30", "1:7"]` keeps:
+
+| Snapshot age | Kept |
+|---|---|
+| up to 7 days | all |
+| 7–30 days | one per day |
+| 30–180 days | one per week |
+| over 180 days | one per 30 days, indefinitely |
+
+Add `"0:365"` to drop everything older than a year. Retention is decided once,
+from the manifests. Each deleted snapshot loses its manifest and dump, and the
+chunkstore keeps exactly the revisions that surviving manifests reference.
+Unreferenced chunks are deleted in two steps. First they are renamed to
+*fossils*. A later prune deletes them permanently, once every production has
+produced a newer revision and at least an hour has passed, or brings them back
+if something still needs them.
+
+Snapshots of a **deleted** production are not pruned: they stay in the bucket,
+with every filestore revision they reference. A production created later
+with the same name sees them in `list_production_snapshots(refresh=true)`.
+
+### Bucket permissions
+
+The `[backup]` credentials need, on the bucket and `<prefix>/*`:
+
+- `s3:ListBucket`;
+- `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject`. Prune's rename is a
+  copy plus a delete;
+- `s3:AbortMultipartUpload`, so that a failed dump upload does not leave
+  billable orphaned parts.
+
+The chunkstore checks whether a chunk exists with a `HEAD` request, and treats
+`403` the same as "missing". Credentials without read access do not fail
+loudly: they re-upload every chunk on every snapshot. The WAL-G storage
+preflight [below](#production-readiness-at-deployment) uses the same
+credentials under `<prefix>/walg/`. S3-compatible stores without conditional
+writes (`If-None-Match`) work: Oduflow falls back to check-then-write and logs
+a warning.
+
+See [Security](security.md#backup-data-in-s3) for encryption and credential
+handling.
+
+### How cluster PITR runs
+
+`oduflow restore-cluster` and **/admin → Cluster DR** run under the system lock:
+
+1. Pick the base backup **before** touching anything: the newest one at or
+   before `--target-time`, or the latest without a target. An unparseable
+   target, an unreadable inventory, or a target older than every base backup
+   fails here, while the cluster is still intact.
+2. Stop every production Odoo container of every team, then stop and remove
+   the production PostgreSQL container. Its volume stays.
+3. In a helper container, move the current data directory aside to
+   `.pitr-old-<timestamp>/` inside the volume (nothing is deleted). Then
+   `wal-g backup-fetch` the base backup and configure recovery: WAL fetch, and
+   when given, the target time with promote.
+4. Recreate PostgreSQL, wait until WAL replay finishes and the cluster
+   promotes, re-enable archiving, and start the productions again.
+
+If the restore fails, Oduflow tries to start the productions it stopped. A
+failure in step 1, or while stopping PostgreSQL, leaves the data directory
+untouched. After the data directory has been moved aside, recovery is manual:
+check `docker logs` of the production PostgreSQL container, and keep in mind
+that the previous data is intact in `.pitr-old-<timestamp>/`. Remove that
+directory by hand once the restored cluster is confirmed good.
 
 ### WAL-G certificates and storage health
 

@@ -113,6 +113,7 @@ src/oduflow/
       odoo_17_guide.md    # Odoo 17 development standards
       odoo_18_guide.md    # Odoo 18 development standards
       odoo_19_guide.md    # Odoo 19 development standards
+      odoo_20_guide.md    # Odoo 20 development standards
 
 tests/                  # Unit and integration tests (pytest)
 ```
@@ -255,3 +256,18 @@ explicit preview/apply boundary because several PostgreSQL settings require a
 restart and operator-authored configs must never be silently replaced. Applying
 the plan also stages regenerated worker settings in existing production Odoo
 containers, while leaving every restart under operator control.
+
+## Running destructive Docker tests
+
+`pytest` runs the unit suite without Docker. For integration tests, provision a disposable Linux host with its own Docker Engine, Docker CLI and buildx, Git, SSH, rsync, fuse-overlayfs and `/dev/fuse`. Reserve ports 80, 443, 51000–51100 and 52100–52399. Run pytest from a Git checkout inside that host: Docker bind mounts and temporary directories must refer to the same filesystem. Do not enroll a shared or production daemon. Tests create and destroy real databases, containers, networks, and volumes, and prune the daemon's build cache.
+
+The full run needs access to public Git repositories, Docker images, distribution package indexes and the WAL-G binary. The test registry and S3 bucket run inside the disposable host; no production registry or backup credentials are needed. The Linux bridge gateway must be reachable from both Docker and pytest. On a host with an HTTP proxy, exclude local fixture addresses from the proxy.
+
+After confirming this is the disposable host, enroll its **local** engine once as an administrator:
+
+```sh
+sudo install -d -m 0755 /etc/oduflow-test
+docker --host unix:///var/run/docker.sock info --format '{{.ID}}' | sudo tee /etc/oduflow-test/engine-id
+```
+
+With the project's test dependencies installed, run `pytest --run-live-docker -m integration` **serially**. `-m heavyweight` selects just the heavyweight subset. Collection is safe without enrollment: `pytest --collect-only -m integration`. Before fixture setup, pytest requires both the explicit flag and an engine ID matching the Docker SDK and CLI. Replacing the daemon invalidates enrollment; remove `/etc/oduflow-test/engine-id` to revoke it.

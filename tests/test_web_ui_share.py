@@ -228,10 +228,112 @@ def test_a_share_link_cannot_manage_its_own_sharing(app):
     assert client.post(f"/api/environments/{_ENV}/share/revoke").status_code == 403
 
 
-def test_agent_cli_websocket_is_refused_for_a_share_link(app):
+def test_agent_cli_websocket_reaches_the_handler_for_a_share_link(
+    app, settings, monkeypatch
+):
+    # The handler must bail at its agent_enabled check before ever touching
+    # the stub client below; make that precondition of the fixture explicit.
+    assert settings.teams["1"].agent_enabled is False
+    monkeypatch.setattr("oduflow.docker_ops.client.get_client", lambda: object())
+    client = _visitor(app, _share_url(app))
+    with client.websocket_connect(f"/api/environments/{_ENV}/agent") as websocket:
+        message = websocket.receive_text()
+        close = websocket.receive()
+    # Past the scope middleware: the handler itself answers, here because the
+    # test team has no coding agent enabled.
+    assert "coding agent is disabled" in message
+    assert close["code"] == 1011
+
+
+class _FakeExecSocket:
+    """The raw socket behind `docker exec`: one banner, then EOF."""
+
+    def __init__(self) -> None:
+        self._chunks = [b"agent ready\r\n"]
+
+    def recv(self, _size: int) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def sendall(self, _data: bytes) -> None:
+        pass
+
+    def shutdown(self, _how: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_agent_cli_exec_runs_as_the_environments_uid_with_its_scoped_token(
+    app, settings, monkeypatch
+):
+    """The core invariant of opening Agent CLI to share links: the PTY is
+    exec'd as the environment's own uid with only that environment's scoped
+    MCP token, never as a shared identity (ADR 0079)."""
+    import dataclasses
+
+    from oduflow.docker_ops import env_ops
+    from oduflow.naming import get_agent_checkout_dir
+
+    settings.teams["1"] = dataclasses.replace(settings.teams["1"], agent_enabled=True)
+
+    uid = 4242
+    token = "scoped-token-for-feature-x"
+    execs: list[dict] = []
+
+    class _FakeApi:
+        def exec_create(self, container_id, cmd, **kwargs):
+            execs.append({"container": container_id, "cmd": cmd, **kwargs})
+            return {"Id": "exec-1"}
+
+        def exec_start(self, exec_id, **kwargs):
+            sock = _FakeExecSocket()
+            outer = type("S", (), {"_sock": sock, "close": lambda self: None})()
+            return outer
+
+        def exec_resize(self, exec_id, **kwargs):
+            pass
+
+    class _FakeContainers:
+        def get(self, name):
+            return type("C", (), {"id": "agent-ctr", "status": "running"})()
+
+    class _FakeClient:
+        api = _FakeApi()
+        containers = _FakeContainers()
+
+    monkeypatch.setattr("oduflow.docker_ops.client.get_client", lambda: _FakeClient())
+    monkeypatch.setattr(env_ops, "agent_env_uid", lambda container, team, env_name: uid)
+    monkeypatch.setattr(
+        env_ops, "refresh_agent_mcp_config", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(env_ops, "get_env_token", lambda s, t, e: token)
+
+    client = _visitor(app, _share_url(app))
+    with client.websocket_connect(f"/api/environments/{_ENV}/agent") as websocket:
+        assert "agent ready" in websocket.receive_text()
+
+    assert len(execs) == 1
+    exec_call = execs[0]
+    expected_user, expected_env = env_ops.agent_exec_identity(uid)
+    # The environment's own uid, not root and not a team-shared account.
+    assert exec_call["user"] == expected_user == f"{uid}:{uid}"
+    # Its private HOME/TMPDIR and ONLY its scoped token; the team auth token
+    # never enters the exec environment.
+    environment = exec_call["environment"]
+    assert environment["HOME"] == expected_env["HOME"]
+    assert environment["ODUFLOW_MCP_TOKEN"] == token
+    assert environment["ODUFLOW_MCP_URL"].endswith(f"/mcp/{_ENV}")
+    assert exec_call["workdir"] == get_agent_checkout_dir(_ENV)
+    # Wrapped by agent_session_command (private umask), running the agent CLI.
+    assert exec_call["cmd"][:2] == ["sh", "-c"]
+    assert "claude" in exec_call["cmd"]
+
+
+def test_agent_cli_websocket_of_another_environment_is_refused(app):
     client = _visitor(app, _share_url(app))
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        with client.websocket_connect(f"/api/environments/{_ENV}/agent"):
+        with client.websocket_connect("/api/environments/other/agent"):
             pass
     # 1008 (policy violation) is the middleware's refusal, not a handler error:
     # the request never reaches the agent container.

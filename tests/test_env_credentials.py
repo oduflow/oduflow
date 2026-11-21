@@ -68,15 +68,16 @@ class TestCreateLoadDeleteCredentials:
         assert "pg_password" in creds
         assert creds["pg_user"] == "u_1_feature-test"
 
-        loaded = load_credentials("feature/test", workspaces_dir, "odoo", "odoo")
+        loaded = load_credentials("feature/test", workspaces_dir, "odoo")
         assert loaded == creds
 
     def test_load_fallback(self, tmp_path):
         workspaces_dir = str(tmp_path / "workspaces")
         os.makedirs(workspaces_dir, exist_ok=True)
 
-        loaded = load_credentials("nonexistent", workspaces_dir, "odoo", "odoo")
-        assert loaded == {"pg_user": "odoo", "pg_password": "odoo"}
+        # The fallback names the superuser and carries no password.
+        loaded = load_credentials("nonexistent", workspaces_dir, "odoo")
+        assert loaded == {"pg_user": "odoo", "pg_password": ""}
 
     def test_delete(self, tmp_path):
         workspaces_dir = str(tmp_path / "workspaces")
@@ -85,8 +86,8 @@ class TestCreateLoadDeleteCredentials:
         create_credentials("feature/del", "1", workspaces_dir)
         delete_credentials("feature/del", workspaces_dir)
 
-        loaded = load_credentials("feature/del", workspaces_dir, "odoo", "odoo")
-        assert loaded == {"pg_user": "odoo", "pg_password": "odoo"}
+        loaded = load_credentials("feature/del", workspaces_dir, "odoo")
+        assert loaded == {"pg_user": "odoo", "pg_password": ""}
 
     def test_delete_nonexistent(self, tmp_path):
         workspaces_dir = str(tmp_path / "workspaces")
@@ -111,7 +112,7 @@ class TestCredentialsFilePermissions:
         ws = str(tmp_path)
         creds = create_credentials("main", "1", ws)
         # Locate the written file via load (round-trips through the same path).
-        loaded = load_credentials("main", ws, "fb_user", "fb_pw")
+        loaded = load_credentials("main", ws, "fb_user")
         assert loaded == creds
         # Find the credentials file and check perms + no leftover temp file.
         import glob

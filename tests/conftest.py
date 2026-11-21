@@ -6,6 +6,7 @@ import atexit
 import hashlib
 import os
 import time
+from contextlib import closing
 
 import pytest
 
@@ -23,6 +24,39 @@ _TEST_TRAEFIK_CONTAINER = "oduflowtest-traefik"
 _TEST_TRAEFIK_ACME_VOLUME = "oduflowtest-traefik-acme"
 _TEST_PROD_DB_CONTAINER = "oduflowtest-prod-db"
 _TEST_PROD_DB_VOLUME = "oduflowtest-prod-db-data"
+
+
+@pytest.fixture(autouse=True)
+def _no_new_live_volumes(request):
+    """An image VOLUME gets no Oduflow labels. Check the serial test's delta."""
+    if not any(
+        request.node.get_closest_marker(m) for m in ("integration", "heavyweight")
+    ):
+        yield
+        return
+    with closing(get_client()) as client:
+
+        def names():
+            return {v["Name"] for v in client.api.volumes()["Volumes"] or []}
+
+        before = names()
+        yield
+        assert not (remaining := names() - before), (
+            f"Docker volumes survived teardown: {sorted(remaining)}"
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_env_secret_overrides(monkeypatch):
+    """Secrets set in the shell running pytest (a Docker deployment sets
+    ODUFLOW_TEAM_1_UI_PASSWORD, ...) must not replace the files tests write."""
+    for name in list(os.environ):
+        if name.startswith("ODUFLOW_TEAM_") or name in (
+            "ODUFLOW_ADMIN_PASSWORD",
+            "ODUFLOW_BACKUP_ACCESS_KEY",
+            "ODUFLOW_BACKUP_SECRET_KEY",
+        ):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +80,54 @@ def _no_label_scan(monkeypatch):
     monkeypatch.setattr(env_tokens, "_scan_labels", lambda settings: {})
 
 
+# The release fake PostgreSQL clusters answer to: the default image's.
+FAKE_SERVER_VERSION_NUM = 160004
+# The real questions, for the tests that are about them. Taken here, where no
+# fixture has replaced them yet.
+_REAL_SERVER_VERSION_NUM = system_ops._server_version_num
+_REAL_ENABLED_EVENT_TRIGGERS = system_ops.enabled_event_triggers
+
+
+@pytest.fixture(autouse=True)
+def _fake_clusters_are_plain_postgres_16(monkeypatch, request):
+    """Two questions the superuser asks a cluster before it acts inside a
+    tenant's database, answered here for every fake cluster at once:
+
+    - its release (``SHOW server_version_num``, once per container), to learn
+      whether event triggers can be switched off for the session: PostgreSQL
+      16;
+    - the database's enabled event triggers, before DDL: none.
+
+    So tests about something else see only the statements they are about,
+    and their fakes need not know either question. The tests of the
+    questions themselves ask for ``real_cluster_questions``. Tests against
+    live Docker ask the real cluster.
+    """
+    system_ops._SERVER_VERSIONS.clear()
+    if any(
+        request.node.get_closest_marker(name) for name in ("integration", "heavyweight")
+    ):
+        return
+    monkeypatch.setattr(
+        system_ops,
+        "_server_version_num",
+        lambda settings, container: FAKE_SERVER_VERSION_NUM,
+    )
+    monkeypatch.setattr(
+        system_ops, "enabled_event_triggers", lambda *args, **kwargs: []
+    )
+
+
+@pytest.fixture
+def real_cluster_questions(monkeypatch):
+    """Both questions are put to the test's own fake cluster again."""
+    system_ops._SERVER_VERSIONS.clear()
+    monkeypatch.setattr(system_ops, "_server_version_num", _REAL_SERVER_VERSION_NUM)
+    monkeypatch.setattr(
+        system_ops, "enabled_event_triggers", _REAL_ENABLED_EVENT_TRIGGERS
+    )
+
+
 def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
     """Settings whose Docker resources cannot reach a developer's own server.
 
@@ -66,6 +148,8 @@ def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
     )
     settings = Settings(
         routing_mode="port",
+        disable_telemetry=True,
+        etc_dir=tmp_dir,
         db_user="odoo",
         db_password="odoo",
         prefix=f"{_TEST_PREFIX}{suffix}-",
@@ -88,18 +172,21 @@ def _test_settings(tmp_dir: str) -> tuple[Settings, TeamSettings]:
 
 def _cleanup_test_resources(settings: Settings, team: TeamSettings) -> None:
     """Remove all test containers and system resources."""
-    try:
-        for env in env_ops.list_environments(settings, team):
-            try:
-                env_ops.delete_environment(settings, team, env["env_name"])
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        system_ops.destroy_system(settings)
-    except Exception:
-        pass
+    for env in env_ops.list_environments(settings, team):
+        env_ops.delete_environment(settings, team, env["env_name"])
+    system_ops.destroy_system(settings)
+    client = get_client()
+    filters = {"label": f"{settings.managed_label}=true"}
+    remaining = [
+        resource.name
+        for group in (
+            client.containers.list(all=True, filters=filters),
+            client.volumes.list(filters=filters),
+            client.networks.list(filters=filters),
+        )
+        for resource in group
+    ]
+    assert not remaining, f"Docker resources survived teardown: {remaining}"
 
 
 def _create_main_environment(settings: Settings, team: TeamSettings) -> None:

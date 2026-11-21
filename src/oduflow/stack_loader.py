@@ -96,15 +96,22 @@ def resolve_env_values(
     team: Any = None,
     env_name: str = "",
     production_name: str = "",
+    production_domain: str = "",
+    database_records: Mapping[str, dict[str, Any]] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve literal, host-env, Odoo, database, and service values at apply time."""
+    """Resolve literal, host-env, Odoo, database, and service values at apply time.
+
+    ``database_records`` seeds the lookup cache with records (including the
+    password) the caller already inspected, so a plan does not probe
+    PostgreSQL again for every consuming service.
+    """
     source_env = os.environ if environ is None else environ
     result: dict[str, str] = {}
     # One lookup per database, not per variable: a full PG* set is six keys
     # pointing at the same resource, and each lookup costs several round trips
     # into the PostgreSQL container.
-    databases: dict[str, dict[str, Any]] = {}
+    databases: dict[str, dict[str, Any]] = dict(database_records or {})
     for key, raw in values.items():
         if isinstance(raw, str):
             result[key] = raw
@@ -157,12 +164,19 @@ def resolve_env_values(
         if raw.production_field is not None:
             if settings is None or team is None or not production_name:
                 raise StackValidationError(f"'{key}' requires an existing production")
-            from oduflow import production_registry
             from oduflow.docker_ops import production_ops
 
-            record = production_registry.get_production(team, production_name)
             if raw.production_field == "url":
-                result[key] = production_ops.prod_url(settings, team, record)
+                # The manifest domain is the single source: plan compares
+                # against it and apply converges the production to it before
+                # any service consumes the URL.
+                if not production_domain:
+                    raise StackValidationError(
+                        f"'{key}' requires the production domain"
+                    )
+                result[key] = production_ops.prod_url(
+                    settings, team, {"domain": production_domain}
+                )
             elif raw.production_field == "database":
                 result[key] = production_ops.prod_db_name(team, production_name)
             else:

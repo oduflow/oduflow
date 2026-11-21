@@ -19,7 +19,7 @@ logger = logging.getLogger("oduflow")
 
 TRACE: bool = False
 
-DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.4.0"
+DEFAULT_AGENT_IMAGE = "oduist/oduflow-coder:0.4.1"
 DEFAULT_POSTGRES_IMAGE = "postgres:16"
 _LEGACY_AGENT_IMAGE = "oduist/oduflow-coder:latest"
 # Retired keys already reported: settings are re-parsed for every console
@@ -43,6 +43,63 @@ def secret_matches(stored: str, candidate: str) -> bool:
     return hmac.compare_digest(stored.encode("utf-8"), candidate.encode("utf-8"))
 
 
+# Secrets an environment variable may supply instead of oduflow.toml. A
+# non-empty variable wins over the file value; everything that reads or edits
+# the file (the Server settings console, ``oduflow admin``) keeps working on
+# the file and never sees the variable's value.
+_TEAM_ENV_KEYS = ("ui_password", "auth_token", "production_token")
+_GLOBAL_ENV_VARS: dict[tuple[str, ...], str] = {
+    ("admin", "password"): "ODUFLOW_ADMIN_PASSWORD",
+    ("backup", "access_key"): "ODUFLOW_BACKUP_ACCESS_KEY",
+    ("backup", "secret_key"): "ODUFLOW_BACKUP_SECRET_KEY",
+}
+
+# The console password unlocks every team's secrets.
+MIN_ADMIN_PASSWORD = 12
+
+
+def _team_env_slug(team_id: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "_", team_id.upper())
+
+
+def team_env_var(team_id: str, key: str) -> str:
+    """``[team.acme-dev] ui_password`` -> ``ODUFLOW_TEAM_ACME_DEV_UI_PASSWORD``."""
+    return f"ODUFLOW_TEAM_{_team_env_slug(team_id)}_{key.upper()}"
+
+
+def env_var_for(path: tuple[str, ...]) -> str | None:
+    """The variable that may replace the config value at ``path``, if any."""
+    if len(path) == 3 and path[0] == "team" and path[2] in _TEAM_ENV_KEYS:
+        return team_env_var(path[1], path[2])
+    return _GLOBAL_ENV_VARS.get(path)
+
+
+def env_value(path: tuple[str, ...]) -> str:
+    """The stripped value of ``path``'s variable; empty when unset or blank."""
+    var = env_var_for(path)
+    return os.environ.get(var, "").strip() if var else ""
+
+
+def _env_or(path: tuple[str, ...], file_value: object) -> str:
+    return env_value(path) or str(file_value)
+
+
+def env_overrides(raw: dict[str, Any]) -> list[tuple[tuple[str, ...], str]]:
+    """``(config path, variable)`` for each value of ``raw`` taken from the
+    environment. Names only: the values stay with whoever set them."""
+    paths: list[tuple[str, ...]] = []
+    teams = raw.get("team")
+    if isinstance(teams, dict):
+        for team_id in teams:
+            paths.extend(("team", str(team_id), key) for key in _TEAM_ENV_KEYS)
+    for path in _GLOBAL_ENV_VARS:
+        # The keys only ever replace a configured [backup]; they never enable it.
+        if path[0] == "backup" and not raw.get("backup"):
+            continue
+        paths.append(path)
+    return [(path, env_var_for(path) or "") for path in paths if env_value(path)]
+
+
 def _normalize_agent_image(value: object) -> str:
     image = str(value or "").strip() or DEFAULT_AGENT_IMAGE
     if image == _LEGACY_AGENT_IMAGE:
@@ -64,18 +121,21 @@ _REGISTRY_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]+)?$"
 
 @dataclass(frozen=True)
 class ImageRegistrySettings:
-    """Container registry configuration ([team.X.image_registry] TOML section).
+    """Image build limits and registry ([team.X.image_registry] TOML section).
 
-    Presence of the section enables the image build/publish MCP tools for the
-    team; teams without it are refused with a clear prerequisite error. The
-    agent can publish only below ``repository_prefix`` on ``host`` — that prefix
-    is the authorization boundary. Credentials are optional: when ``username``
-    and ``token`` are set, pushes send request-scoped auth to the Docker API;
-    otherwise the host Docker daemon's ambient credentials (``docker login``)
-    are used.
+    Building needs no configuration: a team without the section builds with
+    these defaults. The section tunes the limits, lets an operator switch
+    building off (``builds_enabled = false``) and, through
+    ``repository_prefix``, enables publication — the agent can publish only
+    below that prefix on ``host``, which makes it the authorization boundary.
+    Credentials are optional: when ``username`` and ``token`` are set, pushes
+    send request-scoped auth to the Docker API; otherwise the host Docker
+    daemon's ambient credentials (``docker login``) are used.
     """
 
-    repository_prefix: str  # e.g. "acme" — namespace all published repos live under
+    # e.g. "acme" — namespace all published repos live under. Empty: the team
+    # builds and runs images locally but cannot publish them.
+    repository_prefix: str = ""
     host: str = "docker.io"
     username: str = ""
     # Registry token/password from the Oduflow config. It is sent only as
@@ -88,6 +148,9 @@ class ImageRegistrySettings:
     # Local staging images kept per team (oduflow-build/team-<id>:<build-id>);
     # older ones are untagged after each successful build. 0 disables pruning.
     keep_images: int = 10
+    # Operator switch: false refuses every new build for the team — the MCP
+    # tool on both endpoints and `build` on a Stack service.
+    builds_enabled: bool = True
 
 
 ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -178,8 +241,8 @@ class TeamSettings:
     agent_enabled: bool = False
     agent_default: str = "claude"  # which agent consoles/chats open by default
     agent_env: dict[str, str] = field(default_factory=dict)
-    # Container image building ([team.X.image_registry]); None = the image
-    # build/publish MCP tools are unavailable for this team.
+    # Image build limits + registry ([team.X.image_registry]); None = builds
+    # use the default limits and publishing is unavailable for this team.
     image_registry: ImageRegistrySettings | None = None
     # Raw per-team ``public_scheme`` override; empty falls back to the global
     # [routing] value. Read the resolved scheme via
@@ -296,8 +359,9 @@ class BackupSettings:
     basebackup_time: str = "03:30"
     # Snapshot retention: "interval_days:older_than_days" pairs, duplicacy
     # -keep style, largest age first. Default: keep everything younger than
-    # 7 days, one per day up to 30 days, one per week up to a year, one per
-    # month beyond that is not kept (0:365 would drop older ones entirely).
+    # 7 days, one per day up to 30 days, one per week up to 180 days, and one
+    # per 30 days beyond that, indefinitely (add "0:365" to drop snapshots
+    # older than a year entirely).
     keep: tuple[str, ...] = ("30:180", "7:30", "1:7")
     # Number of WAL-G base backups retained (wal-g delete retain FULL n).
     walg_keep_full: int = 7
@@ -468,7 +532,9 @@ class Settings:
     repo_label: str = "oduflow.repo"
     image_label: str = "oduflow.image"
 
-    # Config location
+    # Config location. etc_dir holds files that containers bind-mount, so like
+    # base_data_dir it must be a path the Docker daemon can see; see
+    # resolve_etc_dir().
     etc_dir: str = ""
     toml_path: str = ""
 
@@ -829,6 +895,24 @@ class Settings:
                     "Set a distinct [team.*] port_range for each team."
                 )
 
+        # Distinct team ids can fold to one variable name (acme-dev, acme_dev):
+        # refuse a variable that would silently apply to several teams.
+        by_slug: dict[str, list[str]] = {}
+        for team_id in self.teams:
+            by_slug.setdefault(_team_env_slug(team_id), []).append(team_id)
+        for ids in by_slug.values():
+            if len(ids) < 2:
+                continue
+            for key in _TEAM_ENV_KEYS:
+                var = team_env_var(ids[0], key)
+                if os.environ.get(var, "").strip():
+                    raise ValueError(
+                        f"{var} is ambiguous: teams "
+                        + ", ".join(f"'{i}'" for i in sorted(ids))
+                        + " all map to it. Rename a team or keep that "
+                        "secret in oduflow.toml."
+                    )
+
         # Validate uniqueness of auth tokens
         tokens = [t.auth_token for t in self.teams.values() if t.auth_token]
         if len(tokens) != len(set(tokens)):
@@ -856,6 +940,16 @@ class Settings:
         passwords = [t.ui_password for t in self.teams.values() if t.ui_password]
         if len(passwords) != len(set(passwords)):
             raise ValueError("Duplicate ui_password values across teams.")
+
+        # The console enforces this for passwords it writes; a variable bypasses
+        # the console, so check it here.
+        if env_value(("admin", "password")) and (
+            len(self.admin_password) < MIN_ADMIN_PASSWORD
+        ):
+            raise ValueError(
+                f"ODUFLOW_ADMIN_PASSWORD must be at least {MIN_ADMIN_PASSWORD} "
+                "characters."
+            )
 
         # The console credential unlocks every team's secrets, so it must never
         # double as a team credential that a team member already knows.
@@ -1015,7 +1109,7 @@ class Settings:
             agent.get("opencode_provider", {}), opencode_model
         )
 
-        etc_dir = _resolve_etc_dir()
+        etc_dir = resolve_etc_dir(str(storage.get("etc_dir", "")).strip(), path)
         base_data_dir = _resolve_data_dir(storage.get("data_dir", ""))
 
         # Parse teams
@@ -1081,9 +1175,16 @@ class Settings:
                 team_id=team_id,
                 hostname=hostname,
                 base_domain=base_domain,
-                auth_token=str(team_cfg.get("auth_token", "")),
-                production_token=str(team_cfg.get("production_token", "")),
-                ui_password=str(team_cfg.get("ui_password", "")),
+                auth_token=_env_or(
+                    ("team", team_id, "auth_token"), team_cfg.get("auth_token", "")
+                ),
+                production_token=_env_or(
+                    ("team", team_id, "production_token"),
+                    team_cfg.get("production_token", ""),
+                ),
+                ui_password=_env_or(
+                    ("team", team_id, "ui_password"), team_cfg.get("ui_password", "")
+                ),
                 port_range_start=port_start,
                 port_range_end=port_end,
                 data_dir=team_data_dir,
@@ -1144,7 +1245,9 @@ class Settings:
             agent_feedback=bool(server.get("agent_feedback", False)),
             allow_local_path=bool(server.get("allow_local_path", True)),
             allow_insecure_http=bool(server.get("allow_insecure_http", False)),
-            admin_password=str(admin.get("password", "")).strip(),
+            admin_password=_env_or(
+                ("admin", "password"), admin.get("password", "")
+            ).strip(),
             routing_mode=routing_mode,
             acme_email=str(routing.get("acme_email", "")).strip(),
             routing_tls=tls is not False,
@@ -1202,20 +1305,16 @@ def _parse_image_registry_section(
 ) -> ImageRegistrySettings | None:
     """Parse a [team.X.image_registry] TOML section.
 
-    Absent/empty section → None (image building disabled for the team). A
-    present section must be complete and valid — misconfigured image publishing
-    should fail at startup, not at the first agent build.
+    Absent/empty section → None (builds use the default limits and nothing can
+    be published). A present section must be valid — misconfigured image
+    publishing should fail at startup, not at the first agent build. Without
+    ``repository_prefix`` the section only tunes the build limits or, with
+    ``builds_enabled = false``, switches building off.
     """
     if not raw:
         return None
     prefix = str(raw.get("repository_prefix", "")).strip().strip("/")
-    if not prefix:
-        raise ValueError(
-            f"Team '{team_id}': [team.{team_id}.image_registry] requires "
-            "repository_prefix (the registry namespace published images live "
-            "under, e.g. 'acme'). Remove the section to disable image building."
-        )
-    if not _OCI_REPO_RE.match(prefix):
+    if prefix and not _OCI_REPO_RE.match(prefix):
         raise ValueError(
             f"Team '{team_id}': image_registry repository_prefix {prefix!r} is "
             "not a valid lowercase OCI repository namespace."
@@ -1234,11 +1333,22 @@ def _parse_image_registry_section(
             "set together (explicit credentials) or both omitted (use the host "
             "Docker daemon's own `docker login` credentials)."
         )
+    if username and not prefix:
+        raise ValueError(
+            f"Team '{team_id}': image_registry credentials need "
+            "repository_prefix (the registry namespace published images live "
+            "under, e.g. 'acme'). Remove them to build without publishing."
+        )
     timeout = int(str(raw.get("build_timeout_seconds", 1800)))
     max_context_mb = int(str(raw.get("max_context_mb", 512)))
     max_log_mb = int(str(raw.get("max_log_mb", 16)))
     max_concurrent_builds = int(str(raw.get("max_concurrent_builds", 2)))
     keep_images = int(str(raw.get("keep_images", 10)))
+    builds_enabled = raw.get("builds_enabled", True)
+    if not isinstance(builds_enabled, bool):
+        raise ValueError(
+            f"Team '{team_id}': image_registry builds_enabled must be true or false"
+        )
     if timeout <= 0:
         raise ValueError(
             f"Team '{team_id}': image_registry build_timeout_seconds must be > 0"
@@ -1266,6 +1376,7 @@ def _parse_image_registry_section(
         max_log_mb=max_log_mb,
         max_concurrent_builds=max_concurrent_builds,
         keep_images=keep_images,
+        builds_enabled=builds_enabled,
     )
 
 
@@ -1372,8 +1483,12 @@ def _parse_backup_section(backup_raw: dict[str, object]) -> BackupSettings | Non
     if not backup_raw:
         return None
     bucket = str(backup_raw.get("bucket", "")).strip()
-    access_key = str(backup_raw.get("access_key", "")).strip()
-    secret_key = str(backup_raw.get("secret_key", "")).strip()
+    access_key = _env_or(
+        ("backup", "access_key"), backup_raw.get("access_key", "")
+    ).strip()
+    secret_key = _env_or(
+        ("backup", "secret_key"), backup_raw.get("secret_key", "")
+    ).strip()
     if not (bucket and access_key and secret_key):
         raise ValueError(
             "[backup] section requires all of: bucket, access_key, secret_key "
@@ -1427,11 +1542,113 @@ def find_toml() -> str:
     )
 
 
+def resolve_etc_dir(explicit: str, toml_path: str) -> str:
+    """Resolve the config directory: explicit > directory of the loaded TOML.
+
+    The config dir holds files that get bind-mounted into containers
+    (``postgresql.conf``, ``postgresql-prod.conf``, ``traefik-dynamic/``). The
+    Docker daemon resolves a bind source on the *host*, so when Oduflow runs in
+    a container the dir must be a path the daemon can see too — which is why it
+    is configurable, exactly like ``[storage].data_dir``.
+
+    With nothing configured it is the directory of the ``oduflow.toml`` that
+    actually loaded. For both lookup locations of :func:`find_toml` that is the
+    same answer the old writability probe gave (``/etc/oduflow`` or
+    ``~/.oduflow/conf``), so existing installations are unaffected; and setting
+    ``ODUFLOW_TOML`` to a daemon-visible path relocates the whole config dir on
+    its own. Without a TOML path at all (nothing loaded yet) it falls back to
+    the first-run probe that bootstrap uses to place a new ``oduflow.toml``.
+    """
+    if explicit:
+        return explicit
+    if toml_path:
+        return os.path.dirname(os.path.abspath(toml_path))
+    return _resolve_etc_dir()
+
+
+def validate_etc_dir(etc_dir: str) -> None:
+    """Fail early when the config dir is unusable.
+
+    Oduflow generates ``postgresql.conf`` and Traefik's dynamic config into
+    it, and the containers mount those paths, so a missing or read-only dir
+    would surface much later as a crash-looping ``oduflow-db``. Raises
+    ValueError with the fix spelled out.
+    """
+    if not os.path.isdir(etc_dir):
+        raise ValueError(
+            f"Config directory {etc_dir} does not exist. Create it, or point "
+            "[storage].etc_dir (or ODUFLOW_TOML) at an existing directory."
+        )
+    if not os.access(etc_dir, os.W_OK):
+        raise ValueError(
+            f"Config directory {etc_dir} is not writable by this user. Oduflow "
+            "generates postgresql.conf and Traefik's dynamic config there; fix "
+            "its permissions or set [storage].etc_dir to a writable directory."
+        )
+
+
+# Files and directories the config dir owns. Listed so an upgrade that moves
+# the dir can say what it left behind.
+_ETC_DIR_ARTIFACTS: tuple[str, ...] = (
+    "license.key",
+    "postgresql.conf",
+    "postgresql-prod.conf",
+    "traefik-dynamic",
+    "branding",
+    ".instance_id",
+)
+
+
+def warn_if_legacy_etc_dir(etc_dir: str) -> list[str]:
+    """Warn when the pre-``etc_dir`` location still holds config files.
+
+    Until the config dir became configurable it was *always* the writability
+    probe's answer (``/etc/oduflow`` or ``~/.oduflow/conf``), no matter where
+    ``oduflow.toml`` lived. An installation that points ``ODUFLOW_TOML``
+    elsewhere therefore moves its config dir on upgrade, which would otherwise
+    silently orphan ``license.key`` (the instance reads as unlicensed), the
+    branding assets, the telemetry instance id and any hand-tuned
+    ``postgresql.conf`` or Traefik drop-in. Returns the orphaned names; never
+    raises.
+    """
+    try:
+        legacy = _resolve_etc_dir()
+        if os.path.abspath(legacy) == os.path.abspath(etc_dir):
+            return []
+        orphaned = [
+            name
+            for name in _ETC_DIR_ARTIFACTS
+            if os.path.exists(os.path.join(legacy, name))
+            and not os.path.exists(os.path.join(etc_dir, name))
+        ]
+    except OSError:
+        return []
+    if orphaned:
+        logger.warning(
+            "Config directory is %s, but %s still holds %s from an earlier "
+            "Oduflow version — those files are now ignored (the license reads "
+            "as unlicensed, PostgreSQL/Traefik tuning is regenerated). Move "
+            'them into %s, or set [storage].etc_dir = "%s".',
+            etc_dir,
+            legacy,
+            ", ".join(orphaned),
+            etc_dir,
+            legacy,
+        )
+    return orphaned
+
+
 _cached_etc_dir: str | None = None
 
 
 def _resolve_etc_dir() -> str:
-    """Resolve etc directory: /etc/oduflow or ~/.oduflow/conf (cached)."""
+    """First-run default for the config dir: /etc/oduflow or ~/.oduflow/conf.
+
+    Used only when no ``oduflow.toml`` has been loaded yet — by the bootstrap
+    that writes the first config, and as the last resort of
+    :func:`resolve_etc_dir`. Once a config exists, its own directory is the
+    config dir (cached, probing ``os.access`` once).
+    """
     global _cached_etc_dir
     if _cached_etc_dir is not None:
         return _cached_etc_dir

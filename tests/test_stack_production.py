@@ -13,8 +13,8 @@ from oduflow.errors import BusyError, ConflictError
 from oduflow.locking import LockManager, prod_lock_key
 from oduflow.settings import Settings, TeamSettings
 from oduflow.stack_loader import resolve_env_values
-from oduflow.stack_models import StackManifest, ValueFrom
-from oduflow.stack_ops import apply_stack, build_plan, stack_status
+from oduflow.stack_models import Environment, Service, StackManifest, ValueFrom
+from oduflow.stack_ops import _resource_hash, apply_stack, build_plan, stack_status
 from oduflow.stack_production import runtime_drift as inspect_runtime
 
 
@@ -81,12 +81,14 @@ def register(setup, *, owned=False, **changes):
     return production_registry.create_production(team, "control", record)
 
 
-def test_production_schema_requires_exactly_one_target(setup):
+def test_production_schema_allows_at_most_one_target(setup):
     _, _, manifest, _ = setup
     raw = manifest.model_dump()
     raw["spec"]["production"] = None
-    with pytest.raises(ValidationError, match="exactly one"):
+    with pytest.raises(ValidationError, match="at least one resource"):
         StackManifest.model_validate(raw)
+    raw["spec"]["volumes"] = {"data": {}}
+    assert StackManifest.model_validate(raw).spec.production is None
     raw["spec"]["production"] = manifest.spec.production.model_dump()
     raw["spec"]["environment"] = {
         "name": "dev",
@@ -94,7 +96,7 @@ def test_production_schema_requires_exactly_one_target(setup):
         "branch": "main",
         "odoo_image": "odoo:19",
     }
-    with pytest.raises(ValidationError, match="exactly one"):
+    with pytest.raises(ValidationError, match="at most one"):
         StackManifest.model_validate(raw)
 
 
@@ -366,7 +368,11 @@ def test_production_references_use_registry_identity(setup):
         for key in ["url", "containerName", "database"]
     }
     assert resolve_env_values(
-        values, settings=settings, team=team, production_name="control"
+        values,
+        settings=settings,
+        team=team,
+        production_name="control",
+        production_domain="example.org",
     ) == {
         "url": "https://example.org",
         "containerName": "oduflow-1-prod-control-odoo",
@@ -408,8 +414,6 @@ def test_missing_secret_fails_before_production_creation(setup):
 
 
 def test_production_field_is_deferred_until_creation(setup):
-    from oduflow.stack_models import Service
-
     settings, team, manifest, _ = setup
     manifest.spec.services["consumer"] = Service(
         image="app:1", port=8080, env={"ORIGIN": ValueFrom(productionField="url")}
@@ -671,3 +675,197 @@ def test_stored_layout_var_does_not_block_stack_update(setup):
     ):
         with pytest.raises(_ReachedContainer):
             apply_stack(*setup)
+
+
+@pytest.mark.parametrize("target_kind", ["production", "environment"])
+def test_add_odoo_to_service_stack(setup, tmp_path, target_kind):
+    settings, team, original, path = setup
+    manifest = StackManifest.model_validate(
+        {
+            "metadata": {"name": "multica"},
+            "spec": {
+                "services": {
+                    "web": {"image": "example/web:1", "port": 3000},
+                    "api": {
+                        "image": "example/api:1",
+                        "port": 8080,
+                        "volumes": [{"source": "attachments", "target": "/data"}],
+                        "env": {
+                            "DATABASE_URL": {"database": "app", "databaseField": "url"}
+                        },
+                    },
+                },
+                "volumes": {"attachments": {}},
+                "databases": {"app": {"cluster": "prod"}},
+                "files": [
+                    {"volume": "attachments", "path": "config", "source": "config"}
+                ],
+            },
+        }
+    )
+    (tmp_path / "config").write_text("enabled", encoding="utf-8")
+    args = settings, team, manifest, path
+    with (
+        patch("oduflow.stack_ops.service_database_ops.list_databases", return_value=[]),
+        patch("oduflow.stack_ops.service_database_ops.create_database") as create_db,
+        patch(
+            "oduflow.stack_ops.service_database_ops.get_database",
+            return_value={"url": "pg-url", "status": "ready"},
+        ),
+        patch("oduflow.stack_ops.volume_ops.create_volume"),
+        patch("oduflow.stack_ops.volume_file_ops.write_file_in_volume"),
+        patch("oduflow.stack_ops.service_ops.create_service") as create_service,
+        patch("oduflow.stack_production.plan_production") as plan_prod,
+        patch("oduflow.stack_ops.env_ops.list_environments") as list_envs,
+    ):
+        plan = apply_stack(*args)
+        assert [item.resource for item in plan.actions] == [
+            "volumes.attachments",
+            "databases.app",
+            "files.attachments:config",
+            "services.web",
+            "services.api",
+        ]
+        plan_prod.assert_not_called()
+        list_envs.assert_not_called()
+        assert create_db.call_args.kwargs["cluster"] == "prod"
+        assert create_service.call_args.kwargs["env_vars"] == {"DATABASE_URL": "pg-url"}
+
+    def owned(name, resource, spec, **fields):
+        return {
+            "name": name,
+            "stack": "multica",
+            "stack_resource": resource,
+            "stack_spec_hash": _resource_hash(spec),
+            **fields,
+        }
+
+    volume = owned(
+        "attachments", "volumes.attachments", manifest.spec.volumes["attachments"]
+    )
+    database = owned(
+        "app",
+        "databases.app",
+        manifest.spec.databases["app"],
+        status="ready",
+        cluster="prod",
+        url="pg-url",
+    )
+    services = [
+        owned(
+            name,
+            f"services.{name}",
+            svc,
+            status="running",
+            port=svc.port,
+            hostname=f"{name}.{team.hostname}",
+            image=svc.image,
+        )
+        for name, svc in manifest.spec.services.items()
+    ]
+    services[1].update(
+        env_vars={"DATABASE_URL": "pg-url"},
+        volumes=[{"volume": "attachments", "mount_path": "/data", "mode": "rw"}],
+    )
+    with (
+        patch("oduflow.stack_ops.volume_ops.list_volumes", return_value=[volume]),
+        patch(
+            "oduflow.stack_ops.service_database_ops.list_databases",
+            return_value=[database],
+        ),
+        patch(
+            "oduflow.stack_ops.service_database_ops.get_database",
+            return_value={"url": "pg-url", "status": "ready"},
+        ),
+        patch(
+            "oduflow.stack_ops.volume_file_ops.read_file_in_volume",
+            return_value={"output": "enabled"},
+        ),
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=services),
+        patch("oduflow.stack_ops.env_ops.list_environments", return_value=[]),
+        patch("oduflow.stack_ops.env_ops.create_environment") as create_env,
+        patch("oduflow.stack_production.apply_production") as apply_prod,
+        patch("oduflow.stack_ops.service_ops.restart_service") as restart,
+    ):
+        assert apply_stack(*args).actions == ()
+        status = stack_status(*args)
+        assert status["inSync"]
+        assert {"production", "environment"}.isdisjoint(status["state"]["resources"])
+        # A service stopped by hand is drift the plan carries and apply fixes.
+        services[1]["status"] = "exited"
+        status = stack_status(*args)
+        assert not status["inSync"]
+        assert status["plan"] == [
+            {"operation": "start", "resource": "services.api", "detail": "exited"}
+        ]
+        apply_stack(*args)
+        restart.assert_called_once_with(settings, team, "api")
+        services[1]["status"] = "running"
+
+        if target_kind == "production":
+            manifest.spec.production = original.spec.production
+        else:
+            manifest.spec.environment = Environment(
+                name="dev",
+                branch="main",
+                repo_url="https://github.com/acme/app",
+                odoo_image="odoo:19",
+            )
+        plan = apply_stack(*args)
+        assert [(item.operation, item.resource) for item in plan.actions] == [
+            ("create", target_kind)
+        ]
+        assert create_env.call_count == int(target_kind == "environment")
+        assert apply_prod.call_count == int(target_kind == "production")
+
+
+def test_domain_change_updates_url_consumer_in_same_apply(setup):
+
+    settings, team, manifest, _ = setup
+    register(setup, owned=True)
+    service = Service(
+        image="example/api",
+        port=8080,
+        env={"ODOO_URL": ValueFrom(productionField="url")},
+    )
+    manifest.spec.services["api"] = service
+    old_url = resolve_env_values(
+        service.env,
+        settings=settings,
+        team=team,
+        production_name="control",
+        production_domain=manifest.spec.production.domain,
+    )
+    manifest.spec.production.domain = "new.example.org"
+    actual = {
+        "name": "api",
+        "image": service.image,
+        "port": 8080,
+        "hostname": f"api.{team.hostname}",
+        "status": "running",
+        "stack": "control",
+        "stack_resource": "services.api",
+        "stack_spec_hash": _resource_hash(service),
+        "env_vars": old_url,
+    }
+
+    def reconfigure(settings, team, name, *, domain, **kwargs):
+        production_registry.update_production(team, name, {"domain": domain})
+        return {"healthy": True}
+
+    with (
+        patch("oduflow.stack_ops.service_ops.list_services", return_value=[actual]),
+        patch(
+            "oduflow.stack_production.production_ops.reconfigure_production",
+            side_effect=reconfigure,
+        ),
+        patch("oduflow.stack_ops.service_ops.update_service") as update,
+    ):
+        plan = apply_stack(*setup)
+        assert [item.resource for item in plan.actions] == [
+            "production",
+            "services.api",
+        ]
+        actual["env_vars"] = update.call_args.kwargs["env_override"]
+        assert actual["env_vars"]["ODOO_URL"].endswith("://new.example.org")
+        assert not build_plan(*setup).actions

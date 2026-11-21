@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import docker as _docker
 from oduflow import sanitizer
 from oduflow.env_credentials import MissingCredentialsError
@@ -355,6 +357,179 @@ class TestScopedCredentials:
 
         # allow_fallback=False is what denies the superuser to legacy envs.
         assert load_creds.call_args.kwargs.get("allow_fallback") is False
+
+
+class TestEnvScopedSubfolder:
+    """Env-named subfolders run after the top-level files of their tier."""
+
+    def _run_scope(self, tmp_path, scripts_dir, *, env_name="main", container=None):
+        return sanitizer._run_scripts_for_scope(
+            str(scripts_dir),
+            "repo",
+            _client(container),
+            _settings(),
+            _team(tmp_path),
+            "oduflow_1_main",
+            env_name,
+        )
+
+    def test_env_scripts_run_after_top_level_each_group_sorted(self, tmp_path):
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "main"
+        env_dir.mkdir(parents=True)
+        # 05_env sorts before 10_shared by name, but the top-level group runs
+        # first as a whole; sorting applies within each group.
+        (scripts / "20_shared_b.sql").write_text("SELECT 'top 20';")
+        (scripts / "10_shared_a.sql").write_text("SELECT 'top 10';")
+        (env_dir / "10_env_b.sql").write_text("SELECT 'env 10';")
+        (env_dir / "05_env_a.sql").write_text("SELECT 'env 05';")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts)
+
+        executed = [call.args[2] for call in exec_sql.call_args_list]
+        assert executed == [
+            "SELECT 'top 10';",
+            "SELECT 'top 20';",
+            "SELECT 'env 05';",
+            "SELECT 'env 10';",
+        ]
+        assert logs == [
+            "[SANITIZE:repo] Executed 10_shared_a.sql",
+            "[SANITIZE:repo] Executed 20_shared_b.sql",
+            f"[SANITIZE:repo] Subfolder {env_dir} matches environment "
+            "'main'; running its scripts",
+            "[SANITIZE:repo/main] Executed 05_env_a.sql",
+            "[SANITIZE:repo/main] Executed 10_env_b.sql",
+        ]
+
+    def test_only_the_exact_env_folder_runs(self, tmp_path):
+        scripts = tmp_path / "sanitize"
+        for sub in ("other-env", "_steps", ".hidden"):
+            (scripts / sub).mkdir(parents=True)
+            (scripts / sub / "10_x.sql").write_text(f"SELECT '{sub}';")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts)
+
+        exec_sql.assert_not_called()
+        assert logs == []
+
+    @pytest.mark.parametrize("folder", ["demo.sql", "contractor.py"])
+    @pytest.mark.parametrize("matches", [False, True])
+    def test_script_suffix_folders_are_not_top_level_scripts(
+        self, tmp_path, folder, matches
+    ):
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / folder
+        env_dir.mkdir(parents=True)
+        (scripts / "10_shared.sql").write_text("SELECT 'shared';")
+        (env_dir / "10_env.sql").write_text("SELECT 'env';")
+        (env_dir / "20_env.py").write_text("print('env')")
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(
+                tmp_path,
+                scripts,
+                env_name=folder if matches else "main",
+                container=container,
+            )
+
+        expected_sql = ["SELECT 'shared';"]
+        if matches:
+            expected_sql.append("SELECT 'env';")
+            container.exec_run.assert_called_once()
+            assert container.exec_run.call_args.args[0] == [
+                "python3",
+                "-c",
+                "print('env')",
+            ]
+        else:
+            container.exec_run.assert_not_called()
+        assert [call.args[2] for call in exec_sql.call_args_list] == expected_sql
+        # Refresh rejects any warning, including opening a directory as a script.
+        assert not any("WARNING:" in line for line in logs)
+
+    def test_env_py_scripts_run_in_the_container(self, tmp_path):
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "main"
+        env_dir.mkdir(parents=True)
+        (env_dir / "10_anon.py").write_text("print('env')")
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql"):
+            logs = self._run_scope(tmp_path, scripts, container=container)
+
+        assert container.exec_run.call_args.args[0] == [
+            "python3",
+            "-c",
+            "print('env')",
+        ]
+        assert logs[-1] == "[SANITIZE:repo/main] Executed 10_anon.py"
+
+    def test_symlinked_script_resolves_but_keeps_its_own_name(self, tmp_path):
+        # Env folders symlink shared steps: main/10_step.sql -> ../_steps/...
+        # The resolved content executes; the symlink's filename decides
+        # ordering and is what the logs show.
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "main"
+        steps = scripts / "_steps"
+        env_dir.mkdir(parents=True)
+        steps.mkdir()
+        (steps / "wipe_partners.sql").write_text("DELETE FROM res_partner;")
+        (env_dir / "10_step.sql").symlink_to("../_steps/wipe_partners.sql")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts)
+
+        assert exec_sql.call_args.args[2] == "DELETE FROM res_partner;"
+        assert logs[-1] == "[SANITIZE:repo/main] Executed 10_step.sql"
+
+    def test_slash_env_name_matches_dash_folded_folder(self, tmp_path):
+        # Branch-like env names ("feature/x") are valid; their filesystem
+        # identity folds "/" to "-" everywhere (workspace path, DB, container
+        # names), so the env-scoped subfolder is the folded name.
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "feature-x"
+        env_dir.mkdir(parents=True)
+        (env_dir / "10_x.sql").write_text("SELECT 'env';")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts, env_name="feature/x")
+
+        assert exec_sql.call_args.args[2] == "SELECT 'env';"
+        assert logs[-1] == "[SANITIZE:repo/feature-x] Executed 10_x.sql"
+
+    def test_glob_metacharacters_in_the_env_name_are_literal(self, tmp_path):
+        # "data[1]" is a valid env name; the folder must be matched and
+        # globbed literally, not as a character class (which would silently
+        # skip every script in a matched folder).
+        scripts = tmp_path / "sanitize"
+        env_dir = scripts / "data[1]"
+        env_dir.mkdir(parents=True)
+        (env_dir / "10_x.sql").write_text("SELECT 'env';")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql") as exec_sql:
+            logs = self._run_scope(tmp_path, scripts, env_name="data[1]")
+
+        assert exec_sql.call_args.args[2] == "SELECT 'env';"
+        assert logs[-1] == "[SANITIZE:repo/data[1]] Executed 10_x.sql"
+
+    def test_no_match_log_line_is_a_warning(self, tmp_path):
+        # template_generations treats any "WARNING:" log line as a failed
+        # sanitization; the subfolder-match notice must never read as one.
+        scripts = tmp_path / "sanitize"
+        (scripts / "main").mkdir(parents=True)
+        (scripts / "main" / "10_x.sql").write_text("SELECT 1;")
+
+        with _patch_creds(), patch.object(sanitizer, "_exec_sql"):
+            logs = self._run_scope(tmp_path, scripts)
+
+        assert logs
+        assert not any("WARNING:" in line for line in logs)
 
 
 class TestDetectOdooMajor:

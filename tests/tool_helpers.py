@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from oduflow.server import mcp  # noqa: E402
 
 
-def call_tool(name: str, **kwargs):
+def call_tool(name: str, /, **kwargs):
     """Look up a registered MCP tool by name and invoke it with *kwargs*."""
     import asyncio
     import inspect

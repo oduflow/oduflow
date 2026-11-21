@@ -76,7 +76,13 @@ def get_client() -> DockerClient:
 
 
 def run_for_output(
-    client: DockerClient, image: str, command: str | list[str], **kwargs: Any
+    client: DockerClient,
+    image: str,
+    command: str | list[str],
+    *,
+    stdout: bool = True,
+    stderr: bool = False,
+    **kwargs: Any,
 ) -> bytes:
     """Run a throwaway container to completion and return its stdout.
 
@@ -87,14 +93,39 @@ def run_for_output(
     host's logging configuration. A non-zero exit still raises
     ``docker.errors.ContainerError``.
     """
-    output = client.containers.run(
-        image,
-        command,
-        remove=True,
-        log_config={"type": "json-file"},
-        **kwargs,
-    )
-    return cast(bytes, output)
+    # run(remove=True) removes the container but not anonymous volumes
+    # declared by its image. Daemon-side auto_remove races log collection.
+    # Keep the handle from create through start/wait/logs, even on failure.
+    kwargs["log_config"] = {"type": "json-file"}
+    try:
+        container = client.containers.create(image=image, command=command, **kwargs)
+    except docker.errors.ImageNotFound:
+        client.images.pull(image, platform=kwargs.get("platform"))
+        container = client.containers.create(image=image, command=command, **kwargs)
+
+    completed = False
+    try:
+        container.start()
+        status = container.wait()["StatusCode"]
+        if status != 0:
+            error_output = container.logs(stdout=False, stderr=True)
+            raise docker.errors.ContainerError(
+                container, status, command, image, error_output
+            )
+        output = container.logs(stdout=stdout, stderr=stderr)
+        completed = True
+        return cast(bytes, output)
+    finally:
+        try:
+            container.remove(force=True, v=True)
+        except docker.errors.NotFound:
+            pass
+        except docker.errors.APIError:
+            if completed:
+                raise
+            logger.warning(
+                "Could not remove failed helper %s", container.id, exc_info=True
+            )
 
 
 def pull_with_progress(client: DockerClient, image: str, label: str) -> None:
@@ -159,12 +190,15 @@ def get_odoo_uid_gid(client: DockerClient, image: str) -> str:
         else:
             raise ValueError(f"unexpected id output: {raw}")
     except Exception as e:
+        # Not cached: a transient failure (daemon hiccup, image pull error)
+        # must not pin the fallback for this image until the server restarts —
+        # the next call gets another chance at the real lookup.
         logger.warning(
             "Could not detect UID:GID from image %s: %s, falling back to 100:101",
             image,
             e,
         )
-        result = "100:101"
+        return "100:101"
     _uid_gid_cache[image] = result
     logger.debug("Detected UID:GID for %s: %s", image, result)
     return result
@@ -177,24 +211,34 @@ def chown_recursive(
 
     Tries host-side ``os.chown`` first (works on Linux as root).
     On ``PermissionError`` (e.g. macOS) falls back to running
-    ``chown -R`` inside a throwaway container with *path* bind-mounted.
+    ``chown -hR`` inside a throwaway container with *path* bind-mounted.
+
+    The trees given away here are filestores and session directories, which
+    their tenant writes to. A symbolic link in one is given away as a link and
+    never followed: following it would hand whatever host file it names to the
+    Odoo account. Each entry is addressed through its directory's descriptor,
+    so swapping a directory for a link while the walk runs gains nothing.
     """
+    top = os.path.realpath(path)
+    if not os.path.isdir(top):
+        # As before: a tree that is not there has nothing to give away.
+        return
     try:
-        for root, dirs, files in os.walk(path):
-            os.chown(root, uid, gid)
+        os.chown(top, uid, gid)
+        for _root, dirs, files, dir_fd in os.fwalk(top):
             for name in dirs + files:
-                os.chown(os.path.join(root, name), uid, gid)
+                os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
     except PermissionError:
         logger.info(
             "Host chown failed (PermissionError), falling back to in-container chown for %s",
             path,
         )
-        client.containers.run(
+        run_for_output(
+            client,
             image,
-            f"chown -R {uid}:{gid} /mnt/target",
+            f"chown -hR {uid}:{gid} /mnt/target",
             entrypoint="",
             user="root",
-            remove=True,
             volumes={path: {"bind": "/mnt/target", "mode": "rw"}},
         )
 

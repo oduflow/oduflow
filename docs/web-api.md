@@ -39,9 +39,14 @@ own security model:
 - Odoo.sh import ingest routes require a short-lived Bearer import token. The
   token-minting endpoint remains UI-authenticated.
 
-`/oduflow-connect` is a one-time, token-authenticated browser redirect rather
-than a JSON API. Production routes are registered only when
-`[production].enabled = true`.
+`/oduflow-connect` is a one-time, token-authenticated browser landing rather
+than a JSON API. It is served on each environment's own host and redeems two
+kinds of token: the dashboard's Connect As redirect (session already minted;
+the `GET` signs in), and a link from the
+[`connect_link`](mcp-tools.md#connect_link) MCP tool (the `GET` only shows a
+page and changes nothing; the `POST` that page makes mints the session and
+signs in). The access log records both with the token masked. Production routes
+are registered only when `[production].enabled = true`.
 
 ## Environment endpoints
 
@@ -53,13 +58,13 @@ than a JSON API. Production routes are registered only when
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |
 | `POST` | `/api/environments/{branch}/restart` | Restart its Odoo container |
 | `POST` | `/api/environments/{branch}/sync` | Pull and automatically apply code changes |
-| `GET` | `/api/environments/{branch}/modules` | List installed modules (name and version) — the source for the dashboard's Upgrade modules picker |
+| `GET` | `/api/environments/{branch}/modules` | List installed modules (name and version) — the source for the dashboard's Upgrade modules picker. Read as the environment's own database role; an environment without one gets an error ([Database isolation](environments.md#database-isolation)) |
 | `POST` | `/api/environments/{branch}/modules` | Install or upgrade modules. Body: `action` (`install` or `upgrade`), `modules` (comma-separated string). A successful action returns `modules_installed` or `modules_upgraded` plus `container_restarted`; if the follow-up restart fails, the module action remains successful with `container_restarted: false` plus a warning. Every result includes `modules_attempted`; a non-zero Odoo exit code omits the success field and includes the command output |
 | `POST` | `/api/environments/{branch}/switch-branch` | Move the environment onto another git branch, keeping DB, filestore and URL, then apply the difference. Body: `branch`, optional `new_name` to rename the environment at the same time. The response's `env_name` is the name to address it by afterwards |
 | `POST` | `/api/environments/{branch}/update` | Recreate the container while preserving DB and filestore. Optional body: `env_vars` (full replacement of the user-supplied container variables — either an object mapping names to values, or a `KEY=VALUE` string separated by newlines or commas; an empty object/string clears them, an absent key keeps them). The dashboard sends an object, so a value may contain commas, `odoo_image`, `new_name` (rename the environment; a pooled or explicit hostname is kept, its scoped MCP endpoint moves to `/mcp/<new name>`; productions and stack members are refused) |
 | `GET` | `/api/environments/{branch}/env-vars` | Return the user-supplied container environment variables |
 | `POST` | `/api/environments/{branch}/recreate` | Delete and recreate with the recorded parameters |
-| `POST` | `/api/environments/{branch}/delete` | Delete the environment |
+| `POST` | `/api/environments/{branch}/delete` | Delete the environment. Optional body `{"delete_branch": true}` also deletes its git branch on origin; the deletion is skipped with a warning (in the result's `warnings`) when the branch is used by another environment, is not merged into origin's default branch or the base branch named at creation (squash- and rebase-merges are not recognised), or the push is denied. An empty body keeps the previous behaviour; a body that is not a JSON object, or a non-boolean `delete_branch`, is a `400` |
 | `GET` | `/api/environments/{branch}/logs?n=200&container=` | Read environment logs; optionally select a container |
 | `POST` | `/api/environments/{branch}/protect` | Protect from stop/delete |
 | `POST` | `/api/environments/{branch}/unprotect` | Remove protection |
@@ -70,7 +75,7 @@ than a JSON API. Production routes are registered only when
 | `POST` | `/api/environments/{branch}/share` | Start sharing the environment, or return the existing link |
 | `POST` | `/api/environments/{branch}/share/rotate` | Issue a new link; the previous one and every session opened with it stop working |
 | `POST` | `/api/environments/{branch}/share/revoke` | Stop sharing the environment |
-| `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As |
+| `GET` | `/api/environments/{branch}/users` | List internal and portal users for Connect As. Read as the environment's own database role; an environment without one gets an error instead of a list, and the dashboard shows it |
 | `POST` | `/api/environments/{branch}/connect-as` | Mint an Odoo session for body `user` and return URL/cookie details |
 | `GET` | `/api/environments/{branch}/connect-open?user=` | Mint a session and redirect toward the environment login handoff |
 | `POST` | `/api/environments/{branch}/save-as-template` | Save the environment under body `template_name`; the UI never overwrites an existing template |
@@ -100,13 +105,13 @@ request:
 - start, stop, restart and sync it, and install or upgrade modules;
 - open its Odoo shell and `psql` consoles, use Connect As, and read its scoped
   MCP endpoint and Secret Key;
-- use **Agent Chat**.
+- use **Agent Chat** and **Agent CLI**.
 
 Everything else is out of scope: any other environment, every team-wide surface
 (templates, services, volumes, extra addons, credentials, productions, host
 statistics, license), the provisioning actions on the shared environment itself
 (create, delete, update, recreate, switch branch, protect, save as template),
-the share routes, and **Agent CLI**. API calls and state-changing requests are
+and the share routes. API calls and state-changing requests are
 refused with HTTP 403 and WebSockets close with 1008; a browser *navigating* to
 another page — the full dashboard at `/`, a bookmark — is sent back to
 `/env/<name>` with a 303 instead of being shown a raw error.
@@ -115,9 +120,14 @@ Leaving the shared view (**Logout**) clears the scoped cookie and returns to
 `/env/<name>`, which then explains how to get back in: reopen the full share
 link, or sign in at `/login` if you are an operator who was previewing it.
 
-Agent CLI is excluded because it is a terminal in the *per-team* agent
-container, whose workspace holds a checkout of every environment of the team.
-Agent Chat runs in that same container, so the scope of a shared link is a
+Agent Chat and Agent CLI run in the *per-team* agent container as the
+environment's own Linux user, so they reach only this environment's checkout,
+conversations and scoped MCP token (see
+[Coding Agent → Security model](agent.md#security-model)). Chat already runs
+commands without approval prompts, so the CLI's terminal grants nothing more.
+Both still share the team's git credentials and deploy key, the team-wide
+provider credentials and the container network, and they can read and replace
+an agent login made in this environment. So the scope of a shared link is a
 policy boundary on the dashboard — it is not the cryptographic confinement that
 the per-environment token gives on `/mcp/<env>`. Share links with people you
 would let work in the environment.
@@ -127,7 +137,7 @@ would let work in the environment.
 | Protocol | Endpoint | Description |
 |---|---|---|
 | `WebSocket` | `/api/environments/{branch}/terminal` | Interactive `odoo shell` terminal |
-| `WebSocket` | `/api/environments/{branch}/sql` | Interactive `psql` terminal using the environment-scoped DB role |
+| `WebSocket` | `/api/environments/{branch}/sql` | Interactive `psql` terminal using the environment-scoped DB role. `psql` runs in the environment's Odoo container (which must be running and ship `psql`), never in the shared PostgreSQL container — see [Direct SQL](environments.md#direct-sql) |
 | `WebSocket` | `/api/environments/{branch}/agent` | Hosted Agent CLI PTY |
 | `WebSocket` | `/api/environments/{branch}/agent-acp` | Hosted Agent Chat ACP relay |
 
@@ -181,6 +191,7 @@ Odoo.sh ingest endpoints accept the import token only in
 | `POST` | `/api/services/{name}/protect` | Protect a service: Update, Restore and Delete are refused until unprotected |
 | `POST` | `/api/services/{name}/unprotect` | Remove service protection |
 | `GET` | `/api/services/{name}/logs?n=200` | Read service logs |
+| `WebSocket` | `/api/services/{name}/shell` | Interactive `sh` terminal inside the service container, as the image's default user (the dashboard's **Shell** button). Same JSON `input`/`resize` frames as the environment terminals |
 | `GET` | `/api/service-databases` | List managed sidecar databases without passwords |
 | `POST` | `/api/service-databases/create` | Create a database and scoped role; body: `name`, optional `cluster` (`dev` default, or `prod` for the dedicated production cluster) |
 | `POST` | `/api/service-databases/{name}/credentials` | Explicitly reveal connection credentials and `DATABASE_URL` |
@@ -234,10 +245,10 @@ supported because the cluster is not published on a host port.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/stats` | Container/system metrics plus cached environment storage |
-| `GET` | `/api/usage` | Cached per-environment and team storage/quotas |
-| `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive |
-| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries and PostgreSQL roles, plus server-wide unused Docker images (`id`, `tags`, `size_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. Failures are listed in `errors` and `images.errors` |
+| `GET` | `/api/stats` | Container/system metrics plus cached environment and production storage |
+| `GET` | `/api/usage` | Cached storage and quotas: `usage.envs` and `usage.productions` (per name: `db_bytes`, `disk_bytes`, `computed_at`) plus `usage.team` totals. `team.db_bytes` is the shared development cluster total, the figure `db_quota_gb` applies to; production databases live on the production cluster and are totalled separately in `team.prod_db_bytes`. `team.disk_bytes` covers the whole team data directory, production workspaces included |
+| `POST` | `/api/usage/refresh` | Recompute all team storage usage; potentially expensive. When the production cluster cannot be queried the refresh still succeeds: each production's `db_bytes` and `team.prod_db_bytes` are `null` (unknown), everything else is measured |
+| `POST` | `/api/cleanup` | Dashboard **Cleanup** button. `{"force": false}` (default) is a read-only preview, like `oduflow cleanup --dry-run`: the team's orphaned databases, workspaces, port entries, PostgreSQL roles, unused extra-addons checkouts (named `<repo>/<revision>`, with sizes in `orphan_extra_checkout_sizes`) and stale image build jobs (`orphan_build_jobs`), plus server-wide unused Docker images (`id`, `tags`, `size_bytes`) and the Docker build cache (`build_cache`: `size_bytes`, `reclaimable_bytes`). `{"force": true}` removes only the reviewed names in `orphans` (`{"orphan_databases": [...], ...}`) that are still orphaned, and only the full image IDs in `image_ids` (opt-in). Images used by any container, base images of other images, image build staging images and images an operation requested in the last 6 hours are always kept. `"build_cache": true` (a separate opt-in, independent of `image_ids`; accepted only with `force`) prunes the server-wide build cache, after any image removal; cache in use by a running build is kept, and the result reports `build_cache.reclaimed_bytes`. Failures are listed in `errors`, `images.errors` and `build_cache.error` |
 | `GET` | `/healthz` | Public health report; returns `200` when healthy, `503` when degraded |
 | `GET` | `/api/version` | Installed version versus the latest GitHub release. Runs one live lookup per call, only when the dashboard version dialog asks for it |
 | `GET` | `/api/license` | License information |
@@ -278,6 +289,7 @@ and delete operations require explicit confirmation in their JSON body.
 | `GET` | `/api/productions/backup-status` | Team backup, WAL-G, base-backup, and S3 health |
 | `GET` | `/api/productions/wal-status` | Cached shared-cluster WAL queue, progress, disk headroom, sample age and protection latch; does not probe Docker or S3 on request. Read-only: cluster-wide WAL control (pause/resume/retry/recover/release) and cluster PITR are operator actions in the [server settings console](admin.md) |
 | `GET` | `/api/productions/{name}` | Detailed production information |
+| `POST` | `/api/productions/{name}/storage/refresh` | Refresh cached DB/workspace sizes |
 | `POST` | `/api/productions/{name}/start` | Start |
 | `POST` | `/api/productions/{name}/stop` | Stop |
 | `POST` | `/api/productions/{name}/restart` | Restart |
@@ -307,5 +319,5 @@ semantics.
 | `GET` | `/` | Dashboard application |
 | `GET`, `POST` | `/login` | UI login form |
 | `POST` | `/logout` | Clear the UI session |
-| `GET` | `/oduflow-connect?token=` | One-time environment-host login handoff; sets Odoo `session_id` and redirects to `/web` |
+| `GET`, `POST` | `/oduflow-connect?token=` | One-time environment-host login handoff; sets Odoo `session_id` and redirects to `/web`. A `connect_link` token is redeemed by the `POST` (token in the form body) that the `GET` page makes |
 | `GET` | `/favicon.ico`, `/logo.png`, `/static/{filename}` | Packaged dashboard assets |

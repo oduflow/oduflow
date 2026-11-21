@@ -18,6 +18,7 @@ def _settings(tmp_path) -> Settings:
     )
     return Settings(
         base_data_dir=str(tmp_path),
+        etc_dir=str(tmp_path),
         db_password="password",
         teams={"1": team},
     )

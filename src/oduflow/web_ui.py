@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import codecs
+import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
@@ -74,6 +77,7 @@ from oduflow.docker_ops.stats import (
     get_system_stats,
     read_storage_cache,
     refresh_env_storage,
+    refresh_prod_storage,
     refresh_team_storage,
 )
 from oduflow.errors import (
@@ -167,6 +171,15 @@ _SESSION_MAX_AGE = 7 * 24 * 3600  # 7 days
 # How long a dashboard deploy queues behind another operation on the
 # production before it gives up (and says so in the deploy history).
 _UI_DEPLOY_WAIT_SECONDS = 300
+# The connect_link landing (/oduflow-connect). A person's browser continues from
+# the landing page by itself after a beat; a page that found the environment
+# busy retries on this interval; and a redemption that had to start a stopped
+# environment waits this long for Odoo to answer before redirecting into it.
+_CONNECT_AUTO_MS = 300
+_CONNECT_RETRY_MS = 5000
+_CONNECT_READY_WAIT_SECONDS = 60
+# Upper bound on a form body read by an unauthenticated endpoint.
+_MAX_PUBLIC_FORM_BYTES = 8192
 _SECRET_FILENAME = ".ui_session_secret"
 
 # Cached per data dir (process-wide; the server runs against a single one).
@@ -485,6 +498,67 @@ def _render_login(error: str = "") -> str:
     return _apply_branding(page.replace("<!--ERROR-->", banner))
 
 
+def _render_connect_page(
+    heading: str,
+    paragraphs: list[str],
+    *,
+    fine_print: str = "",
+    token: str = "",
+    button: str = "",
+    auto_ms: int | None = None,
+) -> str:
+    """Render the ``/oduflow-connect`` landing page.
+
+    *paragraphs* and *fine_print* are HTML fragments: callers escape whatever
+    they interpolate. With *token*, the page carries a form that POSTs it back
+    (the redemption step) behind a *button*; *auto_ms* makes a person's browser
+    press it by itself after that many milliseconds.
+
+    The template is self-contained by necessity. The page is served on an
+    ENVIRONMENT host, where Traefik routes only ``/oduflow-connect`` to this
+    server: every other path (``/static/…``, ``/logo.png``, ``/favicon.ico``)
+    reaches the environment's Odoo. So it loads no font, logo or script file,
+    and its theme follows the OS rather than the dashboard's stored choice
+    (``localStorage`` is per origin).
+    """
+    # Brand the template before the dynamic parts go in, so a login that
+    # happens to contain a placeholder is never substituted.
+    page = _apply_branding((_TEMPLATE_DIR / "connect.html").read_text(encoding="utf-8"))
+    body = [f"<p>{text}</p>" for text in paragraphs]
+    if token:
+        auto = f' data-auto-ms="{int(auto_ms)}"' if auto_ms is not None else ""
+        body.append(
+            '<form id="connect-form" method="post" action="/oduflow-connect" '
+            f'data-busy-label="Signing in…"{auto}>'
+            '<input type="hidden" name="token" '
+            f'value="{html.escape(token, quote=True)}">'
+            f'<button type="submit">{html.escape(button)}</button></form>'
+        )
+    if fine_print:
+        body.append(f'<p class="dim">{fine_print}</p>')
+    return page.replace("__HEADING__", html.escape(heading)).replace(
+        "<!--CONTENT-->", "\n    ".join(body)
+    )
+
+
+async def _read_form_field(request: Request, name: str) -> str:
+    """One field of a small urlencoded form body, without a multipart dependency.
+
+    For public endpoints: the body is read only up to a few kilobytes, so an
+    unauthenticated client cannot make the server buffer an arbitrary upload.
+    An oversized body reads as an empty field.
+    """
+    import urllib.parse
+
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > _MAX_PUBLIC_FORM_BYTES:
+            return ""
+    parsed = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+    return (parsed.get(name, [""])[0]).strip()
+
+
 async def _read_login_credentials(request: Request) -> tuple[str, str]:
     """Read form/JSON credentials without a multipart dependency."""
     import urllib.parse
@@ -510,7 +584,14 @@ _EXTERNAL_COMMAND_UI_ERROR = "Operation failed. Check server logs for details."
 
 # Result groups of system_ops.cleanup_orphans that Confirm may name.
 _CLEANUP_ORPHAN_KEYS = frozenset(
-    {"orphan_databases", "orphan_workspaces", "orphan_ports", "orphan_roles"}
+    {
+        "orphan_databases",
+        "orphan_workspaces",
+        "orphan_ports",
+        "orphan_roles",
+        "orphan_extra_checkouts",
+        "orphan_build_jobs",
+    }
 )
 
 
@@ -564,6 +645,344 @@ def _error_response(e: FlowError) -> JSONResponse:
 def _term_error(exc: Exception) -> str:
     """A red error line for the WebSocket terminals, under the brand."""
     return f"\x1b[31mError: {branding.rebrand(str(exc))}\x1b[0m\r\n"
+
+
+def _pid_reporting_argv(argv: list[str]) -> list[str]:
+    """Wrap *argv* so the process first prints its own PID on a line.
+
+    ``exec`` keeps that PID for the real command, so ``_run_exec_pty`` can end
+    it once its terminal is gone.
+    """
+    return ["sh", "-c", 'echo $$; exec "$@"', "sh", *argv]
+
+
+def _end_lingering_exec(
+    client: Any, container: Any, exec_id: str, pid: int, user: str = ""
+) -> None:
+    """End a TTY exec that outlived its terminal.
+
+    Docker does not stop a TTY exec when its client disconnects (moby#9098):
+    the process gets neither EOF nor a hangup, so every closed terminal would
+    leave its shell, ``odoo shell``, ``psql`` or coding agent — and whatever
+    it was running — behind in the container. The process is the session
+    leader of its PTY, so when it goes the kernel hangs up its foreground job
+    too; jobs it put in the background are not signalled. It gets a hangup
+    first and a moment to exit; one that ignores it (``odoo shell`` turns
+    SIGHUP into a KeyboardInterrupt at the prompt) is killed.
+
+    *user* is the exec's own ``user`` option: an unprivileged default user
+    cannot signal a process that was started under another uid.
+
+    ``Running`` guards against the PID having been reused after a process
+    that already exited on its own.
+    """
+
+    def running() -> bool:
+        return bool(client.api.exec_inspect(exec_id).get("Running"))
+
+    try:
+        if not running():
+            return
+        container.exec_run(["sh", "-c", f"kill -HUP {pid}"], user=user)
+        for _ in range(10):
+            time.sleep(0.2)
+            if not running():
+                return
+        container.exec_run(["sh", "-c", f"kill -KILL {pid}"], user=user)
+    except Exception:
+        logger.debug("Could not end lingering exec %s", exec_id, exc_info=True)
+
+
+# PTY relays get threads of their own. Every open terminal keeps one blocked
+# in recv() for as long as it lives, so on the event loop's default executor
+# (min(32, CPUs + 4) threads) a dozen terminals would starve each other's
+# keystrokes — and everything else that offloads work there.
+_PTY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=128, thread_name_prefix="oduflow-pty"
+)
+
+# How long a closed terminal waits for its exec to report the PID.
+_PID_LINE_WAIT = 10.0
+# How long interpreter exit waits for the cleanups still under way.
+_CLEANUP_EXIT_GRACE = 5.0
+
+_cleanup_threads: set[threading.Thread] = set()
+_cleanup_threads_lock = threading.Lock()
+
+
+def _start_cleanup(target: Callable[[], None]) -> None:
+    """Run *target* on a thread that interpreter exit waits for, briefly.
+
+    Detached from the event loop, so a cancelled handler cannot skip the
+    cleanup or cut it short. A daemon thread, so a Docker daemon that stopped
+    answering cannot hold a shutdown up: :func:`_finish_cleanups` grants the
+    threads a bounded grace instead.
+    """
+
+    def run() -> None:
+        try:
+            target()
+        finally:
+            with _cleanup_threads_lock:
+                _cleanup_threads.discard(threading.current_thread())
+
+    thread = threading.Thread(target=run, name="oduflow-shell-cleanup", daemon=True)
+    with _cleanup_threads_lock:
+        _cleanup_threads.add(thread)
+    thread.start()
+
+
+@atexit.register
+def _finish_cleanups() -> None:
+    """Let terminals closed by a shutdown still end their processes."""
+    deadline = time.monotonic() + _CLEANUP_EXIT_GRACE
+    with _cleanup_threads_lock:
+        threads = list(_cleanup_threads)
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+
+class _ExecSession:
+    """A started TTY exec, the socket attached to it, and its PID once read.
+
+    The methods block; call them off the event loop.
+    """
+
+    def __init__(
+        self, client: Any, container: Any, exec_id: str, sock: Any, user: str
+    ) -> None:
+        self.client = client
+        self.container = container
+        self.exec_id = exec_id
+        self.sock = sock
+        self.raw_sock = sock._sock
+        self.user = user
+        self.pid: int | None = None
+        self._pid_lock = threading.Lock()
+        self._pid_read_started = False
+        self._pid_read_done = threading.Event()
+
+    def read_pid_line(self) -> bytes:
+        """Consume the PID line; return whatever else arrived with it."""
+        with self._pid_lock:
+            if self._pid_read_started:
+                return b""
+            self._pid_read_started = True
+        buf = b""
+        try:
+            while b"\n" not in buf and len(buf) < 32:
+                data = self.raw_sock.recv(4096)
+                if not data:
+                    break
+                buf += data
+            line, newline, rest = buf.partition(b"\n")
+            if newline and line.strip().isdigit():
+                self.pid = int(line.strip())
+                return rest
+            # Not a PID (an image without `sh` answers with the exec error):
+            # show it as is.
+            return buf
+        finally:
+            self._pid_read_done.set()
+
+    def close_socket(self) -> None:
+        # shutdown() reliably wakes a thread blocked in recv (a bare close()
+        # need not).
+        for close in (
+            lambda: self.raw_sock.shutdown(socket.SHUT_RDWR),
+            self.raw_sock.close,
+            self.sock.close,
+        ):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def end(self) -> None:
+        """Close the socket and end the process, whatever state it is in.
+
+        A terminal closed right after it was opened — or a handler cancelled
+        while the exec was starting — has not seen the PID line yet, although
+        the process is about to run. The line is waited for here, so that
+        process is ended like any other.
+        """
+        with self._pid_lock:
+            unread = not self._pid_read_started
+        if unread:
+            threading.Thread(
+                target=self._read_pid_line_quietly,
+                name="oduflow-shell-pid",
+                daemon=True,
+            ).start()
+        self._pid_read_done.wait(_PID_LINE_WAIT)
+        self.close_socket()
+        # A reader that got the line just as the wait ran out.
+        self._pid_read_done.wait(1.0)
+        if self.pid is not None:
+            _end_lingering_exec(
+                self.client, self.container, self.exec_id, self.pid, self.user
+            )
+
+    def _read_pid_line_quietly(self) -> None:
+        try:
+            self.read_pid_line()
+        except Exception:
+            pass
+
+
+def _end_abandoned_exec(starting: concurrent.futures.Future[_ExecSession]) -> None:
+    """Done-callback for an exec start whose handler was cancelled meanwhile."""
+    if starting.cancelled() or starting.exception() is not None:
+        return
+    _start_cleanup(starting.result().end)
+
+
+async def _run_exec_pty(
+    websocket: WebSocket,
+    client: Any,
+    container: Any,
+    argv: list[str],
+    **exec_options: Any,
+) -> None:
+    """Run *argv* in *container* on a PTY bridged to a browser terminal.
+
+    Returns when either side ends. The browser sends JSON frames:
+    ``{"type": "input", "data": ...}`` for keystrokes and
+    ``{"type": "resize", "cols": ..., "rows": ...}`` when the terminal is
+    refitted; the exec's output goes back as text frames. *exec_options*
+    (``user``, ``workdir``, ``environment``) go to ``exec_create``.
+
+    The command is started through :func:`_pid_reporting_argv`: its leading
+    PID line is consumed here instead of reaching the terminal, and the
+    process is ended once the session is over (see
+    :func:`_end_lingering_exec`). Docker calls run off the event loop, so a
+    slow daemon stalls this terminal only.
+    """
+    loop = asyncio.get_running_loop()
+
+    def offload(func: Callable[..., Any], *args: Any) -> asyncio.Future[Any]:
+        return loop.run_in_executor(_PTY_EXECUTOR, func, *args)
+
+    def start() -> _ExecSession:
+        exec_id = client.api.exec_create(
+            container.id,
+            _pid_reporting_argv(argv),
+            stdin=True,
+            tty=True,
+            stdout=True,
+            stderr=True,
+            **exec_options,
+        )["Id"]
+        sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
+        return _ExecSession(
+            client, container, exec_id, sock, exec_options.get("user") or ""
+        )
+
+    # Submitted directly rather than through run_in_executor: a cancellation
+    # of this handler must not lose track of an exec that is already starting.
+    starting = _PTY_EXECUTOR.submit(start)
+    started = asyncio.wrap_future(starting)
+    try:
+        session: _ExecSession = await asyncio.shield(started)
+    except asyncio.CancelledError:
+        starting.add_done_callback(_end_abandoned_exec)
+        # Nobody awaits it any more: mark a failed start as seen.
+        started.add_done_callback(lambda f: f.cancelled() or f.exception())
+        raise
+    exec_id, raw_sock = session.exec_id, session.raw_sock
+
+    closed = asyncio.Event()
+    # A character cut in two by the 4096-byte reads must survive the cut.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # The PTY echoes input at once, so keystrokes that reached it before the
+    # PID line would be echoed ahead of that line and hide the PID. They are
+    # held here until the line has been read.
+    held_input: list[bytes] | None = []
+    input_lock = asyncio.Lock()
+
+    async def send_input(data: bytes) -> None:
+        async with input_lock:
+            if held_input is not None:
+                held_input.append(data)
+            else:
+                await offload(raw_sock.sendall, data)
+
+    async def release_input() -> None:
+        nonlocal held_input
+        async with input_lock:
+            held, held_input = held_input or [], None
+            for data in held:
+                await offload(raw_sock.sendall, data)
+
+    async def docker_to_browser() -> None:
+        try:
+            data = await offload(session.read_pid_line)
+            await release_input()
+            while True:
+                text = decoder.decode(data)
+                if text:
+                    await websocket.send_text(text)
+                if closed.is_set():
+                    break
+                data = await offload(raw_sock.recv, 4096)
+                if not data:
+                    # A character the stream ended in the middle of.
+                    text = decoder.decode(b"", final=True)
+                    if text:
+                        await websocket.send_text(text)
+                    break
+        except Exception:
+            pass
+        finally:
+            closed.set()
+
+    async def browser_to_docker() -> None:
+        try:
+            while not closed.is_set():
+                msg = json.loads(await websocket.receive_text())
+                if msg.get("type") == "input":
+                    await send_input(msg["data"].encode("utf-8"))
+                elif msg.get("type") == "resize":
+                    rows, cols = msg.get("rows", 24), msg.get("cols", 80)
+                    try:
+                        await offload(
+                            lambda: client.api.exec_resize(
+                                exec_id, height=rows, width=cols
+                            )
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            closed.set()
+
+    tasks = [
+        asyncio.ensure_future(docker_to_browser()),
+        asyncio.ensure_future(browser_to_docker()),
+    ]
+    try:
+        # Return as soon as EITHER side ends so a browser-closed/idle terminal
+        # never parks docker_to_browser in recv() forever, leaking the executor
+        # thread that blocks interpreter shutdown.
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        closed.set()
+        if session.pid is not None:
+            # Nothing left to wait for: wake the relay's recv() right away.
+            session.close_socket()
+        # Started before the awaits below, which a cancellation would skip.
+        _start_cleanup(session.end)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        for t in tasks:
+            t.cancel()
+        # wait(), not gather(): if this handler is itself being cancelled,
+        # gather() re-raises a child's bare CancelledError in place of the
+        # caller's, which an anyio cancel scope then fails to recognize.
+        await asyncio.wait(tasks)
 
 
 def _validate_dev_env_name(env_name: str) -> str:
@@ -1747,17 +2166,46 @@ def _build_routes(
                 locks.release_env(new_name)
             locks.release_env(branch)
 
-    def api_delete(request: Request) -> JSONResponse:
+    async def api_delete(request: Request) -> JSONResponse:
         branch = request.path_params["branch"]
         team = _get_ui_team(request)
+        # The body is optional (the pre-delete_branch dashboard and API
+        # clients POST with no body at all); when present it must be a JSON
+        # object, and delete_branch a real boolean — a string would silently
+        # mean "true-ish".
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "Request body must be a JSON object."},
+                status_code=400,
+            )
+        delete_branch = body.get("delete_branch", False)
+        if not isinstance(delete_branch, bool):
+            return JSONResponse(
+                {"ok": False, "error": "delete_branch must be a boolean."},
+                status_code=400,
+            )
         try:
             locks.acquire_env(branch, team.team_id)
         except BusyError as e:
             return _error_response(e)
         try:
             settings = get_settings()
-            env_ops.delete_environment(settings, team, branch)
-            return JSONResponse({"ok": True, "result": {"deleted": branch}})
+            warnings = await _offload(
+                env_ops.delete_environment,
+                settings,
+                team,
+                branch,
+                delete_branch=delete_branch,
+            )
+            return JSONResponse(
+                {"ok": True, "result": {"deleted": branch, "warnings": warnings}}
+            )
         except FlowError as e:
             return _error_response(e)
         except Exception:
@@ -1807,6 +2255,7 @@ def _build_routes(
                 env_override=env_override,
                 image_override=odoo_image or None,
                 rename_to=new_name or None,
+                allow_host_paths=False,
                 hostname_override=(body.get("hostname") or "").strip() or None
                 if body
                 else None,
@@ -1872,7 +2321,9 @@ def _build_routes(
         try:
             settings = get_settings()
             activity.touch(team, branch)
-            result = env_ops.recreate_environment(settings, team, branch)
+            result = env_ops.recreate_environment(
+                settings, team, branch, allow_host_paths=False
+            )
             return JSONResponse({"ok": True, "result": result})
         except FlowError as e:
             return _error_response(e)
@@ -2091,7 +2542,6 @@ def _build_routes(
                 extra_dict = extra_addons_raw or None
             elif isinstance(extra_addons_raw, str) and extra_addons_raw.strip():
                 extra_dict = _parse_extra_addons(extra_addons_raw.strip()) or None
-            local_path_from_meta = ""
             template_env_vars: dict[str, str] = {}
             if resolved_template:
                 metadata_path = team.get_template_metadata_path(resolved_template)
@@ -2114,24 +2564,19 @@ def _build_routes(
                         metadata, resolved_template
                     )
                     if not repo_url and metadata.get("local_path"):
-                        if settings.allow_local_path:
-                            local_path_from_meta = metadata["local_path"]
-                        else:
-                            return JSONResponse(
-                                {
-                                    "ok": False,
-                                    "error": (
-                                        f"Template '{resolved_template}' was saved "
-                                        "from a live-mounted environment and has no "
-                                        "repo_url. Set allow_local_path = true in "
-                                        "oduflow.toml [server], or provide "
-                                        "repo_url explicitly."
-                                    ),
-                                },
-                                status_code=400,
-                            )
+                        return JSONResponse(
+                            {
+                                "ok": False,
+                                "error": (
+                                    f"Template '{resolved_template}' was saved from a "
+                                    "live-mounted environment. Provide a Git repo_url "
+                                    "or use the local CLI or stdio MCP."
+                                ),
+                            },
+                            status_code=400,
+                        )
 
-            if not repo_url and not local_path_from_meta:
+            if not repo_url:
                 return JSONResponse(
                     {
                         "ok": False,
@@ -2167,7 +2612,6 @@ def _build_routes(
                 # Template env vars are the baseline; the request overrides
                 # only the keys it names (same merge as the MCP tool).
                 env_vars={**template_env_vars, **env_vars} or None,
-                local_path=local_path_from_meta,
                 hostname=hostname,
                 base_branch=base_branch,
             )
@@ -2260,6 +2704,19 @@ def _build_routes(
                 {"ok": False, "error": "orphans must list reviewed names by group."},
                 status_code=400,
             )
+        # Opt-in like the images, and independent of them. A preview never
+        # prunes, so the flag without force is refused, not ignored.
+        build_cache = body.get("build_cache", False)
+        if type(build_cache) is not bool:
+            return JSONResponse(
+                {"ok": False, "error": "build_cache must be a boolean."},
+                status_code=400,
+            )
+        if build_cache and not force:
+            return JSONResponse(
+                {"ok": False, "error": "build_cache requires force."},
+                status_code=400,
+            )
 
         def run() -> dict[str, Any]:
             settings = get_settings()
@@ -2269,12 +2726,14 @@ def _build_routes(
                 # fails on nor blocks the team's environment operations.
                 result = system_ops.cleanup_orphans(settings, team, dry_run=True)
                 result["images"] = image_cleanup.list_unused_images()
+                result["build_cache"] = image_cleanup.build_cache_usage()
                 return result
             # Hold locks in the worker so disconnects cannot unlock live work,
             # and take them all before deleting anything.
             with contextlib.ExitStack() as stack:
-                if image_ids:
-                    # One image cleanup at a time across all dashboard teams.
+                if image_ids or build_cache:
+                    # One image or build cache cleanup at a time across all
+                    # dashboard teams.
                     stack.enter_context(
                         locks.env_lock(image_cleanup_lock_key(), operation="cleanup")
                     )
@@ -2286,6 +2745,11 @@ def _build_routes(
                     image_cleanup.remove_unused_images(image_ids)
                     if image_ids
                     else {"removed": [], "skipped": [], "errors": []}
+                )
+                # After the images, under the same server-wide lock: the cache
+                # belongs to the daemon, not to this team.
+                result["build_cache"] = (
+                    image_cleanup.prune_build_cache() if build_cache else None
                 )
             return result
 
@@ -5405,30 +5869,41 @@ def _build_routes(
             if lock_acquired:
                 locks.release_env(branch)
 
-    async def api_connect_land(request: Request) -> Response:
-        """Traefik cross-subdomain Connect As landing, served ON the env host.
+    def _connect_page(
+        status_code: int, heading: str, paragraphs: list[str], **form: Any
+    ) -> Response:
+        return HTMLResponse(
+            _render_connect_page(heading, paragraphs, **form),
+            status_code=status_code,
+            # The URL (and, on a retry page, the body) holds a bearer token.
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
 
-        Consumes the one-time token minted by :func:`api_connect_open`, sets the
-        env's ``session_id`` cookie HOST-ONLY (no ``Domain`` → scoped to this env
-        host, so it overrides any stale host-only cookie Odoo left here), and
-        303-redirects to ``/web`` already authenticated. No dashboard session is
-        required or present on this host; the token is the sole credential.
-        """
-        token = request.query_params.get("token") or ""
-        env_host = request.url.hostname or ""
-        sid = connect_tokens.consume(token, env_host)
-        if not sid:
-            return Response(
-                "Connect link is invalid or expired. Reopen it from the dashboard.",
-                status_code=400,
-                media_type="text/plain",
-            )
+    def _connect_invalid() -> Response:
+        # Read by people who were handed the link by another application, not
+        # only by dashboard users: say what happened and what to do without
+        # assuming they know where the link came from.
+        return _connect_page(
+            400,
+            "This sign-in link is no longer valid",
+            [
+                "A sign-in link works once and only for a few minutes after it "
+                "is created. This one has already been used, has expired, or "
+                "was opened on a different address than the one it was made "
+                "for.",
+                "To sign in, go back to where you got the link and ask for a new one.",
+            ],
+        )
+
+    def _connect_signed_in(request: Request, sid: str) -> Response:
         # Same-host redirect: a relative Location keeps whatever scheme and
         # host the browser really reached us on, with no header interpretation
         # — the one-time token is already consumed, so a wrong absolute scheme
         # (e.g. a terminator that doesn't send X-Forwarded-Proto) would leave
         # the user with a dead link.
         response: Response = RedirectResponse("/web", status_code=303)
+        # HOST-ONLY (no Domain → scoped to this env host), so it overrides any
+        # stale host-only cookie Odoo left here.
         response.set_cookie(
             "session_id",
             sid,
@@ -5438,6 +5913,157 @@ def _build_routes(
             secure=_is_secure_request(request),
         )
         return response
+
+    def _mint_for_link(
+        settings: Settings,
+        team: TeamSettings,
+        grant: connect_tokens.LinkGrant,
+        token: str,
+    ) -> str:
+        """Blocking half of a link redemption: wake, mint, wait. Returns the sid."""
+        env_name = grant.env_name
+        with contextlib.suppress(Exception):  # activity tracking is best-effort
+            activity.touch(team, env_name)
+        # Stopped is a routine state under auto-stop, and the link may be opened
+        # minutes after it was issued: start the environment instead of failing.
+        woke = env_ops.ensure_running(settings, env_name, team)
+        if woke:
+            activity.mark_started(team, env_name)
+        result = odoo_ops.connect_as_user(settings, team, env_name, grant.user)
+        # A session now exists, so the link is spent — here, not after the wait
+        # below, so that nothing which interrupts the wait can leave a token
+        # able to mint a second one.
+        connect_tokens.discard(token)
+        if woke:
+            # The container is up but Odoo's HTTP server is still booting;
+            # redirecting now would land the person on a gateway error. Past the
+            # bound, send them anyway — a reload fixes it and they are signed in.
+            env_ops.wait_for_odoo_ready(
+                settings, team, env_name, timeout=_CONNECT_READY_WAIT_SECONDS
+            )
+        return str(result["sid"])
+
+    async def _connect_redeem(request: Request, env_host: str) -> Response:
+        """POST: turn a ``connect_link`` token into a signed-in browser.
+
+        The token is spent only when the sign-in succeeds. A busy environment or
+        a failed start leaves it valid and offers a retry, so a transient
+        condition does not cost the person their link.
+        """
+        token = await _read_form_field(request, "token")
+        settings = get_settings()
+        grant = connect_tokens.peek_link(token, env_host)
+        team = settings.teams.get(grant.team_id) if grant else None
+        if grant is None or team is None:
+            return _connect_invalid()
+        try:
+            locks.acquire_env(grant.env_name, team.team_id, operation="connect_link")
+        except BusyError:
+            return _connect_page(
+                409,
+                "The environment is busy",
+                [
+                    "Another operation is running on this environment right "
+                    "now, so you cannot be signed in yet.",
+                    "Your link has not been used up. This page tries again "
+                    "every few seconds until the link expires; you can also try "
+                    "now.",
+                ],
+                token=token,
+                button="Try again",
+                auto_ms=_CONNECT_RETRY_MS,
+            )
+        try:
+            # Every redemption of this token holds this lock, so re-reading it
+            # here makes the link single-use: a second tab that waited for the
+            # lock finds it gone.
+            if connect_tokens.peek_link(token, env_host) is None:
+                return _connect_invalid()
+            sid = await _offload(_mint_for_link, settings, team, grant, token)
+            return _connect_signed_in(request, sid)
+        except NotFoundError:
+            # Not transient: the environment or the user is gone.
+            connect_tokens.discard(token)
+            return _connect_page(
+                404,
+                "This sign-in link can no longer be used",
+                [
+                    "The environment or the user this link was created for no "
+                    "longer exists.",
+                    "Go back to where you got the link and ask for a new one.",
+                ],
+            )
+        except FlowError as e:
+            # Whoever holds the link reads this page, with no dashboard login
+            # behind them. A failed start or mint explains itself in operator
+            # terms — host paths, container names, the text of the underlying
+            # exception — so the message goes to the log and the page says only
+            # what its reader can act on.
+            logger.error("Connect link for '%s' failed: %s", grant.env_name, e)
+            return _connect_page(
+                _flow_error_status(e),
+                "You could not be signed in",
+                [
+                    "The environment could not sign you in right now.",
+                    "Your link has not been used up — you can try again. If it "
+                    "keeps failing, tell whoever gave you the link.",
+                ],
+                token=token,
+                button="Try again",
+            )
+        except Exception:
+            logger.exception("Unexpected error redeeming a connect link")
+            return _connect_page(
+                500,
+                "You could not be signed in",
+                [
+                    "The server ran into an unexpected problem.",
+                    "Your link has not been used up — you can try again.",
+                ],
+                token=token,
+                button="Try again",
+            )
+        finally:
+            locks.release_env(grant.env_name)
+
+    async def api_connect_land(request: Request) -> Response:
+        """Connect As landing, served ON the env host (Traefik routes it here).
+
+        No dashboard session is required or present on this host; the one-time
+        token is the sole credential. It is one of two kinds (see
+        :mod:`oduflow.connect_tokens`):
+
+        - A **session token** from :func:`api_connect_open` (the dashboard's
+          Open button). The session is already minted; this GET consumes the
+          token, sets the cookie and 303-redirects to ``/web``.
+        - A **link token** from the ``connect_link`` MCP tool. A GET only shows
+          a page — it changes nothing, so a link preview or scanner that fetches
+          the URL does not spend the link and no session exists yet. The page
+          POSTs the token back, and :func:`_connect_redeem` mints the session
+          then.
+        """
+        env_host = request.url.hostname or ""
+        if request.method == "POST":
+            return await _connect_redeem(request, env_host)
+        token = request.query_params.get("token") or ""
+        grant = connect_tokens.peek_link(token, env_host)
+        if grant is not None:
+            return _connect_page(
+                200,
+                "Signing you in",
+                [
+                    f"You are being signed in to <code>{html.escape(env_host)}</code> "
+                    f"as <code>{html.escape(grant.login)}</code>.",
+                ],
+                fine_print="If nothing happens, press Continue. This link works once.",
+                token=token,
+                button="Continue",
+                auto_ms=_CONNECT_AUTO_MS,
+            )
+        sid = connect_tokens.consume(token, env_host)
+        if not sid:
+            return _connect_invalid()
+        return _connect_signed_in(request, sid)
 
     async def api_artifact_download(request: Request) -> Response:
         """Serve a file an MCP tool generated inside an environment, once.
@@ -5485,7 +6111,9 @@ def _build_routes(
             db_name = get_db_name(branch, team.team_id)
 
             try:
-                container = client.containers.get(container_name)
+                container = await run_in_threadpool(
+                    client.containers.get, container_name
+                )
             except _docker.errors.NotFound:
                 await websocket.send_text(
                     "\x1b[31mError: environment not found\x1b[0m\r\n"
@@ -5500,8 +6128,10 @@ def _build_routes(
                 await websocket.close(code=1011)
                 return
 
-            exec_id = client.api.exec_create(
-                container.id,
+            await _run_exec_pty(
+                websocket,
+                client,
+                container,
                 [
                     "/entrypoint.sh",
                     "odoo",
@@ -5512,85 +6142,7 @@ def _build_routes(
                     "-c",
                     "/etc/odoo/odoo.conf",
                 ],
-                stdin=True,
-                tty=True,
-                stdout=True,
-                stderr=True,
-            )["Id"]
-            sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
-            raw_sock = sock._sock
-
-            loop = asyncio.get_event_loop()
-            closed = asyncio.Event()
-
-            async def docker_to_browser() -> None:
-                try:
-                    while not closed.is_set():
-                        data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-                        if not data:
-                            break
-                        await websocket.send_text(
-                            data.decode("utf-8", errors="replace")
-                        )
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            async def browser_to_docker() -> None:
-                try:
-                    while not closed.is_set():
-                        text = await websocket.receive_text()
-                        msg = json.loads(text)
-                        if msg.get("type") == "input":
-                            await loop.run_in_executor(
-                                None, raw_sock.sendall, msg["data"].encode("utf-8")
-                            )
-                        elif msg.get("type") == "resize":
-                            cols = msg.get("cols", 80)
-                            rows = msg.get("rows", 24)
-                            try:
-                                client.api.exec_resize(exec_id, height=rows, width=cols)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            tasks = [
-                asyncio.ensure_future(docker_to_browser()),
-                asyncio.ensure_future(browser_to_docker()),
-            ]
-            try:
-                # Return as soon as EITHER side ends so a browser-closed/idle
-                # terminal never parks docker_to_browser in recv() forever,
-                # leaking the executor thread that blocks interpreter shutdown.
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                closed.set()
-                # shutdown() reliably wakes a thread blocked in recv (a bare
-                # close() need not) and gives the exec'd process EOF on stdin so
-                # it exits.
-                try:
-                    raw_sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    raw_sock.close()
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            )
 
         except Exception as e:
             logger.exception("WebSocket terminal error for branch %s", branch)
@@ -5601,151 +6153,100 @@ def _build_routes(
                 pass
 
     async def ws_sql_terminal(websocket: WebSocket) -> None:
+        """Interactive ``psql`` on the environment's database.
+
+        ``psql`` runs in the environment's own Odoo container, never in the
+        shared PostgreSQL one: there its ``\\!`` would be a root shell beside
+        every team's data and its ``\\c`` a trust-authenticated way into the
+        cluster superuser (see ``odoo_ops.ScopedPsql``).
+        """
         branch = websocket.path_params["branch"]
         await websocket.accept()
         try:
-            import docker as _docker
             from oduflow.docker_ops.client import get_client as _get_client
-            from oduflow.naming import get_db_name, validate_env_name
-
-            # Validate before deriving DB/credential paths, matching the REST
-            # create handler: a name like ".." would otherwise resolve
-            # get_workspace_path one level above the workspaces dir when loading
-            # scoped credentials. Reject it explicitly instead of failing opaquely.
-            try:
-                validate_env_name(branch)
-            except ValueError as e:
-                await websocket.send_text(_term_error(e))
-                await websocket.close(code=1008)
-                return
 
             settings = get_settings()
             team = _get_ui_team(websocket)
             client = _get_client()
-            db_name = get_db_name(branch, team.team_id)
+
+            def resolve() -> odoo_ops.ScopedPsql:
+                target = odoo_ops.scoped_psql(client, settings, team, branch)
+                odoo_ops.require_psql_client(target, branch)
+                return target
 
             try:
-                db_container = client.containers.get(settings.shared_db_container)
-            except _docker.errors.NotFound:
-                await websocket.send_text(
-                    "\x1b[31mError: database container not found\x1b[0m\r\n"
-                )
-                await websocket.close(code=1011)
+                target = await run_in_threadpool(resolve)
+            except ValueError as e:
+                # An invalid name (it would otherwise reach the credential
+                # path lookup) or a production: rejected before any lookup.
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1008)
                 return
-
-            if db_container.status != "running":
-                await websocket.send_text(
-                    "\x1b[31mError: database container is not running\x1b[0m\r\n"
-                )
-                await websocket.close(code=1011)
-                return
-
-            from oduflow.env_credentials import (
-                MissingCredentialsError,
-                load_credentials,
-            )
-
-            # Never open an interactive psql as the cluster superuser: that would
-            # allow \c into another team's database and COPY ... FROM PROGRAM
-            # (RCE). Require the environment's scoped role.
-            try:
-                creds = load_credentials(
-                    branch,
-                    team.workspaces_dir,
-                    settings.db_user,
-                    settings.db_password,
-                    allow_fallback=False,
-                )
-            except MissingCredentialsError as e:
+            except FlowError as e:
+                # No such environment, not running, no scoped role (the
+                # cluster superuser is never used here) or no psql client.
                 await websocket.send_text(_term_error(e))
                 await websocket.close(code=1011)
                 return
 
-            exec_id = client.api.exec_create(
-                db_container.id,
-                ["psql", "-U", creds["pg_user"], "-d", db_name],
-                stdin=True,
-                tty=True,
-                stdout=True,
-                stderr=True,
-            )["Id"]
-            sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
-            raw_sock = sock._sock
-
-            loop = asyncio.get_event_loop()
-            closed = asyncio.Event()
-
-            async def docker_to_browser() -> None:
-                try:
-                    while not closed.is_set():
-                        data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-                        if not data:
-                            break
-                        await websocket.send_text(
-                            data.decode("utf-8", errors="replace")
-                        )
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            async def browser_to_docker() -> None:
-                try:
-                    while not closed.is_set():
-                        text = await websocket.receive_text()
-                        msg = json.loads(text)
-                        if msg.get("type") == "input":
-                            await loop.run_in_executor(
-                                None, raw_sock.sendall, msg["data"].encode("utf-8")
-                            )
-                        elif msg.get("type") == "resize":
-                            cols = msg.get("cols", 80)
-                            rows = msg.get("rows", 24)
-                            try:
-                                client.api.exec_resize(exec_id, height=rows, width=cols)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            tasks = [
-                asyncio.ensure_future(docker_to_browser()),
-                asyncio.ensure_future(browser_to_docker()),
-            ]
-            try:
-                # Return as soon as EITHER side ends so a browser-closed/idle
-                # terminal never parks docker_to_browser in recv() forever,
-                # leaking the executor thread that blocks interpreter shutdown.
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                closed.set()
-                # shutdown() reliably wakes a thread blocked in recv (a bare
-                # close() need not) and gives the exec'd process EOF on stdin so
-                # it exits.
-                try:
-                    raw_sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    raw_sock.close()
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            await _run_exec_pty(
+                websocket,
+                client,
+                target.container,
+                list(target.argv),
+                user=target.user,
+                environment=target.environment,
+            )
 
         except Exception as e:
             logger.exception("WebSocket SQL terminal error for branch %s", branch)
+            try:
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1011)
+            except Exception:
+                pass
+
+    async def ws_service_shell(websocket: WebSocket) -> None:
+        """Interactive ``sh`` inside a service container.
+
+        The dashboard counterpart of ``docker exec -it <container> sh``: the
+        shell runs as the image's default user, exactly like a bare
+        ``docker exec``.
+        """
+        name = websocket.path_params["name"]
+        await websocket.accept()
+        try:
+            from oduflow.docker_ops.client import get_client as _get_client
+
+            settings = get_settings()
+            team = _get_ui_team(websocket)
+            client = _get_client()
+            try:
+                container = await run_in_threadpool(
+                    service_ops.find_service_container, client, settings, team, name
+                )
+            except ValueError as e:  # an invalid name
+                await websocket.send_text(_term_error(e))
+                await websocket.close(code=1008)
+                return
+            except NotFoundError:
+                # Covers another team's service and a container that is not a
+                # service at all; see find_service_container.
+                await websocket.send_text("\x1b[31mError: service not found\x1b[0m\r\n")
+                await websocket.close(code=1011)
+                return
+
+            if container.status != "running":
+                await websocket.send_text(
+                    "\x1b[31mError: service is not running\x1b[0m\r\n"
+                )
+                await websocket.close(code=1011)
+                return
+
+            await _run_exec_pty(websocket, client, container, ["sh"])
+
+        except Exception as e:
+            logger.exception("WebSocket shell error for service %s", name)
             try:
                 await websocket.send_text(_term_error(e))
                 await websocket.close(code=1011)
@@ -5792,7 +6293,9 @@ def _build_routes(
 
             container_name = get_agent_container_name(team.team_id, settings.prefix)
             try:
-                container = client.containers.get(container_name)
+                container = await run_in_threadpool(
+                    client.containers.get, container_name
+                )
             except _docker.errors.NotFound:
                 await websocket.send_text(
                     "\x1b[31mError: agent container not found "
@@ -5905,98 +6408,28 @@ def _build_routes(
                 if settings.agent_claude_model:
                     cmd += ["--model", settings.agent_claude_model]
 
-            exec_id = client.api.exec_create(
-                container.id,
+            # Ended when the console closes: the agent container is long-lived,
+            # and a session left behind would keep this environment's scoped
+            # MCP token in its env.
+            await _run_exec_pty(
+                websocket,
+                client,
+                container,
                 env_ops.agent_session_command(cmd),
-                stdin=True,
-                tty=True,
-                stdout=True,
-                stderr=True,
                 workdir=checkout,
                 environment=exec_env,
                 user=exec_user,
-            )["Id"]
-            sock = client.api.exec_start(exec_id, detach=False, tty=True, socket=True)
-            raw_sock = sock._sock
+            )
 
-            loop = asyncio.get_event_loop()
-            closed = asyncio.Event()
-
-            async def docker_to_browser() -> None:
-                try:
-                    while not closed.is_set():
-                        data = await loop.run_in_executor(None, raw_sock.recv, 4096)
-                        if not data:
-                            break
-                        await websocket.send_text(
-                            data.decode("utf-8", errors="replace")
-                        )
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            async def browser_to_docker() -> None:
-                try:
-                    while not closed.is_set():
-                        text = await websocket.receive_text()
-                        msg = json.loads(text)
-                        if msg.get("type") == "input":
-                            await loop.run_in_executor(
-                                None, raw_sock.sendall, msg["data"].encode("utf-8")
-                            )
-                        elif msg.get("type") == "resize":
-                            cols = msg.get("cols", 80)
-                            rows = msg.get("rows", 24)
-                            try:
-                                client.api.exec_resize(exec_id, height=rows, width=cols)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                finally:
-                    closed.set()
-
-            tasks = [
-                asyncio.ensure_future(docker_to_browser()),
-                asyncio.ensure_future(browser_to_docker()),
-            ]
-            try:
-                # Return as soon as EITHER side ends. Unlike ws_terminal (whose
-                # exec dies with the environment container), the agent container
-                # is long-lived: waiting for BOTH would park docker_to_browser
-                # in recv() forever after the browser closes an idle console,
-                # leaking the exec'd agent process and the executor thread.
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                closed.set()
-                # shutdown() reliably wakes a thread blocked in recv (a bare
-                # close() need not) and gives the agent EOF on stdin so the
-                # `docker exec` process exits instead of leaking.
-                try:
-                    raw_sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    raw_sock.close()
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-        except Exception as e:
+        except Exception:
             logger.exception("WebSocket agent console error for branch %s", branch)
+            # Reachable by scoped share-link visitors, so never echo str(exc)
+            # (host paths, container names) into an untrusted terminal; the
+            # detail is in the server log, like ws_agent_acp's 1011 close.
             try:
-                await websocket.send_text(_term_error(e))
+                await websocket.send_text(
+                    "\x1b[31mError: internal error — check the server logs.\x1b[0m\r\n"
+                )
                 await websocket.close(code=1011)
             except Exception:
                 pass
@@ -6520,6 +6953,21 @@ def _build_routes(
             return _error_response(e)
         except Exception:
             logger.exception("api_production_info failed")
+            return JSONResponse(
+                {"ok": False, "error": "Internal server error."}, status_code=500
+            )
+
+    def api_production_storage_refresh(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        try:
+            team = _get_ui_team(request)
+            production_registry.get_production(team, name)
+            entry = refresh_prod_storage(get_settings(), team, name)
+            return JSONResponse({"ok": True, "storage": entry})
+        except FlowError as e:
+            return _error_response(e)
+        except Exception:
+            logger.exception("Unexpected error in api_production_storage_refresh")
             return JSONResponse(
                 {"ok": False, "error": "Internal server error."}, status_code=500
             )
@@ -7061,6 +7509,11 @@ def _build_routes(
             ),
             Route("/api/productions/{name}", api_production_info, methods=["GET"]),
             Route(
+                "/api/productions/{name}/storage/refresh",
+                api_production_storage_refresh,
+                methods=["POST"],
+            ),
+            Route(
                 "/api/productions/{name}/start",
                 api_production_start,
                 methods=["POST"],
@@ -7306,8 +7759,9 @@ def _build_routes(
             methods=["GET"],
         ),
         # Served on an env host (routed here by Traefik's PathPrefix router);
-        # public + token-authenticated. See api_connect_land.
-        Route("/oduflow-connect", api_connect_land, methods=["GET"]),
+        # public + token-authenticated. See api_connect_land. POST redeems a
+        # connect_link token (the GET only shows its page).
+        Route("/oduflow-connect", api_connect_land, methods=["GET", "POST"]),
         Route("/oduflow-artifact", api_artifact_download, methods=["GET"]),
         Route("/api/environments/{branch:path}/update", api_update, methods=["POST"]),
         Route(
@@ -7367,6 +7821,7 @@ def _build_routes(
             "/api/services/{name}/unprotect", api_service_unprotect, methods=["POST"]
         ),
         Route("/api/services/{name}/logs", api_service_logs, methods=["GET"]),
+        WebSocketRoute("/api/services/{name}/shell", ws_service_shell),
         Route("/api/service-presets", api_service_presets, methods=["GET"]),
         Route("/api/service-presets/restore", api_service_restore, methods=["POST"]),
         Route(

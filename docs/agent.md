@@ -20,7 +20,12 @@ WebSocket ↔ `docker exec` bridge:
 
 - **Agent CLI** — the agent's own terminal UI (TUI) rendered in the browser,
   exec'd with a PTY at the environment's git checkout. Full access to the
-  agent's native command-line experience.
+  agent's native command-line experience. Closing the window ends that agent
+  process (it gets a hangup, and is killed if it does not exit), so a task
+  still in progress is interrupted; minimize the window to keep it running.
+  The session is tied to its browser connection, like a shell to an SSH
+  connection: reloading the page or losing the connection ends the agent the
+  same way, rather than leaving an unreachable agent at work in the checkout.
 - **Agent Chat** — a structured, framework-free browser chat that speaks the
   **Agent Client Protocol (ACP)** to the agent's adapter. Each environment has
   a durable, bounded **conversation history**: use **History** to resume one of
@@ -78,7 +83,7 @@ enablement and credentials live in the `[team.*]` sections:
 ```toml
 # Deployment-wide (optional)
 [agent]
-image = "oduist/oduflow-coder:0.4.0"
+image = "oduist/oduflow-coder:0.4.1"
 # claude_model = ""     # optional Claude model override; empty = CLI default
 # codex_model = ""      # optional Codex model override; empty = CLI default
 # opencode_model = ""   # optional provider/model override; empty = OpenCode default
