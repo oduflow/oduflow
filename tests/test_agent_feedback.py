@@ -294,7 +294,9 @@ def test_cli_waits_for_feedback_receiver(tmp_path):
                 before = len(received)
                 run = subprocess.run(
                     [
-                        str(Path(sys.executable).with_name("oduflow")),
+                        sys.executable,
+                        "-m",
+                        "oduflow.server",
                         "--no-telemetry",
                         "call",
                         "submit_agent_feedback",
@@ -304,6 +306,8 @@ def test_cli_waits_for_feedback_receiver(tmp_path):
                     ],
                     env={
                         **os.environ,
+                        "PYTHONPATH": str(Path(server.__file__).resolve().parents[1]),
+                        "HOME": str(tmp_path),
                         "ODUFLOW_TOML": str(config),
                         "DOCKER_HOST": f"unix://{tmp_path}/absent.sock",
                         "ODUFLOW_AGENT_FEEDBACK_URL": f"http://127.0.0.1:{receiver.server_port}/{path}",
