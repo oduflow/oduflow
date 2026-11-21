@@ -15,6 +15,7 @@ import sys
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from contextvars import ContextVar
 from typing import Any, ParamSpec, TypeVar, cast
 
 # Suppress a third-party deprecation warning emitted at import time by fastmcp's
@@ -87,7 +88,7 @@ from oduflow.naming import (
     redact_url_credentials,
 )
 from oduflow.odoo_version import major_from_image_reference
-from oduflow.output_cache import CachedOutput, OutputCache
+from oduflow.output_cache import CachedOutput, CliOutputCache, OutputCache
 from oduflow.po_tools import PoEntry
 from oduflow.settings import (
     ImageRegistrySettings,
@@ -111,6 +112,9 @@ _ODOO_TEST_SUMMARY_RE = re.compile(
 )
 
 _output_cache = OutputCache()
+_standalone_call: ContextVar[bool] = ContextVar(
+    "oduflow_standalone_call", default=False
+)
 
 _MCP_INSTRUCTIONS = """
 On /production, use list_productions and production_odoo_info to discover the
@@ -315,26 +319,45 @@ def _make_summary(cached: CachedOutput) -> str:
     return "\n".join(parts)
 
 
+def _active_output_cache() -> OutputCache:
+    if _standalone_call.get():
+        return CliOutputCache(_get_settings().toml_path, _resolve_team(None).team_id)
+    return _output_cache
+
+
 def _maybe_cache(output: str, header: str, source_tool: str, source_args: str) -> str:
     """If output exceeds threshold, cache it and return header + summary. Otherwise return as-is."""
     if len(output) > _CACHE_THRESHOLD:
-        from oduflow.production_access import PRODUCTION_TOOLS
-
-        is_production = source_tool in PRODUCTION_TOOLS
-        cached = _output_cache.store(
-            output,
-            source_tool=source_tool,
-            source_args=source_args,
-            team_id=_resolve_team(None).team_id if is_production else "",
-            production=is_production,
-        )
-        return f"{header}\n\n{_make_summary(cached)}"
+        cached = _cache_output(output, source_tool, source_args)
+        if cached is not None:
+            return f"{header}\n\n{_make_summary(cached)}"
     return f"{header}\n\nOutput:\n{output}"
 
 
-def _cache_output(output: str, source_tool: str, source_args: str) -> CachedOutput:
-    """Store command output when the caller explicitly requested a terse response."""
-    return _output_cache.store(output, source_tool=source_tool, source_args=source_args)
+def _cache_output(
+    output: str, source_tool: str, source_args: str
+) -> CachedOutput | None:
+    import sqlite3
+
+    from oduflow.production_access import PRODUCTION_TOOLS
+
+    production = source_tool in PRODUCTION_TOOLS
+    try:
+        return _active_output_cache().store(
+            output,
+            source_tool=source_tool,
+            source_args=source_args,
+            team_id=_resolve_team(None).team_id if production else "",
+            production=production,
+        )
+    except (OSError, sqlite3.Error):
+        if not _standalone_call.get():
+            raise
+        print(
+            "Warning: could not cache CLI output; returning it directly.",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _odoo_test_summary(output: str) -> str | None:
@@ -368,7 +391,9 @@ def _compact_pull_result(
             source_tool="pull_and_apply",
             source_args=f"env={env_name}, summary_only=True",
         )
-        parts.append(f"output_id={cached.output_id}")
+        parts.append(
+            f"output_id={cached.output_id}" if cached else f"Output:\n{output}"
+        )
     return "; ".join(parts)
 
 
@@ -2374,6 +2399,8 @@ def run_odoo_tests(
         # started by this call.
         note = " ".join(woke.split())
         prefix = f"{note} " if note else ""
+        if cached is None:
+            return f"{prefix}{summary}\n\nOutput:\n{output}"
         return f"{prefix}{summary} [output_id={cached.output_id}]"
 
     header = woke + f"Test Results for {env_name}:"
@@ -2960,7 +2987,7 @@ def read_output(
     """
     import time as _time
 
-    cached = _output_cache.get(output_id)
+    cached = _active_output_cache().get(output_id)
     if cached is None:
         return f"Output '{output_id}' not found or expired (TTL: 1 hour)."
 
@@ -8291,6 +8318,7 @@ def _run_call(argv: list[str]) -> None:
     print(f"Calling: {tool_name}")
     print("-" * 60)
     logging.getLogger("oduflow").setLevel(logging.WARNING)
+    token = _standalone_call.set(True)
     try:
         import asyncio
 
@@ -8306,6 +8334,8 @@ def _run_call(argv: list[str]) -> None:
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        _standalone_call.reset(token)
 
 
 def _get_version() -> str:

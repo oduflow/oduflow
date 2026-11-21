@@ -812,6 +812,12 @@ Read from a cached tool output by ID. Tools that can produce large output
 (installs, upgrades, tests, `pull_and_apply`) cache it server-side and return
 an `output_id`; this tool explores it without re-running anything.
 
+For a standalone `oduflow call`, run `oduflow call read_output` as the same
+OS user with the same configuration and team. These IDs work across CLI
+invocations, not over MCP. The private `~/.oduflow-cli-cache/` keeps up to
+50 outputs; entries expire after one hour and are removed on the next cache
+access.
+
 **Parameters**
 
 `output_id`

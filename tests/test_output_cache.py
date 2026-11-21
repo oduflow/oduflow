@@ -9,8 +9,12 @@ entry count nor a single output can grow without bound.
 
 from __future__ import annotations
 
+import stat
+
+import pytest
+
 from oduflow import output_cache as cache_mod
-from oduflow.output_cache import OutputCache
+from oduflow.output_cache import CliOutputCache, OutputCache
 
 
 class TestStore:
@@ -33,8 +37,7 @@ class TestStore:
         assert OutputCache().get("deadbeef") is None
 
     def test_ids_are_unique_for_identical_output(self):
-        # Same text, same second, same 1000-char prefix: without the sequence
-        # counter the second store would overwrite the first.
+        # Identical logs from separate runs must remain independently readable.
         cache = OutputCache()
         first = cache.store("x" * 2000, "tool", "")
         second = cache.store("x" * 2000, "tool", "")
@@ -172,3 +175,36 @@ class TestEviction:
         cache.store("fresh", "t", "")
 
         assert stale.output_id not in cache._store
+
+
+def test_cli_cache_round_trip_is_private_and_scoped(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cache = CliOutputCache("server.toml", "a")
+    entry = cache.store(
+        "ok\r\n WARNING careful\n", "logs", "erp", team_id="a", production=True
+    )
+
+    assert CliOutputCache("server.toml", "a").get(entry.output_id) == entry
+    assert CliOutputCache("server.toml", "b").get(entry.output_id) is None
+    assert CliOutputCache("other.toml", "a").get(entry.output_id) is None
+    db = next(tmp_path.rglob("*.sqlite3"))
+    assert stat.S_IMODE(db.stat().st_mode) == 0o600
+    assert stat.S_IMODE(db.parent.stat().st_mode) == 0o700
+    db.parent.chmod(0o755)
+    with pytest.raises(PermissionError):
+        cache.store("private", "tool", "")
+
+
+def test_cli_cache_expires_and_evicts_across_invocations(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cache_mod, "_MAX_ENTRIES", 2)
+    now = 1000.0
+    monkeypatch.setattr(cache_mod.time, "time", lambda: now)
+    cache = CliOutputCache("server.toml", "a")
+    first, second, third = [cache.store(str(i), "logs", "") for i in range(3)]
+    reader = CliOutputCache("server.toml", "a")
+    assert reader.get(first.output_id) is None
+    now += cache_mod._CACHE_TTL
+    assert reader.get(second.output_id) == second
+    now += 1
+    assert reader.get(third.output_id) is None
