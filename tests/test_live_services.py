@@ -25,17 +25,23 @@ pytestmark = pytest.mark.integration
 def _route(path, status, body=None):
     deadline = time.monotonic() + 30
     while True:
-        response = httpx.get(
-            f"http://127.0.0.1{path}",
-            headers={"Host": "files.qa.test"},
-            trust_env=False,
-        )
-        if response.status_code == status and (body is None or body == response.text):
-            return
-        if time.monotonic() >= deadline:
-            pytest.fail(
-                f"{path}: expected {status}/{body}, got {response.status_code}/{response.text[:120]}"
+        try:
+            response = httpx.get(
+                f"http://127.0.0.1{path}",
+                headers={"Host": "files.qa.test"},
+                trust_env=False,
+                timeout=2,
             )
+        except httpx.TransportError as exc:
+            observed = str(exc)
+        else:
+            if response.status_code == status and (
+                body is None or body == response.text
+            ):
+                return
+            observed = f"{response.status_code}/{response.text[:120]}"
+        if time.monotonic() >= deadline:
+            pytest.fail(f"{path}: expected {status}/{body}, got {observed}")
         time.sleep(0.25)
 
 

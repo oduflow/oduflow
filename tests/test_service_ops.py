@@ -2637,6 +2637,24 @@ class TestGetServiceInfo:
         assert info["started_at"] == "2026-05-26T13:00:00Z"
         assert info["has_preset"] is True
 
+    @pytest.mark.parametrize("live_ports", [{}, {"80/tcp": None}])
+    def test_stopped_service_retains_published_port(
+        self, mock_docker_client, live_ports
+    ):
+        container = self._make_container(
+            ["redis:7"],
+            "sha256:abc",
+            {"oduflow.managed": "true", "oduflow.service": "redis"},
+            {
+                "NetworkSettings": {"Ports": live_ports},
+                "HostConfig": {"PortBindings": {"6379/tcp": [{"HostPort": "16379"}]}},
+            },
+            status="exited",
+        )
+        mock_docker_client.containers.get.return_value = container
+        info = service_ops.get_service_info(TEST_SETTINGS, TEST_TEAM, "redis")
+        assert info["port"] == 6379 and info["url"] == "http://localhost:16379"
+
     def test_get_service_info_traefik_mode(self, mock_docker_client):
         container = self._make_container(
             image_tags=["getmeili/meilisearch:v1.6"],
