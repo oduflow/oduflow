@@ -318,6 +318,68 @@ def test_status_reads_do_not_contact_docker_or_wait_for_monitor(settings):
     assert wal.status(settings)["stale"] is True
 
 
+def test_shared_sample_preserves_errors_then_ages_without_refresh(settings):
+    monitor = wal.Monitor()
+    now = time.time()
+    with (
+        patch.object(
+            wal, "sample_local", side_effect=[sample(now=now), RuntimeError("failed")]
+        ),
+        patch(
+            "oduflow.walg.storage_status",
+            return_value={"status": "error", "detail": "unreachable"},
+        ),
+    ):
+        monitor.tick(settings, MagicMock())
+        assert wal.status(settings)["detail"] == "unreachable"
+        with pytest.raises(RuntimeError, match="failed"):
+            monitor.tick(settings, MagicMock())
+
+    result = wal.status(settings)
+    assert result["status"] == "error" and "sampling failed" in result["detail"]
+    assert result["sampled_at"] == now
+    with patch.object(wal.time, "time", return_value=now + wal.STALE_AFTER + 1):
+        expired = wal.status(settings)
+    assert expired["status"] == "error" and expired["stale"]
+    assert expired["ready_bytes"] == result["ready_bytes"]
+    assert not wal._monitor(settings).latest  # never seed local safety decisions
+
+
+def test_status_cache_is_best_effort_even_during_disk_protection(settings, tmp_path):
+    client, pg, app, events = containers(settings)
+    monitor = wal._monitor(settings)
+    with (
+        patch.object(
+            wal, "sample_local", return_value=sample(now=time.time(), free=wal.GIB)
+        ),
+        patch.object(
+            wal.tempfile,
+            "NamedTemporaryFile",
+            side_effect=OSError(errno.ENOSPC, "full"),
+        ),
+    ):
+        monitor.tick(settings, client)
+    assert events == [app.name, pg.name]
+    assert wal.status(settings)["critical_disk"]
+    assert not (tmp_path / "wal_status.json").exists()
+    wal._monitors.clear()
+    result = wal.status(settings)
+    assert result["stale"] and result["guard"]["latched"]
+    assert "reserve" in result["detail"]
+
+
+@pytest.mark.parametrize("contents", [None, "{", "[]", '{"sampled_at":"bad"}'])
+def test_unavailable_shared_sample_is_stale_and_respects_live_guard(
+    settings, tmp_path, contents
+):
+    if contents is not None:
+        (tmp_path / "wal_status.json").write_text(contents)
+    assert wal.status(settings)["stale"]
+    wal._save(settings, {"version": 1, "latched": True, "reason": "operator recovery"})
+    result = wal.status(settings)
+    assert result["stale"] and result["detail"] == "operator recovery"
+
+
 def containers(settings):
     events = []
     client = MagicMock()

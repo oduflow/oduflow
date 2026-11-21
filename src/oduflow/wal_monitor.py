@@ -17,6 +17,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Callable
 
@@ -502,8 +503,35 @@ class Monitor:
         self.history: deque[dict[str, Any]] = deque(maxlen=20)
         self.thread: threading.Thread | None = None
 
+    def _publish(self, settings: Settings) -> None:
+        """Share diagnostics only; the safety latch is persisted separately."""
+        from oduflow import walg
+
+        try:
+            # Multiple stdio servers can share the directory. Give each writer
+            # a private temp file so a reader always opens one complete sample.
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=settings.base_data_dir, prefix="wal-status.", delete=False
+            ) as tmp:
+                try:
+                    json.dump(
+                        {**self.latest, "preflight": walg.readiness_status(settings)},
+                        tmp,
+                    )
+                    tmp.flush()
+                    os.replace(
+                        tmp.name, Path(settings.base_data_dir) / "wal_status.json"
+                    )
+                finally:
+                    Path(tmp.name).unlink(missing_ok=True)
+        except OSError:
+            # A full disk must not interfere with protection or mask its errors.
+            logger.warning("Could not publish the WAL status sample", exc_info=True)
+
     def tick(self, settings: Settings, client: Any) -> None:
-        with self.lock:
+        with self.lock, ExitStack() as finished:
+            # Publish errors and not-provisioned results too, not just success.
+            finished.callback(self._publish, settings)
             guard = state(settings)
             if not os.path.exists(_path(settings)):
                 try:
@@ -587,10 +615,38 @@ def _monitor(settings: Settings) -> Monitor:
         return _monitors.setdefault(settings.base_data_dir, Monitor())
 
 
+def _published_sample(settings: Settings) -> dict[str, Any]:
+    try:
+        with (Path(settings.base_data_dir) / "wal_status.json").open() as f:
+            sample = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(sample, dict) or not isinstance(
+        sample.get("sampled_at", 0), (int, float)
+    ):
+        return {}
+    preflight = sample.get("preflight", {})
+    if not isinstance(preflight, dict) or (
+        preflight
+        and not (
+            isinstance(preflight.get("checked_at"), (int, float))
+            and isinstance(preflight.get("detail"), str)
+            and preflight.get("status") in ("ok", "pending", "error")
+        )
+    ):
+        return {}
+    if sample.get("status") not in ("ok", "warn", "off", "error") or not isinstance(
+        sample.get("detail"), str
+    ):
+        return {}
+    return sample
+
+
 def status(settings: Settings) -> dict[str, Any]:
     monitor = _monitor(settings)
     # Readers never wait for sampling, S3, shutdown, or a recovery action.
-    result = copy.deepcopy(monitor.latest)
+    # The shared sample is diagnostic only: never feed it into safety decisions.
+    result = copy.deepcopy(monitor.latest) or _published_sample(settings)
     guard = state(settings)
     result["guard"] = {
         key: value for key, value in guard.items() if key != "restart_policies"
@@ -598,8 +654,8 @@ def status(settings: Settings) -> dict[str, Any]:
     result["configured"] = settings.backup is not None
     from oduflow import walg
 
-    result["preflight"] = walg.readiness_status(settings)
-    if not result.get("sampled_at") or time.time() - result["sampled_at"] > STALE_AFTER:
+    result["preflight"] = walg.readiness_status(settings) or result.get("preflight", {})
+    if not 0 <= time.time() - result.get("sampled_at", 0) <= STALE_AFTER:
         result.update(
             status="error", detail="WAL monitor has no fresh sample", stale=True
         )

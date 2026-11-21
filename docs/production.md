@@ -1187,8 +1187,13 @@ actions:
 | `release` | Requires recovery headroom, a safe consumption rate, working storage access, and a successful archive after recovery began. Restores normal connections and restart policies; applications remain stopped until explicitly started. |
 
 Use `production_wal_status()` (MCP), `GET /api/productions/wal-status`
-(dashboard) or `oduflow wal status` for cached read-only diagnostics;
-mutating actions are operator-only — the `/admin` console or
+(dashboard) or `oduflow wal status` for cached read-only diagnostics. The
+monitor publishes its last sample in `<base_data_dir>/wal_status.json` so
+standalone CLI processes can read it without contacting Docker or triggering
+protection. If no sample is available, or the last sample is more than 60
+seconds old, status reports `stale: true`.
+
+Mutating actions are operator-only — the `/admin` console or
 `oduflow wal <action> --confirm ALL-PRODUCTIONS`. Environment-scoped access
 is excluded even from the read-only status.
 Queue size warns at `warn_queue_gb` and protects at `stop_queue_gb`. During
