@@ -667,19 +667,17 @@ def _exec_walg(
         # Return the actual TLS/access error promptly instead of spending the
         # entire diagnostic deadline on WAL-G's default 15 retries.
         exec_kwargs["environment"] = {"WALG_S3_MAX_RETRIES": "0"}
-    exit_code, output = container.exec_run(cmd, **exec_kwargs)
-    text: str = (
-        output.decode("utf-8", errors="replace")
-        if isinstance(output, bytes)
-        else str(output)
-    )
+    exit_code, (stdout, stderr) = container.exec_run(cmd, demux=True, **exec_kwargs)
     if timeout is not None and exit_code in (124, 137):
         raise ExternalCommandError(
             "wal-g " + " ".join(args), exit_code, f"Timed out after {timeout}s"
         )
     if exit_code != 0:
+        text = ((stdout or b"") + (stderr or b"")).decode("utf-8", errors="replace")
         raise ExternalCommandError("wal-g " + " ".join(args), exit_code, text[-2000:])
-    return text
+    # backup-list --json writes JSON to stdout and INFO diagnostics to stderr.
+    # Some commands (including a listing of an empty archive) only log.
+    return (stdout or stderr or b"").decode("utf-8", errors="replace")
 
 
 def backup_push(client: Any, settings: Settings) -> str:
@@ -866,10 +864,9 @@ def pitr_restore_cluster(
     Odoo containers):
 
     1. stop + remove the production PG container (its data volume stays);
-    2. in a helper container on that volume: move the current PGDATA
-       contents aside (``.pitr-old-{ts}/`` — nothing is destroyed),
-       ``wal-g backup-fetch`` the base backup, write ``recovery.signal``
-       and the restore_command (+ recovery_target_time when given);
+    2. in a helper container on that volume: fetch into an empty staging
+       directory and write the recovery config there, then move the current
+       PGDATA aside (``.pitr-old-{ts}/``) and move the staged files into place;
     3. recreate the PG container and wait for recovery to finish
        (pg_is_in_recovery() = false — with no recovery target PostgreSQL
        replays the whole archive and promotes).
@@ -937,7 +934,8 @@ def pitr_restore_cluster(
                 "PostgreSQL may still hold it open."
             )
 
-    # 2. Helper container: displace PGDATA, fetch, write recovery config.
+    # 2. WAL-G refuses a non-empty fetch destination. Fetch and configure the
+    # replacement before moving live data, on the same filesystem for rename.
     recovery_conf = (
         f"restore_command = '{WALG_BIN} --config {WALG_CONF} wal-fetch %f %p'\n"
     )
@@ -949,20 +947,27 @@ def pitr_restore_cluster(
         )
     script = (
         "set -e\n"
-        f"mkdir -p /vol/{old_dir}\n"
-        f"find /vol -mindepth 1 -maxdepth 1 ! -name '.pitr-old-*' "
-        f"-exec mv {{}} /vol/{old_dir}/ \\;\n"
-        f"{WALG_BIN} --config {WALG_CONF} backup-fetch /vol {fetch_target}\n"
-        f'printf "%b" "{recovery_conf}" >> /vol/postgresql.auto.conf\n'
-        "touch /vol/recovery.signal\n"
-        "chown -R postgres:postgres /vol\n"
+        "stage=$(mktemp -d /vol/.pitr-stage-XXXXXXXX)\n"
+        "trap 'rm -rf \"$stage\"' EXIT\n"
+        f'{WALG_BIN} --config {WALG_CONF} backup-fetch "$stage" "$1"\n'
+        'printf "%s" "$2" >> "$stage/postgresql.auto.conf"\n'
+        'touch "$stage/recovery.signal"\n'
+        'chown -R postgres:postgres "$stage"\n'
+        f"mkdir /vol/{old_dir}\n"
+        # Keep both sides for inspection if a rename fails during cutover.
+        "trap - EXIT\n"
+        "find /vol -mindepth 1 -maxdepth 1 ! -path \"$stage\" ! -name '.pitr-old-*' "
+        f"-exec mv -t /vol/{old_dir} -- {{}} +\n"
+        'find "$stage" -mindepth 1 -maxdepth 1 -exec mv -t /vol -- {} +\n'
+        'rmdir "$stage"\n'
+        "chown postgres:postgres /vol\n"
         "chmod 700 /vol\n"
     )
     helper = client.containers.run(
         image,
         name=f"{settings.prod_db_container}-pitr-{stamp}",
         detach=True,
-        entrypoint=["sh", "-c", script],
+        entrypoint=["sh", "-c", script, "pitr", fetch_target, recovery_conf],
         volumes={
             settings.prod_db_volume: {"bind": "/vol", "mode": "rw"},
             bin_host_dir(settings): {"bind": BIN_MOUNT, "mode": "ro"},

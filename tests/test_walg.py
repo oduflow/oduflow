@@ -213,7 +213,7 @@ class TestStorageDiagnostics:
     def test_probe_runs_inside_pg_as_postgres(self, tmp_path):
         client = MagicMock()
         container = client.containers.get.return_value
-        container.exec_run.return_value = (0, b"[]")
+        container.exec_run.return_value = (0, (b"[]", None))
         settings = _settings(tmp_path, BACKUP)
         assert walg.storage_status(client, settings)["status"] == "ok"
         client.containers.get.assert_called_once_with(settings.prod_db_container)
@@ -229,16 +229,31 @@ class TestStorageDiagnostics:
     @pytest.mark.parametrize("code", [124, 137])
     def test_timeout_is_not_an_empty_inventory(self, tmp_path, code):
         client = MagicMock()
-        client.containers.get.return_value.exec_run.return_value = (code, b"")
+        client.containers.get.return_value.exec_run.return_value = (code, (None, None))
         with pytest.raises(ExternalCommandError, match="Timed out"):
             walg.backup_list(client, _settings(tmp_path, BACKUP))
         result = walg.storage_status(client, _settings(tmp_path, BACKUP))
         assert result == {"status": "error", "detail": "WAL-G storage probe timed out"}
 
+    def test_inventory_uses_json_stdout_without_info_log(self, tmp_path):
+        client = MagicMock()
+        run = client.containers.get.return_value.exec_run
+        run.return_value = (
+            0,
+            (
+                b'[{"backup_name":"base_01"}]',
+                b"INFO: List backups from storages: [default]\n",
+            ),
+        )
+        assert walg.backup_list(client, _settings(tmp_path, BACKUP)) == [
+            {"backup_name": "base_01"}
+        ]
+        assert run.call_args.kwargs["demux"] is True
+
     @pytest.mark.parametrize("output", [b"", b"garbage", b"{}", b"[1]"])
     def test_invalid_inventory_is_not_empty(self, tmp_path, output):
         client = MagicMock()
-        client.containers.get.return_value.exec_run.return_value = (0, output)
+        client.containers.get.return_value.exec_run.return_value = (0, (output, None))
         with pytest.raises(PrerequisiteNotMetError, match="invalid backup inventory"):
             walg.backup_list(client, _settings(tmp_path, BACKUP))
 
@@ -246,8 +261,8 @@ class TestStorageDiagnostics:
     def test_empty_archive_requires_successful_storage_listing(self, tmp_path, code):
         client = MagicMock()
         client.containers.get.return_value.exec_run.side_effect = [
-            (code, b"INFO: No backups found"),
-            (0, b"type size last modified name"),
+            (code, (None, b"INFO: No backups found")),
+            (0, (b"type size last modified name", None)),
         ]
         assert walg.backup_list(client, _settings(tmp_path, BACKUP)) == []
 
@@ -256,8 +271,8 @@ class TestStorageDiagnostics:
     ):
         client = MagicMock()
         client.containers.get.return_value.exec_run.side_effect = [
-            (0, b"INFO: No backups found"),
-            (1, b"AccessDenied"),
+            (0, (None, b"INFO: No backups found")),
+            (1, (None, b"AccessDenied")),
         ]
         with pytest.raises(ExternalCommandError, match="AccessDenied"):
             walg.backup_list(client, _settings(tmp_path, BACKUP))
@@ -266,7 +281,10 @@ class TestStorageDiagnostics:
         client = MagicMock()
         client.containers.get.return_value.exec_run.return_value = (
             1,
-            b"https://private-bucket.example: x509: certificate signed by unknown authority",
+            (
+                None,
+                b"https://private-bucket.example: x509: certificate signed by unknown authority",
+            ),
         )
         result = walg.storage_status(client, _settings(tmp_path, BACKUP))
         assert result["status"] == "error"
@@ -283,7 +301,7 @@ class TestStorageDiagnostics:
 
         def local_exec(cmd, **kwargs):
             result = subprocess.run(cmd, capture_output=True, timeout=6)
-            return result.returncode, result.stdout + result.stderr
+            return result.returncode, (result.stdout, result.stderr)
 
         client.containers.get.return_value.exec_run.side_effect = local_exec
         with pytest.raises(ExternalCommandError):
