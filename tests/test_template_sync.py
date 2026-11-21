@@ -153,7 +153,8 @@ def test_api_sync_head_is_read_only_even_while_locked(setup):
     mount_web_ui(app, lambda: settings, locks)
     client = TestClient(app)
     path = "/api/templates/prod/sync"
-    with LockManager(locks.lock_dir).env_lock(template_lock_key(team.team_id, "prod")):
+    with locks.env_lock(template_lock_key(team.team_id, "prod")):
+        assert client.delete(path).status_code == 409
         get = client.get(path)
         head = client.head(path)
     assert head.status_code == get.status_code == 200
