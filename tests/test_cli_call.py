@@ -12,8 +12,12 @@ explicit `false`. This module reproduces that PEP 563 condition (note the
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import subprocess
+import sys
 import types as _types
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -173,3 +177,57 @@ def test_read_output_survives_cli_exit_without_exposing_it_to_mcp(
     team.team_id = "2"
     server._run_call(args)
     assert "not found" in capsys.readouterr().out
+
+
+def test_cli_process_reads_previous_process_output(tmp_path):
+    config = tmp_path / "oduflow.toml"
+    config.write_text(
+        f'[storage]\ndata_dir = "{tmp_path}"\n[team.1]\nhostname = "localhost"\n'
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(server.__file__).resolve().parents[1]),
+        "HOME": str(tmp_path),
+        "ODUFLOW_TOML": str(config),
+    }
+    # Stub only the external Odoo test run; both CLI dispatch and storage
+    # are real. Run the reader with no patches in a separate interpreter.
+    writer = [
+        sys.executable,
+        "-c",
+        "from oduflow import server as s; s._wake_for_work=lambda *a: ''; s.odoo_ops.run_environment_tests=lambda *a, **kw: 'line one\\nfinal marker'; s.main()",
+        "--no-telemetry",
+        "call",
+        "run_odoo_tests",
+        '{"env_name":"fixture","modules":"fixture","summary_only":true}',
+    ]
+    written = subprocess.check_output(writer, env=env, text=True, timeout=30)
+    output_id = re.search(r"output_id=(\w+)", written)[1]
+    read = subprocess.check_output(
+        [
+            sys.executable,
+            "-m",
+            "oduflow.server",
+            "--no-telemetry",
+            "call",
+            "read_output",
+            output_id,
+            "lines",
+            "2",
+            "2",
+        ],
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    assert "2| final marker" in read
+    # A cache write failure must not hide the result of work already done.
+    (tmp_path / ".oduflow-cli-cache").chmod(0o755)
+    failed_cache = subprocess.run(
+        writer, env=env, capture_output=True, text=True, check=True, timeout=30
+    )
+    assert "could not cache" in failed_cache.stderr
+    assert (
+        "final marker" in failed_cache.stdout
+        and "output_id=" not in failed_cache.stdout
+    )

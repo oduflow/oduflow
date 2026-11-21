@@ -328,25 +328,36 @@ def _active_output_cache() -> OutputCache:
 def _maybe_cache(output: str, header: str, source_tool: str, source_args: str) -> str:
     """If output exceeds threshold, cache it and return header + summary. Otherwise return as-is."""
     if len(output) > _CACHE_THRESHOLD:
-        from oduflow.production_access import PRODUCTION_TOOLS
-
-        is_production = source_tool in PRODUCTION_TOOLS
-        cached = _active_output_cache().store(
-            output,
-            source_tool=source_tool,
-            source_args=source_args,
-            team_id=_resolve_team(None).team_id if is_production else "",
-            production=is_production,
-        )
-        return f"{header}\n\n{_make_summary(cached)}"
+        cached = _cache_output(output, source_tool, source_args)
+        if cached is not None:
+            return f"{header}\n\n{_make_summary(cached)}"
     return f"{header}\n\nOutput:\n{output}"
 
 
-def _cache_output(output: str, source_tool: str, source_args: str) -> CachedOutput:
-    """Store command output when the caller explicitly requested a terse response."""
-    return _active_output_cache().store(
-        output, source_tool=source_tool, source_args=source_args
-    )
+def _cache_output(
+    output: str, source_tool: str, source_args: str
+) -> CachedOutput | None:
+    import sqlite3
+
+    from oduflow.production_access import PRODUCTION_TOOLS
+
+    production = source_tool in PRODUCTION_TOOLS
+    try:
+        return _active_output_cache().store(
+            output,
+            source_tool=source_tool,
+            source_args=source_args,
+            team_id=_resolve_team(None).team_id if production else "",
+            production=production,
+        )
+    except (OSError, sqlite3.Error):
+        if not _standalone_call.get():
+            raise
+        print(
+            "Warning: could not cache CLI output; returning it directly.",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _odoo_test_summary(output: str) -> str | None:
@@ -380,7 +391,9 @@ def _compact_pull_result(
             source_tool="pull_and_apply",
             source_args=f"env={env_name}, summary_only=True",
         )
-        parts.append(f"output_id={cached.output_id}")
+        parts.append(
+            f"output_id={cached.output_id}" if cached else f"Output:\n{output}"
+        )
     return "; ".join(parts)
 
 
@@ -2386,6 +2399,8 @@ def run_odoo_tests(
         # started by this call.
         note = " ".join(woke.split())
         prefix = f"{note} " if note else ""
+        if cached is None:
+            return f"{prefix}{summary}\n\nOutput:\n{output}"
         return f"{prefix}{summary} [output_id={cached.output_id}]"
 
     header = woke + f"Test Results for {env_name}:"
