@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.94.0
+
+### Features
+
+- **Open a shell in an auxiliary service** — the dashboard now offers a terminal for the selected team’s service. Closing a dashboard terminal also ends its shell process. (#369)
+- **Reference sibling services in a Stack** — Stack validates service references and applies dependencies before the services that use them. (#377)
+- **Delete a merged branch with its environment** — the dashboard, REST API and MCP can also remove the branch from `origin`. Oduflow keeps the branch if it cannot verify the merge, another environment uses it, or its tip has changed. (#366)
+
+### Security
+
+- **Keep PostgreSQL operations within their database roles** — SQL sessions, password resets, dumps and restores no longer need cluster-superuser access for tenant data. **Upgrade note:** check scoped credentials and extension requirements before restoring older snapshots or upgrading PostgreSQL. Restores that require superuser-only objects are rejected by default. (#369)
+- **Limit access to services, host paths and command arguments** — service operations verify team ownership, HTTP endpoints restrict host filesystem paths, and CLI diagnostics omit argument values. (#369, #380)
+
+### Bug Fixes
+
+- **Restore PostgreSQL on a fresh host** — WAL-G recovery stages the base backup in an empty directory and can replay WAL to the requested timestamp without a pre-existing production container or data volume. Both WAL status commands now report the running monitor’s latest sample. (#374, #379, #389)
+- **Keep Docker cleanup and environment recreation reliable** — disposable helpers release anonymous volumes, cleanup no longer blocks image pruning, and abandoned Odoo commands time out. Destroying a dev cluster preserves its old tablespaces without blocking a fresh import. A missing production volume is no longer logged as a Docker failure on dev-only hosts. (#376, #381, #382, #387)
+- **Preserve service state and recognize Odoo filestores** — Stack preserves stopped services, explicitly configured system environment keys remain visible, and a garbage-collection checklist no longer prevents Oduflow from recognizing a filestore. (#357, #371, #373)
+- **Keep builds and command output available after CLI exit** — local image builds continue after the launching CLI exits and can be cancelled later. A new CLI process can retrieve earlier output with `read_output`; a cache write failure no longer hides the completed command’s result. (#383, #388)
+- **Return accurate CLI results** — direct calls reject missing required arguments, the remote client honors options after global flags, and feedback reports success only after delivery. (#384, #385, #386)
+- **Use the production URL for the first approval** — a newly initialized production generates its first approval link with its advertised URL instead of `localhost`. Existing databases and custom URLs are unchanged. (#392)
+- **Handle HTTP HEAD without side effects** — template sync status returns the same headers as GET without changing state. OAuth authorization endpoints return 405 without issuing a code. (#390, #391)
+
 ## v1.93.0
 
 ### Features
