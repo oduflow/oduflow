@@ -1555,6 +1555,7 @@
   <button class="tab-btn" data-tab="agent-guides" onclick="switchTab('agent-guides')">Agent Guides</button>
 </div>
 
+<div id="production-copies" data-team="__COPY_TEAM__"></div>
 <div id="tab-environments" class="tab-content active">
   <div id="bulk-bar" class="bulk-bar" style="display:none" role="toolbar" aria-label="Bulk actions for selected environments">
     <span class="bulk-count" id="bulk-count"></span>
@@ -7433,6 +7434,70 @@ async function submitFeedback() {
   }
 }
 
+// Only an operation ID and the target name survive reload. Never save form data.
+const copyRows = document.getElementById('production-copies');
+const copyKey = 'production-copy:' + encodeURIComponent(copyRows.dataset.team) + ':';
+
+async function watchProductionCopy(id, name) {
+  const row = document.createElement('div');
+  row.className = 'env-card';
+  copyRows.appendChild(row);
+  const title = document.createElement('strong');
+  title.textContent = name;
+  const status = document.createElement('span');
+  status.setAttribute('role', 'status');
+  row.append(title, ' · ', status);
+  let misses = 0;
+  async function poll() {
+    let job;
+    try {
+      const r = await fetch('/api/production-copies/' + id, {cache:'no-store'});
+      job = await readResult(r);
+      if (r.status === 404 && ++misses >= 3) {
+        status.textContent = 'Copy status unavailable. Check the environment before trying again.';
+      } else if (!r.ok || !job.ok) {
+        throw new Error();
+      } else if (job.state === 'running') {
+        status.textContent = job.phase + ' · ' + _fmtElapsed(Math.max(0, Date.now() - job.started * 1000));
+        setTimeout(poll, 1500);
+        return;
+      } else {
+        status.textContent = job.state === 'succeeded' ? 'Environment created.' : job.phase + ' failed: ' + job.error;
+      }
+    } catch (e) {
+      status.textContent = 'Reconnecting to check copy status…';
+      setTimeout(poll, 2500);
+      return;
+    }
+    sessionStorage.removeItem(copyKey + id);
+    await loadEnvironments(true);
+    function openCard() {
+      switchTab('environments');
+      const card = document.querySelector('#env-list [data-branch="' + CSS.escape(name) + '"]');
+      if (!card) { showToast('Environment is not in the list. Refresh to check again.', true); return; }
+      card.tabIndex = -1;
+      card.focus();
+      card.scrollIntoView({block:'center'});
+      row.remove();
+    }
+    function action(label, fn) {
+      const button = document.createElement('button');
+      button.className = 'btn'; button.textContent = label; button.onclick = fn;
+      row.append(' ', button);
+    }
+    if (job.state === 'succeeded') {
+      loadTemplates();
+      if (document.querySelector('#tab-environments.active') && !document.querySelector('.modal-overlay.show') &&
+          cachedEnvs.some(env => env.branch === name)) {
+        openCard(); showToast('Environment "' + name + '" created'); return;
+      }
+    }
+    if (job.state === 'succeeded' || cachedEnvs.some(env => env.branch === name)) action('Open environment', openCard);
+    action('Dismiss', () => row.remove());
+  }
+  await poll();
+}
+
 async function submitCreate() {
   var branch = document.getElementById('cr-branch').value.trim();
   var baseBranch = document.getElementById('cr-base-branch').value.trim();
@@ -7492,6 +7557,25 @@ async function submitCreate() {
       auto_install_modules: autoInstall,
       env_vars: envVars,
     };
+    if (_createFromProduction) {
+      const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
+      const name = envName || branch;
+      sessionStorage.setItem(copyKey + id, name);
+      try {
+        const response = await fetch(API + '/create', {method: 'POST',
+          headers: {'Content-Type':'application/json', 'X-Copy-Operation':id}, body:JSON.stringify(payload)});
+        if (response.status >= 400 && response.status < 500 && !isAmbiguousGatewayStatus(response.status)) {
+          const rejection = await readResult(response);
+          sessionStorage.removeItem(copyKey + id);
+          errEl.textContent = rejection.error || 'Copy request rejected.';
+          errEl.style.display = 'block';
+          return;
+        }
+      } catch (e) { /* A lost reply does not mean the server rejected the copy. */ }
+      closeCreateModal();
+      watchProductionCopy(id, name);
+      return;
+    }
     var r = await fetch(API + '/create', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -7502,16 +7586,10 @@ async function submitCreate() {
       closeCreateModal();
       var createdFrom = data.result && data.result.branch_created_from;
       showToast('Environment "' + (envName || branch) + '" created' +
-        (data.from_production
-          ? ' from production "' + data.from_production + '" (template "' + data.template_name + '")'
-          : '') +
         (createdFrom
           ? '; new branch "' + branch + '" pushed from "' + createdFrom + '"'
           : ''));
-      await Promise.all([
-        data.from_production ? loadTemplates() : Promise.resolve(),
-        loadEnvironments(true)
-      ]);
+      await loadEnvironments(true);
     } else {
       errEl.textContent = data.error || ('Creation failed (HTTP ' + r.status + ')');
       errEl.style.display = 'block';
@@ -11677,6 +11755,9 @@ async function loadHealth() {
 }
 
 if (!SCOPED_ENV) {
+  Object.keys(sessionStorage).filter(k => k.startsWith(copyKey)).forEach(k => {
+    watchProductionCopy(k.slice(copyKey.length), sessionStorage.getItem(k));
+  });
   if (!WHITE_LABEL) loadLicense();
   // Refresh the local status so an open dashboard notices expiration. This
   // endpoint only reads the local key; it never contacts the license server.

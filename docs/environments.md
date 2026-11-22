@@ -94,7 +94,12 @@ It is mutually exclusive with `template_name` and `local_path`: the production s
 In the dashboard, **Create environment** in a production card's menu opens the
 same dialog with the production's repository, Odoo image, git credential and
 extra addons filled in (all editable) and the base branch set to the
-production's branch.
+production's branch. When the server accepts the copy, the dialog closes and
+the dashboard shows the current step and elapsed time. Reloading the same
+browser tab resumes the status check without starting a second copy. On
+success the dashboard focuses the new environment card, or offers **Open
+environment** if you have switched views. If the server restarts or the
+status expires, check the environment list before trying again.
 
 The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
 

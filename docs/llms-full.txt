@@ -2670,7 +2670,12 @@ It is mutually exclusive with `template_name` and `local_path`: the production s
 In the dashboard, **Create environment** in a production card's menu opens the
 same dialog with the production's repository, Odoo image, git credential and
 extra addons filled in (all editable) and the base branch set to the
-production's branch.
+production's branch. When the server accepts the copy, the dialog closes and
+the dashboard shows the current step and elapsed time. Reloading the same
+browser tab resumes the status check without starting a second copy. On
+success the dashboard focuses the new environment card, or offers **Open
+environment** if you have switched views. If the server restarts or the
+status expires, check the environment list before trying again.
 
 The copy always goes through **one managed template per production**, named `prod-<name>`. It is published on the first call and **reused** by every later one, so a second environment from the same production is an instant `CREATE DATABASE ... TEMPLATE` clone plus an overlay mount — the production is dumped once, not once per environment. The result line tells you which of the two happened, including the snapshot's age when the template was reused.
 
@@ -6628,6 +6633,7 @@ are registered only when `[production].enabled = true`.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
+| `GET` | `/api/production-copies/{operation}` | Poll a dashboard production copy. Start it with `POST /api/environments/create`, `from_production`, and an `X-Copy-Operation` header (32 lowercase hex digits) to receive `202` instead of waiting. Reusing the same ID for the same source and target returns its existing status. States: `running`, `succeeded`, `failed`. Records are team-specific, in memory, and expire one hour after completion; `404` means unknown, not failed. Without the header, creation stays synchronous. |
 | `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`), `base_branch` (when the branch does not exist on origin, create it from this branch and push it; the result's `branch_created_from` names the base when that happened) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |

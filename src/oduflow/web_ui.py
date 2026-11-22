@@ -1565,6 +1565,9 @@ def _build_routes(
             # literal: environment names are git branch names and may carry
             # quotes. Attribute escaping is exactly the right encoding there.
             .replace("__SCOPED_ENV__", html.escape(scoped_env, quote=True))
+            .replace(
+                "__COPY_TEAM__", html.escape(team.team_id if team else "", quote=True)
+            )
             # The create-production modal needs the team zone whichever tab it
             # is opened from, so it ships with the page instead of arriving as
             # a side effect of loading the productions list.
@@ -2452,9 +2455,26 @@ def _build_routes(
         )
         return str(managed)
 
-    async def api_create(request: Request) -> JSONResponse:
-        import json as _json
+    # Accessed only on this dashboard's event loop, never by the Docker workers.
+    copies: dict[tuple[str, str], dict[str, Any]] = {}
+    copy_tasks: set[asyncio.Task[None]] = set()
 
+    def copy_status(team: TeamSettings, operation: str) -> dict[str, Any] | None:
+        cutoff = time.time() - 3600
+        for key, record in list(copies.items()):
+            if record.get("finished", float("inf")) < cutoff:
+                del copies[key]
+        return copies.get((team.team_id, operation))
+
+    async def api_copy_status(request: Request) -> JSONResponse:
+        job = copy_status(_get_ui_team(request), request.path_params["operation"])
+        if job is None:
+            return JSONResponse(
+                {"ok": False, "error": "Copy not tracked."}, status_code=404
+            )
+        return JSONResponse({"ok": True, **job}, headers={"Cache-Control": "no-store"})
+
+    async def api_create(request: Request) -> JSONResponse:
         try:
             body = await request.json()
         except Exception:
@@ -2468,12 +2488,7 @@ def _build_routes(
         # environments.
         branch = (body.get("branch") or "").strip() or env_name
         env_name = env_name or branch
-        repo_url = (body.get("repo_url") or "").strip()
-        odoo_image = (body.get("odoo_image") or "").strip()
-        git_user = (body.get("git_user") or "").strip()
         template_name_raw = (body.get("template_name") or "").strip()
-        extra_addons_raw = body.get("extra_addons")
-        auto_install_raw = (body.get("auto_install_modules") or "").strip()
         hostname = (body.get("hostname") or "").strip()
         from_production = (body.get("from_production") or "").strip()
         # Where the branch starts when origin does not have it yet; it is then
@@ -2514,6 +2529,23 @@ def _build_routes(
             return _error_text_response(e)
 
         team = _get_ui_team(request)
+        operation = request.headers.get("X-Copy-Operation")
+        if operation is not None:
+            if not from_production or not re.fullmatch(r"[0-9a-f]{32}", operation):
+                return JSONResponse(
+                    {"ok": False, "error": "Invalid copy operation."}, status_code=400
+                )
+            previous = copy_status(team, operation)
+            if previous is not None:
+                if (
+                    previous["env_name"] != env_name
+                    or previous["source"] != from_production
+                ):
+                    return JSONResponse(
+                        {"ok": False, "error": "Copy ID already in use."},
+                        status_code=409,
+                    )
+                return JSONResponse({"ok": True, **previous}, status_code=202)
         # Acquire the env lock in its own try so a BusyError returns WITHOUT
         # entering the try/finally below — otherwise the finally would release a
         # lock that another in-flight request holds (issue #42).
@@ -2521,13 +2553,75 @@ def _build_routes(
             locks.acquire_env(env_name, team.team_id)
         except BusyError as e:
             return _error_response(e)
+
+        job: dict[str, Any] = {
+            "env_name": env_name,
+            "source": from_production,
+            "state": "running",
+            "phase": "Preparing production template",
+            "started": time.time(),
+        }
+        work = _create_locked(
+            team,
+            body,
+            env_name,
+            branch,
+            from_production,
+            template_name_raw,
+            hostname,
+            base_branch,
+            env_vars,
+            job,
+        )
+        if operation is None:
+            return await work
+        copies[team.team_id, operation] = job
+
+        async def run_copy() -> None:
+            try:
+                response = await work
+                if response.status_code == 200:
+                    job["state"] = "succeeded"
+                else:
+                    job.update(
+                        state="failed", error=json.loads(bytes(response.body))["error"]
+                    )
+            except Exception:
+                logger.exception("Background copy failed for %s", env_name)
+                job.update(state="failed", error="Internal server error.")
+            finally:
+                job["finished"] = time.time()
+
+        task = asyncio.create_task(run_copy())
+        copy_tasks.add(task)
+        task.add_done_callback(copy_tasks.discard)
+        return JSONResponse({"ok": True, **job}, status_code=202)
+
+    async def _create_locked(
+        team: TeamSettings,
+        body: dict[str, Any],
+        env_name: str,
+        branch: str,
+        from_production: str,
+        template_name_raw: str,
+        hostname: str,
+        base_branch: str,
+        env_vars: dict[str, str],
+        job: dict[str, Any],
+    ) -> JSONResponse:
         try:
+            repo_url = (body.get("repo_url") or "").strip()
+            odoo_image = (body.get("odoo_image") or "").strip()
+            git_user = (body.get("git_user") or "").strip()
+            extra_addons_raw = body.get("extra_addons")
+            auto_install_raw = (body.get("auto_install_modules") or "").strip()
             # Publishing dumps a live production database, so it happens only
             # once the request is past validation and holds the env lock.
             if from_production:
                 template_name_raw = await _template_from_production(
                     team, from_production
                 )
+                job["phase"] = "Creating environment"
 
             resolved_template: str | None
             if not template_name_raw or template_name_raw.lower() == "none":
@@ -2547,7 +2641,7 @@ def _build_routes(
                 metadata_path = team.get_template_metadata_path(resolved_template)
                 if os.path.isfile(metadata_path):
                     with open(metadata_path) as f:
-                        metadata = _json.load(f)
+                        metadata = json.load(f)
                     if not repo_url:
                         repo_url = metadata.get("repo_url", "")
                     if not odoo_image:
@@ -7678,6 +7772,7 @@ def _build_routes(
         Route("/api/s3/browse", api_s3_browse, methods=["POST"]),
         Route("/api/environments", api_list, methods=["GET"]),
         Route("/api/environments/create", api_create, methods=["POST"]),
+        Route("/api/production-copies/{operation}", api_copy_status, methods=["GET"]),
         *production_routes,
         Route("/healthz", healthz, methods=["GET"]),
         Route("/api/stats", api_stats, methods=["GET"]),
