@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import tempfile
+from dataclasses import replace
+from urllib.parse import parse_qs, quote_plus, urlsplit
 
 import pytest
 
@@ -79,6 +82,84 @@ def _host_settings(*hostnames):
             for i, h in enumerate(hostnames, start=1)
         },
     )
+
+
+@pytest.mark.parametrize("method", ["client_secret_basic", "client_secret_post"])
+def test_client_credentials_through_token_lifecycle(method):
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    settings = _settings()
+    secret = "s+e:cr et%"
+    settings.teams["1"] = replace(settings.teams["1"], auth_token=secret)
+    provider = OduflowOAuthProvider(settings)
+    client = TestClient(Starlette(routes=provider.get_routes("/mcp")))
+    redirect_uri = "http://localhost/callback"
+    authorize = client.get(
+        "/authorize",
+        params={
+            "client_id": "team_1",
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "code_challenge_method": "S256",
+            "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        },
+        follow_redirects=False,
+    )
+    code = parse_qs(urlsplit(authorize.headers["location"]).query)["code"][0]
+
+    def post(path, **data):
+        if method == "client_secret_post":
+            return client.post(
+                path, data={**data, "client_id": "team_1", "client_secret": secret}
+            )
+        return client.post(path, data=data, auth=("team_1", quote_plus(secret)))
+
+    exchange = post(
+        "/token",
+        grant_type="authorization_code",
+        code=code,
+        redirect_uri=redirect_uri,
+        code_verifier="dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    )
+    assert exchange.status_code == 200
+    original = exchange.json()
+    refresh = post(
+        "/token", grant_type="refresh_token", refresh_token=original["refresh_token"]
+    )
+    assert refresh.status_code == 200
+    rotated = refresh.json()
+    assert rotated["refresh_token"] != original["refresh_token"]
+    assert (
+        _run(provider.load_access_token(rotated["access_token"])).client_id == "team_1"
+    )
+    assert post("/revoke", token=rotated["access_token"]).status_code == 200
+    assert _run(provider.load_access_token(rotated["access_token"])) is None
+
+
+@pytest.mark.parametrize(
+    ("basic", "form", "status"),
+    [
+        ("team_1:wrong", {}, 401),
+        ("bad-encoding", {}, 401),
+        ("team_2:tok-b", {"client_id": "team_1"}, 400),
+        ("team_1:tok-a", {"client_secret": "tok-a"}, 400),
+    ],
+)
+@pytest.mark.parametrize("path", ["/token", "/revoke"])
+def test_invalid_basic_client_auth(path, basic, form, status):
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    provider = OduflowOAuthProvider(_settings())
+    client = TestClient(Starlette(routes=provider.get_routes("/mcp")))
+    encoded = base64.b64encode(basic.encode()).decode() if ":" in basic else basic
+    response = client.post(
+        path, headers={"Authorization": f"Basic {encoded}"}, data=form
+    )
+    assert response.status_code == status
+    if status == 401:
+        assert response.headers["www-authenticate"].startswith("Basic ")
 
 
 class TestOduflowOAuthProvider:

@@ -83,7 +83,7 @@ comes from a variable does not get a generated one in the file.
 
 Oduflow can act as its own OAuth 2.1 Authorization Server, so MCP clients that require an OAuth flow (e.g. Claude.ai Remote MCP, MCP Inspector) can connect without any external identity provider.
 
-The team's OAuth **`client_id`** is a non-secret identifier, `team_<id>` (e.g. `team_1` for `[team.1]`); the **`client_secret`** is the team's `auth_token`. Only the `client_id` appears in the authorization URL — the secret is sent solely in the token request body, so it never leaks into logs or browser history. When the OAuth flow completes, Oduflow issues an **independent, opaque access token that expires** (with a refresh token to obtain a new one) — the client never receives the `auth_token` itself, so a compromised OAuth token has a bounded lifetime and can be revoked. The `auth_token` stays valid as a plain Bearer token for CLI clients (see [Bearer-only mode](#bearer-only-mode-cli-automation)).
+The team's OAuth **`client_id`** is a non-secret identifier, `team_<id>` (e.g. `team_1` for `[team.1]`); the **`client_secret`** is the team's `auth_token`. Only the `client_id` appears in the authorization URL. At the HTTPS token and revocation endpoints, clients can authenticate with HTTP Basic (`client_secret_basic`, used by Codex) or form fields (`client_secret_post`). When the OAuth flow completes, Oduflow issues an **independent, opaque access token that expires** (with a refresh token to obtain a new one) — the client never receives the `auth_token` itself, so a compromised OAuth token has a bounded lifetime and can be revoked. The `auth_token` stays valid as a plain Bearer token for CLI clients (see [Bearer-only mode](#bearer-only-mode-cli-automation)).
 
 ### Setup
 

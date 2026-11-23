@@ -4,8 +4,8 @@ Each team is preregistered as an OAuth client whose ``client_id`` is a public,
 non-secret identifier (``team_<id>``, e.g. ``team_1``) and whose
 ``client_secret`` is the team's ``auth_token``. Keeping the secret out of the
 ``client_id`` matters because ``client_id`` travels in the ``/authorize`` query
-string (logs, browser history, Referer); the secret is sent only in the POST
-``/token`` body. A successful Authorization Code + PKCE flow mints an
+string (logs, browser history, Referer). Clients authenticate to the token
+endpoint via HTTP Basic or form credentials. Authorization Code + PKCE mints an
 *independent*, opaque, expiring ``access_token`` (with a rotating
 ``refresh_token``) — the OAuth client never receives the team ``auth_token``.
 Minted tokens are persisted (see :mod:`oduflow.oauth_token_store`) so they
@@ -17,21 +17,25 @@ and a minted token carries the numeric ``team_id`` as its ``client_id`` so
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from functools import partial
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 # FastMCP's AccessToken (a subclass of the MCP SDK's that adds ``claims``) —
 # never the SDK's own. ``fastmcp.server.dependencies.get_access_token()``, which
 # scoped_access uses to read a token's env scope, rejects a plain SDK token: it
 # tries to convert it and passes ``claims=None`` (the SDK's default) into a
 # field typed ``dict``, so validation fails and the request is denied outright.
-from fastmcp.server.auth.auth import AccessToken
+from fastmcp.server.auth.auth import AccessToken, TokenHandler
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
+from mcp.server.auth.handlers.revoke import RevocationHandler
 from mcp.server.auth.json_response import PydanticJSONResponse
+from mcp.server.auth.middleware.client_auth import ClientAuthenticator
 from mcp.server.auth.provider import (
     AccessToken as SDKAccessToken,
 )
@@ -48,6 +52,7 @@ from mcp.shared.auth import (
     ProtectedResourceMetadata,
 )
 from pydantic import AnyHttpUrl, AnyUrl
+from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -206,6 +211,54 @@ class HostRelativeAuthChallenge:
         await self.app(scope, receive, send_wrapper)
 
 
+async def _with_basic_client_auth(
+    handler: Callable[[Request], Awaitable[Response]], request: Request
+) -> Response:
+    """Adapt HTTP Basic credentials to the MCP SDK's form-only handlers."""
+    authorization = request.headers.getlist("authorization")
+    if not authorization:
+        return await handler(request)
+
+    scheme, _, encoded = authorization[0].partition(" ")
+    if scheme.lower() != "basic" and len(authorization) == 1:
+        return await handler(request)
+
+    challenge = {
+        "WWW-Authenticate": 'Basic realm="oduflow"',
+        "Cache-Control": "no-store",
+    }
+    try:
+        if len(authorization) != 1:
+            raise ValueError
+        credentials = base64.b64decode(encoded.strip(), validate=True).decode("ascii")
+        encoded_id, encoded_secret = credentials.split(":", 1)
+        client_id = unquote_plus(encoded_id, errors="strict")
+        client_secret = unquote_plus(encoded_secret, errors="strict")
+    except ValueError:
+        return JSONResponse(
+            {"error": "invalid_client"}, status_code=401, headers=challenge
+        )
+
+    async with request.form() as form:
+        if "client_secret" in form or any(
+            value != client_id for value in form.getlist("client_id")
+        ):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+        # Both the SDK authenticator and the grant/revocation handlers read
+        # request.form(). Give them the same credentials on this request only.
+        request._form = FormData(
+            [
+                *form.multi_items(),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+            ]
+        )
+        response = await handler(request)
+    if response.status_code == 401:
+        response.headers.update(challenge)
+    return response
+
+
 class _FlexibleClient(OAuthClientInformationFull):
     """Client info that accepts the varied callback URLs MCP clients use.
 
@@ -273,8 +326,7 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
                 continue
             # Public, non-secret client_id (e.g. "team_1"): it travels in the
             # /authorize query string, so it must NOT be the secret. The secret
-            # lives only in client_secret (POST /token body) and is what the
-            # issued access_token equals.
+            # authenticates token requests. Issued access tokens are independent.
             client_id = public_client_id(team.team_id)
             client = _FlexibleClient(
                 client_id=client_id,
@@ -311,6 +363,23 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
         for route in routes:
             if not isinstance(route, Route):
                 patched.append(route)
+            elif route.path in {"/token", "/revoke"}:
+                authenticator = ClientAuthenticator(self)
+                handler = (
+                    TokenHandler(self, authenticator)
+                    if route.path == "/token"
+                    else RevocationHandler(self, authenticator)
+                )
+                methods = ["POST", "OPTIONS"]
+                patched.append(
+                    Route(
+                        route.path,
+                        endpoint=cors_middleware(
+                            partial(_with_basic_client_auth, handler.handle), methods
+                        ),
+                        methods=methods,
+                    )
+                )
             elif route.path == "/authorize" and route.methods is not None:
                 # GET issues a code, so do not run it for Starlette's implicit
                 # HEAD. Match HEAD explicitly or the dashboard mount takes it.
