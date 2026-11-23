@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.95.0
+
+### Features
+
+- **Connect native MCP clients such as Codex over OAuth** — the `/token` and `/revoke` endpoints now accept `client_secret_basic` (HTTP Basic client credentials) in addition to form credentials, keep the SDK's 4 MiB body limit, return `invalid_client` on failed client authentication in `/revoke`, allow the `Authorization` header in CORS preflights, and alias `/mcp/revoke` to `/revoke` for path-relative clients. (#394)
+
+### Bug Fixes
+
+- **Track production copies in the background from the dashboard** — starting a production copy no longer blocks the request; the dashboard follows its progress and reports the outcome. (#393)
+
 ## v1.94.0
 
 ### Features
