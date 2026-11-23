@@ -142,6 +142,26 @@ def test_scoped_page_renders_for_the_cookie_holder(app):
     resp = client.get(f"/env/{_ENV}")
     assert resp.status_code == 200
     assert f'data-scoped-env="{_ENV}"' in resp.text
+    # The chat-first workspace, for a share-link visitor.
+    assert "/static/workspace/assets/" in resp.text
+    assert 'data-viewer="share"' in resp.text
+
+
+def test_engineer_view_is_the_scoped_dashboard(app):
+    client = _visitor(app, _share_url(app))
+    resp = client.get(f"/env/{_ENV}?view=console")
+    assert resp.status_code == 200
+    assert f'data-scoped-env="{_ENV}"' in resp.text
+    assert "environments.filter(function (env)" in resp.text
+    assert "/static/workspace/assets/" not in resp.text
+
+
+def test_workspace_escapes_the_environment_name(app):
+    client = _operator(app)
+    resp = client.get('/env/x"><script>alert(1)</script>')
+    assert resp.status_code == 200
+    assert "<script>alert(1)</script>" not in resp.text
+    assert 'data-scoped-env="x&quot;&gt;&lt;script&gt;' in resp.text
 
 
 def test_page_without_a_key_or_cookie_is_refused(app):
@@ -161,6 +181,9 @@ def test_operator_can_preview_the_shared_view(app):
     resp = client.get(f"/env/{_ENV}")
     assert resp.status_code == 200
     assert f'data-scoped-env="{_ENV}"' in resp.text
+    # An operator's workspace links back to the dashboard instead of "Leave".
+    assert 'data-viewer="operator"' in resp.text
+    resp = client.get(f"/env/{_ENV}?view=console")
     assert "environments.filter(function (env)" in resp.text
 
 
@@ -194,7 +217,11 @@ def test_page_navigation_returns_to_the_shared_workspace(app, path, method):
     page = client.get(resp.headers["location"])
     assert page.status_code == 200
     assert f'data-scoped-env="{_ENV}"' in page.text
-    assert 'onclick="logout()"' in page.text
+    # A share-link viewer gets the workspace's "Leave" control (and the
+    # Engineer view keeps the dashboard's own).
+    assert 'data-viewer="share"' in page.text
+    console = client.get(resp.headers["location"] + "?view=console")
+    assert 'onclick="logout()"' in console.text
 
 
 def test_team_surfaces_are_denied(app):

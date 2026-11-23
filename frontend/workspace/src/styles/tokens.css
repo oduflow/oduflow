@@ -1,0 +1,92 @@
+/* Design tokens: a verbatim copy of the dashboard's :root blocks
+   (src/oduflow/templates/dashboard.html). They must stay identical:
+   tests/test_workspace_bundle.py compares them. See DESIGN.md. */
+@font-face {
+  font-family: "Source Sans 3";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/static/source-sans-3-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Source Code Pro";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/static/source-code-pro-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+:root {
+  /* "The Engineer's Console" tokens — shared with oduflow.dev (see DESIGN.md) */
+  --bg: oklch(0.07 0.01 260);
+  --surface: oklch(0.1 0.01 260);
+  --subtle: oklch(0.15 0.01 260);
+  --border: oklch(0.3 0.013 260);
+  --surface-raised: oklch(0.16 0.012 260);
+  --border-raised: oklch(0.34 0.015 260);
+  --text: oklch(0.93 0.005 260);
+  --text-dim: oklch(0.7 0.01 260);
+  --accent: oklch(0.6 0.2 260);
+  --green: #34d399;
+  --red: oklch(0.65 0.22 25);
+  --yellow: #fbbf24;
+  --cyan: #22d3ee;
+  --violet: #a78bfa;
+  --rose: #fb7185;
+  --terminal-bg: #060a12;
+  --terminal-text: oklch(0.93 0.005 260);
+  /* Theme-derived tokens — overridden in the light theme below */
+  --accent-fg: #fff;
+  --backdrop: rgba(0,0,0,0.72);
+  --track: rgba(255,255,255,0.06);
+  --track-border: rgba(255,255,255,0.08);
+  --shadow-bar: 0 8px 24px rgba(0,0,0,0.4);
+  --shadow-menu: 0 16px 48px rgba(0,0,0,0.5);
+  --shadow-modal: 0 24px 64px rgba(0,0,0,0.65);
+  --font-sans: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Source Code Pro", ui-monospace, SFMono-Regular, Consolas, monospace;
+  /* Type scale — semantic rem tokens (see DESIGN.md §3) */
+  --text-2xs: 0.8125rem;  /* 13px — micro labels: byline, badges, ports */
+  --text-xs:  0.875rem;   /* 14px — secondary UI: meta, labels, buttons, inputs, hints, mono meta */
+  --text-sm:  0.9375rem;  /* 15px — body / list text */
+  --text-md:  1rem;       /* 16px — tabs, sync message */
+  --text-lg:  1.0625rem;  /* 17px — entity titles (branch/template/service), modal h2 */
+  --text-xl:  1.4375rem;  /* 23px — header h1, modal close glyph */
+  --radius: 0.625rem;
+  --radius-sm: 0.425rem;
+  --focus-ring: 0 0 0 3px color-mix(in oklab, var(--accent) 50%, transparent);
+  --z-bar: 50;
+  --z-dropdown: 100;
+  --z-modal: 200;
+  --z-toast: 300;
+}
+/* Light theme — see DESIGN.md §2 (Light theme). The active theme is resolved in JS
+   and written to <html data-theme>: it follows the OS by default, and the header
+   toggle overrides it and persists to localStorage. Neutrals invert on the blue-black
+   ramp; signal colors switch to AA-on-white text variants; the embedded terminal
+   (--terminal-bg) and ANSI map stay dark so the console still reads as a device. */
+:root[data-theme="light"] {
+  --bg: oklch(0.97 0.004 260);
+  --surface: oklch(1 0 0);
+  --subtle: oklch(0.96 0.005 260);
+  --surface-raised: oklch(1 0 0);
+  --border: oklch(0.9 0.006 260);
+  --border-raised: oklch(0.86 0.008 260);
+  --text: oklch(0.25 0.02 260);
+  --text-dim: oklch(0.48 0.02 260);
+  --accent: oklch(0.5 0.2 260);
+  --green: oklch(0.47 0.13 160);
+  --red: oklch(0.505 0.213 27.5);
+  --yellow: oklch(0.5 0.14 62);
+  --cyan: oklch(0.48 0.11 220);
+  --violet: oklch(0.491 0.27 292.6);
+  --rose: oklch(0.514 0.222 17);
+  --accent-fg: #fff;
+  --backdrop: rgba(15,23,42,0.45);
+  --track: rgba(0,0,0,0.06);
+  --track-border: rgba(0,0,0,0.1);
+  --shadow-bar: 0 8px 24px rgba(15,23,42,0.1);
+  --shadow-menu: 0 16px 48px rgba(15,23,42,0.14);
+  --shadow-modal: 0 24px 64px rgba(15,23,42,0.18);
+}

@@ -139,3 +139,6 @@ power to anyone holding its token.
   rationale were brought in line afterwards.
 - 2026-10-27 — Agent CLI allowed for scoped sessions (own environment only)
   and offered on the shared card.
+- 2026-10-10 — the link now opens a chat-first workspace; this scoped
+  dashboard remains as its Engineer view (`?view=console`), ending "one page,
+  two faces". See [[0087-chat-first-shared-workspace]].

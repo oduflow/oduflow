@@ -75,3 +75,10 @@ oduflow_data_*/
 # mutmut mutation testing workspace + result cache
 mutants/
 .mutmut-cache
+
+# Workspace frontend (frontend/workspace): dependencies only; its build output
+# under src/oduflow/templates/static/workspace/ IS committed.
+node_modules/
+# Its source modules live in src/lib/, which the Python `lib/` rule above
+# would otherwise drop.
+!frontend/workspace/src/lib/

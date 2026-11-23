@@ -1,16 +1,18 @@
-"""Scoped single-environment dashboard access (``/env/<name>``).
+"""Scoped single-environment access from a share link (``/env/<name>``).
 
 The UI counterpart of the scoped MCP endpoint (see ``oduflow.scoped_access``
 and ``specs/0028-scoped-environment-mcp-access.md``): an operator shares one
-environment with a client, who gets the normal dashboard reduced to that
-environment — its card, logs, dev-loop actions, consoles, Agent Chat and
-Agent CLI — and nothing else of the team.
+environment with a client, who gets a chat-first workspace for it (see
+``specs/0087-chat-first-shared-workspace.md``) plus, as its Engineer view
+(``?view=console``), the normal dashboard reduced to that environment — its
+card, logs, dev-loop actions, consoles, Agent Chat and Agent CLI — and nothing
+else of the team. Both pages call the same API, so one allowlist covers them.
 
 Two pieces cooperate, both in ``web_ui``:
 
 - the ``/env/<name>`` route exchanges a share link's ``?key=`` (verified
   against ``oduflow.env_share``) for a signed, host-only cookie and renders the
-  dashboard in scoped mode;
+  workspace (or the scoped dashboard);
 - ``UIAuthMiddleware`` resolves that cookie to a *scoped principal* — the
   owning team plus one environment name — and runs every subsequent request
   through :func:`is_allowed` here.

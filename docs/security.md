@@ -248,9 +248,11 @@ an environment also rotates its token.
 
 ## Shared single-environment dashboard (`/env/<name>`)
 
-The dashboard equivalent of `/mcp/<env>`: a link that opens the dashboard
-reduced to one environment, for a client or collaborator who has no team
-password.
+The dashboard equivalent of `/mcp/<env>`: a link that opens one environment for
+a client or collaborator who has no team password. It lands on a chat-first
+workspace with the environment's coding agent; the dashboard reduced to that
+environment is one click away as its Engineer view (`?view=console`). Both pages
+use the same API, so the same allowlist below applies to both.
 
 Open **More → Share UI** on an environment card and Oduflow mints
 

@@ -1456,6 +1456,8 @@
     color: var(--text-dim);
   }
   .scoped-chip strong { font-family: var(--font-mono); color: var(--text); font-weight: 500; }
+  .scoped-chip-link { margin-left: 6px; color: var(--accent); font-weight: 600; text-decoration: none; }
+  .scoped-chip-link:hover { text-decoration: underline; }
   /* The display rule above would otherwise beat the UA stylesheet's
      [hidden] { display: none }, leaving an empty chip in the header. */
   .scoped-chip[hidden] { display: none; }
@@ -2756,7 +2758,7 @@
       <!-- This security disclosure is duplicated in docs/security.md
            ("Scoped environment sharing"), docs/web-api.md and
            specs/0055-scoped-environment-ui-sharing.md — keep them in sync. -->
-      <p class="modal-note">The dashboard link is scoped to this environment: its card, logs, consoles, module install/upgrade, Connect As, Agent Chat and Agent CLI. Other team environments and team-wide pages are unavailable. Agent Chat and Agent CLI run as this environment's own user in the team's coder container, so they cannot reach other environments' checkouts or conversations. Important: they still use the team's Git credentials and deploy key, the team-wide agent provider keys, any agent login made in this environment and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
+      <p class="modal-note">The link opens a chat with this environment's coding agent, made for people who are not developers. Its Engineer view is the dashboard reduced to this environment: its card, logs, consoles, module install/upgrade, Connect As, Agent Chat and Agent CLI. Other team environments and team-wide pages are unavailable. Agent Chat and Agent CLI run as this environment's own user in the team's coder container, so they cannot reach other environments' checkouts or conversations. Important: they still use the team's Git credentials and deploy key, the team-wide agent provider keys, any agent login made in this environment and the container network. Share only with someone trusted for that access. The link carries its own key, so treat it as a credential.</p>
       <div class="form-group" id="share-link-group">
         <label for="share-url">Share link</label>
         <div class="copy-row">
@@ -3125,6 +3127,12 @@ if (SCOPED_ENV) {
   var _scopedName = document.createElement('strong');
   _scopedName.textContent = SCOPED_ENV;
   _scopedChip.appendChild(_scopedName);
+  // This is the Engineer view of the shared workspace (/env/<name>?view=console).
+  var _workspaceLink = document.createElement('a');
+  _workspaceLink.className = 'scoped-chip-link';
+  _workspaceLink.href = scopedPagePath();
+  _workspaceLink.textContent = 'Back to workspace';
+  _scopedChip.appendChild(_workspaceLink);
   _scopedChip.hidden = false;
 }
 
@@ -3907,7 +3915,10 @@ function renderEnvMenu(env, allStopped, dis, showAgent) {
   var access = '<button role="menuitem" title="Scoped MCP endpoint and Secret Key for this environment only" onclick="openMcpAccess(\'' + escAttr(env.branch) + '\')">MCP Access</button>' +
     (SCOPED_ENV
       ? ''
-      : '<button role="menuitem" title="Share a link to this environment only: its dashboard, consoles and coding agent, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>');
+      : '<button role="menuitem" title="Share a link to this environment only: a chat with its coding agent, plus its dashboard and consoles, nothing else" onclick="openShare(\'' + escAttr(env.branch) + '\')">Share UI</button>') +
+    (showAgent && !SCOPED_ENV
+      ? '<button role="menuitem" title="Open the chat-first page a share link leads to" onclick="openWorkspace(\'' + escAttr(env.branch) + '\')">Workspace</button>'
+      : '');
   var management = SCOPED_ENV ? '' :
     '<button role="menuitem" title="' + (env.note ? 'Edit the note on this environment' : 'Add a note to this environment') + '" onclick="editNote(\'' + escAttr(env.branch) + '\')">' +
       (env.note ? 'Edit note' : 'Add note') + '</button>' +
@@ -4565,6 +4576,12 @@ function _renderShareError(message) {
   error.textContent = message;
   error.style.display = 'block';
   document.getElementById('share-retry').style.display = '';
+}
+
+// The chat-first workspace a share link opens (specs/0087). An operator opens
+// it to see what a client sees; their own session lets them in.
+function openWorkspace(branch) {
+  window.open('/env/' + branch.split('/').map(encodeURIComponent).join('/'), '_blank', 'noopener');
 }
 
 async function openShare(branch) {
@@ -10623,7 +10640,7 @@ function ensureChatAssets() {
   // chat.js and acp-client.js are an interdependent pair of our own code; bump
   // this shared CHAT_V whenever either one changes (see AGENTS.md). One version
   // busts both at once, preventing a stale chat.js/acp-client.js mismatch.
-  var CHAT_V = '8';
+  var CHAT_V = '9';
   // marked.min.js and purify.min.js are vendored third-party assets (not part
   // of the CHAT_V pair — bump their filename if upgraded). DOMPurify must load
   // before chat.js: renderMarkdown sanitizes marked's raw-HTML output with it.

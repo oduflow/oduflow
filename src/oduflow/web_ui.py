@@ -123,7 +123,8 @@ logger = logging.getLogger("oduflow")
 _AUTH_COOKIE = "oduflow_ui_auth"
 # Reachable without authentication: the login flow and static brand assets
 # (so the login page can render its logo/favicon/fonts). /static/ serves only
-# vetted extensions from the packaged assets dir (fonts, icons, xterm).
+# vetted extensions from the packaged assets dir (fonts, icons, xterm, the
+# shared-environment workspace bundle).
 # /import-odoo.sh (the Odoo.sh client script) and the five import ingest
 # endpoints authenticate with a short-lived import token, not the UI password,
 # so they bypass UI session authentication. They are EXACT paths (not prefixes):
@@ -351,6 +352,26 @@ def _check_share_token(
     return (team, env_name)
 
 
+def _connect_next_path(value: str) -> str:
+    """The in-environment path a Connect As landing may continue to, or "".
+
+    Only a path on the environment's own host is accepted: it must start with a
+    single "/" (so "//evil.example" and "/\\evil.example", which browsers read
+    as another host, are refused) and carry no control characters. Anything
+    else falls back to the default landing, so this cannot become an open
+    redirect."""
+    if (
+        not value
+        or len(value) > 2048
+        or not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+    ):
+        return ""
+    return value
+
+
 def _is_cross_origin(headers: Headers) -> bool:
     """Whether Origin/Referer mark this as a cross-site request (CSRF).
 
@@ -484,6 +505,9 @@ def _is_secure_request(request: Request) -> bool:
 
 
 _TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent / "templates"
+# The built shared-environment workspace (frontend/workspace, committed build):
+# index.html is the page template, assets/ holds the content-hashed bundle.
+_WORKSPACE_DIR = _TEMPLATE_DIR / "static" / "workspace"
 
 
 _apply_branding = branding.render_page
@@ -1594,6 +1618,31 @@ def _build_routes(
             )
         )
 
+    def _render_workspace(env_name: str, viewer: str) -> str:
+        """Render the chat-first workspace for one shared environment.
+
+        The page is the committed build of ``frontend/workspace`` (see
+        specs/0087-chat-first-shared-workspace.md); only the environment name
+        and who is looking (``share`` or ``operator``) are filled in, plus the
+        brand under a white-label license (oduflow.branding). Both land
+        in body data attributes, where attribute escaping is the right encoding
+        for a branch name that may carry quotes."""
+        page = _apply_branding(
+            (_WORKSPACE_DIR / "index.html").read_text(encoding="utf-8")
+        )
+        return page.replace(
+            "__SCOPED_ENV__", html.escape(env_name, quote=True)
+        ).replace("__VIEWER__", viewer)
+
+    def _render_scoped_page(
+        request: Request, settings: Settings, env_name: str, viewer: str
+    ) -> HTMLResponse:
+        """The shared environment's page: the workspace, or with ``?view=console``
+        the dashboard reduced to this environment ("Engineer view")."""
+        if request.query_params.get("view") == "console":
+            return HTMLResponse(_render_dashboard(settings, scoped_env=env_name))
+        return HTMLResponse(_render_workspace(env_name, viewer))
+
     def dashboard(request: Request) -> HTMLResponse:
         settings = get_settings()
         # Same resolution as the API: the open (auth-disabled) server sets no
@@ -1637,7 +1686,7 @@ def _build_routes(
         return Response(message, status_code=status_code, media_type="text/plain")
 
     def scoped_env_page(request: Request) -> Response:
-        """The shared single-environment dashboard at ``/env/<name>``.
+        """The shared single-environment workspace at ``/env/<name>``.
 
         This route authenticates itself (it is outside the team login): either
         the share link's ``?key=``, which is exchanged for a scoped cookie and
@@ -1688,13 +1737,13 @@ def _build_routes(
             request.cookies.get(ui_scope.SHARE_COOKIE, ""), settings
         )
         if share and share[1] == env_name:
-            return HTMLResponse(_render_dashboard(settings, scoped_env=env_name))
+            return _render_scoped_page(request, settings, env_name, "share")
 
         auth_enabled = any(t.ui_password for t in settings.teams.values())
         session = request.cookies.get(_AUTH_COOKIE, "")
         operator = _check_cookie_token(session, settings) if session else None
         if operator is not None or not auth_enabled:
-            return HTMLResponse(_render_dashboard(settings, scoped_env=env_name))
+            return _render_scoped_page(request, settings, env_name, "operator")
         return _share_link_error(
             "This link is missing its key. Open the full share link you were "
             "sent (it ends with ?key=...) to get back to this environment. "
@@ -1836,10 +1885,17 @@ def _build_routes(
             or not file_path.is_file()
         ):
             return Response("Not found", status_code=404)
+        # The workspace bundle's file names carry a content hash, so a new
+        # build is a new URL and these can be cached for good.
+        hashed = file_path.parent == (_WORKSPACE_DIR / "assets").resolve()
         return Response(
             file_path.read_bytes(),
             media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable"
+                if hashed
+                else "public, max-age=86400"
+            },
         )
 
     def _get_ui_team(request: HTTPConnection) -> TeamSettings:
@@ -5927,6 +5983,9 @@ def _build_routes(
         behind a one-time token, and 303 the browser to the env's own
         ``/oduflow-connect`` (routed to Oduflow by Traefik), which sets the cookie
         host-only there.
+
+        ``?next=`` names an in-environment path to land on instead of ``/web``
+        (the workspace uses it to open a link the agent wrote, signed in).
         """
         branch = request.path_params["branch"]
         lock_acquired = False
@@ -5936,6 +5995,7 @@ def _build_routes(
             locks.acquire_env(branch, team.team_id, operation="connect_as_user")
             lock_acquired = True
             user = (request.query_params.get("user") or "admin").strip() or "admin"
+            next_path = _connect_next_path(request.query_params.get("next") or "")
             activity.touch(team, branch)
             result = await _offload(
                 odoo_ops.connect_as_user, settings, team, branch, user
@@ -5947,8 +6007,11 @@ def _build_routes(
                     f"{settings.public_scheme_for(team)}://{env_host}"
                     f"/oduflow-connect?token={token}"
                 )
+                if next_path:
+                    landing += "&next=" + quote(next_path, safe="")
                 return RedirectResponse(landing, status_code=303)
-            response: Response = RedirectResponse(result["url"], status_code=303)
+            target = result["base_url"] + next_path if next_path else result["url"]
+            response: Response = RedirectResponse(target, status_code=303)
             # Host-only cookie (no domain): scoped to the dashboard's host and,
             # since cookies ignore ports, sent to the env on the same host.
             # HttpOnly mirrors Odoo's own session_id so it overrides it cleanly.
@@ -6003,13 +6066,14 @@ def _build_routes(
             ],
         )
 
-    def _connect_signed_in(request: Request, sid: str) -> Response:
+    def _connect_signed_in(request: Request, sid: str, next_path: str = "") -> Response:
         # Same-host redirect: a relative Location keeps whatever scheme and
         # host the browser really reached us on, with no header interpretation
         # — the one-time token is already consumed, so a wrong absolute scheme
         # (e.g. a terminator that doesn't send X-Forwarded-Proto) would leave
-        # the user with a dead link.
-        response: Response = RedirectResponse("/web", status_code=303)
+        # the user with a dead link. ``next_path`` (already validated by
+        # _connect_next_path) is where the workspace asked to land instead.
+        response: Response = RedirectResponse(next_path or "/web", status_code=303)
         # HOST-ONLY (no Domain → scoped to this env host), so it overrides any
         # stale host-only cookie Odoo left here.
         response.set_cookie(
@@ -6143,7 +6207,8 @@ def _build_routes(
 
         - A **session token** from :func:`api_connect_open` (the dashboard's
           Open button). The session is already minted; this GET consumes the
-          token, sets the cookie and 303-redirects to ``/web``.
+          token, sets the cookie and 303-redirects to ``/web`` (or the
+          validated ``?next=`` path the workspace asked for).
         - A **link token** from the ``connect_link`` MCP tool. A GET only shows
           a page — it changes nothing, so a link preview or scanner that fetches
           the URL does not spend the link and no session exists yet. The page
@@ -6171,7 +6236,8 @@ def _build_routes(
         sid = connect_tokens.consume(token, env_host)
         if not sid:
             return _connect_invalid()
-        return _connect_signed_in(request, sid)
+        next_path = _connect_next_path(request.query_params.get("next") or "")
+        return _connect_signed_in(request, sid, next_path)
 
     async def api_artifact_download(request: Request) -> Response:
         """Serve a file an MCP tool generated inside an environment, once.
@@ -7718,7 +7784,7 @@ def _build_routes(
         Route("/logout", logout, methods=["POST"]),
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/logo.png", logo, methods=["GET"]),
-        Route("/static/{filename}", static_file, methods=["GET"]),
+        Route("/static/{filename:path}", static_file, methods=["GET"]),
         Route("/api/version", api_version, methods=["GET"]),
         Route("/api/license", api_license, methods=["GET"]),
         Route("/api/license/activate", api_license_activate, methods=["POST"]),
