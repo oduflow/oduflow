@@ -160,6 +160,7 @@ def test_asgi_rewrites_scoped_well_known():
     [
         ("/mcp/authorize", "/authorize"),
         ("/mcp/token", "/token"),
+        ("/mcp/revoke", "/revoke"),
         ("/mcp/register", "/register"),
         (
             "/mcp/.well-known/oauth-authorization-server",

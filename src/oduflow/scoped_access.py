@@ -282,6 +282,7 @@ class ScopedEnvASGI:
     _OAUTH_SUBPATHS = {
         "/mcp/authorize": "/authorize",
         "/mcp/token": "/token",
+        "/mcp/revoke": "/revoke",
         "/mcp/register": "/register",
         "/mcp/.well-known/oauth-authorization-server": (
             "/.well-known/oauth-authorization-server"
