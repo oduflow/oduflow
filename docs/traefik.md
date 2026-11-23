@@ -4,6 +4,26 @@ By default Oduflow uses **port mode**: each environment gets a dedicated host po
 
 For production-like access with HTTPS, Oduflow can deploy a **Traefik** reverse proxy that gives every environment its own subdomain with an automatically issued Let's Encrypt certificate.
 
+## Access from the Docker host
+
+Each development environment in Traefik mode also publishes Odoo's HTTP port on
+the Docker host's IPv4 loopback interface. An agent running on that host can
+create an environment over MCP, then use its local URL for HTTP requests or
+browser tests even when the public tunnel is offline.
+
+For example, the same environment can have a public URL of
+`https://feature.dev.example.com` and a local URL of
+`http://127.0.0.1:50023`. The API returns `url`, `local_url` and the numeric
+`local_port`. MCP reports both URLs. The dashboard shows the port next to the
+public link. Click the port to copy its number.
+
+The host port comes from the team's `port_range` and stays assigned across
+stop/start, updates, renames and recreation. Deletion frees it. Size the range
+for the number of development environments, including stopped ones. For an
+environment created before loopback publication was introduced, run
+`update_environment` to add the binding while keeping its database and
+filestore. The local address appears once the container has the binding.
+
 ## Setup
 
 1. **Configure a wildcard DNS record.** Point `*.dev.example.com` to your server's IP address:
@@ -273,7 +293,7 @@ With `tls = false` Traefik:
 - Does **not** redirect HTTP→HTTPS and does **not** request Let's Encrypt certificates (`acme_email` is not required).
 - Routes by the same `Host` rules as before, so each environment keeps its own subdomain.
 
-Point the tunnel at the server's port 80 and route the wildcard hostname to it (e.g. `*.dev.example.com → http://localhost:80`). Cloudflare provides the certificate and forwards requests over HTTP; the tunnel sets `X-Forwarded-Proto: https`. On the `web` entrypoint Oduflow enables `forwardedHeaders.insecure` so Traefik passes those headers through (by default Traefik would overwrite `X-Forwarded-Proto` with the plain-HTTP connection scheme), letting Oduflow see the request as secure — the dashboard's session cookie stays `Secure` and every environment/service URL Oduflow reports is still `https://…`. Because this entrypoint trusts all forwarded headers, expose port 80 **only** to the tunnel, not to the public internet.
+Point the tunnel at the server's port 80 and route the wildcard hostname to it (e.g. `*.dev.example.com → http://localhost:80`). Cloudflare provides the certificate and forwards requests over HTTP; the tunnel sets `X-Forwarded-Proto: https`. On the `web` entrypoint Oduflow enables `forwardedHeaders.insecure` so Traefik passes those headers through (by default Traefik would overwrite `X-Forwarded-Proto` with the plain-HTTP connection scheme), letting Oduflow see the request as secure — the dashboard's session cookie stays `Secure` and every public environment/service URL Oduflow reports is still `https://…`. Because this entrypoint trusts all forwarded headers, expose port 80 **only** to the tunnel, not to the public internet.
 
 > **Changing `tls` on a running deployment recreates Traefik but not your environments.** Each environment and service bakes its Traefik routing labels in at creation time — `entrypoints=websecure` (with Let's Encrypt) when `tls = true`, `entrypoints=web` when `tls = false`. Restarting Oduflow recreates the Traefik container in the new mode, but pre-existing environments and services keep their old labels: after the switch their routers point at an entrypoint that no longer matches, so they become unreachable until **recreated** (or, going `false → true`, get caught by the HTTP→HTTPS redirect). Treat `tls` as a deploy-time choice; if you must flip it on a live server, recreate the existing environments and services afterwards. The default is `tls = true` (Traefik terminates TLS with Let's Encrypt, as described above).
 
@@ -295,7 +315,7 @@ public_scheme = "http"   # no TLS anywhere: hand out http:// links
 hostname = "dev.example.com"
 ```
 
-`public_scheme` sets the scheme of every URL Oduflow reports; it defaults to
+`public_scheme` sets the scheme of every public URL Oduflow reports; it defaults to
 `https` in traefik mode and `http` in port mode, and is independent of `tls`
 (which only decides whether *Traefik* terminates TLS). It also switches off
 `forwardedHeaders.insecure` on the `web` entrypoint: with no trusted terminator
@@ -334,7 +354,7 @@ public_scheme = "https"                 # its links are https://
 
 Point the tunnel at the server's port 80 for the second team's hostnames
 (e.g. `dev.example.com` and `*.dev.example.com → http://localhost:80`); the
-first team's clients resolve its hostname to the server directly. Every URL
+first team's clients resolve its hostname to the server directly. Every public URL
 Oduflow hands out — dashboard links, MCP endpoints, environment and service
 URLs — uses each team's resolved scheme. No `acme_email` is involved: with
 `tls = false` Traefik never talks to Let's Encrypt, and the tunnel's

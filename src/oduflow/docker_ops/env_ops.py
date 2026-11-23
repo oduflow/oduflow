@@ -240,31 +240,66 @@ def _get_used_ports(
     client: DockerClient,
     settings: Settings,
     team: TeamSettings,
-    exclude_env: str = "",
+    exclude_env: str,
 ) -> set[int]:
-    """Collect host ports currently bound by managed containers (excluding a specific env)."""
+    """Collect published ports on the Docker host, including unmanaged containers."""
+    own_name = "/" + get_resource_name(
+        exclude_env, "odoo", settings.prefix, team.team_id
+    )
     used: set[int] = set()
-    filters = {
-        "label": [
-            f"{settings.managed_label}=true",
-            f"{settings.team_label}={team.team_id}",
-        ]
-    }
-    for c in client.containers.list(all=True, filters=filters):
-        if not c.name.startswith(settings.prefix):
+    # Docker's list summaries include active port publications. Avoid inspecting
+    # every container (and its environment) just to find occupied host ports.
+    for container in client.containers.list(sparse=True):
+        if own_name in container.attrs.get("Names", []):
             continue
-        env = c.labels.get(settings.branch_label, "")
-        if env == exclude_env:
-            continue
-        ports = c.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
-        for mappings in ports.values():
-            if mappings:
-                for m in mappings:
-                    try:
-                        used.add(int(m["HostPort"]))
-                    except (KeyError, ValueError, TypeError):
-                        pass
+        for binding in container.attrs.get("Ports") or []:
+            if binding.get("Type") == "tcp" and binding.get("PublicPort"):
+                used.add(int(binding["PublicPort"]))
     return used
+
+
+def _reserve_env_port(
+    client: DockerClient,
+    settings: Settings,
+    team: TeamSettings,
+    env_name: str,
+    preferred_port: int | None = None,
+) -> int:
+    return allocate_port(
+        team.port_registry_path,
+        env_name,
+        team.port_range_start,
+        team.port_range_end,
+        used_ports=_get_used_ports(client, settings, team, exclude_env=env_name),
+        preferred_port=preferred_port,
+    )
+
+
+def _odoo_port_binding(
+    settings: Settings, port: int
+) -> dict[str, int | tuple[str, int]]:
+    if settings.routing_mode == "traefik":
+        return {"8069/tcp": ("127.0.0.1", port)}
+    return {"8069/tcp": port}
+
+
+def _configured_odoo_port(container: Any, *, loopback_only: bool = False) -> int | None:
+    # HostConfig is also present on a stopped container.
+    bindings = container.attrs.get("HostConfig", {}).get("PortBindings") or {}
+    for binding in bindings.get("8069/tcp") or []:
+        if loopback_only and binding.get("HostIp") != "127.0.0.1":
+            continue
+        try:
+            return int(binding["HostPort"])
+        except (KeyError, ValueError, TypeError):
+            continue
+    return None
+
+
+def _local_address(port: int | None) -> dict[str, Any]:
+    if port is None:
+        return {}
+    return {"local_port": port, "local_url": f"http://127.0.0.1:{port}"}
 
 
 def _active_environment_names(
@@ -1975,11 +2010,10 @@ def _rollback_partial_environment(
     env_name: str,
 ) -> None:
     """Best-effort rollback that preserves the original provisioning error."""
-    if settings.routing_mode == "port":
-        try:
-            release_port(team.port_registry_path, env_name)
-        except Exception:
-            logger.exception("Failed to release port while rolling back '%s'", env_name)
+    try:
+        release_port(team.port_registry_path, env_name)
+    except Exception:
+        logger.exception("Failed to release port while rolling back '%s'", env_name)
     try:
         _cleanup_old_environment(client, settings, team, env_name)
     except Exception:
@@ -2683,6 +2717,7 @@ def adopt_existing_environment(
     return {
         "env_name": env_name,
         "url": url,
+        **_local_address(_configured_odoo_port(container, loopback_only=True)),
         "git_branch": current_branch,
         "odoo_image": labels.get(settings.image_label, ""),
         "template_name": labels.get("oduflow.template", "none"),
@@ -3218,17 +3253,6 @@ def _create_environment_impl(
             "mode": "rw",
         }
 
-    host_port: int | None = None
-    if settings.routing_mode == "port":
-        used_ports = _get_used_ports(client, settings, team, exclude_env=env_name)
-        host_port = allocate_port(
-            team.port_registry_path,
-            env_name,
-            team.port_range_start,
-            team.port_range_end,
-            used_ports=used_ports,
-        )
-
     sessions_path = os.path.join(workspace_path, "sessions")
     os.makedirs(sessions_path, mode=0o777, exist_ok=True)
     os.chmod(sessions_path, 0o777)
@@ -3252,8 +3276,6 @@ def _create_environment_impl(
         restart_policy={"Name": "unless-stopped"},
         command=f"odoo -d {env_db} --dev=xml",
     )
-    if settings.routing_mode == "port":
-        run_kwargs["ports"] = {"8069/tcp": host_port}
 
     image_cleanup.note_image_requested(odoo_image)
     try:
@@ -3296,7 +3318,7 @@ def _create_environment_impl(
             )
         except Exception:
             # Same rollback as a containers.run failure below: the database,
-            # role, filestore, workspace and allocated port already exist.
+            # role, filestore and workspace already exist.
             logger.error(
                 "Base init failed for '%s'; rolling back partial environment",
                 env_name,
@@ -3306,6 +3328,8 @@ def _create_environment_impl(
         setup_logs.append(init_log)
 
     try:
+        host_port = _reserve_env_port(client, settings, team, env_name)
+        run_kwargs["ports"] = _odoo_port_binding(settings, host_port)
         container = client.containers.run(**run_kwargs)
     except Exception:
         # The serving container failed to start (e.g. an invalid container name
@@ -3369,6 +3393,7 @@ def _create_environment_impl(
 
     result: dict[str, Any] = {
         "url": url,
+        **(_local_address(host_port) if settings.routing_mode == "traefik" else {}),
         "hostname": hostname or get_env_short_hostname(env_name),
         "odoo_container": odoo_container_name,
         "database": env_db,
@@ -4442,8 +4467,6 @@ def delete_environment(
     with contextlib.suppress(Exception):
         agent_sessions.clear_session(team, env_name)
 
-    if settings.routing_mode == "port":
-        release_port(team.port_registry_path, env_name)
     if team.hostname_registry_path or team.data_dir:
         release_hostname(_hostname_registry_path(team), env_name)
 
@@ -4454,6 +4477,9 @@ def delete_environment(
             container.remove(v=True)
         except docker.errors.NotFound:
             pass
+
+    if not preserve_access:
+        release_port(team.port_registry_path, env_name)
 
     try:
         _exec_sql(
@@ -4612,7 +4638,17 @@ def recreate_environment(
         except (OSError, ValueError) as e:
             logger.warning("Could not adopt legacy MCP token for '%s': %s", env_name, e)
 
-    delete_environment(settings, team, env_name, preserve_access=True)
+    # A legacy Traefik environment can have no port yet. Check capacity while
+    # the existing environment is still intact, and retain the reservation
+    # across the delete/create gap.
+    previous_port = _configured_odoo_port(container)
+    _reserve_env_port(client, settings, team, env_name, preferred_port=previous_port)
+    try:
+        delete_environment(settings, team, env_name, preserve_access=True)
+    except Exception:
+        if previous_port is None:
+            release_port(team.port_registry_path, env_name)
+        raise
     try:
         return create_environment(
             settings,
@@ -4638,6 +4674,7 @@ def recreate_environment(
         env_share.remove(team, env_name)
         env_tokens.remove(team, env_name)
         invalidate_cache()
+        release_port(team.port_registry_path, env_name)
         raise
 
 
@@ -4722,6 +4759,9 @@ def list_environments(settings: Settings, team: TeamSettings) -> list[dict[str, 
         }
 
         if "-odoo" in container.name:
+            envs[env_name].update(
+                _local_address(_configured_odoo_port(container, loopback_only=True))
+            )
             try:
                 envs[env_name]["url"] = (
                     get_env_base_url(settings, team, env_name, container)[0]
@@ -5130,6 +5170,9 @@ def get_environment_info(
             env_name, labels.get(ENV_HOSTNAME_LABEL, "")
         )
 
+        result.update(
+            _local_address(_configured_odoo_port(odoo_container, loopback_only=True))
+        )
         try:
             result["url"] = (
                 get_env_base_url(settings, team, env_name, odoo_container)[0]
@@ -6863,21 +6906,6 @@ def update_environment(
     raw_cmd = container.attrs["Config"].get("Cmd") or []
     command = " ".join(raw_cmd) if raw_cmd else None
 
-    # Port bindings (only relevant in port mode). Only read here; a fresh
-    # allocation (when switching into port mode) is deferred until just before
-    # the container is recreated, so an earlier abort (e.g. image pull failure)
-    # does not leak a reserved port.
-    host_port: int | None = None
-    port_newly_allocated = False
-    if settings.routing_mode == "port":
-        port_bindings = container.attrs.get("HostConfig", {}).get("PortBindings") or {}
-        tcp_bindings = port_bindings.get("8069/tcp")
-        if tcp_bindings:
-            try:
-                host_port = int(tcp_bindings[0]["HostPort"])
-            except (KeyError, IndexError, ValueError, TypeError):
-                pass
-
     # Validate the target image is available BEFORE removing the old container,
     # so a bad or unreachable image does not leave the env with no container
     # at all (#49). If the pull fails, fall back to a local copy; if there is
@@ -6931,6 +6959,12 @@ def update_environment(
     role_provisioned = False
     was_running = container.status == "running"
 
+    # A portless legacy container must survive an exhausted port range.
+    previous_port = _configured_odoo_port(container)
+    host_port = previous_port
+    if host_port is None:
+        host_port = _reserve_env_port(client, settings, team, env_name)
+
     logger.info(
         "Updating environment – stopping old container",
         extra={"env_name": env_name, "container": odoo_container_name},
@@ -6953,6 +6987,8 @@ def update_environment(
             if was_running:
                 with contextlib.suppress(Exception):
                     container.start()
+            if previous_port is None:
+                release_port(team.port_registry_path, env_name)
             raise PrerequisiteNotMetError(
                 f"Environment '{env_name}' has no PostgreSQL role of its own, "
                 f"and one could not be provisioned: {exc} The environment was "
@@ -7075,11 +7111,6 @@ def update_environment(
     route_hostname = labels.get(ENV_HOSTNAME_LABEL, "")
     _assert_env_hostname_available(settings, team, env_name, route_hostname)
     labels.update(build_env_traefik_labels(settings, team, env_name, route_hostname))
-    if settings.routing_mode == "traefik":
-        # No published port in traefik mode; drop any stale reservation left from
-        # a previous port-mode life so the slot is reusable.
-        release_port(team.port_registry_path, env_name)
-
     # Verify extra addons checkouts are intact. New environments use persistent
     # SHA-keyed shared paths; legacy environments keep per-workspace worktrees
     # until their next pull_and_apply migrates the mounts.
@@ -7101,20 +7132,6 @@ def update_environment(
             if not os.path.isdir(wt):
                 logger.warning("Extra addons checkout missing: %s", wt)
 
-    # Switching into port mode (was traefik) or a legacy container that never
-    # published a port: allocate one now, right before recreation, so any
-    # earlier abort could not have leaked the reservation.
-    if settings.routing_mode == "port" and host_port is None:
-        used_ports = _get_used_ports(client, settings, team, exclude_env=env_name)
-        host_port = allocate_port(
-            team.port_registry_path,
-            env_name,
-            team.port_range_start,
-            team.port_range_end,
-            used_ports=used_ports,
-        )
-        port_newly_allocated = True
-
     # ------------------------------------------------------------------
     # 4. Re-create the container with the same settings
     # ------------------------------------------------------------------
@@ -7132,15 +7149,14 @@ def update_environment(
     )
     if command:
         run_kwargs["command"] = command
-    if settings.routing_mode == "port" and host_port is not None:
-        run_kwargs["ports"] = {"8069/tcp": host_port}
+    run_kwargs["ports"] = _odoo_port_binding(settings, host_port)
 
     try:
         new_container = client.containers.run(**run_kwargs)
     except Exception:
         # The old container is already gone; at least don't leak a port slot we
         # freshly reserved for this recreate.
-        if port_newly_allocated:
+        if previous_port is None:
             release_port(team.port_registry_path, env_name)
         raise
 
@@ -7255,6 +7271,7 @@ def update_environment(
         "action": "error" if dep_exit else "recreate",
         "output": "\n".join(setup_logs),
         "url": url,
+        **(_local_address(host_port) if settings.routing_mode == "traefik" else {}),
         "env_name": env_name,
         "renamed_from": renamed_from,
         "hostname": get_env_short_hostname(env_name, route_hostname),
