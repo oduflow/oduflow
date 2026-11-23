@@ -38,12 +38,15 @@ BRANCH = "feature/x"
 
 @pytest.fixture
 def team(tmp_path):
-    return TeamSettings(team_id="1", data_dir=str(tmp_path / "data"))
+    return TeamSettings(
+        team_id="1",
+        data_dir=str(tmp_path / "data"),
+        port_registry_path=str(tmp_path / "data" / "ports.json"),
+    )
 
 
 @pytest.fixture
 def settings(team):
-    # Traefik mode: no port registry involved in the teardown.
     return Settings(routing_mode="traefik", teams={"1": team})
 
 

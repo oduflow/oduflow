@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from oduflow.docker_ops import env_ops
 from oduflow.docker_ops.env_ops import (
     ENV_HOSTNAME_LABEL,
     container_route_host,
@@ -115,3 +116,41 @@ class TestGetEnvBaseUrl:
 
         assert url == "http://dev.example.com:50001"
         assert cookie_domain == "dev.example.com"
+
+
+@pytest.mark.parametrize("port", [None, 50023])
+def test_traefik_addresses_follow_container_bindings(settings, team, monkeypatch, port):
+    container = _container(
+        {
+            settings.branch_label: "feature-x",
+            settings.team_label: team.team_id,
+            "traefik.http.routers.oduflow-1-feature-x.rule": f"Host(`{LEGACY_HOST}`)",
+        }
+    )
+    container.name = "oduflow-1-feature-x-odoo"
+    container.status = "exited"
+    bindings = (
+        {}
+        if port is None
+        else {"8069/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]}
+    )
+    container.attrs = {
+        "HostConfig": {"PortBindings": bindings},
+        "NetworkSettings": {"Ports": {}},
+    }
+    client = MagicMock()
+    client.containers.get.return_value = container
+    client.containers.list.return_value = [container]
+    monkeypatch.setattr(env_ops, "get_client", lambda: client)
+    monkeypatch.setattr(env_ops, "start_environment", lambda *args: None)
+    info = env_ops.get_environment_info(settings, team, "feature-x")
+    (listed,) = env_ops.list_environments(settings, team)
+    adopted = env_ops.adopt_existing_environment(settings, team, "feature-x")
+    for result in (info, listed, adopted):
+        assert result["url"].split("/")[2] == LEGACY_HOST
+        if port is None:
+            assert "local_url" not in result
+            assert "local_port" not in result
+        else:
+            assert result["local_url"] == "http://127.0.0.1:50023"
+            assert result["local_port"] == port

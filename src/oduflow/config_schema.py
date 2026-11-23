@@ -169,7 +169,7 @@ def _ui_auth_off_at_boot(s: Settings) -> bool:
 
 
 _PUBLIC_SCHEME_HELP = (
-    "Scheme of every URL the server hands out. Empty derives it from the routing "
+    "Scheme of public URLs the server hands out. Empty derives it from the routing "
     "mode (https with Traefik, http in port mode). Set http only when nothing "
     "terminates TLS in front of a tls = false deployment."
 )

@@ -464,7 +464,8 @@ class TestCreateEnvironmentTool:
     @patch("oduflow.docker_ops.env_ops.create_environment")
     def test_create(self, mock_create, mock_adopt):
         mock_create.return_value = {
-            "url": "http://localhost:50000",
+            "url": "https://main.dev.example.com",
+            "local_url": "http://127.0.0.1:50000",
             "odoo_container": "oduflow-main-odoo",
             "database": "oduflow_1_main",
             "workspace": "/tmp/ws",
@@ -476,6 +477,8 @@ class TestCreateEnvironmentTool:
             repo_url="https://8.8.8.8/repo.git",
             odoo_image="odoo:17.0",
         )
+        assert "URL: https://main.dev.example.com" in result
+        assert "Local URL (Docker host): http://127.0.0.1:50000" in result
         assert "Environment provisioned successfully!" in result
         assert "Database: oduflow_1_main" in result
         assert "Template: none (init from scratch)" in result

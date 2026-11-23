@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from oduflow import env_share, env_tokens
+from oduflow import env_share, env_tokens, port_registry
 from oduflow.docker_ops import env_ops, system_ops
 from oduflow.settings import Settings, TeamSettings
 
@@ -13,11 +13,21 @@ from oduflow.settings import Settings, TeamSettings
 class _FakeContainer:
     def __init__(self, labels: dict[str, str]):
         self.labels = labels
+        self.attrs = {
+            "HostConfig": {
+                "PortBindings": {
+                    "8069/tcp": [{"HostIp": "127.0.0.1", "HostPort": "50023"}]
+                }
+            }
+        }
 
 
 class _FakeContainers:
     def __init__(self, container: _FakeContainer):
         self._container = container
+
+    def list(self, **kwargs):
+        return []
 
     def get(self, name: str) -> _FakeContainer:
         return self._container
@@ -32,6 +42,7 @@ def _settings(tmp_path) -> tuple[Settings, TeamSettings]:
     team = TeamSettings(
         team_id="1",
         data_dir=str(tmp_path / "team_1"),
+        port_registry_path=str(tmp_path / "team_1" / "ports.json"),
         port_range_start=50000,
         port_range_end=50100,
     )
@@ -71,6 +82,7 @@ def test_recreate_adopts_label_only_token(tmp_path, monkeypatch):
     deleted: dict[str, bool] = {}
 
     def fake_delete(settings, team, env_name, *, preserve_access=False):
+        assert port_registry.get_port(team.port_registry_path, env_name) == 50023
         deleted["preserve_access"] = preserve_access
         return []
 
@@ -106,6 +118,7 @@ def test_failed_recreate_revokes_preserved_credentials(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="no space left"):
         env_ops.recreate_environment(s, team, "main")
 
+    assert port_registry.get_port(team.port_registry_path, "main") is None
     assert env_tokens.get(team, "main") is None
     assert env_share.get(team, "main") is None
     assert env_tokens.resolve_token(s, token) is None

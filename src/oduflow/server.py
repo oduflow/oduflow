@@ -956,6 +956,13 @@ def _odoo_guide_reminder(odoo_image: str) -> str:
     )
 
 
+def _environment_url_lines(env: dict[str, Any]) -> list[str]:
+    lines = [f"URL: {env['url']}"]
+    if env.get("local_url"):
+        lines.append(f"Local URL (Docker host): {env['local_url']}")
+    return lines
+
+
 def _existing_environment_message(
     existing: dict[str, Any],
     *,
@@ -966,7 +973,7 @@ def _existing_environment_message(
     lines = [
         "Environment already exists — reusing it. Nothing was recreated.",
         f"Environment: {existing['env_name']}",
-        f"URL: {existing['url']}",
+        *_environment_url_lines(existing),
         f"Git Branch: {existing['git_branch']}",
         f"Hostname: {existing['hostname']}",
         f"Odoo Container: {existing['odoo_container']}",
@@ -1393,7 +1400,7 @@ def create_environment(
         lines = [
             "Environment provisioned successfully!",
             f"Environment: {resolved_env_name}",
-            f"URL: {result['url']}",
+            *_environment_url_lines(result),
             f"Hostname: {result.get('hostname', '')}",
             f"Odoo Container: {result['odoo_container']}",
             f"Database: {result['database']}",
@@ -2280,7 +2287,7 @@ def recreate_environment(env_name: str, ctx: Context | None = None) -> str:
     result = env_ops.recreate_environment(settings, team, env_name)
     lines = [
         f"Environment '{env_name}' recreated from its recorded configuration.",
-        f"URL: {result['url']}",
+        *_environment_url_lines(result),
         f"Odoo Container: {result['odoo_container']}",
         f"Database: {result['database']}",
         f"Workspace: {result['workspace']}",
@@ -2308,6 +2315,8 @@ def list_environments(ctx: Context | None = None) -> str:
         if env.get("url"):
             status_line += f" - {env['url']}"
         output += status_line + "\n"
+        if env.get("local_url"):
+            output += f"  Local URL (Docker host): {env['local_url']}\n"
         output += f"  Git Branch: {env.get('git_branch') or env['env_name']}\n"
         if env.get("created_at"):
             output += f"  Created: {env['created_at']}\n"
@@ -2554,7 +2563,7 @@ def update_environment(
         headline = "Environment updated successfully!"
     lines = [
         headline,
-        f"URL: {result['url']}",
+        *_environment_url_lines(result),
         f"Hostname: {result.get('hostname', '')}",
         f"Odoo Container: {result['odoo_container']}",
         f"Database: {result['database']}",
@@ -2621,7 +2630,7 @@ def get_environment_info(env_name: str, ctx: Context | None = None) -> str:
         lines.append(f"Note: {note}")
     lines.append(f"Database: {info['db_name']}")
     if info.get("url"):
-        lines.append(f"URL: {info['url']}")
+        lines.extend(_environment_url_lines(info))
     if info.get("hostname"):
         lines.append(f"Hostname: {info['hostname']}")
     if info.get("repo_url") and not info.get("local_path"):

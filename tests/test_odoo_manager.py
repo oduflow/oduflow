@@ -361,6 +361,7 @@ class TestCreateEnvironment:
             self.restrict = restrict
             yield
 
+    @pytest.mark.parametrize("mode", ["port", "traefik"])
     @patch(
         "oduflow.extra_addons.generate_odoo_conf",
         return_value="/tmp/flow-test/workspaces/feature-payments/odoo.conf",
@@ -400,6 +401,7 @@ class TestCreateEnvironment:
         mock_copy_conf,
         mock_gen_conf,
         mock_docker_client,
+        mode,
     ):
         mock_odoo = MagicMock()
         mock_odoo.exec_run.return_value = (0, b"OK")
@@ -410,15 +412,26 @@ class TestCreateEnvironment:
         }
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("nf")
 
+        settings = dataclasses.replace(TEST_SETTINGS, routing_mode=mode)
         result = env_ops.create_environment(
-            TEST_SETTINGS,
+            settings,
             TEST_TEAM,
             "feature/payments",
             "https://github.com/org/repo.git",
             "odoo:15.0",
         )
 
-        assert result["url"] == "http://localhost:50000"
+        run = mock_docker_client.containers.run.call_args.kwargs
+        if mode == "traefik":
+            assert run["ports"] == {"8069/tcp": ("127.0.0.1", 50000)}
+            assert run["labels"]["traefik.enable"] == "true"
+            assert result["url"] == "https://feature-payments.localhost"
+            assert result["local_url"] == "http://127.0.0.1:50000"
+            assert result["local_port"] == 50000
+        else:
+            assert run["ports"] == {"8069/tcp": 50000}
+            assert result["url"] == "http://localhost:50000"
+            assert "local_port" not in result
         assert result["database"] == "oduflow_1_feature-payments"
         assert result["odoo_container"] == "oduflow-1-feature-payments-odoo"
         assert mock_sql.call_count == 2
@@ -2394,7 +2407,7 @@ class TestUpdateEnvironment:
         mock_docker_client.containers.get.return_value = container
         mock_docker_client.containers.list.return_value = []
         with ExitStack() as stack:
-            for name in ("_reapply_odoo_conf", "_create_pg_role", "release_port"):
+            for name in ("_reapply_odoo_conf", "_create_pg_role"):
                 stack.enter_context(patch.object(env_ops, name))
             stack.enter_context(
                 patch.object(
@@ -2427,6 +2440,64 @@ class TestUpdateEnvironment:
                 settings, team, "main", pull_image=False, install_dependencies=False
             )
             assert result["hostname"] == "qa"
+
+    def test_legacy_traefik_environment_gets_a_loopback_port(
+        self, mock_docker_client, tmp_path
+    ):
+        team = dataclasses.replace(
+            TEST_TEAM,
+            hostname="dev.example.com",
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+        settings = dataclasses.replace(
+            TEST_SETTINGS, routing_mode="traefik", teams={"1": team}
+        )
+        container = self._make_container()
+        container.attrs["HostConfig"].pop("PortBindings")
+        mock_docker_client.containers.get.return_value = container
+        with (
+            patch.object(env_ops, "_reapply_odoo_conf"),
+            patch.object(env_ops, "_create_pg_role"),
+            patch.object(
+                env_ops,
+                "load_credentials",
+                return_value={"pg_user": "u", "pg_password": "pw"},
+            ),
+        ):
+            result = env_ops.update_environment(
+                settings, team, "main", pull_image=False, install_dependencies=False
+            )
+        run = mock_docker_client.containers.run.call_args.kwargs
+        assert run["ports"] == {"8069/tcp": ("127.0.0.1", 50000)}
+        assert result["local_url"] == "http://127.0.0.1:50000"
+        assert result["url"] == "https://main.dev.example.com"
+
+    def test_exhausted_range_preserves_legacy_container(
+        self, mock_docker_client, tmp_path
+    ):
+        team = dataclasses.replace(
+            TEST_TEAM,
+            port_range_end=50001,
+            port_registry_path=str(tmp_path / "ports.json"),
+        )
+        settings = dataclasses.replace(
+            TEST_SETTINGS, routing_mode="traefik", teams={"1": team}
+        )
+        env_ops.allocate_port(team.port_registry_path, "other", 50000, 50001)
+        container = self._make_container()
+        container.attrs["HostConfig"].pop("PortBindings")
+        mock_docker_client.containers.get.return_value = container
+        with (
+            patch.object(
+                env_ops,
+                "load_credentials",
+                return_value={"pg_user": "u", "pg_password": "pw"},
+            ),
+            pytest.raises(FlowError, match="No free ports"),
+        ):
+            env_ops.update_environment(settings, team, "main", pull_image=False)
+        container.stop.assert_not_called()
+        container.remove.assert_not_called()
 
     def test_hostname_conflict_keeps_container(self, mock_docker_client):
         from oduflow.hostname_registry import allocate_hostname
@@ -3387,6 +3458,7 @@ class TestProvisioningSetup:
 
 
 class TestDeleteEnvironment:
+    @pytest.mark.parametrize("preserve_access", [False, True])
     @patch("oduflow.docker_ops.env_ops._drop_pg_role")
     @patch(
         "oduflow.docker_ops.env_ops.load_credentials",
@@ -3397,7 +3469,7 @@ class TestDeleteEnvironment:
     @patch("oduflow.docker_ops.env_ops.shutil.rmtree")
     @patch(
         "oduflow.docker_ops.env_ops.os.path.exists",
-        side_effect=lambda p: ".protected" not in p,
+        side_effect=lambda p: os.fspath(p).endswith("/feature-payments"),
     )
     def test_delete(
         self,
@@ -3408,13 +3480,19 @@ class TestDeleteEnvironment:
         mock_load_creds,
         mock_drop_role,
         mock_docker_client,
+        preserve_access,
     ):
         container = MagicMock()
         container.labels = {"oduflow.team": "1"}
         mock_docker_client.containers.get.return_value = container
 
         with patch("oduflow.docker_ops.env_ops.env_share.remove") as remove_share:
-            env_ops.delete_environment(TEST_SETTINGS, TEST_TEAM, "feature/payments")
+            env_ops.delete_environment(
+                TEST_SETTINGS,
+                TEST_TEAM,
+                "feature/payments",
+                preserve_access=preserve_access,
+            )
 
         container.stop.assert_called_once()
         container.remove.assert_called_once()
@@ -3423,10 +3501,14 @@ class TestDeleteEnvironment:
         )
         mock_sql.assert_called_once()
         mock_rmtree.assert_called_once()
-        mock_release.assert_called_once_with(
-            TEST_TEAM.port_registry_path, "feature/payments"
-        )
-        remove_share.assert_called_once_with(TEST_TEAM, "feature/payments")
+        if preserve_access:
+            mock_release.assert_not_called()
+            remove_share.assert_not_called()
+        else:
+            mock_release.assert_called_once_with(
+                TEST_TEAM.port_registry_path, "feature/payments"
+            )
+            remove_share.assert_called_once_with(TEST_TEAM, "feature/payments")
 
     @patch("oduflow.docker_ops.env_ops.release_port")
     @patch("oduflow.docker_ops.env_ops._exec_sql")

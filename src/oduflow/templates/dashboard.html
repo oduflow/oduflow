@@ -392,7 +392,14 @@
   .health-chip[data-state="warn"] .health-state { color: var(--yellow); }
   .health-chip[data-state="error"] .health-state { color: var(--red); }
   .health-chip[data-state="off"] .health-state { color: var(--text-dim); }
-  .env-url { margin-bottom: 10px; }
+  .env-url { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .env-url .local-port {
+    background: transparent;
+    color: var(--text-dim);
+    border: 0;
+    padding: 0;
+    font: var(--text-2xs) var(--font-mono);
+  }
   .env-url a {
     color: var(--accent);
     text-decoration: none;
@@ -3977,8 +3984,11 @@ function renderEnvironments(envs, force) {
         containerStatsHtml(c.name) + '</span>'
       ).join('');
 
+    const portHtml = Number.isInteger(env.local_port)
+      ? '<button type="button" class="copy-db local-port" title="Copy Docker host loopback port" onclick="copyToClipboard(\'' + env.local_port + '\')">Port ' + env.local_port + '</button>'
+      : '';
     const urlHtml = env.url
-      ? '<div class="env-url"><a href="' + esc(env.url) + '" target="_blank">' + esc(env.url) + '</a></div>'
+      ? '<div class="env-url"><a href="' + esc(env.url) + '" target="_blank">' + esc(env.url) + '</a>' + portHtml + '</div>'
       : '';
 
     // PRs and commits belong to the branch, so these links live next to the

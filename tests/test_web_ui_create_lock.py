@@ -25,7 +25,13 @@ def _open_settings(tmp_path):
     return Settings(
         routing_mode="port",
         base_data_dir=str(tmp_path),
-        teams={"1": TeamSettings(team_id="1")},
+        teams={
+            "1": TeamSettings(
+                team_id="1",
+                data_dir=str(tmp_path),
+                port_registry_path=str(tmp_path / "ports.json"),
+            )
+        },
     )
 
 
@@ -262,6 +268,7 @@ def test_api_recreate_restores_legacy_slot_to_branch_hostname(tmp_path):
         team_id="1",
         hostname="dev.example.com",
         data_dir=str(data_dir),
+        port_registry_path=str(data_dir / "ports.json"),
         hostname_registry_path=str(data_dir / "hostnames.json"),
         environment_slots=2,
         environment_hostname_mode="branch",

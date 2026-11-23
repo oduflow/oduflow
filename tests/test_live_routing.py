@@ -1,17 +1,72 @@
-"""Two equal service names must route to different team networks over TLS."""
+"""End-to-end routing on the enrolled Docker host."""
 
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import replace
 
 import httpx
 import pytest
 
-from oduflow.docker_ops import service_ops, system_ops
+from oduflow.docker_ops import env_ops, odoo_ops, service_ops, system_ops
 from oduflow.docker_ops.client import get_client
 from oduflow.naming import get_team_network_name
 
 pytestmark = pytest.mark.integration
+
+
+def test_each_environment_serves_its_database_on_both_addresses(
+    live_environment, tmp_path
+):
+    isolated, original = live_environment
+    team = replace(original, hostname="dev.qa.test")
+    settings = replace(
+        isolated,
+        teams={team.team_id: team},
+        routing_mode="traefik",
+        routing_tls=False,
+        public_scheme_setting="http",
+        allow_local_path=True,
+    )
+    system_ops.init_system(settings)
+    ports = set()
+    with (
+        closing(get_client()) as client,
+        httpx.Client(trust_env=False, timeout=10) as web,
+    ):
+        for name in ("first", "second"):
+            checkout = tmp_path / name
+            checkout.mkdir()
+            result = env_ops.create_environment(
+                settings,
+                team,
+                "main",
+                "",
+                "odoo:19.0",
+                env_name=name,
+                local_path=str(checkout),
+            )
+            port = result["local_port"]
+            assert port not in ports
+            ports.add(port)
+            assert result["local_url"] == f"http://127.0.0.1:{port}"
+            host = f"{name}.{team.hostname}"
+            assert result["url"] == f"http://{host}"
+            container = client.containers.get(result["odoo_container"])
+            assert container.ports["8069/tcp"] == [
+                {"HostIp": "127.0.0.1", "HostPort": str(port)}
+            ]
+            session = odoo_ops.connect_as_user(settings, team, name, "admin")
+            for origin, headers in (
+                (result["local_url"], {}),
+                ("http://127.0.0.1:80", {"Host": host}),
+            ):
+                response = web.post(
+                    origin + "/web/session/get_session_info",
+                    headers={**headers, "Cookie": f"session_id={session['sid']}"},
+                    json={"jsonrpc": "2.0", "method": "call", "params": {}, "id": 1},
+                )
+                response.raise_for_status()
+                assert response.json()["result"]["db"] == result["database"]
 
 
 def test_same_name_in_two_teams_routes_to_the_right_network(live_environment, tmp_path):

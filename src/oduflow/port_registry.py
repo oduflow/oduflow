@@ -89,6 +89,8 @@ def allocate_port(
     port_range_start: int,
     port_range_end: int,
     used_ports: set[int] | None = None,
+    *,
+    preferred_port: int | None = None,
 ) -> int:
     """Allocate a stable port for an environment.
 
@@ -102,6 +104,7 @@ def allocate_port(
         port_range_end: End of port range (exclusive)
         used_ports: Set of ports currently in use by OTHER environments' Docker containers.
                     If None, no conflict checking against Docker is done.
+        preferred_port: Current Docker binding to adopt when its registry entry is missing.
 
     Returns:
         The allocated port number.
@@ -127,12 +130,16 @@ def allocate_port(
 
         occupied = set(registry.values()) | used_ports
 
-        for port in range(port_range_start, port_range_end):
-            if port not in occupied:
-                registry[env_name] = port
-                _save_registry(registry_path, registry)
-                logger.info("Allocated port %d for environment '%s'", port, env_name)
-                return port
+        candidates = range(port_range_start, port_range_end)
+        if preferred_port in candidates and preferred_port not in occupied:
+            port = preferred_port
+        else:
+            port = next((p for p in candidates if p not in occupied), None)
+        if port is not None:
+            registry[env_name] = port
+            _save_registry(registry_path, registry)
+            logger.info("Allocated port %d for environment '%s'", port, env_name)
+            return port
 
     raise FlowError(
         f"No free ports in range {port_range_start}-{port_range_end}. "
