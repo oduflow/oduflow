@@ -7,7 +7,7 @@ import base64
 import json
 import tempfile
 from dataclasses import replace
-from urllib.parse import parse_qs, quote_plus, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
@@ -84,13 +84,20 @@ def _host_settings(*hostnames):
     )
 
 
-@pytest.mark.parametrize("method", ["client_secret_basic", "client_secret_post"])
-def test_client_credentials_through_token_lifecycle(method):
+@pytest.mark.parametrize(
+    ("method", "secret"),
+    [
+        ("client_secret_basic", "s+e:cr et%"),
+        # curl -u style: a raw, unencoded "+" must survive Basic decoding.
+        ("client_secret_basic_raw", "s+e:cret"),
+        ("client_secret_post", "s+e:cr et%"),
+    ],
+)
+def test_client_credentials_through_token_lifecycle(method, secret):
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
 
     settings = _settings()
-    secret = "s+e:cr et%"
     settings.teams["1"] = replace(settings.teams["1"], auth_token=secret)
     provider = OduflowOAuthProvider(settings)
     client = TestClient(Starlette(routes=provider.get_routes("/mcp")))
@@ -113,7 +120,9 @@ def test_client_credentials_through_token_lifecycle(method):
             return client.post(
                 path, data={**data, "client_id": "team_1", "client_secret": secret}
             )
-        return client.post(path, data=data, auth=("team_1", quote_plus(secret)))
+        if method == "client_secret_basic_raw":
+            return client.post(path, data=data, auth=("team_1", secret))
+        return client.post(path, data=data, auth=("team_1", quote(secret, safe="")))
 
     exchange = post(
         "/token",
@@ -160,6 +169,91 @@ def test_invalid_basic_client_auth(path, basic, form, status):
     assert response.status_code == status
     if status == 401:
         assert response.headers["www-authenticate"].startswith("Basic ")
+        assert response.json()["error"] == "invalid_client"
+
+
+def _oauth_client():
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    provider = OduflowOAuthProvider(_settings())
+    return provider, TestClient(Starlette(routes=provider.get_routes("/mcp")))
+
+
+@pytest.mark.parametrize("path", ["/token", "/revoke"])
+def test_wrong_form_credentials_return_invalid_client(path):
+    _, client = _oauth_client()
+    response = client.post(
+        path,
+        data={"client_id": "team_1", "client_secret": "wrong", "token": "x"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_client"
+
+
+@pytest.mark.parametrize("path", ["/token", "/revoke"])
+def test_cors_preflight_allows_authorization_header(path):
+    _, client = _oauth_client()
+    response = client.options(
+        path,
+        headers={
+            "Origin": "https://inspector.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization, content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
+@pytest.mark.parametrize("path", ["/token", "/revoke"])
+def test_oversized_body_is_rejected_before_auth(path):
+    _, client = _oauth_client()
+    response = client.post(
+        path,
+        content=b"x" * (4 * 1024 * 1024 + 1),
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://inspector.example",
+        },
+    )
+    assert response.status_code == 413
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
+def test_foreign_bearer_header_does_not_block_form_credentials():
+    provider, client = _oauth_client()
+    response = client.post(
+        "/revoke",
+        headers=[("Authorization", "Bearer proxy"), ("Authorization", "Bearer x")],
+        data={"client_id": "team_1", "client_secret": "tok-a", "token": "nope"},
+    )
+    assert response.status_code == 200
+
+
+def test_multiple_basic_headers_are_rejected():
+    _, client = _oauth_client()
+    encoded = base64.b64encode(b"team_1:tok-a").decode()
+    response = client.post(
+        "/revoke",
+        headers=[
+            ("Authorization", f"Basic {encoded}"),
+            ("Authorization", "Bearer proxy"),
+        ],
+        data={"token": "nope"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_client"
+
+
+def test_basic_with_matching_form_client_id_is_not_duplicated():
+    _, client = _oauth_client()
+    response = client.post(
+        "/revoke",
+        data={"client_id": "team_1", "token": "nope"},
+        auth=("team_1", "tok-a"),
+    )
+    assert response.status_code == 200
 
 
 class TestOduflowOAuthProvider:
@@ -835,3 +929,27 @@ class TestRevokeOwnership:
         assert team_id_for_client_id("team_team_x", teams) == "team_x"
         # Unknown ids pass through untouched (hostname/default routing applies).
         assert team_id_for_client_id("unknown", teams) == "unknown"
+
+
+@pytest.mark.parametrize("declare_length", [True, False])
+def test_fallback_body_limit_for_older_sdks(declare_length):
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from oduflow.oauth_provider import _FallbackBodyLimit
+
+    async def echo(request):
+        return PlainTextResponse(str(len(await request.body())))
+
+    app = Starlette(routes=[Route("/", echo, methods=["POST"])])
+    client = TestClient(_FallbackBodyLimit(app, 10))
+    assert client.post("/", content=b"x" * 10).text == "10"
+
+    def chunks():
+        yield b"x" * 6
+        yield b"x" * 6
+
+    body = b"x" * 11 if declare_length else chunks()
+    assert client.post("/", content=body).status_code == 413

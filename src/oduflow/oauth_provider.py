@@ -18,19 +18,22 @@ and a minted token carries the numeric ``team_id`` as its ``client_id`` so
 from __future__ import annotations
 
 import base64
+import binascii
+import json
 import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
 from typing import Any
-from urllib.parse import unquote_plus, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 # FastMCP's AccessToken (a subclass of the MCP SDK's that adds ``claims``) —
 # never the SDK's own. ``fastmcp.server.dependencies.get_access_token()``, which
 # scoped_access uses to read a token's env scope, rejects a plain SDK token: it
 # tries to convert it and passes ``claims=None`` (the SDK's default) into a
 # field typed ``dict``, so validation fails and the request is denied outright.
+import mcp.server.transport_security as _transport_security
 from fastmcp.server.auth.auth import AccessToken, TokenHandler
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from mcp.server.auth.handlers.revoke import RevocationHandler
@@ -45,6 +48,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.server.auth.routes import build_metadata, cors_middleware
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
+from mcp.server.streamable_http import MCP_PROTOCOL_VERSION_HEADER
 from mcp.shared.auth import (
     InvalidRedirectUriError,
     OAuthClientInformationFull,
@@ -52,10 +56,12 @@ from mcp.shared.auth import (
     ProtectedResourceMetadata,
 )
 from pydantic import AnyHttpUrl, AnyUrl
-from starlette.datastructures import FormData
+from starlette.datastructures import Headers
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, request_response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from oduflow import env_tokens
 from oduflow.oauth_token_store import OAuthTokenStore
@@ -211,52 +217,216 @@ class HostRelativeAuthChallenge:
         await self.app(scope, receive, send_wrapper)
 
 
+_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
+_BASIC_CHALLENGE = {
+    "WWW-Authenticate": 'Basic realm="oduflow"',
+    "Cache-Control": "no-store",
+}
+
+
+def _parse_basic_credentials(encoded: str) -> tuple[str, str]:
+    """Decode an HTTP Basic ``client_id:client_secret`` pair.
+
+    Mirrors the MCP SDK's own Basic parsing rules (UTF-8, ``unquote`` rather
+    than ``unquote_plus``) so a header the SDK would accept is accepted here
+    too. A raw ``+`` therefore stays a ``+``; Oduflow secrets are generated
+    without spaces, so form-style ``+``-for-space encoding does not arise.
+    Raises ``ValueError`` on any malformed value.
+    """
+    try:
+        decoded = base64.b64decode(encoded.strip()).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("Invalid Basic authentication header") from exc
+    if ":" not in decoded:
+        raise ValueError("Invalid Basic authentication header")
+    client_id, client_secret = decoded.split(":", 1)
+    return unquote(client_id), unquote(client_secret)
+
+
 async def _with_basic_client_auth(
     handler: Callable[[Request], Awaitable[Response]], request: Request
 ) -> Response:
-    """Adapt HTTP Basic credentials to the MCP SDK's form-only handlers."""
+    """Adapt HTTP Basic credentials to the MCP SDK's form-only handlers.
+
+    The SDK token/revocation handlers require ``client_id`` (and, for our
+    ``client_secret_post`` clients, ``client_secret``) in the form body. For a
+    request authenticated with exactly one ``Authorization: Basic`` header, the
+    credentials are moved into a rebuilt urlencoded body and the request is
+    replayed to the handler. Any other ``Authorization`` header (a proxy's
+    Bearer, for instance) is ignored and the body credentials are used as-is.
+    """
     authorization = request.headers.getlist("authorization")
-    if not authorization:
+    basic = [
+        value for value in authorization if value.partition(" ")[0].lower() == "basic"
+    ]
+    if not basic:
         return await handler(request)
 
-    scheme, _, encoded = authorization[0].partition(" ")
-    if scheme.lower() != "basic" and len(authorization) == 1:
-        return await handler(request)
-
-    challenge = {
-        "WWW-Authenticate": 'Basic realm="oduflow"',
-        "Cache-Control": "no-store",
-    }
     try:
         if len(authorization) != 1:
-            raise ValueError
-        credentials = base64.b64decode(encoded.strip(), validate=True).decode("ascii")
-        encoded_id, encoded_secret = credentials.split(":", 1)
-        client_id = unquote_plus(encoded_id, errors="strict")
-        client_secret = unquote_plus(encoded_secret, errors="strict")
+            # Two credentials on one request: refuse rather than guess.
+            raise ValueError("Multiple Authorization headers")
+        client_id, client_secret = _parse_basic_credentials(basic[0].partition(" ")[2])
     except ValueError:
         return JSONResponse(
-            {"error": "invalid_client"}, status_code=401, headers=challenge
+            {"error": "invalid_client"}, status_code=401, headers=_BASIC_CHALLENGE
         )
 
-    async with request.form() as form:
-        if "client_secret" in form or any(
-            value != client_id for value in form.getlist("client_id")
-        ):
-            return JSONResponse({"error": "invalid_request"}, status_code=400)
-        # Both the SDK authenticator and the grant/revocation handlers read
-        # request.form(). Give them the same credentials on this request only.
-        request._form = FormData(
-            [
-                *form.multi_items(),
-                ("client_id", client_id),
-                ("client_secret", client_secret),
-            ]
+    body = await request.body()
+    content_type = request.headers.get("content-type", "").partition(";")[0]
+    if body and content_type.strip().lower() != _FORM_CONTENT_TYPE:
+        return JSONResponse(
+            {
+                "error": "invalid_request",
+                "error_description": f"Content-Type must be {_FORM_CONTENT_TYPE}.",
+            },
+            status_code=400,
         )
-        response = await handler(request)
+    try:
+        fields = parse_qsl(
+            body.decode("utf-8"),
+            keep_blank_values=True,
+            strict_parsing=False,
+            errors="strict",
+        )
+    except UnicodeDecodeError:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    form_ids = [value for key, value in fields if key == "client_id"]
+    # RFC 6749 §2.3: a client must not use more than one authentication method.
+    if any(key == "client_secret" for key, _ in fields) or any(
+        value != client_id for value in form_ids
+    ):
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    if not form_ids:
+        fields.append(("client_id", client_id))
+    fields.append(("client_secret", client_secret))
+    new_body = urlencode(fields).encode("ascii")
+
+    headers = [
+        (key, value)
+        for key, value in request.scope["headers"]
+        if key.lower() not in {b"content-length", b"content-type"}
+    ]
+    headers.append((b"content-type", _FORM_CONTENT_TYPE.encode("ascii")))
+    headers.append((b"content-length", str(len(new_body)).encode("ascii")))
+    replayed = False
+
+    async def receive() -> Message:
+        nonlocal replayed
+        if not replayed:
+            replayed = True
+            return {"type": "http.request", "body": new_body, "more_body": False}
+        return await request.receive()
+
+    response = await handler(
+        Request({**request.scope, "headers": headers}, receive=receive)
+    )
     if response.status_code == 401:
-        response.headers.update(challenge)
+        response.headers.update(_BASIC_CHALLENGE)
     return response
+
+
+class _RevocationHandler(RevocationHandler):
+    """Revocation handler that reports failed client auth as ``invalid_client``.
+
+    The SDK answers a failed client authentication on ``/revoke`` with
+    ``unauthorized_client``. RFC 7009 reuses RFC 6749 §5.2 semantics, where
+    wrong client credentials are ``invalid_client`` — which is also what
+    fastmcp's ``TokenHandler`` returns on ``/token``. Keep both endpoints
+    consistent.
+    """
+
+    async def handle(self, request: Request) -> Response:
+        response = await super().handle(request)
+        if response.status_code != 401:
+            return response
+        try:
+            body = json.loads(bytes(response.body))
+        except (json.JSONDecodeError, TypeError):
+            return response
+        if not isinstance(body, dict) or body.get("error") != "unauthorized_client":
+            return response
+        return JSONResponse(
+            {
+                "error": "invalid_client",
+                "error_description": body.get("error_description"),
+            },
+            status_code=401,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+
+
+class _FallbackBodyLimit:
+    """Minimal 413 guard for MCP SDKs without ``RequestBodyLimitMiddleware``."""
+
+    def __init__(self, app: ASGIApp, max_body_size: int) -> None:
+        self.app = app
+        self.max_body_size = max_body_size
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        too_large = Response("Request body too large", status_code=413)
+        declared = Headers(scope=scope).get("content-length")
+        if declared is not None and declared.isdigit():
+            if int(declared) > self.max_body_size:
+                await too_large(scope, receive, send)
+                return
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.max_body_size:
+                await too_large(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        sent = False
+
+        async def replay() -> Message:
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
+# MCP SDK >= 1.30 caps OAuth endpoint bodies at 4 MiB. Replacing its /token and
+# /revoke routes must keep that guard, so reuse it when present.
+_MAX_REQUEST_BODY_SIZE: int = getattr(
+    _transport_security, "DEFAULT_MAX_REQUEST_BODY_SIZE", 4 * 1024 * 1024
+)
+_BodyLimit: Callable[[ASGIApp, int], ASGIApp] = getattr(
+    _transport_security, "RequestBodyLimitMiddleware", _FallbackBodyLimit
+)
+
+
+def _client_auth_endpoint(
+    handler: Callable[[Request], Awaitable[Response]], methods: list[str]
+) -> ASGIApp:
+    """ASGI app for a client-authenticated OAuth endpoint (/token, /revoke).
+
+    Layers, outside in: CORS (allowing ``Authorization`` so browser clients can
+    use ``client_secret_basic``), the SDK's request-body limit (inside CORS so a
+    413 still carries CORS headers), then the Basic-to-form adapter.
+    """
+    app: ASGIApp = request_response(partial(_with_basic_client_auth, handler))
+    app = _BodyLimit(app, _MAX_REQUEST_BODY_SIZE)
+    return CORSMiddleware(
+        app=app,
+        allow_origins="*",
+        allow_methods=methods,
+        allow_headers=[MCP_PROTOCOL_VERSION_HEADER, "authorization"],
+    )
 
 
 class _FlexibleClient(OAuthClientInformationFull):
@@ -368,15 +538,13 @@ class OduflowOAuthProvider(InMemoryOAuthProvider):
                 handler = (
                     TokenHandler(self, authenticator)
                     if route.path == "/token"
-                    else RevocationHandler(self, authenticator)
+                    else _RevocationHandler(self, authenticator)
                 )
                 methods = ["POST", "OPTIONS"]
                 patched.append(
                     Route(
                         route.path,
-                        endpoint=cors_middleware(
-                            partial(_with_basic_client_auth, handler.handle), methods
-                        ),
+                        endpoint=_client_auth_endpoint(handler.handle, methods),
                         methods=methods,
                     )
                 )
