@@ -53,6 +53,7 @@ are registered only when `[production].enabled = true`.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/environments` | List environments |
+| `GET` | `/api/production-copies/{operation}` | Poll a dashboard production copy. Start it with `POST /api/environments/create`, `from_production`, and an `X-Copy-Operation` header (32 lowercase hex digits) to receive `202` instead of waiting. Reusing the same ID for the same source and target returns its existing status. States: `running`, `succeeded`, `failed`. Records are team-specific, in memory, and expire one hour after completion; `404` means unknown, not failed. Without the header, creation stays synchronous. |
 | `POST` | `/api/environments/create` | Create an environment. Body: `env_name`, optional `hostname`, `repo_url`, `odoo_image`, `template_name`, `extra_addons`, `auto_install_modules`, `env_vars` (merged per key over the template's), `git_user`, `from_production` (build from a dev copy of that production, through its managed `prod-<name>` template — published on first use; mutually exclusive with `template_name`), `base_branch` (when the branch does not exist on origin, create it from this branch and push it; the result's `branch_created_from` names the base when that happened) |
 | `POST` | `/api/environments/{branch}/start` | Start an environment |
 | `POST` | `/api/environments/{branch}/stop` | Stop an environment |

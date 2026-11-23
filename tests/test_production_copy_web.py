@@ -6,6 +6,8 @@ with the flag turned off — and it is the only place the flag can be changed.
 """
 
 import os
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -298,6 +300,102 @@ def _create_from_production(client, **extra):
 
 def _template_ready(value: bool):
     return patch("oduflow.docker_ops.system_ops.template_is_ready", return_value=value)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_background_copy_reconnects_without_repeating_work(tmp_path, fail):
+    client, _, team = _client(tmp_path)
+    _register(team)
+    entered, finish = threading.Event(), threading.Event()
+    creations = []
+
+    def create(*args, env_name, **kwargs):
+        creations.append(env_name)
+        entered.set()
+        assert finish.wait(5)
+        if fail:
+            raise ConflictError("Template unavailable.")
+        return {"env_name": env_name}
+
+    operation = "a" * 32
+    status = f"/api/production-copies/{operation}"
+
+    def start(key=operation):
+        return client.post(
+            "/api/environments/create",
+            headers={"X-Copy-Operation": key},
+            json={
+                "from_production": PROD,
+                "branch": "feature/x",
+                "env_name": "qa",
+                "odoo_image": "odoo:18.0",
+                "repo_url": "https://example.com/repo.git",
+            },
+        )
+
+    with (
+        client,
+        patch(
+            "oduflow.server.ensure_production_template",
+            return_value=("prod-erp", False),
+        ),
+        patch("oduflow.docker_ops.env_ops.create_environment", side_effect=create),
+    ):
+        try:
+            assert start().status_code == 202
+            assert entered.wait(3)
+            assert client.get(status).json()["phase"] == "Creating environment"
+            assert start().json()["state"] == "running"
+            assert start("b" * 32).status_code == 409
+        finally:
+            finish.set()
+        deadline = time.monotonic() + 5
+        while (job := client.get(status).json())["state"] == "running":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert job["state"] == ("failed" if fail else "succeeded")
+        if fail:
+            assert job["error"] == "Template unavailable."
+        assert start().json() == job
+        assert creations == ["qa"]
+
+
+def test_copy_status_is_private_to_the_submitting_team(tmp_path):
+    teams = {
+        key: TeamSettings(
+            team_id=key, ui_password=f"password-{key}", data_dir=str(tmp_path / key)
+        )
+        for key in ("1", "2")
+    }
+    settings = Settings(base_data_dir=str(tmp_path), prod_enabled=True, teams=teams)
+    app = Starlette()
+    mount_web_ui(app, lambda: settings, LockManager())
+    operation = "1" * 32
+    status = f"/api/production-copies/{operation}"
+    with TestClient(app) as client:
+        assert client.get(status).status_code == 401
+        client.post(
+            "/login", data={"password": teams["1"].ui_password}, follow_redirects=False
+        )
+        assert (
+            client.post(
+                "/api/environments/create",
+                headers={"X-Copy-Operation": operation},
+                json={"from_production": "missing", "branch": "qa"},
+            ).status_code
+            == 202
+        )
+        assert client.get(status).json()["env_name"] == "qa"
+        client.cookies.clear()
+        assert (
+            client.post(
+                "/login",
+                data={"password": teams["2"].ui_password},
+                follow_redirects=False,
+            ).status_code
+            == 303
+        )
+        assert client.get(status).status_code == 404
 
 
 def test_create_from_production_publishes_the_managed_template(tmp_path):
